@@ -108,6 +108,10 @@ def main():
         execute('expired-member', POINT + '''class Box{Point inner(3);}
             void main(){Point * p=null;{Box b;p=b.inner.self();}print(p.get());}''', '~3\n', error='expired')
         execute('pointer-auto-object', POINT + '''void main(){Point * a(1);Point * b=a;b.x=2;print(a.get());}''', '2\n~2\n')
+        execute('bare-pointer-is-empty', POINT + '''void main(){Point * p;print(p==null);p=new Point(2);print(p.get());
+            delete p;for(Point * i;i==null;){i=new Point(3);delete i;}print("done");}''', 'true\n2\n~2\n~3\ndone\n')
+        execute('bare-pointer-dereference', POINT + '''void main(){Point * p;print("before");print(p.get());}''',
+                'before\n', error=True)
         execute('pointer-manual-object', POINT + '''void main(){Point * m=new Point(3);Point * alias=m;delete alias;print("done");}''',
                 '~3\ndone\n')
         execute('documented-example', (ROOT / 'compiler/examples/classes-regressions.azs').read_text(encoding='utf-8'), '0\n')
@@ -123,7 +127,6 @@ def main():
             'delete-literal': POINT + 'void main(){Point p(1);delete p;}',
             'compare-literals': POINT + 'void main(){Point a(1);Point b(2);print(a==b);}',
             'slice-derived': POINT + 'class Tagged:Point{int t;Tagged():Point(1){}}void main(){Tagged t;Point p=t;}',
-            'pointer-without-parentheses': POINT + 'void main(){Point * p;}',
             'pointer-to-primitive': 'void main(){int * p=null;}',
             'pointer-field-arguments': POINT + 'class Box{Point * p(1);}void main(){}',
             'primitive-field-arguments': 'class Box{int x(1);}void main(){}',

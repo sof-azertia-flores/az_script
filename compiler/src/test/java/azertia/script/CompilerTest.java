@@ -1160,7 +1160,10 @@ class CompilerTest {
         assertDoesNotThrow(() -> compile("class P{int x;}void main(){P a;P b();P * c();for(P * i();false;){}for(P j;false;){}}"));
         // A method named like a field still parses as a method: the lookahead finds "{" or ":".
         assertDoesNotThrow(() -> compile("class Q{int x;Q(int v){x=v;}}class P{Q q(1);Q make(int v){Q r(v);return r;}}void main(){}"));
-        for (String invalid : List.of(point + "void main(){P * p;}", point + "void main(){P a=null;}",
+        // A bare pointer declaration is an empty pointer: it lowers exactly like "= null" and constructs nothing.
+        assertEquals(main(point + "void main(){P * p=null;for(P * i=null;false;){}}"),
+                main(point + "void main(){P * p;for(P * i;false;){}}"));
+        for (String invalid : List.of(point + "void main(){P a=null;}",
                 point + "void main(){P a(1);P * p=a;}", point + "void main(){P * p=new P(1);P a=p;}",
                 point + "void main(){P a(1);P b(2);print(a!=b);}", point + "void main(){P a(1);delete a;}",
                 point + "void main(){P a(1);var v=a;}", point + "#gvar g\nvoid main(){P a(1);g=a;}",
@@ -1168,9 +1171,6 @@ class CompilerTest {
                 "class N{int v;N next;}void main(){}", "class A{B b;}class B{A a;}void main(){}",
                 point + "class Box{P * p(1);}void main(){}", point + "class Box{P p;}void main(){}"))
             assertThrows(IllegalArgumentException.class, () -> compile(invalid), invalid);
-        var pointer = assertThrows(IllegalArgumentException.class, () -> compile(point + "void main(){\n  P * p;\n}"));
-        assertTrue(pointer.getMessage().contains(":2:"), pointer::getMessage);
-        assertTrue(pointer.getMessage().contains("P * p()"), pointer::getMessage);
         var field = assertThrows(IllegalArgumentException.class, () -> compile(point + "class Box{\n  P inner;\n}\nvoid main(){}"));
         assertTrue(field.getMessage().contains("Box initialization:2:"), field::getMessage);
     }

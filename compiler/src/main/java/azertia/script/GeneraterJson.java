@@ -948,12 +948,9 @@ public class GeneraterJson {
                 String spelling = advance().text();
                 String declaredType = spelling.equals("var") ? null : pointerSuffix(sourceType(spelling, false));
                 String variable = declaredName().text();
-                if (classNames.contains(spelling) && !at("=")) {
-                    boolean pointer = declaredType.endsWith("*");
-                    // "C * p(args)" is an automatic pointer object; its parentheses are mandatory.
-                    if (pointer && !at("("))
-                        throw error("Pointer " + variable + " needs constructor arguments, e.g. " + spelling + " * " + variable
-                                + "(), or an initializer such as = null");
+                boolean pointer = declaredType != null && declaredType.endsWith("*");
+                // "C * p(args)" is an automatic pointer object; a bare "C * p;" is an empty (null) pointer.
+                if (classNames.contains(spelling) && !at("=") && (!pointer || at("("))) {
                     List<JsonElement> arguments = new ArrayList<>();
                     if (pointer) arguments.add(new JsonPrimitive(variable));
                     arguments.add(new JsonPrimitive(spelling));
@@ -968,7 +965,8 @@ public class GeneraterJson {
                     definition.addProperty("declared-type", spelling);
                     return definition;
                 }
-                JsonElement initializer = match("=") ? expression() : null;
+                JsonElement initializer = match("=") ? expression()
+                        : pointer && classNames.contains(spelling) ? operation("ctrl", "null", start) : null;
                 endStatement();
                 JsonObject definition = initializer == null
                         ? operation("ctrl", "vardef", start, new JsonPrimitive(variable))

@@ -78,7 +78,7 @@ int main() {
 
 `address` 是独立的无符号 64 位地址类型，表示 slot 位置，空地址写作 `null`。例如 `address p = alloc(2); mem_get(p + 1) = 42; mem_free(p);`。地址支持与 int32 偏移加减并检查越界；对象引用也使用该运行时类型，类成员的静态类型检查和继承规则保持不变。地址值、变量槽编号、分配数量和函数 ID 是不同概念，后面三者仍使用既有 32 位表示。
 
-支持 `class`、成员变量、构造方法、成员方法和 `~ClassName()` 析构。对象有三种写法：`Point p(3);` 是字面量对象，按值复制（赋值、传参、返回都复制全部 slots，每个副本各自析构），地址随变量到期而失效；`Point * p(3);` 是离块自动析构的指针对象（无参也要写 `()`）；`Point * p = new Point(3);` 是需要 `delete p;` 的手动对象。脚本只能通过方法中的 `this`（类型 `Point *`）拿到字面量对象的地址。每个字段占一个 slot，字面量字段内嵌完整对象；方法均编译成带隐式对象地址参数的普通函数。完整语义见 [类、字面量对象与指针](compiler/LANGUAGE.md#类字面量对象与指针)，[类回归示例](compiler/examples/classes-regressions.azs) 成功返回 `0`。
+支持 `class`、成员变量、构造方法、成员方法和 `~ClassName()` 析构。对象有三种写法：`Point p(3);` 是字面量对象，按值复制（赋值、传参、返回都复制全部 slots，每个副本各自析构），地址随变量到期而失效；`Point * p(3);` 是离块自动析构的指针对象（无参也要写 `()`）；`Point * p = new Point(3);` 是需要 `delete p;` 的手动对象；单写 `Point * q;` 声明空指针，等同 `= null`。脚本只能通过方法中的 `this`（类型 `Point *`）拿到字面量对象的地址。每个字段占一个 slot，字面量字段内嵌完整对象；方法均编译成带隐式对象地址参数的普通函数。完整语义见 [类、字面量对象与指针](compiler/LANGUAGE.md#类字面量对象与指针)，[类回归示例](compiler/examples/classes-regressions.azs) 成功返回 `0`。
 
 `for (int i=0; i<10; i++)` 在编译层降为块和 `while`；`continue` 清理当前轮局部对象后进入下一轮，在 `for` 中会先执行步进。`class Child : Base` 支持公开单继承：父类字段占前面的 slots，子类字段追加，父类方法直接接收同一个对象地址。方法按静态类型绑定，构造从父到子，析构从子到父；子类构造失败会清理已完成的父类部分。示例见 [循环](compiler/examples/loops-regressions.azs) 和 [继承](compiler/examples/inheritance-regressions.azs)。
 
