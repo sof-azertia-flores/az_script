@@ -68,15 +68,15 @@ final class JniHintRegression {
         AbdInvoker.flush();
         equal(List.of(10, 100), events);
         equal(42, AbdInvoker.invoke(0x12000002));
-        int automatic = (Integer) AbdInvoker.invoke(0x12000003);
-        int manual = (Integer) AbdInvoker.invoke(0x12000004);
+        Address automatic = (Address) AbdInvoker.invoke(0x12000003);
+        Address manual = (Address) AbdInvoker.invoke(0x12000004);
         equal(11, AbdInvoker.invoke(0x12000005, automatic));
         equal(33, AbdInvoker.invoke(0x12000005, manual));
         AbdInvoker.flush();
         equal(List.of(10, 100), events);
         equal(true, AbdInvoker.saveStatus(saved));
         AbdInvoker.invoke(0x00010006, 99);
-        Caller220.ACputMem(automatic, 77);
+        Caller220.ACputMem(automatic.bits(), 77);
         AbdInvoker.loadStatus(saved);
         equal(42, AbdInvoker.invoke(0x00010002));
         equal(11, AbdInvoker.invoke(0x12000005, automatic));
@@ -111,7 +111,7 @@ final class JniHintRegression {
         AbdInvoker.loadStatus(all);
         equal(initialized, events);
         equal(List.of(), destructed);
-        equal(33, AbdInvoker.invoke(0x12000005, (Integer) AbdInvoker.invoke(0x12000004)));
+        equal(33, AbdInvoker.invoke(0x12000005, (Address) AbdInvoker.invoke(0x12000004)));
         AbdInvoker.destroyScript();
         equal(List.of(11), destructed);
 
@@ -150,12 +150,12 @@ final class JniHintRegression {
         destructed.clear();
         AbdInvoker.loadScript(new File(work, "high-destructor.exec.abd"));
         AbdInvoker.flush();
-        int high = (Integer) AbdInvoker.invoke(0x7FFF0002);
+        Address high = (Address) AbdInvoker.invoke(0x7FFF0002);
         File highSaved = new File(work, "high-destructor.snapshot.abd");
         equal(true, AbdInvoker.saveStatus(highSaved));
-        Caller220.ACputMem(high, 99);
+        Caller220.ACputMem(high.bits(), 99);
         AbdInvoker.loadStatus(highSaved);
-        equal(55, Caller.getMemInt(high));
+        equal(55, Caller.getMemInt(high.bits()));
         equal(List.of(), destructed);
         AbdInvoker.destroyScript();
         equal(List.of(55), destructed);
@@ -167,7 +167,7 @@ final class JniHintRegression {
         File bounded = new File(work, "bounded.snapshot.abd");
         equal(true, AbdInvoker.saveStatus(bounded));
         byte[] previous = Files.readAllBytes(bounded.toPath());
-        int large = Caller20.memAlloc(2);
+        long large = Caller20.memAlloc(2);
         try {
             String value = "x".repeat(33 * 1024 * 1024);
             Caller220.ACputMem(large, value);

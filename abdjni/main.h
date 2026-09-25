@@ -3,5 +3,6 @@
 #include <iostream>
 #include "acs.h"
 #include "heepalloc.h"
+#include "blocks.h"
 #include "invoker.h"
 #include "internelFunctions.h"

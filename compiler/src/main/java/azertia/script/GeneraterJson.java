@@ -12,9 +12,9 @@ public class GeneraterJson {
     private static final int DEFAULT_FUNCTION_NAMESPACE = 0xfff;
     private static final int RESERVED_RUNTIME_NAMESPACE = 0xabd;
     private static final int MAX_MACRO_EXPANSION_CHARS = 1_048_576;
-    private static final Set<String> TYPES = Set.of("int", "float", "double", "string", "boolean", "bool", "void");
+    private static final Set<String> TYPES = Set.of("int", "float", "double", "string", "boolean", "bool", "void", "address");
     /** Statement keywords; they can never name a function, parameter, variable, global or macro. */
-    private static final Set<String> KEYWORDS = Set.of("return", "if", "else", "while", "break", "def", "var", "class", "new", "delete", "this", "null", "extern");
+    private static final Set<String> KEYWORDS = Set.of("return", "if", "else", "while", "for", "break", "continue", "def", "var", "class", "new", "delete", "this", "null", "extern", "public", "private", "protected", "virtual");
     private static final Set<String> PREPROCESSOR_DIRECTIVES = Set.of(
             "ifdef", "ifndef", "if_equals", "else", "fi", "endif", "include", "author", "gvar",
             "namespace", "namespace_hint", "assume_hint", "setmeta", "setattr", "define", "undef");
@@ -33,6 +33,9 @@ public class GeneraterJson {
         public String ownerClass, functionKind;
         public int id;
         public Integer explicitPosition;
+        public JsonArray baseArguments;
+        public String baseInitializer;
+        public int line, column;
     }
     public static class ExternSignature {
         public String returnType;
@@ -337,6 +340,14 @@ public class GeneraterJson {
                     meta.addProperty("owner-class", function.ownerClass);
                     meta.addProperty("function-kind", function.functionKind);
                 }
+                if (function.baseArguments != null) {
+                    meta.add("base-args", function.baseArguments.deepCopy());
+                    meta.addProperty("base-initializer", function.baseInitializer);
+                }
+                if (function.line != 0) {
+                    meta.addProperty("_line", function.line);
+                    meta.addProperty("_column", function.column);
+                }
                 JsonArray params = new JsonArray(); function.params.forEach(params::add);
                 JsonArray paramTypes = new JsonArray(); function.paramTypes.forEach(paramTypes::add);
                 meta.add("param", params); meta.add("param-types", paramTypes);
@@ -436,6 +447,13 @@ public class GeneraterJson {
                     if (!wellFormedUtf16(value))
                         throw error("Unpaired surrogate in string literal; write a supplementary character as a \\uD8xx\\uDCxx pair", l, col);
                     tokens.add(new Token(source.substring(start, offset), new JsonPrimitive(value.toString()), l, col, false));
+                } else if (!tokens.isEmpty() && tokens.get(tokens.size() - 1).text().equals(":")
+                        && Character.isJavaIdentifierPart(c)) {
+                    // A colon introduces either a hexadecimal ID or a class/base name.
+                    // Keep IDs such as 000a intact and defer their validation to the parser.
+                    take();
+                    while (peek(0) != '\0' && Character.isJavaIdentifierPart(peek(0))) take();
+                    tokens.add(new Token(source.substring(start, offset), null, l, col, Character.isJavaIdentifierStart(c)));
                 } else if (Character.isDigit(c) || (c == '.' && Character.isDigit(peek(1)))) {
                     while (Character.isDigit(peek(0))) take();
                     if (peek(0) == '.') { take(); while (Character.isDigit(peek(0))) take(); }
@@ -473,15 +491,10 @@ public class GeneraterJson {
                     tokens.add(new Token(text, literal, l, col, true));
                 } else {
                     String two = "" + c + peek(1);
-                    if (Set.of("==", "!=", "<=", ">=", "&&", "||", "+=", "-=", "*=", "/=", "%=", "::").contains(two)) {
+                    if (Set.of("==", "!=", "<=", ">=", "&&", "||", "+=", "-=", "*=", "/=", "%=", "++", "--", "::").contains(two)) {
                         take(); take(); tokens.add(new Token(two, null, l, col, false));
                     } else if (c == ':') {
                         take(); tokens.add(new Token(":", null, l, col, false));
-                        while (Character.isWhitespace(peek(0))) take();
-                        int hexLine = line, hexColumn = column, hexStart = offset;
-                        while (Character.isLetterOrDigit(peek(0))) take();
-                        if (hexStart == offset) throw error("Expected hexadecimal function ID", hexLine, hexColumn);
-                        tokens.add(new Token(source.substring(hexStart, offset), null, hexLine, hexColumn, false));
                     } else if ("{}(),;+-*/%=<>!.~".indexOf(c) >= 0) {
                         take(); tokens.add(new Token(String.valueOf(c), null, l, col, false));
                     } else throw error("Unexpected character: " + c, l, col);
@@ -516,6 +529,25 @@ public class GeneraterJson {
             if (classNames.contains(value)) return value;
             try { return normalizeType(value, allowVoid, "type"); }
             catch (IllegalArgumentException e) { throw error(e.getMessage(), tokens.get(index - 1)); }
+        }
+        /** "C *" names a pointer to C; a bare class name is a literal (value) object. */
+        private String pointerSuffix(String type) {
+            if (!at("*")) return type;
+            if (!classNames.contains(type)) throw error("Only class types can be pointers");
+            advance(); return type + "*";
+        }
+        /** In a class body, "Type name(...)" is a field with constructor arguments when ';' follows ')'. */
+        private boolean fieldConstruction() {
+            int depth = 0;
+            for (int i = index; i < tokens.size(); i++) {
+                String text = tokens.get(i).text();
+                if (text.equals("(")) depth++;
+                else if (text.equals(")") && --depth == 0) {
+                    String next = tokens.get(i + 1).text();
+                    return next.equals(";") || next.equals("}");
+                } else if (text.equals("<eof>")) return false;
+            }
+            return false;
         }
         private void enterRecursion() {
             if (recursionDepth >= TreeLimits.MAX_NESTING) throw error("Syntax nesting exceeds " + TreeLimits.MAX_NESTING + " levels");
@@ -559,7 +591,7 @@ public class GeneraterJson {
                     parseFunction(first, destructor ? "destructor" : "constructor", "void",
                             destructor ? "<dtor>" : "<ctor>", external, false);
                 } else {
-                    String type = sourceType(first, true), name = declaredNameOrOwner();
+                    String type = pointerSuffix(sourceType(first, true)), name = declaredNameOrOwner();
                     if (match("::")) {
                         if (!classNames.contains(name)) throw error("Unknown owner class: " + name);
                         String member = declaredName().text();
@@ -567,18 +599,73 @@ public class GeneraterJson {
                     } else parseFunction(null, null, type, name, external, false);
                 }
             }
-            validateDuplicateExterns(); assignFunctionIds();
+            Map<String,JsonArray> layouts = validateClassLayouts();
+            validateDuplicateExterns(layouts); assignFunctionIds();
             for (AzFunction function : script.functions) TreeLimits.validate(function.body.generate());
         }
         private String declaredNameOrOwner() {
             if (classNames.contains(current().text()) && tokens.get(index + 1).text().equals("::")) return advance().text();
             return declaredName().text();
         }
-        private void validateDuplicateExterns() {
-            Map<String,JsonArray> layouts = new HashMap<>();
+        private Token classLocation(JsonObject definition) {
+            return new Token(definition.get("name").getAsString(), null,
+                    definition.get("_line").getAsInt(), definition.get("_column").getAsInt(), true);
+        }
+        private Map<String,JsonArray> validateClassLayouts() {
+            Map<String,JsonObject> declarations = new LinkedHashMap<>();
             for (JsonElement item : script.classes) {
-                JsonObject definition = item.getAsJsonObject();layouts.put(definition.get("name").getAsString(), definition.getAsJsonArray("fields"));
+                JsonObject definition = item.getAsJsonObject();
+                declarations.put(definition.get("name").getAsString(), definition);
             }
+            Map<String,JsonArray> layouts = new HashMap<>();
+            for (JsonObject definition : declarations.values()) {
+                Deque<JsonObject> pending = new ArrayDeque<>(); Set<String> chain = new HashSet<>();
+                JsonObject next = definition;
+                while (next != null && !layouts.containsKey(next.get("name").getAsString())) {
+                    String name = next.get("name").getAsString();
+                    if (!chain.add(name)) throw error("Cyclic class inheritance involving " + name, classLocation(next));
+                    pending.push(next);
+                    if (next.has("base")) {
+                        String base = next.get("base").getAsString(); JsonObject parent = declarations.get(base);
+                        if (parent == null) throw error("Unknown base class: " + base, classLocation(next));
+                        next = parent;
+                    } else next = null;
+                }
+                while (!pending.isEmpty()) {
+                    JsonObject value = pending.pop(); JsonArray fields = new JsonArray();
+                    if (value.has("base")) fields.addAll(layouts.get(value.get("base").getAsString()));
+                    fields.addAll(value.getAsJsonArray("fields"));
+                    String name = value.get("name").getAsString();
+                    if (fields.isEmpty()) throw error("Class " + name + " must contain at least one field", classLocation(value));
+                    layouts.put(name, fields);
+                }
+            }
+            Map<String,Integer> nesting = new HashMap<>();
+            for (JsonObject definition : declarations.values())
+                valueNesting(definition.get("name").getAsString(), layouts, nesting, new LinkedHashSet<>(), classLocation(definition));
+            for (AzFunction function : script.functions) {
+                if (function.baseInitializer == null) continue;
+                JsonObject owner = declarations.get(function.ownerClass);
+                if (owner == null || !owner.has("base") || !owner.get("base").getAsString().equals(function.baseInitializer))
+                    throw error("Constructor " + function.ownerClass + " can initialize only its direct base class",
+                            new Token(function.name, null, function.line, function.column, true));
+            }
+            return layouts;
+        }
+        /** A literal-object field embeds its class, so containment must be acyclic and bounded. */
+        private int valueNesting(String name, Map<String,JsonArray> layouts, Map<String,Integer> known, Set<String> visiting, Token at) {
+            Integer cached = known.get(name);
+            if (cached != null) return cached;
+            if (!visiting.add(name)) throw error("Class " + name + " contains itself by value; use a pointer field", at);
+            int levels = 1;
+            for (JsonElement field : layouts.get(name)) {
+                String type = field.getAsJsonObject().get("type").getAsString();
+                if (classNames.contains(type)) levels = Math.max(levels, 1 + valueNesting(type, layouts, known, visiting, at));
+            }
+            if (levels > 64) throw error("Literal object nesting of " + name + " exceeds 64 levels", at);
+            visiting.remove(name); known.put(name, levels); return levels;
+        }
+        private void validateDuplicateExterns(Map<String,JsonArray> layouts) {
             for (DuplicateExtern duplicate : duplicateExterns) {
                 ExternSignature first = duplicate.first(), second = duplicate.second();
                 if (first.paramTypes.size() != second.paramTypes.size() || !sameSourceType(first.returnType, second.returnType, layouts))
@@ -592,7 +679,10 @@ public class GeneraterJson {
             ArrayDeque<List<String>> pending = new ArrayDeque<>();Set<List<String>> compared = new HashSet<>();pending.add(List.of(first, second));
             while (!pending.isEmpty()) {
                 List<String> pair = pending.removeLast();if (pair.get(0).equals(pair.get(1))) continue;
-                JsonArray left = layouts.get(pair.get(0)), right = layouts.get(pair.get(1));
+                boolean pointer = pair.get(0).endsWith("*");
+                if (pointer != pair.get(1).endsWith("*")) return false;
+                JsonArray left = layouts.get(pointer ? pair.get(0).substring(0, pair.get(0).length() - 1) : pair.get(0)),
+                        right = layouts.get(pointer ? pair.get(1).substring(0, pair.get(1).length() - 1) : pair.get(1));
                 if (left == null || right == null || left.size() != right.size()) return false;
                 if (!compared.add(pair)) continue;
                 for (int i = 0; i < left.size(); i++)
@@ -664,6 +754,13 @@ public class GeneraterJson {
             for (JsonElement item : script.classes)
                 if (item.getAsJsonObject().get("name").getAsString().equals(className)) throw error("Duplicate class: " + className);
             JsonObject definition = new JsonObject(); definition.addProperty("name", className);
+            definition.addProperty("_line", classToken.line()); definition.addProperty("_column", classToken.column());
+            if (match(":")) {
+                match("public");
+                if (at("private") || at("protected") || at("virtual")) throw error("Only public single inheritance is supported");
+                definition.addProperty("base", name().text());
+                if (at(",")) throw error("Multiple inheritance is not supported");
+            }
             JsonArray fields = new JsonArray(); JsonObject methods = new JsonObject();
             definition.add("fields", fields); definition.add("methods", methods); script.classes.add(definition);
             Set<String> members = new HashSet<>(); boolean constructor = false, destructor = false;
@@ -681,24 +778,32 @@ public class GeneraterJson {
                     advance();parseFunction(className,"constructor","void","<ctor>",external,true);
                     definition.addProperty("constructor",className+"::<ctor>");constructor=true;
                 } else {
-                    Token start=current();String type=sourceType(name().text(),true);String member=declaredName().text();
+                    Token start=current();String type=pointerSuffix(sourceType(name().text(),true));String member=declaredName().text();
                     if (!members.add(member)) throw error("Duplicate class member: " + className + "." + member);
-                    if (at("(")) {
+                    if (at("(") && !fieldConstruction()) {
                         parseFunction(className,"method",type,member,external,true);methods.addProperty(member,className+"::"+member);
                     } else {
                         if (external) throw error("Fields cannot be extern");
                         if (type.equals("void")) throw error("Field cannot have type void");
                         JsonObject field=new JsonObject();field.addProperty("name",member);field.addProperty("type",type);
                         field.addProperty("_line",start.line());field.addProperty("_column",start.column());
-                        if(match("="))field.add("initializer",expression());endStatement();fields.add(field);
+                        if (at("(")) {
+                            // Only an embedded literal object takes constructor arguments.
+                            if (type.endsWith("*")) throw error("A pointer field cannot own an automatic object; initialize it with = new " + type.substring(0, type.length() - 1) + "(...)");
+                            if (!classNames.contains(type)) throw error("Only literal-object fields take constructor arguments");
+                            advance();List<JsonElement> arguments=new ArrayList<>();arguments.add(new JsonPrimitive(type));
+                            if(!at(")"))do{arguments.add(expression());}while(match(","));
+                            expect(")");field.add("initializer",operation("ctrl","object-value",start,arguments.toArray(JsonElement[]::new)));
+                        } else if(match("="))field.add("initializer",expression());
+                        endStatement();fields.add(field);
                     }
                 }
             }
             expect("}");match(";");
-            if(fields.isEmpty())throw error("Class "+className+" must declare at least one field");
             if(!constructor) {
                 AzFunction function=new AzFunction();function.ownerClass=className;function.functionKind="constructor";
-                function.name=className+"::<ctor>";function.returnType="void";function.params.add("this");function.paramTypes.add(className);
+                function.name=className+"::<ctor>";function.returnType="void";function.params.add("this");function.paramTypes.add(className+"*");
+                function.line=classToken.line();function.column=classToken.column();
                 function.body=JsonArray::new;addDefinition(function);definition.addProperty("constructor",function.name);
             }
         }
@@ -710,13 +815,14 @@ public class GeneraterJson {
             String qualified=owner==null?member:owner+"::"+member;
             if(Compiler.isBuiltinName(qualified)||owner==null&&classNames.contains(qualified))throw error("Reserved function name: "+qualified);
             AzFunction function=new AzFunction();function.name=qualified;function.ownerClass=owner;function.functionKind=kind;function.returnType=type;
-            if(owner!=null){function.params.add("this");function.paramTypes.add(owner);}
+            function.line=current().line();function.column=current().column();
+            if(owner!=null){function.params.add("this");function.paramTypes.add(owner+"*");}
             expect("(");
             if(!at(")"))do {
                 String parameter=name().text(),parameterType="any";
                 if(parameter.equals("void"))throw error("void cannot be a parameter type");
                 if(knownType(parameter)) {
-                    parameterType=sourceType(parameter,false);
+                    parameterType=pointerSuffix(sourceType(parameter,false));
                     parameter=external&&(at(",")||at(")"))?"<argument:"+function.params.size()+">":declaredName().text();
                 } else if(external)throw error("External parameters require explicit types");
                 if(function.params.contains(parameter))throw error("Duplicate parameter: "+parameter);
@@ -724,7 +830,21 @@ public class GeneraterJson {
             }while(match(","));
             expect(")");
             Integer suffix=null;
-            if(match(":")){Token token=advance();try{suffix=hexadecimal(token.text(),external?8:4,"function ID");}catch(IllegalArgumentException e){throw error(e.getMessage(),token);}}
+            if(match(":")) {
+                boolean initializer="constructor".equals(kind)&&current().identifier()&&tokens.get(index+1).text().equals("(");
+                if(!initializer) {
+                    Token token=advance();
+                    try{suffix=hexadecimal(token.text(),external?8:4,"function ID");}catch(IllegalArgumentException e){throw error(e.getMessage(),token);}
+                    initializer=match(":");
+                }
+                if(initializer) {
+                    if(external||!"constructor".equals(kind))throw error("Only a constructor definition may initialize a base class");
+                    function.baseInitializer=name().text();function.baseArguments=new JsonArray();expect("(");
+                    if(!at(")"))do{function.baseArguments.add(expression());}while(match(","));
+                    expect(")");
+                    if(at(","))throw error("Only one direct base initializer is supported");
+                }
+            }
             if("destructor".equals(kind)&&function.params.size()!=1)throw error("Destructor must have no parameters");
             if(external) {
                 if(suffix==null)throw error("Extern function requires a full hexadecimal ID");
@@ -763,6 +883,7 @@ public class GeneraterJson {
             try { return statementBody(); } finally { recursionDepth--; }
         }
         private JsonElement statementBody() {
+            if (match(";")) return new JsonArray();
             if (at("{")) return block();
             Token start = current();
             if (match("return")) {
@@ -773,10 +894,23 @@ public class GeneraterJson {
                 } else result = operation("ctrl", "return", start, expression());
                 endStatement(); return result;
             }
-            if (match("break")) {
-                if (loopDepth == 0) throw error("'break' can only be used inside a while loop");
-                JsonElement result = operation("ctrl", "break", start);
+            if (at("break") || at("continue")) {
+                String control = advance().text();
+                if (loopDepth == 0) throw error("'" + control + "' can only be used inside a loop");
+                JsonElement result = operation("ctrl", control, start);
                 endStatement(); return result;
+            }
+            if (match("for")) {
+                expect("("); JsonElement initializer = new JsonArray();
+                if (!match(";")) {
+                    if (at("def") || at("var") || (knownType(current().text()) && !at("void"))) initializer = statement();
+                    else { initializer = statementExpression(); expect(";"); }
+                }
+                JsonElement condition = at(";") ? new JsonPrimitive(true) : expression(); expect(";");
+                JsonElement step = at(")") ? new JsonArray() : statementExpression(); expect(")");
+                JsonElement body; loopDepth++;
+                try { body = statement(); } finally { loopDepth--; }
+                return operation("ctrl", "for", start, initializer, condition, step, body);
             }
             if (match("delete")) {
                 JsonElement result = operation("ctrl", "object-delete", start, expression());
@@ -812,18 +946,27 @@ public class GeneraterJson {
             }
             if (at("var") || (knownType(current().text()) && !at("void"))) {
                 String spelling = advance().text();
-                String declaredType = spelling.equals("var") ? null : sourceType(spelling, false);
+                String declaredType = spelling.equals("var") ? null : pointerSuffix(sourceType(spelling, false));
                 String variable = declaredName().text();
-                if (classNames.contains(spelling) && !at("=")) {
+                boolean pointer = declaredType != null && declaredType.endsWith("*");
+                // "C * p(args)" is an automatic pointer object; a bare "C * p;" is an empty (null) pointer.
+                if (classNames.contains(spelling) && !at("=") && (!pointer || at("("))) {
                     List<JsonElement> arguments = new ArrayList<>();
-                    arguments.add(new JsonPrimitive(variable)); arguments.add(new JsonPrimitive(spelling));
+                    if (pointer) arguments.add(new JsonPrimitive(variable));
+                    arguments.add(new JsonPrimitive(spelling));
                     if (match("(")) {
                         if (!at(")")) do { arguments.add(expression()); } while (match(","));
                         expect(")");
                     }
-                    endStatement(); return operation("ctrl", "object-def", start, arguments.toArray(JsonElement[]::new));
+                    endStatement();
+                    if (pointer) return operation("ctrl", "object-def", start, arguments.toArray(JsonElement[]::new));
+                    JsonObject definition = operation("ctrl", "vardef", start, new JsonPrimitive(variable),
+                            operation("ctrl", "object-value", start, arguments.toArray(JsonElement[]::new)));
+                    definition.addProperty("declared-type", spelling);
+                    return definition;
                 }
-                JsonElement initializer = match("=") ? expression() : null;
+                JsonElement initializer = match("=") ? expression()
+                        : pointer && classNames.contains(spelling) ? operation("ctrl", "null", start) : null;
                 endStatement();
                 JsonObject definition = initializer == null
                         ? operation("ctrl", "vardef", start, new JsonPrimitive(variable))
@@ -831,7 +974,18 @@ public class GeneraterJson {
                 if (declaredType != null) definition.addProperty("declared-type", declaredType);
                 return definition;
             }
-            JsonElement expression = expression(); endStatement(); return expression;
+            JsonElement expression = statementExpression(); endStatement(); return expression;
+        }
+        /** Update operators are statement sugar, so prefix and postfix have no result-value distinction. */
+        private JsonElement statementExpression() {
+            Token operator = at("++") || at("--") ? advance() : null;
+            JsonElement value = expression();
+            if (operator == null && (at("++") || at("--"))) operator = advance();
+            if (operator == null) return value;
+            if (!value.isJsonObject() || !value.getAsJsonObject().get("t").getAsString().equals("ctrl")
+                    || !value.getAsJsonObject().get("call").getAsString().equals("var"))
+                throw error("Increment/decrement requires a simple variable and is only supported as a statement or for step");
+            return operation("ctrl", operator.text().equals("++") ? "increment" : "decrement", operator, value);
         }
         JsonElement expression() { return assignment(); }
         private JsonElement assignment() {
@@ -947,7 +1101,7 @@ public class GeneraterJson {
         Parser parser = new Parser(source.substring(offset), script);
         JsonElement result;
         if (parser.at("{")) result = parser.block();
-        else if (Set.of("return", "break", "def", "var", "if", "while", "delete").contains(parser.current().text())
+        else if (Set.of("return", "break", "continue", "def", "var", "if", "while", "for", "delete", "++", "--").contains(parser.current().text())
                 || parser.knownType(parser.current().text())) result = parser.statement();
         else result = parser.expression();
         parser.match(";"); parser.expect("<eof>"); TreeLimits.validate(result); return () -> result;

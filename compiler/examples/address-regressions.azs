@@ -1,0 +1,26 @@
+// Addresses are separate from int32; one address step advances one slot.
+address makeValues() {
+    address values = alloc(4);
+    for (int i = 0; i < 4; i++) {
+        mem_get(values + i) = i + 1;
+    }
+    mem_send_up(values);
+    return values;
+}
+
+int readValue(address pointer) { return mem_get(pointer); }
+
+int main() {
+    address values = makeValues();
+    int sum = 0;
+    for (address cursor = values; cursor < values + 4; cursor++) {
+        if (cursor == values + 1) { continue; }
+        sum += readValue(cursor);
+    }
+    address references = alloc(2);
+    mem_get(references) = values;
+    mem_get(references + 1) = null;
+    var alias = mem_get(references);
+    if (sum != 8 || mem_get(alias) != 1 || mem_get(references + 1) != null) { return 1; }
+    return 0;
+}

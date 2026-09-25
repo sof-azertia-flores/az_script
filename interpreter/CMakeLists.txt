@@ -8,8 +8,8 @@ find_package(Threads REQUIRED)
 if(NOT TARGET azertianBinaryData)
     add_subdirectory(../abdC "${CMAKE_CURRENT_BINARY_DIR}/abdC")
 endif()
-add_library(abdInvoker SHARED library.cpp internelFunctions.cpp heepalloc.cpp)
-add_library(abdInvokero STATIC library.cpp internelFunctions.cpp heepalloc.cpp)
+add_library(abdInvoker SHARED library.cpp internelFunctions.cpp heepalloc.cpp blocks.cpp)
+add_library(abdInvokero STATIC library.cpp internelFunctions.cpp heepalloc.cpp blocks.cpp)
 foreach(target abdInvoker abdInvokero)
     target_compile_features(${target} PUBLIC cxx_std_20)
     target_include_directories(${target} PUBLIC
@@ -35,7 +35,7 @@ install(TARGETS abdInvoker abdInvokero EXPORT AzScriptTargets
     LIBRARY DESTINATION "${CMAKE_INSTALL_LIBDIR}"
     ARCHIVE DESTINATION "${CMAKE_INSTALL_LIBDIR}")
 install(TARGETS azscript-run RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
-install(FILES library.h internelFunctions.h heepalloc.h azertianBinaryDataValues.h acs.h
+install(FILES library.h internelFunctions.h heepalloc.h blocks.h azertianBinaryDataValues.h acs.h
     DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/azscript/detail/interpreter")
 if(BUILD_TESTING)
     add_executable(runtime-tests runtime_tests.cpp)

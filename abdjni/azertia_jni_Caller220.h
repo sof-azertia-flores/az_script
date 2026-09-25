@@ -10,50 +10,58 @@ extern "C" {
 /*
  * Class:     azertia_jni_Caller220
  * Method:    ACputMem
- * Signature: (II)V
+ * Signature: (JI)V
  */
-JNIEXPORT void JNICALL Java_azertia_jni_Caller220_ACputMem__II
-  (JNIEnv *, jclass, jint, jint);
+JNIEXPORT void JNICALL Java_azertia_jni_Caller220_ACputMem__JI
+  (JNIEnv *, jclass, jlong, jint);
 
 /*
  * Class:     azertia_jni_Caller220
  * Method:    ACputMem
- * Signature: (IF)V
+ * Signature: (JF)V
  */
-JNIEXPORT void JNICALL Java_azertia_jni_Caller220_ACputMem__IF
-  (JNIEnv *, jclass, jint, jfloat);
+JNIEXPORT void JNICALL Java_azertia_jni_Caller220_ACputMem__JF
+  (JNIEnv *, jclass, jlong, jfloat);
 
 /*
  * Class:     azertia_jni_Caller220
  * Method:    ACputMem
- * Signature: (ID)V
+ * Signature: (JD)V
  */
-JNIEXPORT void JNICALL Java_azertia_jni_Caller220_ACputMem__ID
-  (JNIEnv *, jclass, jint, jdouble);
+JNIEXPORT void JNICALL Java_azertia_jni_Caller220_ACputMem__JD
+  (JNIEnv *, jclass, jlong, jdouble);
 
 /*
  * Class:     azertia_jni_Caller220
  * Method:    ACputMem
- * Signature: (IZ)V
+ * Signature: (JZ)V
  */
-JNIEXPORT void JNICALL Java_azertia_jni_Caller220_ACputMem__IZ
-  (JNIEnv *, jclass, jint, jboolean);
+JNIEXPORT void JNICALL Java_azertia_jni_Caller220_ACputMem__JZ
+  (JNIEnv *, jclass, jlong, jboolean);
 
 /*
  * Class:     azertia_jni_Caller220
  * Method:    ACputMem
- * Signature: (ILjava/lang/String;)V
+ * Signature: (JLjava/lang/String;)V
  */
-JNIEXPORT void JNICALL Java_azertia_jni_Caller220_ACputMem__ILjava_lang_String_2
-  (JNIEnv *, jclass, jint, jstring);
+JNIEXPORT void JNICALL Java_azertia_jni_Caller220_ACputMem__JLjava_lang_String_2
+  (JNIEnv *, jclass, jlong, jstring);
+
+/*
+ * Class:     azertia_jni_Caller220
+ * Method:    ACputMemAddress
+ * Signature: (JJ)V
+ */
+JNIEXPORT void JNICALL Java_azertia_jni_Caller220_ACputMemAddress
+  (JNIEnv *, jclass, jlong, jlong);
 
 /*
  * Class:     azertia_jni_Caller220
  * Method:    ACputMemNull
- * Signature: (I)V
+ * Signature: (J)V
  */
 JNIEXPORT void JNICALL Java_azertia_jni_Caller220_ACputMemNull
-  (JNIEnv *, jclass, jint);
+  (JNIEnv *, jclass, jlong);
 
 #ifdef __cplusplus
 }

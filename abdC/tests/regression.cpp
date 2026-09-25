@@ -9,8 +9,12 @@
 #include <limits>
 #include <random>
 #include <stdexcept>
+#include <type_traits>
 
 using namespace azertian;
+static_assert(!std::is_convertible_v<int, address>);
+static_assert(!std::is_convertible_v<address, int>);
+static_assert(!std::is_convertible_v<address, std::uint64_t>);
 namespace {
 void check(bool value, const char* message) { if (!value) throw std::runtime_error(message); }
 template<class F> void rejected(F fn) {
@@ -43,10 +47,13 @@ std::shared_ptr<AbdMap> fixture() {
     result->put("array", array);
     result->put("negativeZero", std::make_shared<DoubleAbdValue>(-0.0));
     result->put("nan", std::make_shared<FloatAbdValue>(std::bit_cast<float>(std::uint32_t(0x7fc12345))));
+    result->put("addressZero", std::make_shared<AddressAbdValue>(address{}));
+    result->put("addressEndian", std::make_shared<AddressAbdValue>(address(0x0102030405060708ULL)));
+    result->put("addressMax", std::make_shared<AddressAbdValue>(address(UINT64_MAX)));
     return result;
 }
 void validate(const std::shared_ptr<AbdMap>& value) {
-    check(value->values.size() == 12, "map cardinality/fallthrough");
+    check(value->values.size() == 15, "map cardinality/fallthrough");
     check(typed<IntAbdValue>(value->get("intMin"))->data == std::numeric_limits<int>::min(), "minimum signed integer");
     check(typed<IntAbdValue>(value->get("intMax"))->data == std::numeric_limits<int>::max(), "maximum signed integer");
     check(typed<DoubleAbdValue>(value->get("double"))->data == -1234.125, "double endian");
@@ -64,6 +71,9 @@ void validate(const std::shared_ptr<AbdMap>& value) {
     check(!typed<BoolAbdValue>(typed<AbdMap>(array->get(1))->get("nested"))->data, "nested map");
     check(std::signbit(typed<DoubleAbdValue>(value->get("negativeZero"))->data), "negative zero");
     check(std::bit_cast<std::uint32_t>(typed<FloatAbdValue>(value->get("nan"))->data) == 0x7fc12345, "NaN payload");
+    check(typed<AddressAbdValue>(value->get("addressZero"))->data == address{}, "zero address");
+    check(typed<AddressAbdValue>(value->get("addressEndian"))->data == address(0x0102030405060708ULL), "address endian");
+    check(typed<AddressAbdValue>(value->get("addressMax"))->data == address(UINT64_MAX), "unsigned maximum address");
 }
 std::vector<unsigned char> frame(const std::shared_ptr<AbdMap>& map) {
     auto v = map->toAbdValue();
@@ -80,7 +90,8 @@ void runTests() {
     check(frame(read(bytes)) == bytes, "byte-exact roundtrip");
     auto copy = std::shared_ptr<AbdMap>(static_cast<AbdMap*>(source->deepCopy()));
     copy->put("intMin", std::make_shared<IntAbdValue>(99));
-    check(copy->values.size() == 12 && typed<IntAbdValue>(copy->get("intMin"))->data == 99, "map update");
+    check(copy->values.size() == 15 && typed<IntAbdValue>(copy->get("intMin"))->data == 99, "map update");
+    typed<AddressAbdValue>(copy->get("addressMax"))->data = address(42);
     typed<ByteArrayValue>(copy->get("bytes"))->data[0] = 99;
     typed<AbdMap>(typed<AbdArray>(copy->get("array"))->get(1))->put("nested", std::make_shared<BoolAbdValue>(true));
     validate(source);
@@ -107,6 +118,18 @@ void runTests() {
     rejected([&] { IntAbdValue v(shortValue); });
     rejected([&] { DoubleAbdValue v(shortValue); });
     rejected([&] { FloatAbdValue v(shortValue); });
+    const unsigned char addressBytes[] = {8, 7, 6, 5, 4, 3, 2, 1};
+    auto addressPayload = AddressAbdValue(address(0x0102030405060708ULL)).toAbdValue();
+    check(addressPayload->size == 8 && std::memcmp(addressPayload->data, addressBytes, 8) == 0, "exact address wire bytes");
+    for (int size = 0; size <= 9; ++size) {
+        if (size == 8) continue;
+        const unsigned char zeroBytes[9]{};
+        auto payload = std::make_shared<AbdValue>(zeroBytes, size);
+        rejected([&] { AddressAbdValue invalid(payload); });
+        auto typedPayload = std::make_shared<AbdStack>();
+        typedPayload->vs = {IntAbdValue(0xce200b).toAbdValue(), payload};
+        rejected([&] { AbdArray invalid(typedPayload); });
+    }
     unsigned char invalidBoolean[] = {2};
     rejected([&] { BoolAbdValue v(std::make_shared<AbdValue>(invalidBoolean, 1)); });
     auto malformed = std::make_shared<AbdStack>();

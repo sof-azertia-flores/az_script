@@ -9,22 +9,22 @@ import java.util.*;
 public class Compiler {
     private static final ThreadLocal<Integer> EXPRESSION_DEPTH = ThreadLocal.withInitial(() -> 0);
     private static final int NULL_TYPE = -2, FIRST_CLASS_TYPE = 100;
-    private static final int MAX_VARIABLE_SLOTS = 1_048_576;
+    private static final int MAX_VARIABLE_SLOTS = 1_048_576, MAX_VALUE_NESTING = 64;
     private static final ThreadLocal<Map<String,Integer>> CLASS_TYPES = ThreadLocal.withInitial(LinkedHashMap::new);
     private static final ThreadLocal<Map<Integer,ClassInfo>> CLASS_LAYOUTS = ThreadLocal.withInitial(LinkedHashMap::new);
     public static class AsTypes {
         public static final int INT_VALUE = 0, STRING_VALUE = 1, FLOAT_VALUE = 2,
-                DOUBLE_VALUE = 3, BOOLEAN_VALUE = 4, VOID_VALUE = 5, ANY_VALUE = 6;
+                DOUBLE_VALUE = 3, BOOLEAN_VALUE = 4, VOID_VALUE = 5, ANY_VALUE = 6, ADDRESS_VALUE = 7, OBJECT_VALUE = 8;
     }
     private record BuiltinSpec(String name, int id, int returnType, List<Integer> paramTypes) {}
     private static final List<BuiltinSpec> BUILTINS = List.of(
             new BuiltinSpec("print", 0x0abd0000, AsTypes.VOID_VALUE, List.of(AsTypes.ANY_VALUE)),
             new BuiltinSpec("getDepth", 0x0abd0001, AsTypes.INT_VALUE, List.of()),
-            new BuiltinSpec("mem_free", 0x0abd0002, AsTypes.BOOLEAN_VALUE, List.of(AsTypes.INT_VALUE)),
-            new BuiltinSpec("alloc", 0x0abd0003, AsTypes.INT_VALUE, List.of(AsTypes.INT_VALUE)),
-            new BuiltinSpec("make_free", 0x0abd0004, AsTypes.VOID_VALUE, List.of(AsTypes.INT_VALUE)),
-            new BuiltinSpec("mem_send_up", 0x0abd0005, AsTypes.VOID_VALUE, List.of(AsTypes.INT_VALUE)),
-            new BuiltinSpec("mem_get", 0x0abd0006, AsTypes.ANY_VALUE, List.of(AsTypes.INT_VALUE)));
+            new BuiltinSpec("mem_free", 0x0abd0002, AsTypes.BOOLEAN_VALUE, List.of(AsTypes.ADDRESS_VALUE)),
+            new BuiltinSpec("alloc", 0x0abd0003, AsTypes.ADDRESS_VALUE, List.of(AsTypes.INT_VALUE)),
+            new BuiltinSpec("make_free", 0x0abd0004, AsTypes.VOID_VALUE, List.of(AsTypes.ADDRESS_VALUE)),
+            new BuiltinSpec("mem_send_up", 0x0abd0005, AsTypes.VOID_VALUE, List.of(AsTypes.ADDRESS_VALUE)),
+            new BuiltinSpec("mem_get", 0x0abd0006, AsTypes.ANY_VALUE, List.of(AsTypes.ADDRESS_VALUE)));
     public static boolean isBuiltinName(String name) {
         return BUILTINS.stream().anyMatch(spec -> spec.name().equals(name));
     }
@@ -40,15 +40,22 @@ public class Compiler {
         public int type = AsTypes.ANY_VALUE;
     }
     private record Signature(int id, int returnType, List<Integer> paramTypes, boolean requireKnown) {}
-    private record Field(String name, int type, JsonElement initializer, int line, int column) {}
+    private record Field(String owner, String name, int type, JsonElement initializer, int line, int column) {}
     private static final class ClassInfo {
-        String name, constructor, destructor;
-        int type, manualFactory, scopedFactory;
+        String name, constructor, destructor, cleanupDestructor;
+        ClassInfo base;
+        // Literal (value) objects and pointers are distinct types of one layout.
+        int valueType, pointerType, manualFactory, scopedFactory, valueFactory;
+        boolean synthesizedDestructor;
+        final List<Field> ownFields = new ArrayList<>();
         final List<Field> fields = new ArrayList<>();
+        final Map<String,Field> visibleFields = new LinkedHashMap<>();
+        final Map<String,String> ownMethods = new LinkedHashMap<>();
         final Map<String,String> methods = new LinkedHashMap<>();
         Field field(String name) {
-            return fields.stream().filter(field -> field.name().equals(name)).findFirst()
-                    .orElseThrow(() -> new IllegalArgumentException("Unknown member: " + this.name + "." + name));
+            Field field = visibleFields.get(name);
+            if (field == null) throw new IllegalArgumentException("Unknown member: " + this.name + "." + name);
+            return field;
         }
     }
     private static class Counter { int next; }
@@ -161,7 +168,8 @@ public class Compiler {
         return switch (operation) {
             case "var" -> params.size() == 1 ? variableType(string(params.get(0), "Variable name"), environment) : AsTypes.ANY_VALUE;
             case "null" -> NULL_TYPE;
-            case "object-new" -> classInfo(string(params.get(0), "Class name"), environment).type;
+            case "object-new" -> classInfo(string(params.get(0), "Class name"), environment).pointerType;
+            case "object-value" -> classInfo(string(params.get(0), "Class name"), environment).valueType;
             case "member" -> memberField(params, environment).type();
             case "member-set" -> params.size() == 2 ? expressionType(params.get(1), environment) : AsTypes.ANY_VALUE;
             case "member-call" -> {
@@ -173,8 +181,17 @@ public class Compiler {
             }
             case "#allocate" -> {
                 requireTrusted(object, environment);
-                yield classInfo(string(params.get(0), "Class name"), environment).type;
+                yield classInfo(string(params.get(0), "Class name"), environment).pointerType;
             }
+            case "#new-block" -> {
+                requireTrusted(object, environment);
+                yield classInfo(string(params.get(0), "Class name"), environment).valueType;
+            }
+            case "#address-of" -> {
+                requireTrusted(object, environment);
+                yield CLASS_LAYOUTS.get().get(expressionType(params.get(0), environment)).pointerType;
+            }
+            case "#move" -> { requireTrusted(object, environment); yield expressionType(params.get(0), environment); }
             case "varset", "mov" -> params.size() == 2
                     ? expressionType(params.get(1), environment) : AsTypes.ANY_VALUE;
             case "float" -> AsTypes.FLOAT_VALUE;
@@ -184,7 +201,10 @@ public class Compiler {
             case "add" -> params.size() == 2
                     ? additionType(expressionType(params.get(0), environment), expressionType(params.get(1), environment))
                     : AsTypes.ANY_VALUE;
-            case "minus", "multiply", "divide" -> params.size() == 2
+            case "minus" -> params.size() == 2
+                    ? subtractionType(expressionType(params.get(0), environment), expressionType(params.get(1), environment))
+                    : AsTypes.ANY_VALUE;
+            case "multiply", "divide" -> params.size() == 2
                     ? arithmeticType(expressionType(params.get(0), environment), expressionType(params.get(1), environment))
                     : AsTypes.ANY_VALUE;
             case "mod" -> params.size() == 2
@@ -192,7 +212,7 @@ public class Compiler {
                     && expressionType(params.get(1), environment) == AsTypes.INT_VALUE
                     ? AsTypes.INT_VALUE : AsTypes.ANY_VALUE;
             case "if" -> branchType(params, environment);
-            case "vardef", "return", "break", "while", "object-def", "object-delete", "#bind", "#make-free" -> AsTypes.VOID_VALUE;
+            case "vardef", "return", "break", "continue", "while", "for", "increment", "decrement", "object-def", "object-delete", "#bind", "#make-free", "#drop" -> AsTypes.VOID_VALUE;
             default -> AsTypes.ANY_VALUE;
         };
     }
@@ -207,7 +227,12 @@ public class Compiler {
     }
     private static int additionType(int first, int second) {
         if (first == AsTypes.STRING_VALUE || second == AsTypes.STRING_VALUE) return AsTypes.STRING_VALUE;
+        if (first == AsTypes.ADDRESS_VALUE && second == AsTypes.INT_VALUE
+                || second == AsTypes.ADDRESS_VALUE && first == AsTypes.INT_VALUE) return AsTypes.ADDRESS_VALUE;
         return arithmeticType(first, second);
+    }
+    private static int subtractionType(int first, int second) {
+        return first == AsTypes.ADDRESS_VALUE && second == AsTypes.INT_VALUE ? AsTypes.ADDRESS_VALUE : arithmeticType(first, second);
     }
     private static int arithmeticType(int first, int second) {
         if (!numeric(first) || !numeric(second)) return AsTypes.ANY_VALUE;
@@ -219,7 +244,21 @@ public class Compiler {
         return type == AsTypes.INT_VALUE || type == AsTypes.FLOAT_VALUE || type == AsTypes.DOUBLE_VALUE;
     }
     private static boolean returnCompatible(int expected, int actual) {
-        return equivalent(expected, actual) || isClass(expected) && actual == NULL_TYPE || numeric(expected) && numeric(actual);
+        return assignable(expected, actual) || numeric(expected) && numeric(actual);
+    }
+    /**
+     * A base pointer addresses the same prefix; no pointer adjustment or runtime type is needed.
+     * Literal objects never convert: copying one keeps its layout and cleanup destructor.
+     */
+    private static boolean assignable(int expected, int actual) {
+        if (equivalent(expected, actual))
+            return !isValueClass(expected) || Objects.equals(CLASS_LAYOUTS.get().get(expected).cleanupDestructor,
+                    CLASS_LAYOUTS.get().get(actual).cleanupDestructor) || expected == actual;
+        if ((isPointerClass(expected) || expected == AsTypes.ADDRESS_VALUE) && actual == NULL_TYPE) return true;
+        if (!isPointerClass(expected) || !isPointerClass(actual)) return false;
+        for (ClassInfo base = CLASS_LAYOUTS.get().get(actual).base; base != null; base = base.base)
+            if (equivalent(expected, base.pointerType)) return true;
+        return false;
     }
     private static boolean equivalent(int first, int second) {
         ArrayDeque<Long> pending = new ArrayDeque<>(); Set<Long> compared = new HashSet<>();
@@ -227,7 +266,7 @@ public class Compiler {
         while (!pending.isEmpty()) {
             long pair = pending.removeLast(); int leftType = (int)(pair >> 32), rightType = (int)pair;
             if (leftType == rightType) continue;
-            if (!isClass(leftType) || !isClass(rightType)) return false;
+            if (!isClass(leftType) || !isClass(rightType) || isValueClass(leftType) != isValueClass(rightType)) return false;
             if (!compared.add(pair)) continue;
             ClassInfo left = CLASS_LAYOUTS.get().get(leftType), right = CLASS_LAYOUTS.get().get(rightType);
             if (left == null || right == null || left.fields.size() != right.fields.size()) return false;
@@ -248,15 +287,19 @@ public class Compiler {
             case AsTypes.BOOLEAN_VALUE -> "boolean";
             case AsTypes.VOID_VALUE -> "void";
             case AsTypes.ANY_VALUE -> "any";
+            case AsTypes.ADDRESS_VALUE -> "address";
             case NULL_TYPE -> "null";
-            default -> CLASS_TYPES.get().entrySet().stream().filter(entry -> entry.getValue() == type)
-                    .map(Map.Entry::getKey).findFirst().orElse("unknown(" + type + ")");
+            case AsTypes.OBJECT_VALUE -> "object";
+            default -> {
+                ClassInfo info = CLASS_LAYOUTS.get().get(type);
+                yield info == null ? "unknown(" + type + ")" : isPointerClass(type) ? info.name + " *" : info.name;
+            }
         };
     }
     private static void requireKnownExact(String context, int expected, int actual) {
         if (actual == AsTypes.ANY_VALUE)
             throw new IllegalArgumentException(context + " has unknown type; expected " + typeName(expected));
-        if (!equivalent(expected, actual) && !(isClass(expected) && actual == NULL_TYPE))
+        if (!assignable(expected, actual))
             throw new IllegalArgumentException(
                     context + " expected " + typeName(expected) + ", got " + typeName(actual));
     }
@@ -291,7 +334,9 @@ public class Compiler {
             throw new IllegalArgumentException("Object references cannot be used in arithmetic");
         if (firstType == AsTypes.ANY_VALUE || secondType == AsTypes.ANY_VALUE
                 || firstType == AsTypes.STRING_VALUE || secondType == AsTypes.STRING_VALUE
-                || numeric(firstType) && numeric(secondType)) return;
+                || numeric(firstType) && numeric(secondType)
+                || firstType == AsTypes.ADDRESS_VALUE && secondType == AsTypes.INT_VALUE
+                || secondType == AsTypes.ADDRESS_VALUE && firstType == AsTypes.INT_VALUE) return;
         throw new IllegalArgumentException("add operands must be numeric or include a string, got "
                 + typeName(firstType) + " and " + typeName(secondType));
     }
@@ -377,11 +422,12 @@ public class Compiler {
             if (signature != null) {
                 for (int i = 0; i < params.size(); i++) {
                     int expectedType = signature.paramTypes().get(i);
-                    if (expectedType != AsTypes.ANY_VALUE) {
-                        int actual = expressionType(params.get(i), environment);
-                        if (actual != AsTypes.ANY_VALUE || signature.requireKnown())
-                            requireKnownExact(label + " argument " + (i + 1 - hidden), expectedType, actual);
-                    }
+                    int actual = expressionType(params.get(i), environment);
+                    if (expectedType == AsTypes.ANY_VALUE) {
+                        if (isValueClass(actual)) throw new IllegalArgumentException(label + " argument " + (i + 1 - hidden)
+                                + " cannot take an object value; the parameter needs a declared class type");
+                    } else if (actual != AsTypes.ANY_VALUE || signature.requireKnown())
+                        requireKnownExact(label + " argument " + (i + 1 - hidden), expectedType, actual);
                 }
             }
             result.put("t", 1); result.put("id", id);
@@ -420,6 +466,7 @@ public class Compiler {
                     if (declaredType != AsTypes.ANY_VALUE)
                         requireKnownExact("Initializer for " + alias, declaredType,
                                 expressionType(params.get(1), environment));
+                    else rejectUntypedObject("Untyped variable " + alias, params.get(1), environment);
                     initializer = compileExpression(params.get(1), environment);
                 }
                 if (environment.counter.next >= MAX_VARIABLE_SLOTS)
@@ -443,6 +490,7 @@ public class Compiler {
                 if (variable.type != AsTypes.ANY_VALUE)
                     requireKnownExact("Assignment to " + alias, variable.type,
                             expressionType(params.get(1), environment));
+                else rejectUntypedObject("Untyped variable " + alias, params.get(1), environment);
                 result.put("v", variable.slot);
                 result.put("val", compileExpression(params.get(1), environment));
             }
@@ -466,6 +514,7 @@ public class Compiler {
                     throw new IllegalArgumentException("Assignment target must be a variable or mem_get(pointer)");
                 if (memory) arity("mem_get", params.get(0).getAsJsonObject().getAsJsonArray("param"), 1, 1);
                 rejectVoidValue("Assignment", params.get(1), environment);
+                rejectUntypedObject("Raw memory", params.get(1), environment);
                 result.put("c", ExecOpcodes.code("m")); result.put("v1", left);
                 result.put("v2", compileExpression(params.get(1), environment));
             }
@@ -488,12 +537,12 @@ public class Compiler {
                     result.put("r", compileExpression(params.get(0), environment));
                 }
             }
-            case "null" -> { arity(call, params, 0, 0); return withDepth(1, () -> new AcsIntegerElement(0)); }
+            case "null" -> { arity(call, params, 0, 0); return withDepth(1, () -> new AcsAddress(0L)); }
             case "member" -> {
                 arity(call, params, 2, 2); Field field = memberField(params, environment);
                 ClassInfo info = receiverClass(params.get(0), environment);
                 AcsObject address = new AcsObject(); address.put("t", 0); address.put("c", ExecOpcodes.code("oa"));
-                JsonElement receiver = params.get(0);
+                JsonElement receiver = receiverAddress(params.get(0), environment);
                 address.put("v", withDepth(2, () -> compileExpression(receiver, environment))); address.put("offset", info.fields.indexOf(field));
                 result.put("t", 1); result.put("id", 0x0abd0006);
                 AcsArray args = new AcsArray(); args.acsa.add(address); result.put("param", args);
@@ -513,7 +562,7 @@ public class Compiler {
                 ClassInfo info = receiverClass(params.get(0), environment);
                 String member = string(params.get(1), "Method name"), method = info.methods.get(member);
                 if (method == null) throw new IllegalArgumentException("Unknown method: " + info.name + "." + member);
-                JsonArray args = new JsonArray(); args.add(params.get(0));
+                JsonArray args = new JsonArray(); args.add(receiverAddress(params.get(0), environment));
                 for (int i = 2; i < params.size(); i++) args.add(params.get(i));
                 return compileInstruction(callNode(method, args), environment);
             }
@@ -522,6 +571,12 @@ public class Compiler {
                 ClassInfo info = classInfo(string(params.get(0), "Class name"), environment);
                 JsonArray args = new JsonArray(); for (int i = 1; i < params.size(); i++) args.add(params.get(i));
                 return compileInstruction(callNode(factoryName(info, true), args), environment);
+            }
+            case "object-value" -> {
+                arity(call, params, 1, Integer.MAX_VALUE);
+                ClassInfo info = classInfo(string(params.get(0), "Class name"), environment);
+                JsonArray args = new JsonArray(); for (int i = 1; i < params.size(); i++) args.add(params.get(i));
+                return compileInstruction(callNode(info.name + VALUE_FACTORY, args), environment);
             }
             case "object-def" -> {
                 arity(call, params, 2, Integer.MAX_VALUE);
@@ -534,12 +589,14 @@ public class Compiler {
                     construct.add("_line", source.get("_line")); construct.add("_column", source.get("_column"));
                 }
                 JsonObject definition = node("vardef", new JsonPrimitive(alias), construct);
-                definition.addProperty("declared-type", info.name);
+                definition.addProperty("declared-type", info.name + "*");
                 return compileInstruction(definition, environment);
             }
             case "object-delete" -> {
                 arity(call, params, 1, 1); int objectType = expressionType(params.get(0), environment);
-                if (!isClass(objectType) && objectType != NULL_TYPE) throw new IllegalArgumentException("delete requires a known class reference or null");
+                if (!isPointerClass(objectType) && objectType != NULL_TYPE)
+                    throw new IllegalArgumentException(isValueClass(objectType) ? "delete requires a class pointer; a literal object ends with its variable"
+                            : "delete requires a known class pointer or null");
                 result.put("c", ExecOpcodes.code("od")); result.put("v", compileExpression(params.get(0), environment));
             }
             case "#allocate" -> {
@@ -564,9 +621,50 @@ public class Compiler {
                 JsonElement pointer = params.get(0);
                 AcsArray args = new AcsArray(); args.acsa.add(withDepth(1, () -> compileExpression(pointer, environment))); result.put("param", args);
             }
+            case "#new-block" -> {
+                requireTrusted(source, environment); arity(call, params, 1, 1);
+                result.put("c", ExecOpcodes.code("new_block"));
+                result.put("size", classInfo(string(params.get(0), "Class name"), environment).fields.size());
+            }
+            case "#address-of" -> {
+                requireTrusted(source, environment); arity(call, params, 1, 1);
+                result.put("c", ExecOpcodes.code("block_address")); result.put("v", compileExpression(params.get(0), environment));
+            }
+            case "#move" -> {
+                requireTrusted(source, environment); arity(call, params, 1, 1);
+                JsonArray target = parameters(params.get(0).getAsJsonObject());
+                result.put("c", ExecOpcodes.code("mv")); result.put("v", environment.getVariable(string(target.get(0), "Moved variable")).slot);
+            }
+            case "#drop" -> {
+                requireTrusted(source, environment); arity(call, params, 1, 1);
+                result.put("c", ExecOpcodes.code("drop")); result.put("v", compileExpression(params.get(0), environment));
+            }
             case "#check-this" -> {
                 requireTrusted(source, environment); arity(call, params, 0, 0);
                 result.put("c", ExecOpcodes.code("oa")); result.put("v", compileExpression(variable("this"), environment)); result.put("offset", 0);
+            }
+            case "#field-initialize" -> {
+                requireTrusted(source, environment); arity(call, params, 1, 1);
+                // Initializers belong to the implementing class/module. Constructor parameters and
+                // body locals cannot shadow their names; runtime allocations still belong to the body.
+                LogicEnvironment initialization = environment.root().child();
+                initialization.ownerClass = environment.ownerClass;
+                initialization.function = environment.ownerClass + " initialization";
+                initialization.returnType = AsTypes.VOID_VALUE; initialization.counter = environment.counter;
+                initialization.define("this", 0, classInfo(environment.ownerClass, environment).pointerType);
+                try { return compileInstruction(params.get(0).getAsJsonObject(), initialization); }
+                catch (IllegalArgumentException error) {
+                    if (error.getMessage() != null && error.getMessage().startsWith("In function ")) throw error;
+                    String location = source.has("_line") ? ":" + source.get("_line").getAsInt() + ":" + source.get("_column").getAsInt() : "";
+                    throw new IllegalArgumentException("In function " + initialization.function + location + ": " + error.getMessage(), error);
+                }
+            }
+            case "#cleanup" -> {
+                requireTrusted(source, environment); arity(call, params, 3, 3);
+                result.put("c", ExecOpcodes.code("cleanup"));
+                result.put("v", compileExpression(params.get(0), environment));
+                result.put("val", compileExpression(params.get(1), environment));
+                result.put("on-error", params.get(2).getAsBoolean());
             }
             case "add", "minus", "multiply", "divide", "mod", "greater", "lower", "cmp", "ne", "ge", "le", "and", "or" -> {
                 arity(call, params, 2, 2);
@@ -574,7 +672,26 @@ public class Compiler {
                 rejectVoidValue(call + " right operand", params.get(1), environment);
                 switch (call) {
                     case "add" -> requireAddableOrUnknown(params.get(0), params.get(1), environment);
-                    case "minus", "multiply", "divide", "greater", "lower", "ge", "le" -> {
+                    case "minus" -> {
+                        int left = expressionType(params.get(0), environment), right = expressionType(params.get(1), environment);
+                        if (left == AsTypes.ADDRESS_VALUE) requireIntegerOrUnknown("Address offset", params.get(1), environment);
+                        else if (left == AsTypes.ANY_VALUE && right == AsTypes.INT_VALUE) { /* Runtime decides numeric vs address. */ }
+                        else {
+                            requireNumericOrUnknown(call + " left operand", params.get(0), environment);
+                            requireNumericOrUnknown(call + " right operand", params.get(1), environment);
+                        }
+                    }
+                    case "greater", "lower", "ge", "le" -> {
+                        int left = expressionType(params.get(0), environment), right = expressionType(params.get(1), environment);
+                        if (left == AsTypes.ADDRESS_VALUE || right == AsTypes.ADDRESS_VALUE) {
+                            if (left != AsTypes.ADDRESS_VALUE && left != AsTypes.ANY_VALUE || right != AsTypes.ADDRESS_VALUE && right != AsTypes.ANY_VALUE)
+                                throw new IllegalArgumentException("Address ordering requires two addresses");
+                        } else {
+                            requireNumericOrUnknown(call + " left operand", params.get(0), environment);
+                            requireNumericOrUnknown(call + " right operand", params.get(1), environment);
+                        }
+                    }
+                    case "multiply", "divide" -> {
                         requireNumericOrUnknown(call + " left operand", params.get(0), environment);
                         requireNumericOrUnknown(call + " right operand", params.get(1), environment);
                     }
@@ -588,9 +705,16 @@ public class Compiler {
                     }
                     default -> {
                         int left = expressionType(params.get(0), environment), right = expressionType(params.get(1), environment);
+                        if (isValueClass(left) || isValueClass(right))
+                            throw new IllegalArgumentException("Literal objects cannot be compared; compare their fields or pointers");
                         if ((isClass(left) || isClass(right) || left == NULL_TYPE || right == NULL_TYPE)
-                                && !equivalent(left, right) && !(isClass(left) && right == NULL_TYPE) && !(isClass(right) && left == NULL_TYPE))
-                            throw new IllegalArgumentException("Object equality requires structurally equivalent class references or null");
+                                && !(left == NULL_TYPE && right == AsTypes.ANY_VALUE || right == NULL_TYPE && left == AsTypes.ANY_VALUE)
+                                && !assignable(left, right) && !assignable(right, left))
+                            throw new IllegalArgumentException("Object equality requires compatible class references or null");
+                        if ((left == AsTypes.ADDRESS_VALUE || right == AsTypes.ADDRESS_VALUE)
+                                && left != AsTypes.ANY_VALUE && right != AsTypes.ANY_VALUE
+                                && !assignable(left, right) && !assignable(right, left))
+                            throw new IllegalArgumentException("Address equality requires an address or null");
                     }
                 }
                 result.put("c", ExecOpcodes.code(switch (call) { case "greater" -> "gt"; case "lower" -> "lt"; case "cmp" -> "eq"; default -> call; }));
@@ -602,7 +726,13 @@ public class Compiler {
                 rejectVoidValue(call + " operand", params.get(0), environment);
                 if (call.equals("neg") || call.equals("pos")) requireNumericOrUnknown(call + " operand", params.get(0), environment);
                 else requireConditionOrUnknown("not operand", params.get(0), environment);
-                if (call.equals("pos")) return compileExpression(params.get(0), environment);
+                if (call.equals("pos")) {
+                    // A dynamic value still needs the same numeric check as a known operand.
+                    // Multiplication by int one preserves numeric type, signed zero and evaluation count.
+                    if (expressionType(params.get(0), environment) == AsTypes.ANY_VALUE)
+                        return compileInstruction(node("multiply", params.get(0), new JsonPrimitive(1)), environment);
+                    return compileExpression(params.get(0), environment);
+                }
                 result.put("c", ExecOpcodes.code(call)); result.put("v", compileExpression(params.get(0), environment));
             }
             case "float" -> {
@@ -616,10 +746,38 @@ public class Compiler {
                     throw new IllegalArgumentException("Floating literal is outside float range");
                 return withDepth(1, () -> new AcsFloat(number));
             }
-            case "break" -> {
+            case "break", "continue" -> {
                 arity(call, params, 0, 0);
-                if (environment.loopDepth == 0) throw new IllegalArgumentException("break can only be used inside a while loop");
-                result.put("c", ExecOpcodes.code("brk"));
+                if (environment.loopDepth == 0) throw new IllegalArgumentException(call + " can only be used inside a loop");
+                result.put("c", ExecOpcodes.code(call.equals("break") ? "brk" : "cont"));
+            }
+            case "increment", "decrement" -> {
+                arity(call, params, 1, 1); JsonElement target = params.get(0);
+                if (!target.isJsonObject() || !"ctrl".equals(string(target.getAsJsonObject().get("t"), "Update target t"))
+                        || !"var".equals(string(target.getAsJsonObject().get("call"), "Update target call")))
+                    throw new IllegalArgumentException("Increment/decrement requires a simple variable");
+                JsonArray targetParams = parameters(target.getAsJsonObject()); arity(call, targetParams, 1, 1);
+                if (expressionType(target, environment) != AsTypes.ADDRESS_VALUE) requireNumericOrUnknown(call, target, environment);
+                // Subtraction checks numeric values or address offsets even for dynamic variables.
+                JsonObject assignment = node("varset", targetParams.get(0), node("minus", target,
+                        new JsonPrimitive(call.equals("increment") ? -1 : 1)));
+                assignment.addProperty("compound", true);
+                return compileExpression(assignment, environment);
+            }
+            case "for" -> {
+                arity(call, params, 4, 4);
+                // Keep the initializer in a dedicated enclosing scope. Every next
+                // iteration runs the step before testing the condition; continue
+                // reaches that path after the previous body's scope has cleaned up.
+                String first = "#for-first";
+                JsonObject firstDefinition = node("vardef", new JsonPrimitive(first), new JsonPrimitive(true));
+                firstDefinition.addProperty("declared-type", "boolean");
+                JsonArray iteration = array(
+                        node("if", variable(first), node("varset", new JsonPrimitive(first), new JsonPrimitive(false)), params.get(2)),
+                        node("if", node("not", params.get(1)), node("break")),
+                        array(params.get(3)));
+                return compileExpression(array(params.get(0), firstDefinition,
+                        node("while", new JsonPrimitive(true), iteration)), environment);
             }
             case "if", "while" -> {
                 arity(call, params, 2, call.equals("if") ? 3 : 2);
@@ -641,10 +799,12 @@ public class Compiler {
             case "float" -> AsTypes.FLOAT_VALUE; case "double" -> AsTypes.DOUBLE_VALUE;
             case "boolean", "bool" -> AsTypes.BOOLEAN_VALUE; case "void" -> AsTypes.VOID_VALUE;
             case "any" -> AsTypes.ANY_VALUE;
+            case "address" -> AsTypes.ADDRESS_VALUE;
             default -> {
-                Integer named = CLASS_TYPES.get().get(type);
+                boolean pointer = type.endsWith("*");
+                Integer named = CLASS_TYPES.get().get(pointer ? type.substring(0, type.length() - 1) : type);
                 if (named == null) throw new IllegalArgumentException("Unknown type: " + type);
-                yield named;
+                yield pointer ? pointerTypeOf(named) : named;
             }
         };
         if (valueOnly && (result == AsTypes.VOID_VALUE || result == AsTypes.ANY_VALUE))
@@ -686,7 +846,21 @@ public class Compiler {
     private record Function(int id, String name, int returnType, List<Integer> paramTypes,
                             JsonObject metadata, JsonElement script) {}
     private static boolean isClass(int type) { return type >= FIRST_CLASS_TYPE; }
-    private static int abiType(int type) { return isClass(type) ? AsTypes.INT_VALUE : type; }
+    private static boolean isValueClass(int type) { return isClass(type) && (type - FIRST_CLASS_TYPE) % 2 == 0; }
+    private static boolean isPointerClass(int type) { return isClass(type) && (type - FIRST_CLASS_TYPE) % 2 == 1; }
+    private static int pointerTypeOf(int valueType) { return valueType + 1; }
+    /** Pointers erase to address; literal objects cross calls as runtime object values. */
+    private static int abiType(int type) {
+        return isValueClass(type) ? AsTypes.OBJECT_VALUE : isClass(type) ? AsTypes.ADDRESS_VALUE : type;
+    }
+    private static void rejectUntypedObject(String context, JsonElement value, LogicEnvironment environment) {
+        if (isValueClass(expressionType(value, environment)))
+            throw new IllegalArgumentException(context + " cannot hold an object value; declare it with the class type or use a pointer");
+    }
+    /** Member access through a literal object uses the address of its storage. */
+    private static JsonElement receiverAddress(JsonElement receiver, LogicEnvironment environment) {
+        return isValueClass(expressionType(receiver, environment)) ? internal(environment, "#address-of", receiver) : receiver;
+    }
     private static JsonArray array(JsonElement... values) {
         JsonArray result = new JsonArray(); for (JsonElement value : values) result.add(value); return result;
     }
@@ -711,8 +885,9 @@ public class Compiler {
     }
     private static ClassInfo receiverClass(JsonElement receiver, LogicEnvironment environment) {
         int type = expressionType(receiver, environment);
-        return environment.root().classes.values().stream().filter(info -> info.type == type).findFirst()
-                .orElseThrow(() -> new IllegalArgumentException("Member access requires a known class type, got " + typeName(type)));
+        ClassInfo info = isClass(type) ? CLASS_LAYOUTS.get().get(type) : null;
+        if (info == null) throw new IllegalArgumentException("Member access requires a known class type, got " + typeName(type));
+        return info;
     }
     private static Field memberField(JsonArray params, LogicEnvironment environment) {
         arity("member", params, 2, 2);
@@ -720,7 +895,7 @@ public class Compiler {
     }
     private static Field implicitField(String name, LogicEnvironment environment) {
         ClassInfo info = environment.ownerClass == null ? null : environment.root().classes.get(environment.ownerClass);
-        return info == null ? null : info.fields.stream().filter(field -> field.name().equals(name)).findFirst().orElse(null);
+        return info == null ? null : info.visibleFields.get(name);
     }
     private static int variableType(String name, LogicEnvironment environment) {
         if (name.equals("this") && environment.ownerClass == null) throw new IllegalArgumentException("this is only available inside a class");
@@ -743,8 +918,11 @@ public class Compiler {
         }
         return name;
     }
+    private static final String VALUE_FACTORY = "::<value>";
     private static String factoryName(ClassInfo info, boolean manual) { return info.name + (manual ? "::<new>" : "::<scoped>"); }
-    private static boolean isFactory(String function) { return function.endsWith("::<new>") || function.endsWith("::<scoped>"); }
+    private static boolean isFactory(String function) {
+        return function.endsWith("::<new>") || function.endsWith("::<scoped>") || function.endsWith(VALUE_FACTORY);
+    }
     private static String displayName(String function) {
         return isFactory(function) ? function.substring(0, function.lastIndexOf("::")) + " constructor" : function;
     }
@@ -752,8 +930,8 @@ public class Compiler {
         if (name.isEmpty() || !Character.isJavaIdentifierStart(name.charAt(0))) throw new IllegalArgumentException("Invalid " + description + ": " + name);
         for (int i = 1; i < name.length(); i++)
             if (!Character.isJavaIdentifierPart(name.charAt(i))) throw new IllegalArgumentException("Invalid " + description + ": " + name);
-        if (Set.of("class", "new", "delete", "this", "null", "return", "if", "else", "while", "break", "var", "def",
-                "int", "float", "double", "string", "boolean", "bool", "void", "any", "true", "false", "extern").contains(name))
+        if (Set.of("class", "new", "delete", "this", "null", "return", "if", "else", "while", "for", "break", "continue", "public", "private", "protected", "virtual", "var", "def",
+                "int", "float", "double", "string", "boolean", "bool", "void", "any", "address", "true", "false", "extern").contains(name))
             throw new IllegalArgumentException("Reserved " + description + ": " + name);
     }
     private static void readClasses(JsonObject source, LogicEnvironment environment) {
@@ -763,11 +941,17 @@ public class Compiler {
             JsonObject definition = element.getAsJsonObject(); ClassInfo info = new ClassInfo();
             info.name = string(definition.get("name"), "Class name"); validateSourceName(info.name, "class name");
             if (isBuiltinName(info.name) || environment.classes.containsKey(info.name)) throw new IllegalArgumentException("Duplicate or reserved class: " + info.name);
-            info.type = FIRST_CLASS_TYPE + environment.classes.size(); environment.classes.put(info.name, info);
-            CLASS_TYPES.get().put(info.name, info.type);
+            info.valueType = FIRST_CLASS_TYPE + 2 * environment.classes.size(); info.pointerType = pointerTypeOf(info.valueType);
+            environment.classes.put(info.name, info);
+            CLASS_TYPES.get().put(info.name, info.valueType);
         }
         for (JsonElement element : definitions) {
             JsonObject definition = element.getAsJsonObject(); ClassInfo info = environment.classes.get(definition.get("name").getAsString());
+            if (definition.has("base")) {
+                String name = string(definition.get("base"), "Base class");
+                info.base = environment.classes.get(name);
+                if (info.base == null) throw new IllegalArgumentException("Unknown base class " + name + " for " + info.name);
+            }
             Set<String> names = new HashSet<>();
             for (JsonElement item : definition.getAsJsonArray("fields")) {
                 JsonObject field = item.getAsJsonObject(); String name = string(field.get("name"), "Field name"); validateSourceName(name, "field name");
@@ -775,9 +959,8 @@ public class Compiler {
                 int type = valueType(string(field.get("type"), "Field type"), true);
                 int line = field.has("_line") ? field.get("_line").getAsInt() : 0;
                 int column = field.has("_column") ? field.get("_column").getAsInt() : 0;
-                info.fields.add(new Field(name, type, field.get("initializer"), line, column));
+                info.ownFields.add(new Field(info.name, name, type, field.get("initializer"), line, column));
             }
-            if (info.fields.isEmpty()) throw new IllegalArgumentException("Class " + info.name + " must declare at least one field");
             info.constructor = string(definition.get("constructor"), "Constructor function");
             if (!info.constructor.equals(info.name + "::<ctor>")) throw new IllegalArgumentException("Invalid constructor mapping for " + info.name);
             if (definition.has("destructor")) {
@@ -789,18 +972,60 @@ public class Compiler {
                 if (!names.add(method.getKey())) throw new IllegalArgumentException("Duplicate member: " + info.name + "." + method.getKey());
                 String qualified = string(method.getValue(), "Method function");
                 if (!qualified.equals(info.name + "::" + method.getKey())) throw new IllegalArgumentException("Invalid method mapping for " + info.name);
-                info.methods.put(method.getKey(), qualified);
+                info.ownMethods.put(method.getKey(), qualified);
             }
-            CLASS_LAYOUTS.get().put(info.type, info);
+            // A class with literal-object fields always has a destructor that ends them.
+            if (info.destructor == null && info.ownFields.stream().anyMatch(field -> isValueClass(field.type()))) {
+                info.destructor = info.name + "::<dtor>"; info.synthesizedDestructor = true;
+            }
+            CLASS_LAYOUTS.get().put(info.valueType, info); CLASS_LAYOUTS.get().put(info.pointerType, info);
         }
+        Set<ClassInfo> complete = new HashSet<>();
+        for (ClassInfo leaf : environment.classes.values()) {
+            List<ClassInfo> chain = new ArrayList<>(); Set<ClassInfo> visiting = new HashSet<>();
+            for (ClassInfo info = leaf; info != null && !complete.contains(info); info = info.base) {
+                if (!visiting.add(info)) throw new IllegalArgumentException("Inheritance cycle involving " + info.name);
+                chain.add(info);
+            }
+            for (int i = chain.size() - 1; i >= 0; i--) {
+                ClassInfo info = chain.get(i);
+                if (info.base != null) {
+                    info.fields.addAll(info.base.fields);
+                    info.visibleFields.putAll(info.base.visibleFields);
+                    info.methods.putAll(info.base.methods);
+                }
+                for (Field field : info.ownFields) {
+                    info.fields.add(field); info.visibleFields.put(field.name(), field); info.methods.remove(field.name());
+                }
+                info.ownMethods.forEach((name, method) -> { info.methods.put(name, method); info.visibleFields.remove(name); });
+                if (info.fields.isEmpty()) throw new IllegalArgumentException("Class " + info.name + " must declare at least one field");
+                if (info.fields.size() > MAX_VARIABLE_SLOTS) throw new IllegalArgumentException("Class " + info.name + " exceeds the object slot limit");
+                info.cleanupDestructor = info.destructor != null ? info.destructor : info.base == null ? null : info.base.cleanupDestructor;
+                complete.add(info);
+            }
+        }
+        Map<ClassInfo,Integer> nesting = new HashMap<>();
+        for (ClassInfo info : environment.classes.values()) valueNesting(info, nesting, new HashSet<>());
     }
+    /** Literal-object fields are embedded storage, so a class cannot contain itself by value. */
+    private static int valueNesting(ClassInfo info, Map<ClassInfo,Integer> known, Set<ClassInfo> visiting) {
+        Integer cached = known.get(info);
+        if (cached != null) return cached;
+        if (!visiting.add(info)) throw new IllegalArgumentException("Class " + info.name + " contains itself by value; use a pointer field");
+        int levels = 1;
+        for (Field field : info.fields)
+            if (isValueClass(field.type())) levels = Math.max(levels, 1 + valueNesting(CLASS_LAYOUTS.get().get(field.type()), known, visiting));
+        if (levels > MAX_VALUE_NESTING) throw new IllegalArgumentException("Literal object nesting of " + info.name + " exceeds " + MAX_VALUE_NESTING + " levels");
+        visiting.remove(info); known.put(info, levels); return levels;
+    }
+    /** Scalars and pointers only; literal-object fields are constructed in declaration order. */
     private static JsonElement defaultValue(int type) {
         return switch (type) {
             case AsTypes.STRING_VALUE -> new JsonPrimitive("");
             case AsTypes.FLOAT_VALUE -> node("float", new JsonPrimitive(0.0f));
             case AsTypes.DOUBLE_VALUE -> new JsonPrimitive(0.0);
             case AsTypes.BOOLEAN_VALUE -> new JsonPrimitive(false);
-            default -> isClass(type) ? node("null") : new JsonPrimitive(0);
+            default -> isClass(type) || type == AsTypes.ADDRESS_VALUE ? node("null") : new JsonPrimitive(0);
         };
     }
     private static void addClassFactories(List<Function> functions, Set<Integer> ids, LogicEnvironment global,
@@ -810,8 +1035,8 @@ public class Compiler {
         Set<String> declaredClassFunctions = new HashSet<>();
         for (ClassInfo info : global.classes.values()) {
             validateClassFunction(byName, info, info.constructor, "constructor"); declaredClassFunctions.add(info.constructor);
-            if (info.destructor != null) { validateClassFunction(byName, info, info.destructor, "destructor"); declaredClassFunctions.add(info.destructor); }
-            for (String method : info.methods.values()) { validateClassFunction(byName, info, method, "method"); declaredClassFunctions.add(method); }
+            if (info.destructor != null && !info.synthesizedDestructor) { validateClassFunction(byName, info, info.destructor, "destructor"); declaredClassFunctions.add(info.destructor); }
+            for (String method : info.ownMethods.values()) { validateClassFunction(byName, info, method, "method"); declaredClassFunctions.add(method); }
         }
         for (Function function : functions) {
             boolean member = function.metadata().has("owner-class") || function.metadata().has("function-kind") || function.name().contains("::");
@@ -828,34 +1053,61 @@ public class Compiler {
                 throw new IllegalArgumentException("Unregistered class extern: " + declaration.name());
         }
         Set<Integer> occupied = new HashSet<>(ids); occupied.addAll(global.abs.values()); occupied.addAll(GeneraterJson.specialNames.values());
-        int position = 1, namespace = global.moduleNamespace << 16;
+        int[] position = {1}; int namespace = global.moduleNamespace << 16;
+        java.util.function.Supplier<Integer> nextId = () -> {
+            while (position[0] <= 0xffff && occupied.contains(namespace | position[0])) position[0]++;
+            if (position[0] > 0xffff) throw new IllegalArgumentException("No free function ID for class factories");
+            int id = namespace | position[0]++; ids.add(id); occupied.add(id); return id;
+        };
+        // A class with literal-object fields and no declared destructor gets one that
+        // ends those fields; every module creating such objects generates its own.
+        for (ClassInfo info : global.classes.values()) if (info.synthesizedDestructor) {
+            int id = nextId.get(); String name = info.destructor;
+            if (global.abs.containsKey(name)) throw new IllegalArgumentException("Reserved compiler function: " + name);
+            JsonObject metadata = new JsonObject(); metadata.addProperty("owner-class", info.name); metadata.addProperty("function-kind", "destructor");
+            JsonArray names = new JsonArray(); names.add("this"); metadata.add("param", names);
+            List<Integer> types = List.of(info.pointerType);
+            functions.add(new Function(id, name, AsTypes.VOID_VALUE, types, metadata, new JsonArray()));
+            registerCompilerFunction(global, name, id, AsTypes.VOID_VALUE, types);
+        }
         for (ClassInfo info : global.classes.values()) {
             Function constructor = byName.get(info.constructor);
-            for (boolean manual : new boolean[]{false, true}) {
-                while (position <= 0xffff && occupied.contains(namespace | position)) position++;
-                if (position > 0xffff) throw new IllegalArgumentException("No free function ID for class factories");
-                int id = namespace | position++; ids.add(id); occupied.add(id);
-                String name = factoryName(info, manual);
+            List<Integer> types = List.copyOf(constructor.paramTypes().subList(1, constructor.paramTypes().size()));
+            for (int kind = 0; kind < 3; kind++) {
+                boolean manual = kind == 1, literal = kind == 2;
+                int id = nextId.get();
+                String name = literal ? info.name + VALUE_FACTORY : factoryName(info, manual);
                 if (global.abs.containsKey(name)) throw new IllegalArgumentException("Reserved compiler function: " + name);
-                global.abs.put(name, id); if (manual) info.manualFactory = id; else info.scopedFactory = id;
-                List<Integer> types = List.copyOf(constructor.paramTypes().subList(1, constructor.paramTypes().size()));
+                if (literal) info.valueFactory = id; else if (manual) info.manualFactory = id; else info.scopedFactory = id;
                 JsonObject metadata = new JsonObject(); metadata.addProperty("owner-class", info.name);
-                JsonArray names = new JsonArray(), ctorArgs = new JsonArray(); ctorArgs.add(variable("this"));
-                for (int i = 0; i < types.size(); i++) { String argument = "<argument:" + i + ">"; names.add(argument); ctorArgs.add(variable(argument)); }
+                String storage = literal ? "#object" : "this";
+                JsonArray names = new JsonArray(), ctorArgs = new JsonArray();
+                ctorArgs.add(literal ? internal(global, "#address-of", variable(storage)) : variable(storage));
+                for (int i = 0; i < types.size(); i++) {
+                    String argument = "<argument:" + i + ">"; names.add(argument);
+                    // A literal-object argument was already copied into the factory; move it on.
+                    ctorArgs.add(isValueClass(types.get(i)) ? internal(global, "#move", variable(argument)) : variable(argument));
+                }
                 metadata.add("param", names);
                 JsonArray body = new JsonArray();
-                JsonObject local = node("vardef", new JsonPrimitive("this"), internal(global, "#allocate", new JsonPrimitive(info.name)));
-                local.addProperty("declared-type", info.name); global.trustedNodes.add(local); body.add(local);
+                JsonObject local = node("vardef", new JsonPrimitive(storage),
+                        internal(global, literal ? "#new-block" : "#allocate", new JsonPrimitive(info.name)));
+                local.addProperty("declared-type", literal ? info.name : info.name + "*"); global.trustedNodes.add(local); body.add(local);
                 body.add(callNode(info.constructor, ctorArgs));
-                body.add(internal(global, "#bind", variable("this"), info.destructor == null ? JsonNull.INSTANCE : new JsonPrimitive(info.destructor), new JsonPrimitive(manual)));
-                if (manual) body.add(internal(global, "#make-free", variable("this")));
-                body.add(node("return", variable("this")));
-                functions.add(new Function(id, name, info.type, types, metadata, body));
-                global.arities.put(id, types.size()); global.functionReturnTypes.put(id, info.type);
-                global.scriptSignatures.put(id, new Signature(id, info.type, types, true));
-                global.namedSignatures.put(name, new Signature(id, info.type, types, true));
+                JsonElement self = literal ? internal(global, "#address-of", variable(storage)) : variable(storage);
+                body.add(internal(global, "#bind", self, info.cleanupDestructor == null ? JsonNull.INSTANCE : new JsonPrimitive(info.cleanupDestructor), new JsonPrimitive(manual)));
+                if (manual) body.add(internal(global, "#make-free", variable(storage)));
+                body.add(node("return", variable(storage)));
+                int returns = literal ? info.valueType : info.pointerType;
+                functions.add(new Function(id, name, returns, types, metadata, body));
+                registerCompilerFunction(global, name, id, returns, types);
             }
         }
+    }
+    private static void registerCompilerFunction(LogicEnvironment global, String name, int id, int returns, List<Integer> types) {
+        global.abs.put(name, id); global.arities.put(id, types.size()); global.functionReturnTypes.put(id, returns);
+        global.scriptSignatures.put(id, new Signature(id, returns, types, true));
+        global.namedSignatures.put(name, new Signature(id, returns, types, true));
     }
     private static void validateClassFunction(Map<String,Function> functions, ClassInfo owner, String name, String kind) {
         Function function = functions.get(name);
@@ -863,13 +1115,76 @@ public class Compiler {
         JsonObject metadata = function.metadata();
         if (!owner.name.equals(string(metadata.get("owner-class"), "Function owner"))
                 || !kind.equals(string(metadata.get("function-kind"), "Class function kind"))
-                || function.paramTypes().isEmpty() || function.paramTypes().get(0) != owner.type
+                || function.paramTypes().isEmpty() || function.paramTypes().get(0) != owner.pointerType
                 || !string(metadata.getAsJsonArray("param").get(0), "this parameter").equals("this"))
             throw new IllegalArgumentException("Invalid implicit this signature for " + name);
         if (!kind.equals("method") && function.returnType() != AsTypes.VOID_VALUE)
             throw new IllegalArgumentException("Constructor/destructor must return void: " + name);
         if (kind.equals("destructor") && function.paramTypes().size() != 1)
             throw new IllegalArgumentException("Destructor must have no parameters: " + name);
+    }
+    private static JsonElement classFunctionBody(Function function, LogicEnvironment global) {
+        JsonObject metadata = function.metadata(); JsonElement body = function.script();
+        String kind = metadata.has("function-kind") ? string(metadata.get("function-kind"), "Class function kind") : "";
+        boolean hasBaseInitializer = metadata.has("base-args") || metadata.has("base-initializer");
+        if (hasBaseInitializer && !kind.equals("constructor"))
+            throw new IllegalArgumentException("Base initializer is only allowed on a constructor");
+        if (kind.isEmpty()) return body;
+        if (!body.isJsonArray()) throw new IllegalArgumentException("Class function body must be a block");
+        ClassInfo info = classInfo(string(metadata.get("owner-class"), "Function owner"), global);
+        JsonArray guarded = new JsonArray(); guarded.add(internal(global, "#check-this"));
+        if (kind.equals("constructor")) {
+            for (Field field : info.ownFields) if (!isValueClass(field.type())) guarded.add(internal(global, "#field-initialize",
+                    node("member-set", node("member", variable("this"), new JsonPrimitive(field.name())), defaultValue(field.type()))));
+            // Declaration order: literal-object fields are constructed (with no arguments
+            // unless initialized), other fields run their explicit initializers.
+            for (Field field : info.ownFields) {
+                JsonElement value = field.initializer();
+                if (value == null && !isValueClass(field.type())) continue;
+                if (value == null) {
+                    JsonObject construct = node("object-value", new JsonPrimitive(CLASS_LAYOUTS.get().get(field.type()).name));
+                    if (field.line() > 0) { construct.addProperty("_line", field.line()); construct.addProperty("_column", field.column()); }
+                    value = construct;
+                }
+                JsonObject assignment = node("member-set", node("member", variable("this"), new JsonPrimitive(field.name())), value);
+                if (field.line() > 0) { assignment.addProperty("_line", field.line()); assignment.addProperty("_column", field.column()); }
+                JsonObject initializer = internal(global, "#field-initialize", assignment);
+                if (field.line() > 0) { initializer.addProperty("_line", field.line()); initializer.addProperty("_column", field.column()); }
+                guarded.add(initializer);
+            }
+        }
+        body.getAsJsonArray().forEach(guarded::add);
+        if (hasBaseInitializer && (info.base == null || !metadata.has("base-initializer") || !metadata.has("base-args")
+                || !info.base.name.equals(string(metadata.get("base-initializer"), "Base initializer")) || !metadata.get("base-args").isJsonArray()))
+            throw new IllegalArgumentException("Constructor initializer must name the direct base of " + info.name);
+        JsonArray receiver = new JsonArray(); receiver.add(variable("this"));
+        if (kind.equals("destructor")) {
+            // C++ order: this body, this class's literal-object fields (last first), then the base.
+            JsonArray finalizer = new JsonArray();
+            for (int i = info.ownFields.size() - 1; i >= 0; i--) if (isValueClass(info.ownFields.get(i).type()))
+                finalizer.add(internal(global, "#drop", node("member", variable("this"), new JsonPrimitive(info.ownFields.get(i).name()))));
+            if (info.base != null && info.base.cleanupDestructor != null) finalizer.add(callNode(info.base.cleanupDestructor, receiver));
+            return finalizer.isEmpty() ? guarded : internal(global, "#cleanup", guarded, finalizer, new JsonPrimitive(false));
+        }
+        if (info.base == null || !kind.equals("constructor")) return guarded;
+        JsonArray arguments = new JsonArray(); arguments.add(variable("this"));
+        if (metadata.has("base-args")) metadata.getAsJsonArray("base-args").forEach(arguments::add);
+        JsonObject baseCall = callNode(info.base.constructor, arguments);
+        if (metadata.has("_line")) { baseCall.add("_line", metadata.get("_line")); baseCall.add("_column", metadata.get("_column")); }
+        JsonArray construction = new JsonArray(); construction.add(internal(global, "#check-this"));
+        if (info.base.cleanupDestructor == null) { construction.add(baseCall); construction.add(guarded); }
+        else {
+            // Include base-argument temporaries in the protected scope: their own destructors
+            // may fail after the child body returns, which must still roll back the base.
+            String completed = "#base-constructed";
+            JsonObject flag = node("vardef", new JsonPrimitive(completed), new JsonPrimitive(false));
+            flag.addProperty("declared-type", "boolean"); construction.add(flag);
+            JsonArray protectedBody = new JsonArray(); protectedBody.add(baseCall);
+            protectedBody.add(node("varset", new JsonPrimitive(completed), new JsonPrimitive(true))); protectedBody.add(guarded);
+            JsonObject cleanup = node("if", variable(completed), callNode(info.base.cleanupDestructor, receiver));
+            construction.add(internal(global, "#cleanup", protectedBody, cleanup, new JsonPrimitive(true)));
+        }
+        return construction;
     }
     /**
      * Conservative control-flow check: can execution fall off the end of this
@@ -889,9 +1204,10 @@ public class Compiler {
         JsonArray params = object.has("param") && object.get("param").isJsonArray()
                 ? object.getAsJsonArray("param") : new JsonArray();
         return switch (object.get("call").getAsString()) {
-            case "return", "break" -> false;
+            case "return", "break", "continue" -> false;
             case "if" -> params.size() < 3 || canCompleteNormally(params.get(1)) || canCompleteNormally(params.get(2));
             case "while" -> params.size() < 2 || !isTrueLiteral(params.get(0)) || containsBreak(params.get(1));
+            case "for" -> params.size() < 4 || !isTrueLiteral(params.get(1)) || containsBreak(params.get(3));
             default -> true;
         };
     }
@@ -917,7 +1233,7 @@ public class Compiler {
         if (!isControl(object)) return false;
         String call = object.get("call").getAsString();
         if (call.equals("break")) return true;
-        if (call.equals("while")) return false; // a nested loop owns its own breaks
+        if (call.equals("while") || call.equals("for")) return false; // a nested loop owns its own breaks
         if (!object.has("param") || !object.get("param").isJsonArray()) return false;
         for (JsonElement child : object.getAsJsonArray("param")) if (containsBreak(child)) return true;
         return false;
@@ -948,7 +1264,7 @@ public class Compiler {
     private static AcsObject compileProgram(JsonObject source) {
         AcsObject result = new ExecProgram(); JsonObject metadata = source.getAsJsonObject("metadata");
         result.put("author", metadata.has("author") ? string(metadata.get("author"), "Author") : "");
-        result.put("version", metadata.has("version") ? metadata.get("version").getAsInt() : 2); result.put("exec-version", 5);
+        result.put("version", metadata.has("version") ? metadata.get("version").getAsInt() : 2); result.put("exec-version", ExecCodec.VERSION);
         AcsObject extension = new AcsObject();
         if (source.has("ext")) for (var entry : source.getAsJsonObject("ext").entrySet()) extension.put(entry.getKey(), string(entry.getValue(), "Extension value"));
         result.put("ext", extension);
@@ -1087,25 +1403,8 @@ public class Compiler {
             }
             scope.counter.next = parameter; AcsObject compiled = new AcsObject();compiled.put("id",function.id());compiled.put("return-type",abiType(scope.returnType));
             compiled.put("param-count",parameter);compiled.put("param-types",parameterTypes);
-            JsonElement functionBody = function.script();
-            if (function.metadata().has("function-kind")) {
-                if (!functionBody.isJsonArray()) throw new IllegalArgumentException("Class function body must be a block");
-                JsonArray guarded = new JsonArray();guarded.add(internal(global,"#check-this"));functionBody.getAsJsonArray().forEach(guarded::add);functionBody=guarded;
-            }
             try {
-                AcsElement body = compileExpression(functionBody,scope);
-                if ("constructor".equals(function.metadata().has("function-kind") ? function.metadata().get("function-kind").getAsString() : "")) {
-                    ClassInfo info = global.classes.get(scope.ownerClass);LogicEnvironment initialization = global.child();initialization.ownerClass=scope.ownerClass;
-                    initialization.function=scope.ownerClass+" initialization";initialization.returnType=AsTypes.VOID_VALUE;initialization.counter=scope.counter;initialization.define("this",0,info.type);
-                    JsonArray prefix = new JsonArray();
-                    for (Field field : info.fields) prefix.add(node("member-set",node("member",variable("this"),new JsonPrimitive(field.name())),defaultValue(field.type())));
-                    for (Field field : info.fields) if (field.initializer()!=null) {
-                        JsonObject assignment=node("member-set",node("member",variable("this"),new JsonPrimitive(field.name())),field.initializer());
-                        if(field.line()>0){assignment.addProperty("_line",field.line());assignment.addProperty("_column",field.column());}prefix.add(assignment);
-                    }
-                    AcsArray initializers=(AcsArray)compileExpression(prefix,initialization);AcsArray original=(AcsArray)body;
-                    original.acsa.addAll(1,initializers.acsa);
-                }
+                AcsElement body = compileExpression(classFunctionBody(function, global), scope);
                 compiled.put("script",body);
             } catch (IllegalArgumentException error) {
                 if (error.getMessage()!=null&&error.getMessage().startsWith("In function "))throw error;

@@ -9,7 +9,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.function.Function;
 
-/** Low-level JNI compatibility API. Prefer AbdInvoker for lifetime management. */
+/** Low-level JNI API using raw unsigned address bits in long. Prefer AbdInvoker. */
 public final class Caller {
     private Caller() {}
     public static final List<Integer> namespaces = new CopyOnWriteArrayList<>();
@@ -21,10 +21,10 @@ public final class Caller {
     public static native void insertScript(String scriptPosition);
     public static native void flush();
     public static native int namespaceForHint(String hint);
-    public static native int call(int functionId, int[] args);
+    public static native long call(int functionId, long[] args);
 
     /** Arguments belong to the native callback frame and must never be freed here. */
-    public static Object callbackValue(int id, int[] args) {
+    public static Object callbackValue(int id, long[] args) {
         Object[] values = new Object[args.length];
         for (int i = 0; i < args.length; i++) values[i] = AbdInvoker.readValue(args[i]);
         Function<Object[], Object> returning = returningExecutors.get(id);
@@ -34,12 +34,14 @@ public final class Caller {
         executor.run(values);
         return null;
     }
-    /** Original void-callback entry point retained for source compatibility. */
-    public static int callback(int id, int[] args) { callbackValue(id, args); return 0; }
-    public static native int getMemType(int pointer);
-    public static native String getMemStr(int pointer);
-    public static native float getMemFloat(int pointer);
-    public static native double getMemDouble(int pointer);
-    public static native boolean getMemBool(int pointer);
-    public static native int getMemInt(int pointer);
+    /** Void-callback adapter; arguments use the same 64-bit slot addresses. */
+    public static int callback(int id, long[] args) { callbackValue(id, args); return 0; }
+    public static native int getMemType(long pointer);
+    public static native String getMemStr(long pointer);
+    public static native float getMemFloat(long pointer);
+    public static native double getMemDouble(long pointer);
+    public static native boolean getMemBool(long pointer);
+    public static native int getMemInt(long pointer);
+    /** Return the unsigned address bits held by an ADDRESS_VALUE slot. */
+    public static native long getMemAddress(long pointer);
 }

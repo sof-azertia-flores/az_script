@@ -10,9 +10,9 @@ import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
 
-/** Strict fixed-record exec v5 encoder/decoder. Executable roots never use typed maps. */
+/** Strict fixed-record exec v7 encoder/decoder. Executable roots never use typed maps. */
 public final class ExecCodec {
-    public static final int VERSION=5, MAX_BYTES=64*1024*1024, MAX_SLOTS=1_048_576;
+    public static final int VERSION=7, MAX_BYTES=64*1024*1024, MAX_SLOTS=1_048_576;
     public static final String MAGIC="AZSCRIPT";
     private ExecCodec() {}
     private record Layout(int globals,int parameters,int locals) {}
@@ -68,7 +68,7 @@ public final class ExecCodec {
         return value;
     }
     private static void type(int value,boolean parameter,boolean external) {
-        if(value<0||value>6||value==5&&parameter||value==6&&(!parameter||external))
+        if(value<0||value>8||value==5&&parameter||value==6&&(!parameter||external))
             throw invalid("invalid "+(parameter?"parameter":"return")+" type "+value);
     }
     private static void scriptId(int id) {
@@ -141,7 +141,7 @@ public final class ExecCodec {
         return stack(values);
     }
     private static void scalar(AcsElement value) {
-        if(value instanceof AcsIntegerElement||value instanceof AcsStringElement||value instanceof AcsBooleanElement)return;
+        if(value instanceof AcsIntegerElement||value instanceof AcsStringElement||value instanceof AcsBooleanElement||value instanceof AcsAddress)return;
         if(value instanceof AcsFloat number&&Float.isFinite(number.getV()))return;
         if(value instanceof AcsDouble number&&Double.isFinite(number.getV()))return;
         if(value instanceof AcsByteArray bytes&&Arrays.equals(bytes.getBytes(),new byte[]{(byte)0xff}))return;
@@ -205,19 +205,40 @@ public final class ExecCodec {
                 keys(object,"t c v val","");fields.add(expression(object.mmp.get("v"),layout,level+1));
                 fields.add(expression(object.mmp.get("val"),layout,level+1));
             }
-            case ExecOpcodes.BREAK -> keys(object,"t c","");
+            case ExecOpcodes.CLEANUP -> {
+                keys(object,"t c v val on-error","");fields.add(expression(object.mmp.get("v"),layout,level+1));
+                fields.add(expression(object.mmp.get("val"),layout,level+1));fields.add(b(bool(object.mmp.get("on-error"),"on-error")));
+            }
+            case ExecOpcodes.BREAK,ExecOpcodes.CONTINUE -> keys(object,"t c","");
+            case ExecOpcodes.NEW_BLOCK -> {
+                keys(object,"t c size","");int size=integer(object,"size");
+                if(size<1||size>MAX_SLOTS)throw invalid("object slot count is outside 1.."+MAX_SLOTS);
+                fields.add(n(size));
+            }
+            case ExecOpcodes.BLOCK_ADDRESS -> {keys(object,"t c v","");fields.add(expression(object.mmp.get("v"),layout,level+1));}
+            case ExecOpcodes.MOVE_OUT -> {
+                keys(object,"t c v","");int id=integer(object,"v");
+                if(id<0)throw invalid("object move requires a local slot");
+                slot(id,layout,false);fields.add(n(id));
+            }
+            case ExecOpcodes.DROP -> {
+                keys(object,"t c v","");storageTarget(object(object.mmp.get("v"),"drop target"),"drop target");
+                fields.add(expression(object.mmp.get("v"),layout,level+1));
+            }
             default -> {
                 if(op!=ExecOpcodes.MOVE&&(op<ExecOpcodes.ADD||op>ExecOpcodes.OR))throw invalid("invalid control opcode "+op);
                 keys(object,"t c v1 v2","");
-                if(op==ExecOpcodes.MOVE) {
-                    AcsObject target=object(object.mmp.get("v1"),"assignment target");int targetKind=integer(target,"t");
-                    if(!(targetKind==0&&integer(target,"c")==ExecOpcodes.VARIABLE)
-                            &&!(targetKind==1&&integer(target,"id")==0x0abd0006))throw invalid("invalid assignment target");
-                }
+                if(op==ExecOpcodes.MOVE)storageTarget(object(object.mmp.get("v1"),"assignment target"),"assignment target");
                 fields.add(expression(object.mmp.get("v1"),layout,level+1));fields.add(expression(object.mmp.get("v2"),layout,level+1));
             }
         }
         return stack(fields);
+    }
+    /** Assignment and drop targets name a variable slot or the built-in mem_get. */
+    private static void storageTarget(AcsObject target,String label) {
+        int targetKind=integer(target,"t");
+        if(!(targetKind==0&&integer(target,"c")==ExecOpcodes.VARIABLE)
+                &&!(targetKind==1&&integer(target,"id")==0x0abd0006))throw invalid("invalid "+label);
     }
     private static final class Record {
         final List<AbdValue> fields;int position;
@@ -254,7 +275,7 @@ public final class ExecCodec {
             }
             case 1 -> utf8(value);
             case 3,0xce867 -> AbdBasicType.requireSize(value,4);
-            case 0xce1066 -> AbdBasicType.requireSize(value,8);
+            case 0xce1066,AcsAddress.TYPE -> AbdBasicType.requireSize(value,8);
             case 0x0d00 -> AbdBasicType.abd2bol(value);
             case 0xce2009 -> {if(value.getData().length==0)throw invalid("empty BigInteger payload");}
             case 0xce200a -> {}
@@ -265,7 +286,7 @@ public final class ExecCodec {
         if(value.getData().length>MAX_BYTES-4)throw invalid("executable exceeds 64 MiB");
         Record root=new Record(value,1);
         if(root.fields.isEmpty()||!Arrays.equals(root.fields.get(0).getData(),MAGIC.getBytes(StandardCharsets.UTF_8))) {
-            throw invalid("expected exec v5 AZSCRIPT header; legacy executable maps are unsupported");
+            throw invalid("expected exec v7 AZSCRIPT header; legacy executable maps are unsupported");
         }
         root.string();int version=root.integer();if(version!=VERSION)throw invalid("unsupported exec version "+version);
         ExecProgram result=new ExecProgram();result.put("author","");result.put("version",root.integer());result.put("exec-version",version);
@@ -309,6 +330,7 @@ public final class ExecCodec {
             case 0xce867 -> new AcsFloat(payload);
             case 0xce1066 -> new AcsDouble(payload);
             case 0xce200a -> new AcsByteArray(payload);
+            case AcsAddress.TYPE -> new AcsAddress(payload);
             default -> throw invalid("unsupported constant type "+type);
         };
         scalar(result);return result;
@@ -328,6 +350,10 @@ public final class ExecCodec {
                 if(record.bool())view.put("val",decodeExpression(record.next(),level+1));
             }
             case ExecOpcodes.SET -> {view.put("v",record.integer());view.put("val",decodeExpression(record.next(),level+1));}
+            case ExecOpcodes.CLEANUP -> {
+                view.put("v",decodeExpression(record.next(),level+1));view.put("val",decodeExpression(record.next(),level+1));
+                view.put("on-error",record.bool());
+            }
             case ExecOpcodes.RETURN -> {if(record.bool())view.put("r",decodeExpression(record.next(),level+1));}
             case ExecOpcodes.RETURN_OBJECT -> view.put("r",decodeExpression(record.next(),level+1));
             case ExecOpcodes.OBJECT_ADDRESS -> {view.put("v",decodeExpression(record.next(),level+1));view.put("offset",record.integer());}
@@ -340,7 +366,10 @@ public final class ExecCodec {
                 if(record.bool())view.put("else",decodeExpression(record.next(),level+1));
             }
             case ExecOpcodes.WHILE -> {view.put("v",decodeExpression(record.next(),level+1));view.put("val",decodeExpression(record.next(),level+1));}
-            case ExecOpcodes.BREAK -> {}
+            case ExecOpcodes.BREAK,ExecOpcodes.CONTINUE -> {}
+            case ExecOpcodes.NEW_BLOCK -> view.put("size",record.integer());
+            case ExecOpcodes.MOVE_OUT -> view.put("v",record.integer());
+            case ExecOpcodes.BLOCK_ADDRESS,ExecOpcodes.DROP -> view.put("v",decodeExpression(record.next(),level+1));
             default -> {view.put("v1",decodeExpression(record.next(),level+1));view.put("v2",decodeExpression(record.next(),level+1));}
         }
         record.end();return view;

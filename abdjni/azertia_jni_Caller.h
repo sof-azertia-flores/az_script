@@ -23,73 +23,93 @@ JNIEXPORT void JNICALL Java_azertia_jni_Caller_init
 JNIEXPORT void JNICALL Java_azertia_jni_Caller_loadScript
   (JNIEnv *, jclass, jstring);
 
-/* Class: azertia_jni_Caller, Method: insertScript, Signature: (Ljava/lang/String;)V */
+/*
+ * Class:     azertia_jni_Caller
+ * Method:    insertScript
+ * Signature: (Ljava/lang/String;)V
+ */
 JNIEXPORT void JNICALL Java_azertia_jni_Caller_insertScript
   (JNIEnv *, jclass, jstring);
 
-/* Class: azertia_jni_Caller, Method: flush, Signature: ()V */
+/*
+ * Class:     azertia_jni_Caller
+ * Method:    flush
+ * Signature: ()V
+ */
 JNIEXPORT void JNICALL Java_azertia_jni_Caller_flush
   (JNIEnv *, jclass);
 
-/* Class: azertia_jni_Caller, Method: namespaceForHint, Signature: (Ljava/lang/String;)I */
+/*
+ * Class:     azertia_jni_Caller
+ * Method:    namespaceForHint
+ * Signature: (Ljava/lang/String;)I
+ */
 JNIEXPORT jint JNICALL Java_azertia_jni_Caller_namespaceForHint
   (JNIEnv *, jclass, jstring);
 
 /*
  * Class:     azertia_jni_Caller
  * Method:    call
- * Signature: (I[I)I
+ * Signature: (I[J)J
  */
-JNIEXPORT jint JNICALL Java_azertia_jni_Caller_call
-  (JNIEnv *, jclass, jint, jintArray);
+JNIEXPORT jlong JNICALL Java_azertia_jni_Caller_call
+  (JNIEnv *, jclass, jint, jlongArray);
 
 /*
  * Class:     azertia_jni_Caller
  * Method:    getMemType
- * Signature: (I)I
+ * Signature: (J)I
  */
 JNIEXPORT jint JNICALL Java_azertia_jni_Caller_getMemType
-  (JNIEnv *, jclass, jint);
+  (JNIEnv *, jclass, jlong);
 
 /*
  * Class:     azertia_jni_Caller
  * Method:    getMemStr
- * Signature: (I)Ljava/lang/String;
+ * Signature: (J)Ljava/lang/String;
  */
 JNIEXPORT jstring JNICALL Java_azertia_jni_Caller_getMemStr
-  (JNIEnv *, jclass, jint);
+  (JNIEnv *, jclass, jlong);
 
 /*
  * Class:     azertia_jni_Caller
  * Method:    getMemFloat
- * Signature: (I)F
+ * Signature: (J)F
  */
 JNIEXPORT jfloat JNICALL Java_azertia_jni_Caller_getMemFloat
-  (JNIEnv *, jclass, jint);
+  (JNIEnv *, jclass, jlong);
 
 /*
  * Class:     azertia_jni_Caller
  * Method:    getMemDouble
- * Signature: (I)D
+ * Signature: (J)D
  */
 JNIEXPORT jdouble JNICALL Java_azertia_jni_Caller_getMemDouble
-  (JNIEnv *, jclass, jint);
+  (JNIEnv *, jclass, jlong);
 
 /*
  * Class:     azertia_jni_Caller
  * Method:    getMemBool
- * Signature: (I)Z
+ * Signature: (J)Z
  */
 JNIEXPORT jboolean JNICALL Java_azertia_jni_Caller_getMemBool
-  (JNIEnv *, jclass, jint);
+  (JNIEnv *, jclass, jlong);
 
 /*
  * Class:     azertia_jni_Caller
  * Method:    getMemInt
- * Signature: (I)I
+ * Signature: (J)I
  */
 JNIEXPORT jint JNICALL Java_azertia_jni_Caller_getMemInt
-  (JNIEnv *, jclass, jint);
+  (JNIEnv *, jclass, jlong);
+
+/*
+ * Class:     azertia_jni_Caller
+ * Method:    getMemAddress
+ * Signature: (J)J
+ */
+JNIEXPORT jlong JNICALL Java_azertia_jni_Caller_getMemAddress
+  (JNIEnv *, jclass, jlong);
 
 #ifdef __cplusplus
 }

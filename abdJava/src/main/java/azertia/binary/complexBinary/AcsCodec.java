@@ -26,6 +26,7 @@ final class AcsCodec {
             case 0x0d00: return new AcsBooleanElement(value);
             case 0xce2009: return new AcsBigInteger(value);
             case 0xce200a: return new AcsByteArray(value.getData());
+            case AcsAddress.TYPE: return new AcsAddress(value);
             case 0xface: return new AcsWrappedObject<>(value);
             case 0xce1066: return new AcsDouble(value);
             case 0xce867: return new AcsFloat(value);

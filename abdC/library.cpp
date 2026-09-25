@@ -34,6 +34,7 @@ std::shared_ptr<AbdMapValue> decode(const std::shared_ptr<AbdValue>& type,
     case 1: return std::make_shared<StringAbdValue>(value);
     case 2: return std::make_shared<AbdMap>(std::make_shared<AbdStack>(value));
     case 3: return std::make_shared<IntAbdValue>(value);
+    case 0xce200b: return std::make_shared<AddressAbdValue>(value);
     case 0xce1066: return std::make_shared<DoubleAbdValue>(value);
     case 0xce867: return std::make_shared<FloatAbdValue>(value);
     case 0xce2009: // Legacy BigInteger/raw-byte tag; bytes are preserved.

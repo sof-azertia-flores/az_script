@@ -20,7 +20,7 @@ install(TARGETS azertianBinaryData dynazertianBinaryData EXPORT AzScriptTargets
     RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}"
     LIBRARY DESTINATION "${CMAKE_INSTALL_LIBDIR}"
     ARCHIVE DESTINATION "${CMAKE_INSTALL_LIBDIR}")
-install(FILES library.h azertianBinaryDataValues.h
+install(FILES library.h azertianBinaryDataValues.h address.h
     DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/azscript/detail/abdC")
 include(CTest)
 if(BUILD_TESTING)

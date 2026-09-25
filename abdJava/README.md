@@ -17,6 +17,13 @@ payload。`AcsByteArray` / `put(key, byte[])` 使用新标签 `0xce200a`，
 支持空数组和前导零；旧 `0xce2009` 仍按 BigInteger 读取，并在数值没有
 变动时原样保留输入字节。已经被旧版 BigInteger 转换丢弃的字节无法恢复。
 
+`AcsAddress` 使用独立的 `0xce200b` 标签和恰好 8 字节 little-endian
+无符号值。`new AcsAddress(long)` 保留 Java long 的全部位；String 和
+BigInteger 构造函数要求值在 0 到 `18446744073709551615` 范围内。
+`rawBits()` 返回原始 long 位模式，`toUnsignedString()` 和 `toBigInteger()`
+提供无符号读取；`AcsObject.getAsAddress(key)` 保留地址类型。JSON 视图使用
+`{"address":"18446744073709551615"}`，避免与 int32 或普通字符串混淆。
+
 ## Java 反射结构
 
 `AsStructIO` 是另一层 Java 对象映射，不等同于 `AcsObject`。
@@ -39,7 +46,7 @@ payload。`AcsByteArray` / `put(key, byte[])` 使用新标签 `0xce200a`，
 把此兼容路径当成不可信脚本的沙箱；读取同时遵守 JVM 序列化过滤器并
 限制深度/对象数量/数组大小。普通跨语言数据应使用基础 ACS 类型。
 
-回归测试包含 12 字段跨语言样本、全部帧截断点、损坏长度/类型、循环与
+回归测试包含 15 字段跨语言样本、全部帧截断点、损坏长度/类型、循环与
 超深嵌套、原始字节、结构字段顺序、BigInteger、接口集合、空字符串、
 反射及显式 Serializable 兼容路径。测试 main 支持 `--write PATH` 和
 `--read PATH`，读取后验证每个字段并要求重新编码的字节完全一致。

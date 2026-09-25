@@ -30,7 +30,7 @@ def main():
             run(compiler + ['compile', src, '-o', abd, '--ast', ast, '--exec-json', executable])
             tree = json.loads(ast.read_text(encoding='utf-8'))
             code = json.loads(executable.read_text(encoding='utf-8'))
-            assert code['exec-version'] == 5 and code['gvs'] == global_count
+            assert code['exec-version'] == 7 and code['gvs'] == global_count
             found_globals = set()
             for function in code['f']:
                 assert function['local-count'] >= 0
@@ -98,10 +98,11 @@ def main():
         # Hidden class factory functions receive the same base as ordinary methods.
         factory_ids = [function['id'] for function in bcode['f']
                        if function['id'] not in b.values()]
-        assert len(factory_ids) == 2
+        # Scoped pointer, manual pointer and literal-object factories.
+        assert len(factory_ids) == 3
         lines = run([args.host, base, 'insert', second, 'flush',
                      *[argument for ident in factory_ids for argument in ('span', ident)]])
-        assert lines[:2] == ['1:2', '1:2'], lines
+        assert lines[:3] == ['1:2', '1:2', '1:2'], lines
         print('Numeric slots: 3 source/AST/ABD layouts and roundtrips; '
               'independent global offsets, insertion rejection, recursion, class cleanup, '
               'loop/shadow scopes, lifecycle hooks and hidden factories passed.')

@@ -1,4 +1,5 @@
 #include <azscript/runtime.hpp>
+#include "../interpreter/heepalloc.h"
 
 #include <fstream>
 #include <bit>
@@ -91,6 +92,14 @@ int main(int argc, char** argv) {
                 std::cout << function->global_offset << ':' << function->global_count << '\n';
             } else if (command == "globals") {
                 std::cout << script->baseEnv->variables.size() << '\n';
+            } else if (command == "step-limit") {
+                const auto limit = std::stoull(argument());
+                if (limit == 0) throw std::runtime_error("Step limit must be positive");
+                script->max_steps = limit;
+            } else if (command == "heap-empty") {
+                if (azertian::heap::lenAlloc() != 0 || !azertian::heap::object_records().empty())
+                    throw std::runtime_error("Expected every allocation and object registration to be released");
+                std::cout << "empty\n";
             } else throw std::runtime_error("Unknown host test command");
         }
         script->destroy();

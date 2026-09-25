@@ -1,3 +1,39 @@
+# 字面量对象与 slot 块（2026-09-25）
+
+新增运行时值类型 `object`（类型编号 8）。它是一个 slot 块：内部的 slot 各自独立，可以通过 C++ API 延伸或缩短，复制时整块深复制。块地址编码为 `bit63 | id<<24 | offset`，脚本里与公共堆地址无法区分；id 永不复用，块的生命周期一结束，地址随即报废，之后解引用报 `Invalid or expired object address`。`Point a(1,2);`、`Point a;` 和 `Point a();` 现在都声明字面量对象，赋值时原地逐字段复制，每个副本到期都各自运行析构。自动指针对象改写为 `Point * a(1,2);`，无参时也必须写 `()`；手动对象改写为 `Point * m = new Point(1,2);`；单写 `Point * p;` 声明空指针，与 `Point * p = null;` 生成完全相同的代码，不构造对象，也不负责清理之后赋给它的对象。值与指针完全按 C++ 区分：参数、返回值和字段都可以按值传递；`this` 的类型是 `C*`，也是脚本唯一能拿到块地址的地方。`null` 与 `delete` 只用于指针，值对象不能放进无类型位置，也不能比较或切片。
+
+字面量对象的析构顺序与自动指针交错按逆序进行，依次为：本类析构体 → 本类值字段（逆序）→ 基类。临时对象在所在语句结束时析构，`if`/`while` 条件里的临时对象在条件求值后立即析构。返回本函数拥有的局部对象或参数时直接移交，不复制；返回其他对象时先复制。构造失败时不运行本对象的析构，但已经构造好的值字段仍会析构。堆对象的值字段在 `delete` 或自动释放时析构；对堆对象调用原始 `mem_free` 时，值字段只报废地址、不运行析构。`mem_free` 等原始内存接口不接受块地址。exec 升级到 v7，新增 opcode 32–35（`new_block`、`block_address`、`mv`、`drop`）和类型 8。JNI 快照升级到 v7，按对象递归保存值字段；恢复时字面量对象获得新 id，已经报废的地址保持原样并永久作废。字面量对象不跨越 Java 边界。
+
+`python3 tools/build_and_test.py --offline` 全套退出 0：Java 测试 71/71，原生运行时 551 项检查，ctest 中的 abd、runtime、jni 三项通过，Java/C++ ABD 样本逐字节一致。新增字面量对象端到端套件共 47 项，覆盖：各种声明形式、空指针声明及其解引用报错、复制与析构次序、传参/返回/字段/嵌套/继承、`this` 指针在原对象到期后报错、临时对象、全部编译期拒绝、源码→AST→ABD 字节一致往返、宿主调用后堆与块为空，以及 JNI 拒绝和快照恢复。既有套件迁移到新语法后继续通过：类 70、循环 60、继承 89、地址 83、数学库、数字 slots、紧凑 exec（36 个 opcode，93 个独立 wire 用例及 JNI 快照）、hint 链接和编译器/原生集成 72。`python3 tools/build_and_test.py --offline --sanitize` 随后顺序执行，同样退出 0，未发现 ASan/UBSan 报告。sanitizer 构建不含 JNI，因此计数相应减少：字面量对象 46、类 69、继承 88、编译器/原生集成 67，地址 83 与循环 60 不变。
+
+`dist/azscript-macos-arm64` 已刷新为 exec v7 / JNI 快照 v7，17 项搬迁验收全部通过，清单共 143 个文件，包含新头文件 `detail/interpreter/blocks.h`。导出时顺带修正了发行工具中写死的 v6 版本号，以及只允许 opcode 3–31 的检查（继承示例会用到新 opcode 33）。实机验证平台为 macOS arm64。
+
+日志：`build/bare-pointer-validation.log`、`build/bare-pointer-sanitize.log`、`build/literal-objects-export.log`，以及加入空指针声明之前的 `build/literal-objects-validation.log`、`build/literal-objects-sanitize.log`。语法见 `compiler/LANGUAGE.md` 的“类、字面量对象与指针”一节，格式见 `docs/EXEC_FORMAT.md`。
+
+# 独立 64 位地址类型（2026-09-25）
+
+新增源码类型 `address`，运行时类型编号 7，与 int32 区分。对象引用、隐式 this、堆分配起点、所有权和内存接口均保存无符号 64 位地址，空地址为 0；分配数量、成员偏移、变量编号和函数 ID 保持原有整数表示。地址与 int32 偏移加减检查完整 uint64 边界，同类型比较按无符号值执行。类的静态结构类型、继承前缀布局及生命周期规则保持不变，原始 address 返回不隐式提升所有权。
+
+ABD 新增独立标签 `0xce200b`，payload 为恰好八字节小端值；Java/C++ 466 字节跨语言样本逐字节一致。C++ 使用 `azertian::address`，Java ABD 使用 `AcsAddress`，JNI 高层使用 `azertia.Address`，低层指针接口使用 long 原始位模式。exec 与 JNI 快照均升级 v6，拒绝旧格式；快照继续验证模块身份、全部分配与对象记录后原子替换。exec JSON 地址使用十进制字符串对象，避免超过 JavaScript 精确整数范围后损失数据。
+
+`python3 tools/build_and_test.py --offline` 全套通过；最终 `python3 tools/build_and_test.py --offline --sanitize` 亦退出 0，包含新增地址套件。Java 测试 69/69，原生运行时 491 项检查，真实 JVM 回归 2603 个断言、4 线程 800 次调用及小栈 1000 模块链接通过。地址端到端 83 项在普通和 sanitizer 解释器通过，包括静态/动态类型拒绝、null 比较、slots 内存储地址、递增与 for 遍历、显式所有权转移、类字段与继承、独立编码的高位地址模块、溢出/下溢和错误清理。复查修复了动态值与 null 比较被误拒绝，以及动态一元加号绕过数字检查；负零、数值类型和一次求值均有回归。既有数学、类、循环、继承、offset、hint 链接和 JNI 快照用例继续通过；未发现 ASan/UBSan 报告。
+
+`dist/azscript-macos-arm64` 已刷新为 v6，并通过 17 项搬迁验收。包中包含新地址头文件、Java wrapper、地址源码示例及更新文档；新增示例编译、默认两份 JSON、AST 重编译字节一致和独立运行全部通过。142 个清单文件的长度和 SHA-256 一致，25 个文档本地链接有效。实机验证平台为 macOS arm64。
+
+日志：`build/address-validation.log`、`build/address-sanitize.log`、`build/address-source-validation.log`、`build/address-export.log`。源码示例：`compiler/examples/address-regressions.azs`。
+
+# for、continue 与公开单继承（2026-09-25）
+
+`for` 保留可读 AST，编译为独立块和现有 `while`；初始化只运行一次，`continue` 先清理本轮对象，再执行步进与条件检查。简单变量的前后缀 `++/--` 可用作独立语句和步进，不引入表达式取值语义。执行格式仍为 v5，新增无参数 opcode 30（continue）与固定结构 opcode 31（内部 cleanup），旧解释器会拒绝不认识的指令。
+
+公开单继承按父类完整字段前缀、子类声明字段追加分配准确 slots，成员采用静态绑定，支持遮蔽和子类引用向父类转换。父构造先执行，字段初始化继续使用实现模块的成员及全局绑定；析构从子到父。内部 cleanup 保证提前返回、运行错误和临时对象析构错误都经过必要的父类清理。构造完成标记确保只回滚已经成功构造的父类；基类参数中自动临时对象的析构错误也在保护范围内。跨 hint 库的构造、方法及析构引用继续通过 flush 重定位，不向 exec 写入类名、继承表或布局。
+
+`python3 tools/build_and_test.py --offline` 与 `python3 tools/build_and_test.py --offline --sanitize` 均退出 0。新增循环端到端 60 项；继承端到端普通构建 89 项（含 JNI）、sanitizer 构建 88 项。继承测试包含 21 次在同一脚本上的错误及预算耗尽调用，每次结束后立即确认堆分配和对象登记为空，再正常调用验证可继续使用。跨库继承、构造回滚、完整析构链及 JNI 手动/自动对象快照恢复均通过。最终 Java 测试 64/64，含两条新指令的精确 wire 往返和畸形继承 AST 拒绝。既有数学库、普通源码、类生命周期、全局 offset、多模块链接、独立 wire、C++ 与 JNI 回归继续通过；未发现 ASan/UBSan 报告。
+
+`dist/azscript-macos-arm64` 已重新导出并通过 16 项搬迁验收，新增循环与继承源码、两份 JSON、AST 字节一致往返及独立解释器执行。发行包继续包含完整编译器及 Java 运行环境、C++ SDK、JNI 和独立数学库。语法和示例见 `compiler/LANGUAGE.md`、`compiler/examples/loops-regressions.azs`、`compiler/examples/inheritance-regressions.azs`；opcode 契约见 `docs/EXEC_FORMAT.md`。当前实机验证平台为 macOS arm64。
+
+日志：`build/loops-inheritance-validation.log`、`build/loops-inheritance-sanitize.log`、`build/loops-inheritance-junit-final.log`、`build/loops-inheritance-export.log`。
+
 # 数学库独立 hint 模块重构（2026-09-25）
 
 数学库已拆分为 `compiler/stdlib/math.include.azs` 共享声明和 `compiler/stdlib/math.azs` 独立实现。hint 为 `AZSCRIPT_MATH`，头文件使用假定 namespace `4d41`；52个公开函数固定低位编号0002–0035，两个内部辅助函数不进入头文件。实现保留原有算法、定义域和精度约定。浮点接口参数明确为double，整数接口为int，math_pow为(double,int)，按extern契约精确检查类型。
