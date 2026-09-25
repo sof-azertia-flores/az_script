@@ -63,11 +63,11 @@ def _outputs(abd: Path, ast: Path, executable_json: Path) -> None:
             raise RuntimeError(f"Invalid JSON output {path}: {error}") from error
         _require(isinstance(decoded, dict), f"Expected a JSON object in {path}")
         if path == executable_json:
-            _require(decoded.get("exec-version") == 6, "Expected exec v6 output")
+            _require(decoded.get("exec-version") == 7, "Expected exec v7 output")
             def inspect(value):
                 if isinstance(value, dict):
                     if value.get("t") == 0:
-                        _require(type(value.get("c")) is int and 3 <= value["c"] <= 31,
+                        _require(type(value.get("c")) is int and 3 <= value["c"] <= 35,
                                  "Control instruction must use a numeric opcode")
                     for child in value.values():
                         inspect(child)

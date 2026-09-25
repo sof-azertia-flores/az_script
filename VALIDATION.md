@@ -1,14 +1,14 @@
 # 字面量对象与 slot 块（2026-09-25）
 
-新增运行时值类型 `object`（类型编号 8）。它是一个 slot 块：内部的 slot 各自独立，可以通过 C++ API 延伸或缩短，复制时整块深复制。块地址编码为 `bit63 | id<<24 | offset`，脚本里与公共堆地址无法区分；id 永不复用，块的生命周期一结束，地址随即报废，之后解引用报 `Invalid or expired object address`。`Point a(1,2);`、`Point a;` 和 `Point a();` 现在都声明字面量对象，赋值时原地逐字段复制，每个副本到期都各自运行析构。自动指针对象改写为 `Point * a(1,2);`，无参时也必须写 `()`；手动对象改写为 `Point * m = new Point(1,2);`。值与指针完全按 C++ 区分：参数、返回值和字段都可以按值传递；`this` 的类型是 `C*`，也是脚本唯一能拿到块地址的地方。`null` 与 `delete` 只用于指针，值对象不能放进无类型位置，也不能比较或切片。
+新增运行时值类型 `object`（类型编号 8）。它是一个 slot 块：内部的 slot 各自独立，可以通过 C++ API 延伸或缩短，复制时整块深复制。块地址编码为 `bit63 | id<<24 | offset`，脚本里与公共堆地址无法区分；id 永不复用，块的生命周期一结束，地址随即报废，之后解引用报 `Invalid or expired object address`。`Point a(1,2);`、`Point a;` 和 `Point a();` 现在都声明字面量对象，赋值时原地逐字段复制，每个副本到期都各自运行析构。自动指针对象改写为 `Point * a(1,2);`，无参时也必须写 `()`；手动对象改写为 `Point * m = new Point(1,2);`；单写 `Point * p;` 声明空指针，与 `Point * p = null;` 生成完全相同的代码，不构造对象，也不负责清理之后赋给它的对象。值与指针完全按 C++ 区分：参数、返回值和字段都可以按值传递；`this` 的类型是 `C*`，也是脚本唯一能拿到块地址的地方。`null` 与 `delete` 只用于指针，值对象不能放进无类型位置，也不能比较或切片。
 
 字面量对象的析构顺序与自动指针交错按逆序进行，依次为：本类析构体 → 本类值字段（逆序）→ 基类。临时对象在所在语句结束时析构，`if`/`while` 条件里的临时对象在条件求值后立即析构。返回本函数拥有的局部对象或参数时直接移交，不复制；返回其他对象时先复制。构造失败时不运行本对象的析构，但已经构造好的值字段仍会析构。堆对象的值字段在 `delete` 或自动释放时析构；对堆对象调用原始 `mem_free` 时，值字段只报废地址、不运行析构。`mem_free` 等原始内存接口不接受块地址。exec 升级到 v7，新增 opcode 32–35（`new_block`、`block_address`、`mv`、`drop`）和类型 8。JNI 快照升级到 v7，按对象递归保存值字段；恢复时字面量对象获得新 id，已经报废的地址保持原样并永久作废。字面量对象不跨越 Java 边界。
 
-`python3 tools/build_and_test.py --offline` 全套退出 0：Java 测试 71/71，原生运行时 551 项检查，ctest 中的 abd、runtime、jni 三项通过，Java/C++ ABD 样本逐字节一致。新增字面量对象端到端套件共 46 项，覆盖：各种声明形式、复制与析构次序、传参/返回/字段/嵌套/继承、`this` 指针在原对象到期后报错、临时对象、全部编译期拒绝、源码→AST→ABD 字节一致往返、宿主调用后堆与块为空，以及 JNI 拒绝和快照恢复。既有套件迁移到新语法后继续通过：类 70、循环 60、继承 89、地址 83、数学库、数字 slots、紧凑 exec（36 个 opcode，93 个独立 wire 用例及 JNI 快照）、hint 链接和编译器/原生集成 72。`python3 tools/build_and_test.py --offline --sanitize` 随后顺序执行，同样退出 0，未发现 ASan/UBSan 报告。sanitizer 构建不含 JNI，因此计数相应减少：字面量对象 45、类 69、继承 88、编译器/原生集成 67，地址 83 与循环 60 不变。
+`python3 tools/build_and_test.py --offline` 全套退出 0：Java 测试 71/71，原生运行时 551 项检查，ctest 中的 abd、runtime、jni 三项通过，Java/C++ ABD 样本逐字节一致。新增字面量对象端到端套件共 47 项，覆盖：各种声明形式、空指针声明及其解引用报错、复制与析构次序、传参/返回/字段/嵌套/继承、`this` 指针在原对象到期后报错、临时对象、全部编译期拒绝、源码→AST→ABD 字节一致往返、宿主调用后堆与块为空，以及 JNI 拒绝和快照恢复。既有套件迁移到新语法后继续通过：类 70、循环 60、继承 89、地址 83、数学库、数字 slots、紧凑 exec（36 个 opcode，93 个独立 wire 用例及 JNI 快照）、hint 链接和编译器/原生集成 72。`python3 tools/build_and_test.py --offline --sanitize` 随后顺序执行，同样退出 0，未发现 ASan/UBSan 报告。sanitizer 构建不含 JNI，因此计数相应减少：字面量对象 46、类 69、继承 88、编译器/原生集成 67，地址 83 与循环 60 不变。
 
-本次未重新导出 `dist/`，发行包仍为上一版（v6）。
+`dist/azscript-macos-arm64` 已刷新为 exec v7 / JNI 快照 v7，17 项搬迁验收全部通过，清单共 143 个文件，包含新头文件 `detail/interpreter/blocks.h`。导出时顺带修正了发行工具中写死的 v6 版本号，以及只允许 opcode 3–31 的检查（继承示例会用到新 opcode 33）。实机验证平台为 macOS arm64。
 
-日志：`build/literal-objects-validation.log`、`build/literal-objects-sanitize.log`。语法见 `compiler/LANGUAGE.md` 的“类、字面量对象与指针”一节，格式见 `docs/EXEC_FORMAT.md`。
+日志：`build/bare-pointer-validation.log`、`build/bare-pointer-sanitize.log`、`build/literal-objects-export.log`，以及加入空指针声明之前的 `build/literal-objects-validation.log`、`build/literal-objects-sanitize.log`。语法见 `compiler/LANGUAGE.md` 的“类、字面量对象与指针”一节，格式见 `docs/EXEC_FORMAT.md`。
 
 # 独立 64 位地址类型（2026-09-25）
 
