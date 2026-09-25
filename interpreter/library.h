@@ -13,9 +13,10 @@
 
 namespace azertian {
 inline constexpr int INT_VALUE=0, STRING_VALUE=1, FLOAT_VALUE=2, DOUBLE_VALUE=3,
-                     BOOLEAN_VALUE=4, VOID_VALUE=5, ANY_VALUE=6, ADDRESS_VALUE=7;
+                     BOOLEAN_VALUE=4, VOID_VALUE=5, ANY_VALUE=6, ADDRESS_VALUE=7, OBJECT_VALUE=8;
 inline constexpr std::size_t MAX_VARIABLE_SLOTS=1048576;
 class expression; class function; class environment; class variable; class script; struct loaded_module;
+struct slot_block; struct function_frame;
 struct function_signature {
     int return_type=VOID_VALUE;
     std::vector<int> param_types;
@@ -185,6 +186,8 @@ public:
     std::string name;
     char type=VOID_VALUE;
     void* value=nullptr;
+    // Set only for the slots of a literal object; copies never inherit it.
+    slot_block* container=nullptr;
     std::shared_ptr<variable> deepCopy();
     void copy_from(std::shared_ptr<variable> from);
     variable(const variable& other);
@@ -197,6 +200,9 @@ public:
     explicit variable(float value);
     explicit variable(bool value);
     explicit variable(std::nullptr_t value);
+    // Object values are handles: copying a variable shares the block; the
+    // interpreter's store rule decides when all of its slots are copied.
+    explicit variable(std::shared_ptr<slot_block> value);
     ~variable();
     void setValue(int value);
     void setValue(address value);
@@ -206,6 +212,7 @@ public:
     void setValue(float value);
     void setValue(bool value);
     void setValue(std::nullptr_t value);
+    void setValue(std::shared_ptr<slot_block> value);
 private:
     void clear() noexcept;
     void copy_value(const variable& other);
@@ -219,6 +226,12 @@ struct function_frame {
     // nullptr means not declared in the currently active lexical scope.
     std::vector<std::shared_ptr<variable>> slots;
     std::shared_ptr<variable> result=std::make_shared<variable>(nullptr);
+    // Unbound object temporaries; each statement destroys the ones it created.
+    std::vector<std::shared_ptr<slot_block>> temporaries;
+    function_frame()=default;
+    function_frame(const function_frame&)=delete;
+    function_frame& operator=(const function_frame&)=delete;
+    ~function_frame();
 };
 class environment {
 public:
@@ -232,6 +245,8 @@ public:
     std::shared_ptr<function_frame> frame;
     std::vector<std::size_t> declared_slots;
     bool closing=false;
+    // The function-level scope of a frame also finalizes parameters and temporaries.
+    bool frame_root=false;
     void cleanup(const std::shared_ptr<environment>& self);
     ~environment();
     std::shared_ptr<variable> getVariable(std::string name);

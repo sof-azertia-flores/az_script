@@ -530,6 +530,25 @@ public class GeneraterJson {
             try { return normalizeType(value, allowVoid, "type"); }
             catch (IllegalArgumentException e) { throw error(e.getMessage(), tokens.get(index - 1)); }
         }
+        /** "C *" names a pointer to C; a bare class name is a literal (value) object. */
+        private String pointerSuffix(String type) {
+            if (!at("*")) return type;
+            if (!classNames.contains(type)) throw error("Only class types can be pointers");
+            advance(); return type + "*";
+        }
+        /** In a class body, "Type name(...)" is a field with constructor arguments when ';' follows ')'. */
+        private boolean fieldConstruction() {
+            int depth = 0;
+            for (int i = index; i < tokens.size(); i++) {
+                String text = tokens.get(i).text();
+                if (text.equals("(")) depth++;
+                else if (text.equals(")") && --depth == 0) {
+                    String next = tokens.get(i + 1).text();
+                    return next.equals(";") || next.equals("}");
+                } else if (text.equals("<eof>")) return false;
+            }
+            return false;
+        }
         private void enterRecursion() {
             if (recursionDepth >= TreeLimits.MAX_NESTING) throw error("Syntax nesting exceeds " + TreeLimits.MAX_NESTING + " levels");
             recursionDepth++;
@@ -572,7 +591,7 @@ public class GeneraterJson {
                     parseFunction(first, destructor ? "destructor" : "constructor", "void",
                             destructor ? "<dtor>" : "<ctor>", external, false);
                 } else {
-                    String type = sourceType(first, true), name = declaredNameOrOwner();
+                    String type = pointerSuffix(sourceType(first, true)), name = declaredNameOrOwner();
                     if (match("::")) {
                         if (!classNames.contains(name)) throw error("Unknown owner class: " + name);
                         String member = declaredName().text();
@@ -621,6 +640,9 @@ public class GeneraterJson {
                     layouts.put(name, fields);
                 }
             }
+            Map<String,Integer> nesting = new HashMap<>();
+            for (JsonObject definition : declarations.values())
+                valueNesting(definition.get("name").getAsString(), layouts, nesting, new LinkedHashSet<>(), classLocation(definition));
             for (AzFunction function : script.functions) {
                 if (function.baseInitializer == null) continue;
                 JsonObject owner = declarations.get(function.ownerClass);
@@ -629,6 +651,19 @@ public class GeneraterJson {
                             new Token(function.name, null, function.line, function.column, true));
             }
             return layouts;
+        }
+        /** A literal-object field embeds its class, so containment must be acyclic and bounded. */
+        private int valueNesting(String name, Map<String,JsonArray> layouts, Map<String,Integer> known, Set<String> visiting, Token at) {
+            Integer cached = known.get(name);
+            if (cached != null) return cached;
+            if (!visiting.add(name)) throw error("Class " + name + " contains itself by value; use a pointer field", at);
+            int levels = 1;
+            for (JsonElement field : layouts.get(name)) {
+                String type = field.getAsJsonObject().get("type").getAsString();
+                if (classNames.contains(type)) levels = Math.max(levels, 1 + valueNesting(type, layouts, known, visiting, at));
+            }
+            if (levels > 64) throw error("Literal object nesting of " + name + " exceeds 64 levels", at);
+            visiting.remove(name); known.put(name, levels); return levels;
         }
         private void validateDuplicateExterns(Map<String,JsonArray> layouts) {
             for (DuplicateExtern duplicate : duplicateExterns) {
@@ -644,7 +679,10 @@ public class GeneraterJson {
             ArrayDeque<List<String>> pending = new ArrayDeque<>();Set<List<String>> compared = new HashSet<>();pending.add(List.of(first, second));
             while (!pending.isEmpty()) {
                 List<String> pair = pending.removeLast();if (pair.get(0).equals(pair.get(1))) continue;
-                JsonArray left = layouts.get(pair.get(0)), right = layouts.get(pair.get(1));
+                boolean pointer = pair.get(0).endsWith("*");
+                if (pointer != pair.get(1).endsWith("*")) return false;
+                JsonArray left = layouts.get(pointer ? pair.get(0).substring(0, pair.get(0).length() - 1) : pair.get(0)),
+                        right = layouts.get(pointer ? pair.get(1).substring(0, pair.get(1).length() - 1) : pair.get(1));
                 if (left == null || right == null || left.size() != right.size()) return false;
                 if (!compared.add(pair)) continue;
                 for (int i = 0; i < left.size(); i++)
@@ -740,23 +778,31 @@ public class GeneraterJson {
                     advance();parseFunction(className,"constructor","void","<ctor>",external,true);
                     definition.addProperty("constructor",className+"::<ctor>");constructor=true;
                 } else {
-                    Token start=current();String type=sourceType(name().text(),true);String member=declaredName().text();
+                    Token start=current();String type=pointerSuffix(sourceType(name().text(),true));String member=declaredName().text();
                     if (!members.add(member)) throw error("Duplicate class member: " + className + "." + member);
-                    if (at("(")) {
+                    if (at("(") && !fieldConstruction()) {
                         parseFunction(className,"method",type,member,external,true);methods.addProperty(member,className+"::"+member);
                     } else {
                         if (external) throw error("Fields cannot be extern");
                         if (type.equals("void")) throw error("Field cannot have type void");
                         JsonObject field=new JsonObject();field.addProperty("name",member);field.addProperty("type",type);
                         field.addProperty("_line",start.line());field.addProperty("_column",start.column());
-                        if(match("="))field.add("initializer",expression());endStatement();fields.add(field);
+                        if (at("(")) {
+                            // Only an embedded literal object takes constructor arguments.
+                            if (type.endsWith("*")) throw error("A pointer field cannot own an automatic object; initialize it with = new " + type.substring(0, type.length() - 1) + "(...)");
+                            if (!classNames.contains(type)) throw error("Only literal-object fields take constructor arguments");
+                            advance();List<JsonElement> arguments=new ArrayList<>();arguments.add(new JsonPrimitive(type));
+                            if(!at(")"))do{arguments.add(expression());}while(match(","));
+                            expect(")");field.add("initializer",operation("ctrl","object-value",start,arguments.toArray(JsonElement[]::new)));
+                        } else if(match("="))field.add("initializer",expression());
+                        endStatement();fields.add(field);
                     }
                 }
             }
             expect("}");match(";");
             if(!constructor) {
                 AzFunction function=new AzFunction();function.ownerClass=className;function.functionKind="constructor";
-                function.name=className+"::<ctor>";function.returnType="void";function.params.add("this");function.paramTypes.add(className);
+                function.name=className+"::<ctor>";function.returnType="void";function.params.add("this");function.paramTypes.add(className+"*");
                 function.line=classToken.line();function.column=classToken.column();
                 function.body=JsonArray::new;addDefinition(function);definition.addProperty("constructor",function.name);
             }
@@ -770,13 +816,13 @@ public class GeneraterJson {
             if(Compiler.isBuiltinName(qualified)||owner==null&&classNames.contains(qualified))throw error("Reserved function name: "+qualified);
             AzFunction function=new AzFunction();function.name=qualified;function.ownerClass=owner;function.functionKind=kind;function.returnType=type;
             function.line=current().line();function.column=current().column();
-            if(owner!=null){function.params.add("this");function.paramTypes.add(owner);}
+            if(owner!=null){function.params.add("this");function.paramTypes.add(owner+"*");}
             expect("(");
             if(!at(")"))do {
                 String parameter=name().text(),parameterType="any";
                 if(parameter.equals("void"))throw error("void cannot be a parameter type");
                 if(knownType(parameter)) {
-                    parameterType=sourceType(parameter,false);
+                    parameterType=pointerSuffix(sourceType(parameter,false));
                     parameter=external&&(at(",")||at(")"))?"<argument:"+function.params.size()+">":declaredName().text();
                 } else if(external)throw error("External parameters require explicit types");
                 if(function.params.contains(parameter))throw error("Duplicate parameter: "+parameter);
@@ -900,16 +946,27 @@ public class GeneraterJson {
             }
             if (at("var") || (knownType(current().text()) && !at("void"))) {
                 String spelling = advance().text();
-                String declaredType = spelling.equals("var") ? null : sourceType(spelling, false);
+                String declaredType = spelling.equals("var") ? null : pointerSuffix(sourceType(spelling, false));
                 String variable = declaredName().text();
                 if (classNames.contains(spelling) && !at("=")) {
+                    boolean pointer = declaredType.endsWith("*");
+                    // "C * p(args)" is an automatic pointer object; its parentheses are mandatory.
+                    if (pointer && !at("("))
+                        throw error("Pointer " + variable + " needs constructor arguments, e.g. " + spelling + " * " + variable
+                                + "(), or an initializer such as = null");
                     List<JsonElement> arguments = new ArrayList<>();
-                    arguments.add(new JsonPrimitive(variable)); arguments.add(new JsonPrimitive(spelling));
+                    if (pointer) arguments.add(new JsonPrimitive(variable));
+                    arguments.add(new JsonPrimitive(spelling));
                     if (match("(")) {
                         if (!at(")")) do { arguments.add(expression()); } while (match(","));
                         expect(")");
                     }
-                    endStatement(); return operation("ctrl", "object-def", start, arguments.toArray(JsonElement[]::new));
+                    endStatement();
+                    if (pointer) return operation("ctrl", "object-def", start, arguments.toArray(JsonElement[]::new));
+                    JsonObject definition = operation("ctrl", "vardef", start, new JsonPrimitive(variable),
+                            operation("ctrl", "object-value", start, arguments.toArray(JsonElement[]::new)));
+                    definition.addProperty("declared-type", spelling);
+                    return definition;
                 }
                 JsonElement initializer = match("=") ? expression() : null;
                 endStatement();

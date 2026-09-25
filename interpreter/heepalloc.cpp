@@ -1,4 +1,5 @@
 #include "heepalloc.h"
+#include "blocks.h"
 #include <algorithm>
 #include <map>
 #include <exception>
@@ -58,6 +59,14 @@ void validate(const std::vector<std::shared_ptr<variable>>& values,std::vector<h
             throw std::invalid_argument("Invalid or overlapping heap allocation");
         end=a.startpos.value+a.len;
     }
+}
+// Slot variables of one allocation, for member cleanup outside the registry lock order.
+std::vector<std::shared_ptr<variable>> allocation_slots(address pointer) {
+    std::vector<std::shared_ptr<variable>> result;
+    auto it=containing(pointer);
+    if(it==allocations.end()||it->startpos!=pointer)return result;
+    for(int i=0;i<it->len;++i)result.push_back(slots[static_cast<std::size_t>(pointer.value)+static_cast<std::size_t>(i)]);
+    return result;
 }
 void validate_object(const object_record& record) {
     auto script=record.script_owner.lock();
@@ -119,6 +128,7 @@ std::shared_ptr<variable> getSlot(int index) {
 }
 std::shared_ptr<variable> getAt(address pointer) {
     std::lock_guard<std::recursive_mutex> lock(runtime_mutex());
+    if(blocks::is_block_address(pointer))return blocks::slot(pointer);
     if(containing(pointer)!=allocations.end())return slots[static_cast<std::size_t>(pointer.value)];
     throw std::out_of_range("Invalid or freed heap pointer: "+std::to_string(pointer.value));
 }
@@ -198,6 +208,7 @@ std::vector<object_record> object_records() {
 }
 address object_address(address pointer,int offset) {
     std::lock_guard<std::recursive_mutex> lock(runtime_mutex());
+    if(blocks::is_block_address(pointer))return blocks::member_address(pointer,offset);
     auto it=containing(pointer);
     if(it!=allocations.end()&&it->startpos==pointer) {
         if(offset<0||offset>=it->len)throw std::out_of_range("Object member offset out of range");
@@ -207,6 +218,7 @@ address object_address(address pointer,int offset) {
 }
 void register_object(address pointer,std::optional<int> destructor_id,bool manual,const std::shared_ptr<environment>& env) {
     std::lock_guard<std::recursive_mutex> lock(runtime_mutex());
+    if(blocks::is_block_address(pointer)){blocks::set_destructor(pointer,destructor_id,manual,env);return;}
     if(!env||env->closing||owner_of(pointer)!=env.get()||!is_allocation_start(pointer))
         throw std::runtime_error("Object construction must finish in its allocation scope");
     object_record record{pointer,destructor_id,manual,env->script};validate_object(record);
@@ -215,7 +227,13 @@ void register_object(address pointer,std::optional<int> destructor_id,bool manua
 namespace {
 void destroy_registered(address pointer,const std::shared_ptr<environment>& env) {
     auto it=objects.find(pointer);
-    if(it==objects.end()){free(pointer);return;}
+    if(it==objects.end()) {
+        // A failed construction still destroys its completed value members.
+        std::exception_ptr failure;blocks::finalize_storage(allocation_slots(pointer),env,true,failure);
+        free(pointer);
+        if(failure)std::rethrow_exception(failure);
+        return;
+    }
     check_not_destroying(pointer);
     const object_record record=it->second.value;
     it->second.destroying=true;
@@ -232,6 +250,9 @@ void destroy_registered(address pointer,const std::shared_ptr<environment>& env)
             script->getFunction(*record.destructor_id)->invoke(context,{std::make_shared<variable>(pointer)});
         }
     } catch(...) {failure=std::current_exception();}
+    // Value members end after the destructor body, while the object is still
+    // marked as destroying so they cannot delete or free their container.
+    blocks::finalize_storage(allocation_slots(pointer),env,true,failure);
     // No registry iterator survives the script callback: it may delete other objects.
     objects.erase(pointer);
     free(pointer);
@@ -241,6 +262,7 @@ void destroy_registered(address pointer,const std::shared_ptr<environment>& env)
 void delete_object(address pointer,const std::shared_ptr<environment>& env) {
     std::lock_guard<std::recursive_mutex> lock(runtime_mutex());
     if(pointer.value==0)return;
+    if(blocks::is_block_address(pointer))throw std::runtime_error("delete requires a manual object; a literal object ends with its variable");
     auto it=objects.find(pointer);
     if(it==objects.end())throw std::runtime_error("delete requires a live object");
     check_not_destroying(pointer);
@@ -249,12 +271,14 @@ void delete_object(address pointer,const std::shared_ptr<environment>& env) {
 }
 void release_owned(address pointer,const std::shared_ptr<environment>& env) {
     std::lock_guard<std::recursive_mutex> lock(runtime_mutex());
+    if(blocks::is_block_address(pointer)){blocks::release_owned(pointer,env);return;}
     if(owner_of(pointer)!=env.get())return;
     destroy_registered(pointer,env);
 }
 void return_object(address pointer,const std::shared_ptr<environment>& env) {
     std::lock_guard<std::recursive_mutex> lock(runtime_mutex());
-    if(pointer.value==0)return;
+    // A literal object's this pointer never transfers ownership.
+    if(pointer.value==0||blocks::is_block_address(pointer))return;
     auto object=objects.find(pointer);
     if(!is_allocation_start(pointer))throw std::runtime_error("Object return requires a live allocation");
     const environment* owner=owner_of(pointer);
@@ -283,6 +307,7 @@ void discard_owned(const environment* env) noexcept {
         auto& list=const_cast<environment*>(env)->owned_pointer;
         while(!list.empty()) {
             address pointer=list.back();list.pop_back();
+            if(blocks::is_block_address(pointer)){blocks::discard_owned(pointer,env);continue;}
             if(owner_of(pointer)!=env)continue;
             objects.erase(pointer);free(pointer);
         }
@@ -309,6 +334,12 @@ address pointer_argument(const std::vector<std::shared_ptr<variable>>& args) {
     if(args.size()!=1||!args[0]||args[0]->type!=ADDRESS_VALUE)throw std::invalid_argument("Memory function requires one address argument");
     return *static_cast<address*>(args[0]->value);
 }
+// Literal object storage belongs to its variable, never to raw memory functions.
+address heap_pointer_argument(const std::vector<std::shared_ptr<variable>>& args) {
+    address pointer=pointer_argument(args);
+    if(blocks::is_block_address(pointer))throw std::invalid_argument("Memory function cannot manage a literal object address");
+    return pointer;
+}
 std::shared_ptr<environment> transfer_parent(const std::shared_ptr<environment>& env) {
     if(auto caller=env->caller.lock())return caller;
     return env->parent.lock();
@@ -327,6 +358,8 @@ std::shared_ptr<variable> f_heepalloc::invoke(std::shared_ptr<environment> env,s
 }
 std::shared_ptr<variable> f_free::invoke(std::shared_ptr<environment> env,std::vector<std::shared_ptr<variable>> args) {
     address p=pointer_argument(args);
+    // Like any address that is not a heap allocation start, literal-object storage is not freed.
+    if(blocks::is_block_address(p))return std::make_shared<variable>(false);
     const environment* owner=heap::owner_of(p);
     if(!owner) return std::make_shared<variable>(heap::free(p));
     // The owner must be reachable from the current scope through lexical
@@ -342,14 +375,14 @@ std::shared_ptr<variable> f_free::invoke(std::shared_ptr<environment> env,std::v
     return std::make_shared<variable>(released);
 }
 std::shared_ptr<variable> f_make_free::invoke(std::shared_ptr<environment> env,std::vector<std::shared_ptr<variable>> args) {
-    address p=pointer_argument(args);
+    address p=heap_pointer_argument(args);
     if(!env)throw std::invalid_argument("Missing allocation scope");
     auto it=std::find(env->owned_pointer.begin(),env->owned_pointer.end(),p);
     if(it==env->owned_pointer.end())throw std::runtime_error("Allocation is not owned by current scope");
     heap::set_owner(p,nullptr);env->owned_pointer.erase(it);return std::make_shared<variable>(nullptr);
 }
 std::shared_ptr<variable> f_send_up::invoke(std::shared_ptr<environment> env,std::vector<std::shared_ptr<variable>> args) {
-    address p=pointer_argument(args);
+    address p=heap_pointer_argument(args);
     if(!env)throw std::invalid_argument("Missing allocation scope");
     auto parent=transfer_parent(env);
     if(!parent)throw std::runtime_error("Allocation scope has no parent");

@@ -16,6 +16,7 @@
 #include <limits>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <sstream>
 #include <stdexcept>
 #include <vector>
@@ -220,6 +221,8 @@ public:
         HeapBlock block(arguments.size());
         std::vector<jlong> pointers(arguments.size());
         for (std::size_t i = 0; i < arguments.size(); ++i) {
+            if (arguments[i] && arguments[i]->type == OBJECT_VALUE)
+                throw std::invalid_argument("A literal object cannot be passed to a Java callback; pass a pointer or its fields");
             const address pointer{block.pointer.value + i};
             pointers[i] = toJAddress(pointer);
             heap::getAt(pointer)->copy_from(arguments[i]);
@@ -241,8 +244,24 @@ public:
     std::shared_ptr<function> getiFunction(int id) override { return std::make_shared<JavaFunction>(context, id); }
 };
 
-std::shared_ptr<AbdMapValue> encodeValue(const std::shared_ptr<variable>& value) {
+std::shared_ptr<AbdMapValue> encodeValue(const std::shared_ptr<variable>& value, std::size_t depth = 0) {
     switch (value->type) {
+        case OBJECT_VALUE: {
+            // A literal object is saved with its slots and the address it had, so
+            // saved pointers into it can be renumbered on restore.
+            auto block = blocks::of(value);
+            if (!block || !blocks::owns(*value) || block->state != slot_block::status::live || block->script_owner.lock() != loadedScript)
+                throw std::invalid_argument("Cannot snapshot a borrowed, expired or foreign object value");
+            if (depth > blocks::max_depth) throw std::invalid_argument("Snapshot object nesting is too deep");
+            auto entry = std::make_shared<AbdMap>();
+            entry->put("object", std::make_shared<AddressAbdValue>(blocks::address_of(block)));
+            entry->put("has destructor", std::make_shared<BoolAbdValue>(block->destructor.has_value()));
+            if (block->destructor) entry->put("destructor", std::make_shared<IntAbdValue>(*block->destructor));
+            auto items = std::make_shared<AbdArray>();
+            for (const auto& slot : block->slots) items->push_back(encodeValue(slot, depth + 1));
+            entry->put("slots", items);
+            return entry;
+        }
         case INT_VALUE: return std::make_shared<IntAbdValue>(*static_cast<int*>(value->value));
         case ADDRESS_VALUE: return std::make_shared<AddressAbdValue>(*static_cast<address*>(value->value));
         case FLOAT_VALUE: return std::make_shared<FloatAbdValue>(*static_cast<float*>(value->value));
@@ -268,6 +287,62 @@ template<class T> std::shared_ptr<T> field(const std::shared_ptr<AbdMap>& map, c
     if (!value) throw std::invalid_argument("Missing or invalid snapshot field: " + key);
     return value;
 }
+// Restored literal objects get fresh ids, and saved addresses into them are
+// renumbered. Any other tagged address keeps its bits; its id is retired first,
+// so no object created now or later can make it resolve.
+struct SnapshotDecoder {
+    std::map<std::uint64_t, std::shared_ptr<slot_block>> objects;
+    std::vector<std::shared_ptr<variable>> addresses;
+    static constexpr std::uint64_t offsetMask = (std::uint64_t{1} << blocks::offset_bits) - 1;
+    static std::uint64_t idOf(address pointer) { return (pointer.value & ~blocks::address_tag) >> blocks::offset_bits; }
+    static void collect(const std::shared_ptr<AbdMapValue>& value, std::set<std::uint64_t>& saved, std::set<std::uint64_t>& referenced, std::size_t depth) {
+        if (depth > blocks::max_depth + 1) throw std::invalid_argument("Snapshot object nesting is too deep");
+        if (auto entry = std::dynamic_pointer_cast<AbdMap>(value)) {
+            saved.insert(idOf(field<AddressAbdValue>(entry, "object")->data));
+            for (const auto& item : field<AbdArray>(entry, "slots")->values) collect(item, saved, referenced, depth + 1);
+        } else if (auto pointer = std::dynamic_pointer_cast<AddressAbdValue>(value); pointer && blocks::is_block_address(pointer->data))
+            referenced.insert(idOf(pointer->data));
+    }
+    void retireDangling(const std::vector<std::shared_ptr<AbdMapValue>>& values) {
+        std::set<std::uint64_t> saved, referenced;
+        for (const auto& value : values) collect(value, saved, referenced, 0);
+        for (auto id : referenced) if (!saved.contains(id)) blocks::retire_id(id);
+    }
+    void decodeInto(const std::shared_ptr<variable>& target, const std::shared_ptr<AbdMapValue>& value, std::size_t depth) {
+        if (auto entry = std::dynamic_pointer_cast<AbdMap>(value)) {
+            if (depth > blocks::max_depth) throw std::invalid_argument("Snapshot object nesting is too deep");
+            const address saved = field<AddressAbdValue>(entry, "object")->data;
+            if (!blocks::is_block_address(saved) || (saved.value & offsetMask) != 0 || objects.contains(idOf(saved)))
+                throw std::invalid_argument("Invalid snapshot object address");
+            std::optional<int> destructor;
+            if (field<BoolAbdValue>(entry, "has destructor")->data) destructor = field<IntAbdValue>(entry, "destructor")->data;
+            else if (entry->get("destructor")) throw std::invalid_argument("Unexpected snapshot object destructor");
+            if (destructor) {
+                auto found = loadedScript->functions.find(*destructor);
+                auto function = found == loadedScript->functions.end() ? nullptr : std::dynamic_pointer_cast<ofunction>(found->second);
+                if (!function || function->rett != VOID_VALUE || function->param_types != std::vector<int>{ADDRESS_VALUE})
+                    throw std::invalid_argument("Snapshot object destructor must be a script function void(address)");
+            }
+            auto items = field<AbdArray>(entry, "slots");
+            if (items->values.empty()) throw std::invalid_argument("Snapshot object has no slots");
+            auto block = blocks::create(items->values.size(), loadedScript);
+            block->destructor = destructor; block->depth = depth;
+            objects.emplace(idOf(saved), block);
+            for (std::size_t i = 0; i < items->values.size(); ++i) decodeInto(block->slots[i], items->values[i], depth + 1);
+            target->setValue(block); block->owner = target.get();
+            return;
+        }
+        target->copy_from(decodeValue(value));
+        if (target->type == ADDRESS_VALUE && blocks::is_block_address(*static_cast<address*>(target->value))) addresses.push_back(target);
+    }
+    void renumber() {
+        for (auto& value : addresses) {
+            const address saved = *static_cast<address*>(value->value);
+            if (auto found = objects.find(idOf(saved)); found != objects.end())
+                value->setValue(address{blocks::address_tag | (found->second->id << blocks::offset_bits) | (saved.value & offsetMask)});
+        }
+    }
+};
 std::vector<module_manifest_entry> stableManifest() {
     requireScript();
     if (!loadedScript->setup || loadedScript->faulted)
@@ -286,7 +361,7 @@ std::shared_ptr<AbdMap> snapshot() {
         moduleBytes += module.bytes.size();
     }
     auto result = std::make_shared<AbdMap>();
-    result->put("snapshot version", std::make_shared<IntAbdValue>(6));
+    result->put("snapshot version", std::make_shared<IntAbdValue>(7));
     auto manifest = std::make_shared<AbdArray>();
     for (const auto& module : modules) {
         auto entry = std::make_shared<AbdMap>();
@@ -334,8 +409,8 @@ std::shared_ptr<AbdMap> snapshot() {
 void restoreSnapshot(const std::vector<unsigned char>& bytes) {
     const auto modules = stableManifest();
     auto result = std::make_shared<AbdMap>(std::make_shared<AbdStack>(AbdValue::fromBytes(bytes.data(), bytes.size())));
-    if (field<IntAbdValue>(result, "snapshot version")->data != 6)
-        throw std::invalid_argument("Unsupported snapshot version; expected v6");
+    if (field<IntAbdValue>(result, "snapshot version")->data != 7)
+        throw std::invalid_argument("Unsupported snapshot version; expected v7");
     auto manifest = field<AbdArray>(result, "module manifest");
     if (manifest->values.size() != modules.size()) throw std::invalid_argument("Snapshot module count differs from script");
     for (std::size_t i = 0; i < modules.size(); ++i) {
@@ -359,15 +434,27 @@ void restoreSnapshot(const std::vector<unsigned char>& bytes) {
     restoredGlobals.reserve(originals.size());
     auto globals = field<AbdArray>(result, "variable global");
     if (globals->values.size() != originals.size()) throw std::invalid_argument("Snapshot global count differs from script");
+    SnapshotDecoder decoder;
+    auto values = field<AbdArray>(result, "heap");
+    {
+        std::vector<std::shared_ptr<AbdMapValue>> saved(globals->values.begin(), globals->values.end());
+        saved.insert(saved.end(), values->values.begin(), values->values.end());
+        decoder.retireDangling(saved);
+    }
     for (std::size_t i = 0; i < originals.size(); ++i) {
-        auto value = decodeValue(globals->values[i]);
+        auto value = std::make_shared<variable>(nullptr);
+        decoder.decodeInto(value, globals->values[i], 0);
         value->name = originals[i]->name;
         restoredGlobals.push_back(std::move(value));
     }
-    auto values = field<AbdArray>(result, "heap");
     if (field<IntAbdValue>(result, "length heap")->data != static_cast<int>(values->values.size())) throw std::invalid_argument("Snapshot heap length is inconsistent");
     std::vector<std::shared_ptr<variable>> slots;
-    for (const auto& value : values->values) slots.push_back(decodeValue(value));
+    for (const auto& value : values->values) {
+        auto slot = std::make_shared<variable>(nullptr);
+        decoder.decodeInto(slot, value, 0);
+        slots.push_back(std::move(slot));
+    }
+    decoder.renumber();
     auto entries = field<AbdArray>(result, "heap allocation");
     std::vector<heap::heap_allocation> allocations;
     for (const auto& entry : entries->values) {
@@ -457,10 +544,19 @@ JNIEXPORT jlong JNICALL Java_azertia_jni_Caller_call(JNIEnv* env, jclass, jint i
         std::vector<jlong> pointers(static_cast<std::size_t>(length));
         if (length) env->GetLongArrayRegion(args, 0, length, pointers.data()); checked(env);
         std::vector<std::shared_ptr<variable>> values;
-        for (jlong pointer : pointers) values.push_back(heap::getAt(fromJAddress(pointer))->deepCopy());
+        for (jlong pointer : pointers) {
+            auto value = heap::getAt(fromJAddress(pointer));
+            if (value->type == OBJECT_VALUE) throw std::invalid_argument("A literal object cannot be passed from Java; pass a pointer or its fields");
+            values.push_back(value->deepCopy());
+        }
         CallScope calling;
         auto result = loadedScript->invoke(id, std::move(values));
         if (!result || result->type == VOID_VALUE) return jlong(0);
+        if (result->type == OBJECT_VALUE) {
+            // The value cannot reach Java, so it ends here; its destructor still runs.
+            try { blocks::finalize(blocks::of(result), loadedScript->baseEnv, true); } catch (...) {}
+            throw std::invalid_argument("The script function returned a literal object; return a pointer to cross the Java boundary");
+        }
         HeapBlock storage(1);
         heap::getAt(storage.pointer)->copy_from(result);
         const address pointer = storage.pointer; storage.pointer = address{};

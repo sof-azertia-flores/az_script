@@ -9,12 +9,12 @@ import java.util.*;
 public class Compiler {
     private static final ThreadLocal<Integer> EXPRESSION_DEPTH = ThreadLocal.withInitial(() -> 0);
     private static final int NULL_TYPE = -2, FIRST_CLASS_TYPE = 100;
-    private static final int MAX_VARIABLE_SLOTS = 1_048_576;
+    private static final int MAX_VARIABLE_SLOTS = 1_048_576, MAX_VALUE_NESTING = 64;
     private static final ThreadLocal<Map<String,Integer>> CLASS_TYPES = ThreadLocal.withInitial(LinkedHashMap::new);
     private static final ThreadLocal<Map<Integer,ClassInfo>> CLASS_LAYOUTS = ThreadLocal.withInitial(LinkedHashMap::new);
     public static class AsTypes {
         public static final int INT_VALUE = 0, STRING_VALUE = 1, FLOAT_VALUE = 2,
-                DOUBLE_VALUE = 3, BOOLEAN_VALUE = 4, VOID_VALUE = 5, ANY_VALUE = 6, ADDRESS_VALUE = 7;
+                DOUBLE_VALUE = 3, BOOLEAN_VALUE = 4, VOID_VALUE = 5, ANY_VALUE = 6, ADDRESS_VALUE = 7, OBJECT_VALUE = 8;
     }
     private record BuiltinSpec(String name, int id, int returnType, List<Integer> paramTypes) {}
     private static final List<BuiltinSpec> BUILTINS = List.of(
@@ -44,7 +44,9 @@ public class Compiler {
     private static final class ClassInfo {
         String name, constructor, destructor, cleanupDestructor;
         ClassInfo base;
-        int type, manualFactory, scopedFactory;
+        // Literal (value) objects and pointers are distinct types of one layout.
+        int valueType, pointerType, manualFactory, scopedFactory, valueFactory;
+        boolean synthesizedDestructor;
         final List<Field> ownFields = new ArrayList<>();
         final List<Field> fields = new ArrayList<>();
         final Map<String,Field> visibleFields = new LinkedHashMap<>();
@@ -166,7 +168,8 @@ public class Compiler {
         return switch (operation) {
             case "var" -> params.size() == 1 ? variableType(string(params.get(0), "Variable name"), environment) : AsTypes.ANY_VALUE;
             case "null" -> NULL_TYPE;
-            case "object-new" -> classInfo(string(params.get(0), "Class name"), environment).type;
+            case "object-new" -> classInfo(string(params.get(0), "Class name"), environment).pointerType;
+            case "object-value" -> classInfo(string(params.get(0), "Class name"), environment).valueType;
             case "member" -> memberField(params, environment).type();
             case "member-set" -> params.size() == 2 ? expressionType(params.get(1), environment) : AsTypes.ANY_VALUE;
             case "member-call" -> {
@@ -178,8 +181,17 @@ public class Compiler {
             }
             case "#allocate" -> {
                 requireTrusted(object, environment);
-                yield classInfo(string(params.get(0), "Class name"), environment).type;
+                yield classInfo(string(params.get(0), "Class name"), environment).pointerType;
             }
+            case "#new-block" -> {
+                requireTrusted(object, environment);
+                yield classInfo(string(params.get(0), "Class name"), environment).valueType;
+            }
+            case "#address-of" -> {
+                requireTrusted(object, environment);
+                yield CLASS_LAYOUTS.get().get(expressionType(params.get(0), environment)).pointerType;
+            }
+            case "#move" -> { requireTrusted(object, environment); yield expressionType(params.get(0), environment); }
             case "varset", "mov" -> params.size() == 2
                     ? expressionType(params.get(1), environment) : AsTypes.ANY_VALUE;
             case "float" -> AsTypes.FLOAT_VALUE;
@@ -200,7 +212,7 @@ public class Compiler {
                     && expressionType(params.get(1), environment) == AsTypes.INT_VALUE
                     ? AsTypes.INT_VALUE : AsTypes.ANY_VALUE;
             case "if" -> branchType(params, environment);
-            case "vardef", "return", "break", "continue", "while", "for", "increment", "decrement", "object-def", "object-delete", "#bind", "#make-free" -> AsTypes.VOID_VALUE;
+            case "vardef", "return", "break", "continue", "while", "for", "increment", "decrement", "object-def", "object-delete", "#bind", "#make-free", "#drop" -> AsTypes.VOID_VALUE;
             default -> AsTypes.ANY_VALUE;
         };
     }
@@ -234,12 +246,18 @@ public class Compiler {
     private static boolean returnCompatible(int expected, int actual) {
         return assignable(expected, actual) || numeric(expected) && numeric(actual);
     }
-    /** A base reference addresses the same prefix; no pointer adjustment or runtime type is needed. */
+    /**
+     * A base pointer addresses the same prefix; no pointer adjustment or runtime type is needed.
+     * Literal objects never convert: copying one keeps its layout and cleanup destructor.
+     */
     private static boolean assignable(int expected, int actual) {
-        if (equivalent(expected, actual) || (isClass(expected) || expected == AsTypes.ADDRESS_VALUE) && actual == NULL_TYPE) return true;
-        ClassInfo derived = CLASS_LAYOUTS.get().get(actual);
-        for (ClassInfo base = derived == null ? null : derived.base; base != null; base = base.base)
-            if (equivalent(expected, base.type)) return true;
+        if (equivalent(expected, actual))
+            return !isValueClass(expected) || Objects.equals(CLASS_LAYOUTS.get().get(expected).cleanupDestructor,
+                    CLASS_LAYOUTS.get().get(actual).cleanupDestructor) || expected == actual;
+        if ((isPointerClass(expected) || expected == AsTypes.ADDRESS_VALUE) && actual == NULL_TYPE) return true;
+        if (!isPointerClass(expected) || !isPointerClass(actual)) return false;
+        for (ClassInfo base = CLASS_LAYOUTS.get().get(actual).base; base != null; base = base.base)
+            if (equivalent(expected, base.pointerType)) return true;
         return false;
     }
     private static boolean equivalent(int first, int second) {
@@ -248,7 +266,7 @@ public class Compiler {
         while (!pending.isEmpty()) {
             long pair = pending.removeLast(); int leftType = (int)(pair >> 32), rightType = (int)pair;
             if (leftType == rightType) continue;
-            if (!isClass(leftType) || !isClass(rightType)) return false;
+            if (!isClass(leftType) || !isClass(rightType) || isValueClass(leftType) != isValueClass(rightType)) return false;
             if (!compared.add(pair)) continue;
             ClassInfo left = CLASS_LAYOUTS.get().get(leftType), right = CLASS_LAYOUTS.get().get(rightType);
             if (left == null || right == null || left.fields.size() != right.fields.size()) return false;
@@ -271,8 +289,11 @@ public class Compiler {
             case AsTypes.ANY_VALUE -> "any";
             case AsTypes.ADDRESS_VALUE -> "address";
             case NULL_TYPE -> "null";
-            default -> CLASS_TYPES.get().entrySet().stream().filter(entry -> entry.getValue() == type)
-                    .map(Map.Entry::getKey).findFirst().orElse("unknown(" + type + ")");
+            case AsTypes.OBJECT_VALUE -> "object";
+            default -> {
+                ClassInfo info = CLASS_LAYOUTS.get().get(type);
+                yield info == null ? "unknown(" + type + ")" : isPointerClass(type) ? info.name + " *" : info.name;
+            }
         };
     }
     private static void requireKnownExact(String context, int expected, int actual) {
@@ -401,11 +422,12 @@ public class Compiler {
             if (signature != null) {
                 for (int i = 0; i < params.size(); i++) {
                     int expectedType = signature.paramTypes().get(i);
-                    if (expectedType != AsTypes.ANY_VALUE) {
-                        int actual = expressionType(params.get(i), environment);
-                        if (actual != AsTypes.ANY_VALUE || signature.requireKnown())
-                            requireKnownExact(label + " argument " + (i + 1 - hidden), expectedType, actual);
-                    }
+                    int actual = expressionType(params.get(i), environment);
+                    if (expectedType == AsTypes.ANY_VALUE) {
+                        if (isValueClass(actual)) throw new IllegalArgumentException(label + " argument " + (i + 1 - hidden)
+                                + " cannot take an object value; the parameter needs a declared class type");
+                    } else if (actual != AsTypes.ANY_VALUE || signature.requireKnown())
+                        requireKnownExact(label + " argument " + (i + 1 - hidden), expectedType, actual);
                 }
             }
             result.put("t", 1); result.put("id", id);
@@ -444,6 +466,7 @@ public class Compiler {
                     if (declaredType != AsTypes.ANY_VALUE)
                         requireKnownExact("Initializer for " + alias, declaredType,
                                 expressionType(params.get(1), environment));
+                    else rejectUntypedObject("Untyped variable " + alias, params.get(1), environment);
                     initializer = compileExpression(params.get(1), environment);
                 }
                 if (environment.counter.next >= MAX_VARIABLE_SLOTS)
@@ -467,6 +490,7 @@ public class Compiler {
                 if (variable.type != AsTypes.ANY_VALUE)
                     requireKnownExact("Assignment to " + alias, variable.type,
                             expressionType(params.get(1), environment));
+                else rejectUntypedObject("Untyped variable " + alias, params.get(1), environment);
                 result.put("v", variable.slot);
                 result.put("val", compileExpression(params.get(1), environment));
             }
@@ -490,6 +514,7 @@ public class Compiler {
                     throw new IllegalArgumentException("Assignment target must be a variable or mem_get(pointer)");
                 if (memory) arity("mem_get", params.get(0).getAsJsonObject().getAsJsonArray("param"), 1, 1);
                 rejectVoidValue("Assignment", params.get(1), environment);
+                rejectUntypedObject("Raw memory", params.get(1), environment);
                 result.put("c", ExecOpcodes.code("m")); result.put("v1", left);
                 result.put("v2", compileExpression(params.get(1), environment));
             }
@@ -517,7 +542,7 @@ public class Compiler {
                 arity(call, params, 2, 2); Field field = memberField(params, environment);
                 ClassInfo info = receiverClass(params.get(0), environment);
                 AcsObject address = new AcsObject(); address.put("t", 0); address.put("c", ExecOpcodes.code("oa"));
-                JsonElement receiver = params.get(0);
+                JsonElement receiver = receiverAddress(params.get(0), environment);
                 address.put("v", withDepth(2, () -> compileExpression(receiver, environment))); address.put("offset", info.fields.indexOf(field));
                 result.put("t", 1); result.put("id", 0x0abd0006);
                 AcsArray args = new AcsArray(); args.acsa.add(address); result.put("param", args);
@@ -537,7 +562,7 @@ public class Compiler {
                 ClassInfo info = receiverClass(params.get(0), environment);
                 String member = string(params.get(1), "Method name"), method = info.methods.get(member);
                 if (method == null) throw new IllegalArgumentException("Unknown method: " + info.name + "." + member);
-                JsonArray args = new JsonArray(); args.add(params.get(0));
+                JsonArray args = new JsonArray(); args.add(receiverAddress(params.get(0), environment));
                 for (int i = 2; i < params.size(); i++) args.add(params.get(i));
                 return compileInstruction(callNode(method, args), environment);
             }
@@ -546,6 +571,12 @@ public class Compiler {
                 ClassInfo info = classInfo(string(params.get(0), "Class name"), environment);
                 JsonArray args = new JsonArray(); for (int i = 1; i < params.size(); i++) args.add(params.get(i));
                 return compileInstruction(callNode(factoryName(info, true), args), environment);
+            }
+            case "object-value" -> {
+                arity(call, params, 1, Integer.MAX_VALUE);
+                ClassInfo info = classInfo(string(params.get(0), "Class name"), environment);
+                JsonArray args = new JsonArray(); for (int i = 1; i < params.size(); i++) args.add(params.get(i));
+                return compileInstruction(callNode(info.name + VALUE_FACTORY, args), environment);
             }
             case "object-def" -> {
                 arity(call, params, 2, Integer.MAX_VALUE);
@@ -558,12 +589,14 @@ public class Compiler {
                     construct.add("_line", source.get("_line")); construct.add("_column", source.get("_column"));
                 }
                 JsonObject definition = node("vardef", new JsonPrimitive(alias), construct);
-                definition.addProperty("declared-type", info.name);
+                definition.addProperty("declared-type", info.name + "*");
                 return compileInstruction(definition, environment);
             }
             case "object-delete" -> {
                 arity(call, params, 1, 1); int objectType = expressionType(params.get(0), environment);
-                if (!isClass(objectType) && objectType != NULL_TYPE) throw new IllegalArgumentException("delete requires a known class reference or null");
+                if (!isPointerClass(objectType) && objectType != NULL_TYPE)
+                    throw new IllegalArgumentException(isValueClass(objectType) ? "delete requires a class pointer; a literal object ends with its variable"
+                            : "delete requires a known class pointer or null");
                 result.put("c", ExecOpcodes.code("od")); result.put("v", compileExpression(params.get(0), environment));
             }
             case "#allocate" -> {
@@ -588,6 +621,24 @@ public class Compiler {
                 JsonElement pointer = params.get(0);
                 AcsArray args = new AcsArray(); args.acsa.add(withDepth(1, () -> compileExpression(pointer, environment))); result.put("param", args);
             }
+            case "#new-block" -> {
+                requireTrusted(source, environment); arity(call, params, 1, 1);
+                result.put("c", ExecOpcodes.code("new_block"));
+                result.put("size", classInfo(string(params.get(0), "Class name"), environment).fields.size());
+            }
+            case "#address-of" -> {
+                requireTrusted(source, environment); arity(call, params, 1, 1);
+                result.put("c", ExecOpcodes.code("block_address")); result.put("v", compileExpression(params.get(0), environment));
+            }
+            case "#move" -> {
+                requireTrusted(source, environment); arity(call, params, 1, 1);
+                JsonArray target = parameters(params.get(0).getAsJsonObject());
+                result.put("c", ExecOpcodes.code("mv")); result.put("v", environment.getVariable(string(target.get(0), "Moved variable")).slot);
+            }
+            case "#drop" -> {
+                requireTrusted(source, environment); arity(call, params, 1, 1);
+                result.put("c", ExecOpcodes.code("drop")); result.put("v", compileExpression(params.get(0), environment));
+            }
             case "#check-this" -> {
                 requireTrusted(source, environment); arity(call, params, 0, 0);
                 result.put("c", ExecOpcodes.code("oa")); result.put("v", compileExpression(variable("this"), environment)); result.put("offset", 0);
@@ -600,7 +651,7 @@ public class Compiler {
                 initialization.ownerClass = environment.ownerClass;
                 initialization.function = environment.ownerClass + " initialization";
                 initialization.returnType = AsTypes.VOID_VALUE; initialization.counter = environment.counter;
-                initialization.define("this", 0, classInfo(environment.ownerClass, environment).type);
+                initialization.define("this", 0, classInfo(environment.ownerClass, environment).pointerType);
                 try { return compileInstruction(params.get(0).getAsJsonObject(), initialization); }
                 catch (IllegalArgumentException error) {
                     if (error.getMessage() != null && error.getMessage().startsWith("In function ")) throw error;
@@ -654,6 +705,8 @@ public class Compiler {
                     }
                     default -> {
                         int left = expressionType(params.get(0), environment), right = expressionType(params.get(1), environment);
+                        if (isValueClass(left) || isValueClass(right))
+                            throw new IllegalArgumentException("Literal objects cannot be compared; compare their fields or pointers");
                         if ((isClass(left) || isClass(right) || left == NULL_TYPE || right == NULL_TYPE)
                                 && !(left == NULL_TYPE && right == AsTypes.ANY_VALUE || right == NULL_TYPE && left == AsTypes.ANY_VALUE)
                                 && !assignable(left, right) && !assignable(right, left))
@@ -748,9 +801,10 @@ public class Compiler {
             case "any" -> AsTypes.ANY_VALUE;
             case "address" -> AsTypes.ADDRESS_VALUE;
             default -> {
-                Integer named = CLASS_TYPES.get().get(type);
+                boolean pointer = type.endsWith("*");
+                Integer named = CLASS_TYPES.get().get(pointer ? type.substring(0, type.length() - 1) : type);
                 if (named == null) throw new IllegalArgumentException("Unknown type: " + type);
-                yield named;
+                yield pointer ? pointerTypeOf(named) : named;
             }
         };
         if (valueOnly && (result == AsTypes.VOID_VALUE || result == AsTypes.ANY_VALUE))
@@ -792,7 +846,21 @@ public class Compiler {
     private record Function(int id, String name, int returnType, List<Integer> paramTypes,
                             JsonObject metadata, JsonElement script) {}
     private static boolean isClass(int type) { return type >= FIRST_CLASS_TYPE; }
-    private static int abiType(int type) { return isClass(type) ? AsTypes.ADDRESS_VALUE : type; }
+    private static boolean isValueClass(int type) { return isClass(type) && (type - FIRST_CLASS_TYPE) % 2 == 0; }
+    private static boolean isPointerClass(int type) { return isClass(type) && (type - FIRST_CLASS_TYPE) % 2 == 1; }
+    private static int pointerTypeOf(int valueType) { return valueType + 1; }
+    /** Pointers erase to address; literal objects cross calls as runtime object values. */
+    private static int abiType(int type) {
+        return isValueClass(type) ? AsTypes.OBJECT_VALUE : isClass(type) ? AsTypes.ADDRESS_VALUE : type;
+    }
+    private static void rejectUntypedObject(String context, JsonElement value, LogicEnvironment environment) {
+        if (isValueClass(expressionType(value, environment)))
+            throw new IllegalArgumentException(context + " cannot hold an object value; declare it with the class type or use a pointer");
+    }
+    /** Member access through a literal object uses the address of its storage. */
+    private static JsonElement receiverAddress(JsonElement receiver, LogicEnvironment environment) {
+        return isValueClass(expressionType(receiver, environment)) ? internal(environment, "#address-of", receiver) : receiver;
+    }
     private static JsonArray array(JsonElement... values) {
         JsonArray result = new JsonArray(); for (JsonElement value : values) result.add(value); return result;
     }
@@ -817,8 +885,9 @@ public class Compiler {
     }
     private static ClassInfo receiverClass(JsonElement receiver, LogicEnvironment environment) {
         int type = expressionType(receiver, environment);
-        return environment.root().classes.values().stream().filter(info -> info.type == type).findFirst()
-                .orElseThrow(() -> new IllegalArgumentException("Member access requires a known class type, got " + typeName(type)));
+        ClassInfo info = isClass(type) ? CLASS_LAYOUTS.get().get(type) : null;
+        if (info == null) throw new IllegalArgumentException("Member access requires a known class type, got " + typeName(type));
+        return info;
     }
     private static Field memberField(JsonArray params, LogicEnvironment environment) {
         arity("member", params, 2, 2);
@@ -849,8 +918,11 @@ public class Compiler {
         }
         return name;
     }
+    private static final String VALUE_FACTORY = "::<value>";
     private static String factoryName(ClassInfo info, boolean manual) { return info.name + (manual ? "::<new>" : "::<scoped>"); }
-    private static boolean isFactory(String function) { return function.endsWith("::<new>") || function.endsWith("::<scoped>"); }
+    private static boolean isFactory(String function) {
+        return function.endsWith("::<new>") || function.endsWith("::<scoped>") || function.endsWith(VALUE_FACTORY);
+    }
     private static String displayName(String function) {
         return isFactory(function) ? function.substring(0, function.lastIndexOf("::")) + " constructor" : function;
     }
@@ -869,8 +941,9 @@ public class Compiler {
             JsonObject definition = element.getAsJsonObject(); ClassInfo info = new ClassInfo();
             info.name = string(definition.get("name"), "Class name"); validateSourceName(info.name, "class name");
             if (isBuiltinName(info.name) || environment.classes.containsKey(info.name)) throw new IllegalArgumentException("Duplicate or reserved class: " + info.name);
-            info.type = FIRST_CLASS_TYPE + environment.classes.size(); environment.classes.put(info.name, info);
-            CLASS_TYPES.get().put(info.name, info.type);
+            info.valueType = FIRST_CLASS_TYPE + 2 * environment.classes.size(); info.pointerType = pointerTypeOf(info.valueType);
+            environment.classes.put(info.name, info);
+            CLASS_TYPES.get().put(info.name, info.valueType);
         }
         for (JsonElement element : definitions) {
             JsonObject definition = element.getAsJsonObject(); ClassInfo info = environment.classes.get(definition.get("name").getAsString());
@@ -901,7 +974,11 @@ public class Compiler {
                 if (!qualified.equals(info.name + "::" + method.getKey())) throw new IllegalArgumentException("Invalid method mapping for " + info.name);
                 info.ownMethods.put(method.getKey(), qualified);
             }
-            CLASS_LAYOUTS.get().put(info.type, info);
+            // A class with literal-object fields always has a destructor that ends them.
+            if (info.destructor == null && info.ownFields.stream().anyMatch(field -> isValueClass(field.type()))) {
+                info.destructor = info.name + "::<dtor>"; info.synthesizedDestructor = true;
+            }
+            CLASS_LAYOUTS.get().put(info.valueType, info); CLASS_LAYOUTS.get().put(info.pointerType, info);
         }
         Set<ClassInfo> complete = new HashSet<>();
         for (ClassInfo leaf : environment.classes.values()) {
@@ -927,7 +1004,21 @@ public class Compiler {
                 complete.add(info);
             }
         }
+        Map<ClassInfo,Integer> nesting = new HashMap<>();
+        for (ClassInfo info : environment.classes.values()) valueNesting(info, nesting, new HashSet<>());
     }
+    /** Literal-object fields are embedded storage, so a class cannot contain itself by value. */
+    private static int valueNesting(ClassInfo info, Map<ClassInfo,Integer> known, Set<ClassInfo> visiting) {
+        Integer cached = known.get(info);
+        if (cached != null) return cached;
+        if (!visiting.add(info)) throw new IllegalArgumentException("Class " + info.name + " contains itself by value; use a pointer field");
+        int levels = 1;
+        for (Field field : info.fields)
+            if (isValueClass(field.type())) levels = Math.max(levels, 1 + valueNesting(CLASS_LAYOUTS.get().get(field.type()), known, visiting));
+        if (levels > MAX_VALUE_NESTING) throw new IllegalArgumentException("Literal object nesting of " + info.name + " exceeds " + MAX_VALUE_NESTING + " levels");
+        visiting.remove(info); known.put(info, levels); return levels;
+    }
+    /** Scalars and pointers only; literal-object fields are constructed in declaration order. */
     private static JsonElement defaultValue(int type) {
         return switch (type) {
             case AsTypes.STRING_VALUE -> new JsonPrimitive("");
@@ -944,7 +1035,7 @@ public class Compiler {
         Set<String> declaredClassFunctions = new HashSet<>();
         for (ClassInfo info : global.classes.values()) {
             validateClassFunction(byName, info, info.constructor, "constructor"); declaredClassFunctions.add(info.constructor);
-            if (info.destructor != null) { validateClassFunction(byName, info, info.destructor, "destructor"); declaredClassFunctions.add(info.destructor); }
+            if (info.destructor != null && !info.synthesizedDestructor) { validateClassFunction(byName, info, info.destructor, "destructor"); declaredClassFunctions.add(info.destructor); }
             for (String method : info.ownMethods.values()) { validateClassFunction(byName, info, method, "method"); declaredClassFunctions.add(method); }
         }
         for (Function function : functions) {
@@ -962,34 +1053,61 @@ public class Compiler {
                 throw new IllegalArgumentException("Unregistered class extern: " + declaration.name());
         }
         Set<Integer> occupied = new HashSet<>(ids); occupied.addAll(global.abs.values()); occupied.addAll(GeneraterJson.specialNames.values());
-        int position = 1, namespace = global.moduleNamespace << 16;
+        int[] position = {1}; int namespace = global.moduleNamespace << 16;
+        java.util.function.Supplier<Integer> nextId = () -> {
+            while (position[0] <= 0xffff && occupied.contains(namespace | position[0])) position[0]++;
+            if (position[0] > 0xffff) throw new IllegalArgumentException("No free function ID for class factories");
+            int id = namespace | position[0]++; ids.add(id); occupied.add(id); return id;
+        };
+        // A class with literal-object fields and no declared destructor gets one that
+        // ends those fields; every module creating such objects generates its own.
+        for (ClassInfo info : global.classes.values()) if (info.synthesizedDestructor) {
+            int id = nextId.get(); String name = info.destructor;
+            if (global.abs.containsKey(name)) throw new IllegalArgumentException("Reserved compiler function: " + name);
+            JsonObject metadata = new JsonObject(); metadata.addProperty("owner-class", info.name); metadata.addProperty("function-kind", "destructor");
+            JsonArray names = new JsonArray(); names.add("this"); metadata.add("param", names);
+            List<Integer> types = List.of(info.pointerType);
+            functions.add(new Function(id, name, AsTypes.VOID_VALUE, types, metadata, new JsonArray()));
+            registerCompilerFunction(global, name, id, AsTypes.VOID_VALUE, types);
+        }
         for (ClassInfo info : global.classes.values()) {
             Function constructor = byName.get(info.constructor);
-            for (boolean manual : new boolean[]{false, true}) {
-                while (position <= 0xffff && occupied.contains(namespace | position)) position++;
-                if (position > 0xffff) throw new IllegalArgumentException("No free function ID for class factories");
-                int id = namespace | position++; ids.add(id); occupied.add(id);
-                String name = factoryName(info, manual);
+            List<Integer> types = List.copyOf(constructor.paramTypes().subList(1, constructor.paramTypes().size()));
+            for (int kind = 0; kind < 3; kind++) {
+                boolean manual = kind == 1, literal = kind == 2;
+                int id = nextId.get();
+                String name = literal ? info.name + VALUE_FACTORY : factoryName(info, manual);
                 if (global.abs.containsKey(name)) throw new IllegalArgumentException("Reserved compiler function: " + name);
-                global.abs.put(name, id); if (manual) info.manualFactory = id; else info.scopedFactory = id;
-                List<Integer> types = List.copyOf(constructor.paramTypes().subList(1, constructor.paramTypes().size()));
+                if (literal) info.valueFactory = id; else if (manual) info.manualFactory = id; else info.scopedFactory = id;
                 JsonObject metadata = new JsonObject(); metadata.addProperty("owner-class", info.name);
-                JsonArray names = new JsonArray(), ctorArgs = new JsonArray(); ctorArgs.add(variable("this"));
-                for (int i = 0; i < types.size(); i++) { String argument = "<argument:" + i + ">"; names.add(argument); ctorArgs.add(variable(argument)); }
+                String storage = literal ? "#object" : "this";
+                JsonArray names = new JsonArray(), ctorArgs = new JsonArray();
+                ctorArgs.add(literal ? internal(global, "#address-of", variable(storage)) : variable(storage));
+                for (int i = 0; i < types.size(); i++) {
+                    String argument = "<argument:" + i + ">"; names.add(argument);
+                    // A literal-object argument was already copied into the factory; move it on.
+                    ctorArgs.add(isValueClass(types.get(i)) ? internal(global, "#move", variable(argument)) : variable(argument));
+                }
                 metadata.add("param", names);
                 JsonArray body = new JsonArray();
-                JsonObject local = node("vardef", new JsonPrimitive("this"), internal(global, "#allocate", new JsonPrimitive(info.name)));
-                local.addProperty("declared-type", info.name); global.trustedNodes.add(local); body.add(local);
+                JsonObject local = node("vardef", new JsonPrimitive(storage),
+                        internal(global, literal ? "#new-block" : "#allocate", new JsonPrimitive(info.name)));
+                local.addProperty("declared-type", literal ? info.name : info.name + "*"); global.trustedNodes.add(local); body.add(local);
                 body.add(callNode(info.constructor, ctorArgs));
-                body.add(internal(global, "#bind", variable("this"), info.cleanupDestructor == null ? JsonNull.INSTANCE : new JsonPrimitive(info.cleanupDestructor), new JsonPrimitive(manual)));
-                if (manual) body.add(internal(global, "#make-free", variable("this")));
-                body.add(node("return", variable("this")));
-                functions.add(new Function(id, name, info.type, types, metadata, body));
-                global.arities.put(id, types.size()); global.functionReturnTypes.put(id, info.type);
-                global.scriptSignatures.put(id, new Signature(id, info.type, types, true));
-                global.namedSignatures.put(name, new Signature(id, info.type, types, true));
+                JsonElement self = literal ? internal(global, "#address-of", variable(storage)) : variable(storage);
+                body.add(internal(global, "#bind", self, info.cleanupDestructor == null ? JsonNull.INSTANCE : new JsonPrimitive(info.cleanupDestructor), new JsonPrimitive(manual)));
+                if (manual) body.add(internal(global, "#make-free", variable(storage)));
+                body.add(node("return", variable(storage)));
+                int returns = literal ? info.valueType : info.pointerType;
+                functions.add(new Function(id, name, returns, types, metadata, body));
+                registerCompilerFunction(global, name, id, returns, types);
             }
         }
+    }
+    private static void registerCompilerFunction(LogicEnvironment global, String name, int id, int returns, List<Integer> types) {
+        global.abs.put(name, id); global.arities.put(id, types.size()); global.functionReturnTypes.put(id, returns);
+        global.scriptSignatures.put(id, new Signature(id, returns, types, true));
+        global.namedSignatures.put(name, new Signature(id, returns, types, true));
     }
     private static void validateClassFunction(Map<String,Function> functions, ClassInfo owner, String name, String kind) {
         Function function = functions.get(name);
@@ -997,7 +1115,7 @@ public class Compiler {
         JsonObject metadata = function.metadata();
         if (!owner.name.equals(string(metadata.get("owner-class"), "Function owner"))
                 || !kind.equals(string(metadata.get("function-kind"), "Class function kind"))
-                || function.paramTypes().isEmpty() || function.paramTypes().get(0) != owner.type
+                || function.paramTypes().isEmpty() || function.paramTypes().get(0) != owner.pointerType
                 || !string(metadata.getAsJsonArray("param").get(0), "this parameter").equals("this"))
             throw new IllegalArgumentException("Invalid implicit this signature for " + name);
         if (!kind.equals("method") && function.returnType() != AsTypes.VOID_VALUE)
@@ -1016,10 +1134,19 @@ public class Compiler {
         ClassInfo info = classInfo(string(metadata.get("owner-class"), "Function owner"), global);
         JsonArray guarded = new JsonArray(); guarded.add(internal(global, "#check-this"));
         if (kind.equals("constructor")) {
-            for (Field field : info.ownFields) guarded.add(internal(global, "#field-initialize",
+            for (Field field : info.ownFields) if (!isValueClass(field.type())) guarded.add(internal(global, "#field-initialize",
                     node("member-set", node("member", variable("this"), new JsonPrimitive(field.name())), defaultValue(field.type()))));
-            for (Field field : info.ownFields) if (field.initializer() != null) {
-                JsonObject assignment = node("member-set", node("member", variable("this"), new JsonPrimitive(field.name())), field.initializer());
+            // Declaration order: literal-object fields are constructed (with no arguments
+            // unless initialized), other fields run their explicit initializers.
+            for (Field field : info.ownFields) {
+                JsonElement value = field.initializer();
+                if (value == null && !isValueClass(field.type())) continue;
+                if (value == null) {
+                    JsonObject construct = node("object-value", new JsonPrimitive(CLASS_LAYOUTS.get().get(field.type()).name));
+                    if (field.line() > 0) { construct.addProperty("_line", field.line()); construct.addProperty("_column", field.column()); }
+                    value = construct;
+                }
+                JsonObject assignment = node("member-set", node("member", variable("this"), new JsonPrimitive(field.name())), value);
                 if (field.line() > 0) { assignment.addProperty("_line", field.line()); assignment.addProperty("_column", field.column()); }
                 JsonObject initializer = internal(global, "#field-initialize", assignment);
                 if (field.line() > 0) { initializer.addProperty("_line", field.line()); initializer.addProperty("_column", field.column()); }
@@ -1030,10 +1157,16 @@ public class Compiler {
         if (hasBaseInitializer && (info.base == null || !metadata.has("base-initializer") || !metadata.has("base-args")
                 || !info.base.name.equals(string(metadata.get("base-initializer"), "Base initializer")) || !metadata.get("base-args").isJsonArray()))
             throw new IllegalArgumentException("Constructor initializer must name the direct base of " + info.name);
-        if (info.base == null || !kind.equals("constructor") && !kind.equals("destructor")) return guarded;
         JsonArray receiver = new JsonArray(); receiver.add(variable("this"));
-        if (kind.equals("destructor")) return info.base.cleanupDestructor == null ? guarded
-                : internal(global, "#cleanup", guarded, callNode(info.base.cleanupDestructor, receiver), new JsonPrimitive(false));
+        if (kind.equals("destructor")) {
+            // C++ order: this body, this class's literal-object fields (last first), then the base.
+            JsonArray finalizer = new JsonArray();
+            for (int i = info.ownFields.size() - 1; i >= 0; i--) if (isValueClass(info.ownFields.get(i).type()))
+                finalizer.add(internal(global, "#drop", node("member", variable("this"), new JsonPrimitive(info.ownFields.get(i).name()))));
+            if (info.base != null && info.base.cleanupDestructor != null) finalizer.add(callNode(info.base.cleanupDestructor, receiver));
+            return finalizer.isEmpty() ? guarded : internal(global, "#cleanup", guarded, finalizer, new JsonPrimitive(false));
+        }
+        if (info.base == null || !kind.equals("constructor")) return guarded;
         JsonArray arguments = new JsonArray(); arguments.add(variable("this"));
         if (metadata.has("base-args")) metadata.getAsJsonArray("base-args").forEach(arguments::add);
         JsonObject baseCall = callNode(info.base.constructor, arguments);

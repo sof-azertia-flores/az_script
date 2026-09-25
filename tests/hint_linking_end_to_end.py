@@ -39,7 +39,7 @@ def main():
             run(compiler + ['compile-json', ast, '-o', roundtrip])
             assert abd.read_bytes() == roundtrip.read_bytes(), name
             tree = json.loads(executable.read_text())
-            assert tree['exec-version'] == 6
+            assert tree['exec-version'] == 7
             return abd, tree
 
         def execute(abd, libraries, expected):
@@ -68,13 +68,13 @@ def main():
             'library-load', 'main-load', 'ready', 'rejected', 'ready', *expected[2:]], result.stdout
 
         returns, _ = compile_module('return_library', (work / 'point.azs').read_text() + '''
-            Point produce():0006{Point p(3);return p;}
-            Point manual():0007{return new Point(4);}''')
+            Point* produce():0006{Point * p(3);return p;}
+            Point* manual():0007{return new Point(4);}''')
         returning, _ = compile_module('return_client', '''#include "point.include.azs"
-            extern Point produce():addd0006;
-            extern Point manual():addd0007;
-            Point forward(){return produce();}
-            int main(){Point p=forward();print(p.get());Point m=manual();print(m.get());delete m;return 0;}''')
+            extern Point* produce():addd0006;
+            extern Point* manual():addd0007;
+            Point* forward(){return produce();}
+            int main(){Point* p=forward();print(p.get());Point* m=manual();print(m.get());delete m;return 0;}''')
         execute(returning, [returns], ['library-load', '44', '46', 'point:42', 'point:41', '0'])
 
         # Alias 2222 has different meanings in root and Y; linking is module-local.
@@ -115,10 +115,10 @@ def main():
         execute(cycle, [b, a], ['B', 'A', 'root', '4'])
 
         equivalent, _ = compile_module('equivalent', '''
-            class A{int first; B next;}
-            class B{double value; A link;}
-            class C{int renamed; D child;}
-            class D{double renamed; C ref;}
+            class A{int first; B* next;}
+            class B{double value; A* link;}
+            class C{int renamed; D* child;}
+            class D{double renamed; C* ref;}
             int accept(C value){return value.renamed;}
             C convert(A value){return value;}
             int main(){A a;a.first=7;C c=a;return accept(a)+convert(a).renamed;}''')
@@ -178,10 +178,10 @@ def main():
 
         if args.bridge and args.library:
             snapshot_program, _ = compile_module('snapshot_client', '''#include "point.include.azs"
-                Point createAuto(){Point p(3);return p;}
-                Point createManual(){return new Point(5);}
-                int read(Point p){return p.get();}
-                void release(Point p){delete p;}''')
+                Point* createAuto(){Point * p(3);return p;}
+                Point* createManual(){return new Point(5);}
+                int read(Point* p){return p.get();}
+                void release(Point* p){delete p;}''')
             ast = json.loads((work / 'snapshot_client.ast.json').read_text())
             ids = [int(ast['abstract'][name], 16) for name in ('createAuto', 'createManual', 'read', 'release')]
             java = work / 'HintSourceSnapshot.java'

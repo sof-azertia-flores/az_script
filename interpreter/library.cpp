@@ -1,4 +1,5 @@
 #include "library.h"
+#include "blocks.h"
 #include "heepalloc.h"
 #include "internelFunctions.h"
 #include <charconv>
@@ -45,6 +46,7 @@ const char* type_name(int type) {
     case VOID_VALUE:return "void";
     case ANY_VALUE:return "any";
     case ADDRESS_VALUE:return "address";
+    case OBJECT_VALUE:return "object";
     default:return "unknown";
     }
 }
@@ -117,6 +119,7 @@ V checked_int(std::int64_t n) {
     return std::make_shared<variable>(static_cast<int>(n));
 }
 V binary(const std::string& op,const V& a,const V& b) {
+    if(a->type==OBJECT_VALUE||b->type==OBJECT_VALUE)throw std::runtime_error("Unsupported object value operands for "+op);
     if(op=="add"&&(a->type==STRING_VALUE||b->type==STRING_VALUE))
         return std::make_shared<variable>(value_to_string(a)+value_to_string(b));
     if(a->type==ADDRESS_VALUE||b->type==ADDRESS_VALUE) {
@@ -243,6 +246,17 @@ public:
         return result;
     }
 };
+// Unbound object temporaries created while the body runs are destroyed when it
+// ends, including on errors; the first error wins.
+template<class Body> V statement_scope(const E& env,Body body) {
+    auto frame=env?env->frame:nullptr;
+    const auto mark=frame?frame->temporaries.size():0;
+    V result;std::exception_ptr failure;
+    try {result=body();}catch(...){failure=std::current_exception();}
+    if(frame)try{blocks::finalize_temporaries(*frame,mark,env);}catch(...){if(!failure)failure=std::current_exception();}
+    if(failure)std::rethrow_exception(failure);
+    return result;
+}
 template<class Body> V with_cleanup(const E& scope,Body body) {
     V result;
     std::exception_ptr failure;
@@ -255,7 +269,7 @@ V scoped_execute(const std::shared_ptr<expression>& body,E env) {
     if(std::dynamic_pointer_cast<complex_expression>(body)) return body->execute(env);
     auto scope=std::make_shared<environment>();
     scope->parent=env;scope->script=env->script;scope->frame=env->frame;
-    return with_cleanup(scope,[&]{return body->execute(scope);});
+    return with_cleanup(scope,[&]{return statement_scope(scope,[&]{return body->execute(scope);});});
 }
 // Compiler-generated base cleanup. It does not encode classes or object layouts:
 // both operands are ordinary code, and the finalizer is usually a function call.
@@ -305,6 +319,41 @@ public:
         return nil();
     }
 };
+// Literal object storage. The compiler emits these only for its own lowering:
+// scripts cannot name a block, and only method code sees its address as this.
+class new_block_expression final:public expression {
+    std::size_t size;
+public:
+    explicit new_block_expression(std::size_t size):size(size) {}
+    V execute(E env) override {
+        tick(env);auto block=blocks::create(size,env->script);
+        if(env->frame)blocks::adopt_temporary(block,env->frame.get());
+        return std::make_shared<variable>(std::move(block));
+    }
+};
+class block_address_expression final:public expression {
+    std::shared_ptr<expression> value;
+public:
+    explicit block_address_expression(std::shared_ptr<expression> value):value(std::move(value)) {}
+    V execute(E env) override {
+        tick(env);auto result=value->execute(env);
+        auto block=blocks::of(result);
+        if(!block)throw std::runtime_error("Object address requires an object value");
+        return std::make_shared<variable>(blocks::address_of(block));
+    }
+};
+class move_out_expression final:public expression {
+    int slot;
+public:
+    explicit move_out_expression(int slot):slot(slot) {}
+    V execute(E env) override {tick(env);return blocks::move_out(env->getVariable(slot),env);}
+};
+class drop_expression final:public expression {
+    std::shared_ptr<expression> target;
+public:
+    explicit drop_expression(std::shared_ptr<expression> target):target(std::move(target)) {}
+    V execute(E env) override {tick(env);blocks::drop(target->execute(env),env);return nil();}
+};
 V convert_return(V v,int type) {
     if(type==VOID_VALUE) {
         if(v->type!=VOID_VALUE) throw std::runtime_error("Void function returned a value");
@@ -326,7 +375,7 @@ V convert_return(V v,int type) {
     }
     throw std::runtime_error("Function return type mismatch or missing return");
 }
-// v6 records are raw ABD stacks. Views borrow the caller's input only while
+// v7 records are raw ABD stacks. Views borrow the caller's input only while
 // decoding; the resulting native expression tree owns all retained data.
 struct raw_view {
     const unsigned char* data;
@@ -481,7 +530,7 @@ X parse_raw_expression(raw_view view,const raw_function_layout& layout,std::size
     }
     case 4: {
         const int slot=fields.integer();layout.check_slot(slot,true);const int type=fields.integer();
-        if(type<INT_VALUE||type>ADDRESS_VALUE||type==VOID_VALUE)throw std::invalid_argument("Invalid declared variable type");
+        if(type<INT_VALUE||type>OBJECT_VALUE||type==VOID_VALUE)throw std::invalid_argument("Invalid declared variable type");
         auto node=std::make_shared<varDefineExpression>();node->varindex=slot;
         if(fields.boolean())node->initializer=child();result=std::move(node);break;
     }
@@ -495,6 +544,23 @@ X parse_raw_expression(raw_view view,const raw_function_layout& layout,std::size
         if(!std::dynamic_pointer_cast<varExpression>(target)&&!(call&&call->function_id==0x0abd0006))
             throw std::invalid_argument("Assignment target must be a variable or mem_get(pointer)");
         result=raw_binary<movExpression>(std::move(target),std::move(value));break;
+    }
+    case 32: {
+        const int size=fields.integer();
+        if(size<1||static_cast<std::size_t>(size)>MAX_VARIABLE_SLOTS)throw std::invalid_argument("Invalid object slot count");
+        result=std::make_shared<new_block_expression>(static_cast<std::size_t>(size));break;
+    }
+    case 33:result=std::make_shared<block_address_expression>(child());break;
+    case 34: {
+        const int slot=fields.integer();layout.check_slot(slot);
+        if(slot<0)throw std::invalid_argument("Object move requires a local slot");
+        result=std::make_shared<move_out_expression>(slot);break;
+    }
+    case 35: {
+        auto target=child();auto call=std::dynamic_pointer_cast<functionInvocationExpression>(target);
+        if(!std::dynamic_pointer_cast<varExpression>(target)&&!(call&&call->function_id==0x0abd0006))
+            throw std::invalid_argument("Object drop target must be a variable or mem_get(pointer)");
+        result=std::make_shared<drop_expression>(std::move(target));break;
     }
     case 7:case 8: {
         auto node=std::make_shared<returnExpression>();node->object_return=opcode==8;
@@ -554,7 +620,7 @@ std::vector<int> parse_raw_types(raw_view view,bool script_parameters) {
     while(!fields.empty()) {
         if(result.size()>=MAX_VARIABLE_SLOTS)throw std::invalid_argument("Too many parameter types");
         const int type=fields.integer();
-        if(type<INT_VALUE||(type>BOOLEAN_VALUE&&type!=ADDRESS_VALUE&&!(script_parameters&&type==ANY_VALUE)))
+        if(type<INT_VALUE||(type>BOOLEAN_VALUE&&type!=ADDRESS_VALUE&&type!=OBJECT_VALUE&&!(script_parameters&&type==ANY_VALUE)))
             throw std::invalid_argument("Invalid parameter type");
         result.push_back(type);
     }
@@ -563,7 +629,7 @@ std::vector<int> parse_raw_types(raw_view view,bool script_parameters) {
 parsed_module parse_raw_module(raw_view root,std::size_t offset) {
     raw_cursor fields(root);parsed_module module;
     if(fields.string()!="AZSCRIPT")throw std::invalid_argument("Invalid exec magic");
-    if(fields.integer()!=6)throw std::invalid_argument("Unsupported exec version");
+    if(fields.integer()!=7)throw std::invalid_argument("Unsupported exec version");
     fields.integer();fields.string(); // Source version/author are non-executable metadata.
     const int globals=fields.integer();
     if(globals<0||static_cast<std::size_t>(globals)>MAX_VARIABLE_SLOTS||offset>MAX_VARIABLE_SLOTS-static_cast<std::size_t>(globals))
@@ -576,7 +642,7 @@ parsed_module parse_raw_module(raw_view root,std::size_t offset) {
         raw_cursor entry(signatures.take());const int id=entry.integer();function_signature signature;
         if(id==0||id==1||id==0x0fff0000||namespace_of(id)==0x0abd)throw std::invalid_argument("Invalid external function id");
         signature.return_type=entry.integer();
-        if(signature.return_type<INT_VALUE||(signature.return_type>VOID_VALUE&&signature.return_type!=ADDRESS_VALUE))throw std::invalid_argument("Invalid external return type");
+        if(signature.return_type<INT_VALUE||(signature.return_type>VOID_VALUE&&signature.return_type!=ADDRESS_VALUE&&signature.return_type!=OBJECT_VALUE))throw std::invalid_argument("Invalid external return type");
         signature.param_types=parse_raw_types(entry.take(),false);entry.finish();
         if(!module.extern_signatures.emplace(id,std::move(signature)).second)throw std::invalid_argument("Duplicate external signature id: "+std::to_string(id));
     }
@@ -600,7 +666,7 @@ parsed_module parse_raw_module(raw_view root,std::size_t offset) {
         if(!module.hint.empty()&&namespace_of(fn->function_id)!=0)throw std::invalid_argument("Hint module definitions require namespace zero");
         if(module.hint.empty()&&fn->function_id!=0&&fn->function_id!=1&&module.assumptions.contains(namespace_of(fn->function_id)))
             throw std::invalid_argument("Namespace assumption overlaps module definitions");
-        if(fn->rett<INT_VALUE||(fn->rett>VOID_VALUE&&fn->rett!=ADDRESS_VALUE))throw std::invalid_argument("Unknown return type");
+        if(fn->rett<INT_VALUE||(fn->rett>VOID_VALUE&&fn->rett!=ADDRESS_VALUE&&fn->rett!=OBJECT_VALUE))throw std::invalid_argument("Unknown return type");
         if(fn->param_count<0||fn->local_count<0||static_cast<std::size_t>(fn->param_count)>MAX_VARIABLE_SLOTS||
            static_cast<std::size_t>(fn->local_count)>MAX_VARIABLE_SLOTS-static_cast<std::size_t>(fn->param_count))
             throw std::invalid_argument("Invalid function variable count");
@@ -626,7 +692,7 @@ parsed_module decode_module(const unsigned char* bytes,std::size_t length,std::s
         const auto first=fields.take();
         if(first.size==8&&std::memcmp(first.data,"AZSCRIPT",8)==0)return parse_raw_module(root,offset);
     }
-    throw std::invalid_argument("Unsupported script format: expected raw exec v6");
+    throw std::invalid_argument("Unsupported script format: expected raw exec v7");
 }
 }
 std::recursive_mutex& runtime_mutex(){static std::recursive_mutex m;return m;}
@@ -874,6 +940,8 @@ void script::destroy() {
             try{(*hook)->invoke(baseEnv,{});}catch(...){if(!failure)failure=std::current_exception();}
         }
         try{baseEnv->cleanup(baseEnv);}catch(...){if(!failure)failure=std::current_exception();}
+        // Only hand-written exec can keep an object in a global; it still ends here.
+        blocks::finalize_storage(baseEnv->variables,baseEnv,true,failure);
     }catch(...){if(!failure)failure=std::current_exception();}
     heap::discard_script_objects(this);
     closed=true;setup=false;functions.clear();extern_signatures.clear();on_destory.clear();modules.clear();baseEnv.reset();destroying=false;
@@ -889,14 +957,17 @@ V ofunction::invoke(E ev,std::vector<V> args) {
     call_guard guard(ev);
     validate_arguments("Script function",function_id,param_types,args,true);
     auto env=std::make_shared<environment>();
-    env->script=guard.s;env->parent=guard.s->baseEnv;env->caller=ev;
+    env->script=guard.s;env->parent=guard.s->baseEnv;env->caller=ev;env->frame_root=true;
     env->frame=std::make_shared<function_frame>();
     env->frame->global_offset=global_offset;env->frame->global_count=global_count;
     env->frame->param_count=args.size();
     env->frame->slots.resize(static_cast<std::size_t>(param_count)+static_cast<std::size_t>(local_count));
     for(std::size_t i=0;i<args.size();++i) {
         if(!args[i]) throw std::invalid_argument("Null argument pointer; use variable(nullptr)");
-        env->frame->slots[i]=args[i]->deepCopy();
+        // Object arguments move from caller temporaries or are copied; parameters
+        // are destroyed after every local of the call.
+        auto storage=std::make_shared<variable>(nullptr);blocks::store(storage,args[i],ev);
+        env->frame->slots[i]=storage;blocks::bind_local(storage,env);
     }
     return with_cleanup(env,[&] {
         if(auto block=std::dynamic_pointer_cast<complex_expression>(code)) block->execute_body(env);
@@ -908,7 +979,7 @@ V complex_expression::execute_body(E env) {
     tick(env);
     for(auto& e:expressions) {
         if(env->frame&&(env->frame->returned||env->frame->break_requested||env->frame->continue_requested)) break;
-        e->execute(env);
+        statement_scope(env,[&]{return e->execute(env);});
     }
     return nil();
 }
@@ -919,9 +990,10 @@ V complex_expression::execute(E env) {
 V functionInvocationExpression::execute(E env) {
     tick(env);std::vector<V> args;
     // Snapshot each argument before evaluating the next one (left-to-right).
-    for(auto& p:params) args.push_back(p->execute(env)->deepCopy());
+    for(auto& p:params) args.push_back(blocks::materialize(p->execute(env),env));
     auto result=owner(env)->getFunction(function_id)->invoke(env,std::move(args));
     if(!result) throw std::runtime_error("Host function returned a null pointer");
+    blocks::adopt_result(result,env);
     return result;
 }
 V varExpression::execute(E env){tick(env);return env->getVariable(varindex);}
@@ -932,20 +1004,26 @@ V varDefineExpression::execute(E env) {
         throw std::runtime_error("Invalid local variable declaration: "+std::to_string(varindex));
     auto& slot=env->frame->slots[static_cast<std::size_t>(varindex)];
     if(slot)throw std::runtime_error("Duplicate variable slot: "+std::to_string(varindex));
-    auto value=initializer?initializer->execute(env)->deepCopy():nil();
+    auto storage=nil();
+    if(initializer)blocks::store(storage,initializer->execute(env),env);
     env->declared_slots.push_back(static_cast<std::size_t>(varindex));
-    slot=std::move(value);return nil();
+    env->frame->slots[static_cast<std::size_t>(varindex)]=storage;blocks::bind_local(storage,env);return nil();
 }
 V varSetExpression::execute(E env) {
     tick(env);auto v=env->getVariable(varindex);
-    v->copy_from(expression->execute(env));return v->deepCopy();
+    blocks::store(v,expression->execute(env),env);return v->deepCopy();
 }
 V returnExpression::execute(E env) {
     tick(env);if(!env->frame) throw std::runtime_error("Return outside function");
-    auto result=returnType?returnType->execute(env)->deepCopy():nil();
-    if(object_return) {
-        if(result->type!=ADDRESS_VALUE)throw std::runtime_error("Object return requires address type");
-        heap::return_object(*static_cast<address*>(result->value),env);
+    auto value=returnType?returnType->execute(env):nil();
+    V result;
+    if(value->type==OBJECT_VALUE)result=blocks::export_result(value,env);
+    else {
+        result=value->deepCopy();
+        if(object_return) {
+            if(result->type!=ADDRESS_VALUE)throw std::runtime_error("Object return requires address or object type");
+            heap::return_object(*static_cast<address*>(result->value),env);
+        }
     }
     env->frame->result=std::move(result);env->frame->returned=true;return nil();
 }
@@ -970,15 +1048,23 @@ BINARY_IMPL(equalExpression,"eq")
 BINARY_IMPL(gtExpression,"gt")
 BINARY_IMPL(ltExpression,"lt")
 #undef BINARY_IMPL
-V movExpression::execute(E env){tick(env);auto a=exp1->execute(env);auto b=exp2->execute(env);a->copy_from(b);return a->deepCopy();}
-V ifExpression::execute(E env){tick(env);if(truth(exp1->execute(env))) return scoped_execute(exp2,env);return otherwise?scoped_execute(otherwise,env):nil();}
+V movExpression::execute(E env){tick(env);auto a=exp1->execute(env);auto b=exp2->execute(env);blocks::store(a,b,env);return a->deepCopy();}
+namespace {
+// Temporaries of a condition end once its truth value is known.
+bool condition(const std::shared_ptr<expression>& test,const E& env) {
+    bool value=false;
+    statement_scope(env,[&]{value=truth(test->execute(env));return nil();});
+    return value;
+}
+}
+V ifExpression::execute(E env){tick(env);if(condition(exp1,env)) return scoped_execute(exp2,env);return otherwise?scoped_execute(otherwise,env):nil();}
 V whileExpression::execute(E env) {
     tick(env);
     if(!env->frame) throw std::runtime_error("While outside function");
     auto frame=env->frame;
     ++frame->loop_depth;
     try {
-        while(!frame->returned&&truth(exp1->execute(env))) {
+        while(!frame->returned&&condition(exp1,env)) {
             tick(env);scoped_execute(exp2,env);
             if(frame->break_requested) {frame->break_requested=false;break;}
             frame->continue_requested=false;
@@ -1007,6 +1093,12 @@ void variable::clear() noexcept {
     case FLOAT_VALUE:delete static_cast<float*>(value);break;
     case DOUBLE_VALUE:delete static_cast<double*>(value);break;
     case BOOLEAN_VALUE:delete static_cast<bool*>(value);break;
+    case OBJECT_VALUE: {
+        auto holder=static_cast<std::shared_ptr<slot_block>*>(value);
+        // The owning storage variable ended: its object's address expires.
+        if(*holder&&(*holder)->owner==this)blocks::abandon(*holder);
+        delete holder;break;
+    }
     }
     value=nullptr;type=VOID_VALUE;
 }
@@ -1020,6 +1112,7 @@ VALUE_IMPL(std::string,STRING_VALUE)
 VALUE_IMPL(float,FLOAT_VALUE)
 VALUE_IMPL(double,DOUBLE_VALUE)
 VALUE_IMPL(bool,BOOLEAN_VALUE)
+VALUE_IMPL(std::shared_ptr<slot_block>,OBJECT_VALUE)
 #undef VALUE_IMPL
 variable::variable(const char* value){setValue(value);}
 void variable::setValue(const char* value){if(value)setValue(std::string(value));else setValue(nullptr);}
@@ -1033,6 +1126,7 @@ void variable::copy_value(const variable& v) {
     case FLOAT_VALUE:setValue(*static_cast<float*>(v.value));break;
     case DOUBLE_VALUE:setValue(*static_cast<double*>(v.value));break;
     case BOOLEAN_VALUE:setValue(*static_cast<bool*>(v.value));break;
+    case OBJECT_VALUE:setValue(*static_cast<std::shared_ptr<slot_block>*>(v.value));break;
     case VOID_VALUE:setValue(nullptr);break;
     default:throw std::runtime_error("Unknown runtime value type");
     }
@@ -1046,9 +1140,17 @@ void environment::cleanup(const std::shared_ptr<environment>& self) {
     if(closing)return;
     closing=true;
     std::exception_ptr failure;
+    if(frame_root&&frame)try{blocks::finalize_temporaries(*frame,0,self);}catch(...){if(!failure)failure=std::current_exception();}
     while(!owned_pointer.empty()) {
         address pointer=owned_pointer.back();owned_pointer.pop_back();
         try {heap::release_owned(pointer,self);}catch(...){if(!failure)failure=std::current_exception();}
+    }
+    // Objects that a dynamic variable acquired after its declaration end here.
+    if(frame) {
+        std::vector<V> leftovers;
+        for(auto index:declared_slots)leftovers.push_back(frame->slots[index]);
+        if(frame_root)for(std::size_t i=0;i<frame->param_count&&i<frame->slots.size();++i)leftovers.insert(leftovers.begin()+static_cast<std::ptrdiff_t>(i),frame->slots[i]);
+        blocks::finalize_storage(leftovers,self,true,failure);
     }
     // Destructors may still observe the current block through host callbacks;
     // retire its locals only after every owned allocation has been cleaned.
@@ -1102,6 +1204,7 @@ std::string value_to_string(const V& v) {
     if(v->type==ADDRESS_VALUE)return shortest_number(static_cast<address*>(v->value)->value);
     if(v->type==FLOAT_VALUE)return shortest_number(*static_cast<float*>(v->value));
     if(v->type==DOUBLE_VALUE)return shortest_number(*static_cast<double*>(v->value));
+    if(v->type==OBJECT_VALUE)throw std::runtime_error("An object value cannot be converted to a string");
     throw std::runtime_error("Unknown runtime value type");
 }
 }

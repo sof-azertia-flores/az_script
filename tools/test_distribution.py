@@ -211,9 +211,10 @@ def verify(package: Path, java: Optional[Path] = None) -> Dict[str, object]:
         _run([compiler, package / "examples/classes.azs", "-o", classes_abd], cwd,
              compiler_environment)
         result = _run([runner, classes_abd], cwd, environment)
-        _require(result.stdout.splitlines() == ["7", "5", "destroy Point(5)", "destroy Point(7)", "0"],
+        _require(result.stdout.splitlines() == ["3", "7", "5", "destroy Point(5)", "destroy Point(4)",
+                                               "destroy Point(7)", "destroy Point(3)", "0"],
                  f"Class example or destructor order failed: {result.stdout!r}")
-        passed("class construction, references and destructor execution")
+        passed("literal objects, pointer objects and destructor execution")
 
         for name, expected in (("loops-regressions", "9"), ("inheritance-regressions", "0"), ("address-regressions", "0")):
             output = cwd / "language output" / (name + ".exec.abd")

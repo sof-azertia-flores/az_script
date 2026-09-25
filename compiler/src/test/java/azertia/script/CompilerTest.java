@@ -83,7 +83,7 @@ class CompilerTest {
                 + "int main(){return helper(3,\"__func_param0\");}");
         tree.getAsJsonObject("metadata").addProperty("version", 29);
         JsonObject compiled = Compiler.compile(tree).toJson().getAsJsonObject();
-        assertEquals(6, compiled.get("exec-version").getAsInt());
+        assertEquals(7, compiled.get("exec-version").getAsInt());
         assertEquals(29, compiled.get("version").getAsInt(), "source version is not the executable format version");
         assertTrue(compiled.get("gvs").getAsJsonPrimitive().isNumber());
         assertEquals(2, compiled.get("gvs").getAsInt());
@@ -591,7 +591,7 @@ class CompilerTest {
         var script = new GeneraterJson.AzScript();
         script.execute("class Pair{int x;int y;Pair(int x,int y){this.x=x;this.y=y;}"
                 + "int sum(){return x+y;}~Pair(){print(x);}}"
-                + "Pair identity(Pair p){return p;}void main(){Pair a(1,2);Pair b=new Pair(3,4);Pair alias=a;delete b;}");
+                + "Pair* identity(Pair* p){return p;}void main(){Pair * a(1,2);Pair* b=new Pair(3,4);Pair* alias=a;delete b;}");
         JsonObject tree = script.toObj();
         assertEquals(2, tree.getAsJsonArray("classes").get(0).getAsJsonObject().getAsJsonArray("fields").size());
         String original = tree.toString();
@@ -608,7 +608,8 @@ class CompilerTest {
         assertEquals(0, constructor.getAsJsonArray("script").get(0).getAsJsonObject().getAsJsonObject("v").get("v").getAsInt());
         for (JsonElement element : compiled.getAsJsonArray("f")) {
             JsonObject function = element.getAsJsonObject();
-            assertTrue(function.get("return-type").getAsInt() <= 7);
+            // Pointers erase to address (7); only the literal-object factory returns an object value (8).
+            assertTrue(function.get("return-type").getAsInt() <= 8);
             for (JsonElement type : function.getAsJsonArray("param-types")) assertTrue(type.getAsInt() <= 7);
             for (JsonObject variable : variableInstructions(function.get("script")))
                 assertTrue(variable.get("v").getAsJsonPrimitive().isNumber());
@@ -621,11 +622,11 @@ class CompilerTest {
         assertTrue(instructions.contains("\"id\":" + 0x0abd0003 + ",\"param\":[2]"), instructions);
     }
     @Test void classFieldsKeepTheirTypesThroughReadsCallsAndDefaults() throws Exception {
-        String source = "class Values{int i;float f;double d;boolean b;string s;Values next;Values self(){return this;}}"
+        String source = "class Values{int i;float f;double d;boolean b;string s;Values* next;Values* self(){return this;}}"
                 + "int takeInt(int x){return x;}float takeFloat(float x){return x;}double takeDouble(double x){return x;}"
                 + "boolean takeBool(boolean x){return x;}string takeString(string x){return x;}"
                 + "void main(){Values a;int i=takeInt(a.i);float f=takeFloat(a.f);double d=takeDouble(a.d);"
-                + "boolean b=takeBool(a.b);string s=takeString(a.s);Values n=a.self();n.next=null;delete null;}";
+                + "boolean b=takeBool(a.b);string s=takeString(a.s);Values* n=a.self();n.next=null;delete null;}";
         JsonObject compiled = compile(source);
         assertDoesNotThrow(() -> ExecCodec.decode(AbdValue.fromAbd(Compiler.compile(newTree(source)).toValue().toAbdFormat())));
         assertFalse(compiled.toString().contains("\"return-type\":100"));
@@ -646,15 +647,15 @@ class CompilerTest {
     @Test void classReferencesDoNotChangeDynamicVarAndDefContracts() throws Exception {
         String declaration = "class P{int x;int get(){return x;}}";
         for (String body : new String[]{"var p=new P();p.get();", "def(p,new P());p.get();",
-                "var p=new P();P q=p;", "var p=new P();delete p;"})
+                "var p=new P();P* q=p;", "var p=new P();delete p;"})
             assertThrows(IllegalArgumentException.class, () -> compile(declaration + "void main(){" + body + "}"), body);
-        assertDoesNotThrow(() -> compile(declaration + "void main(){P p=new P();P q=p;q.x=1;delete q;}"));
+        assertDoesNotThrow(() -> compile(declaration + "void main(){P* p=new P();P* q=p;q.x=1;delete q;}"));
         assertThrows(IllegalArgumentException.class, () -> compile("int take(int x){return x;}int main(){var x=1;return take(x);}"));
     }
     @Test void classesSupportForwardTypesInitializerOrderAndLexicalMemberResolution() throws Exception {
         assertDoesNotThrow(() -> compile("#gvar x\nclass Box{Point p;int x=2;int later=x+1;"
                 + "int value(int x){return x+this.x;}int field(){return x;}}"
-                + "class Point{int x;Point self(){return this;}Point(){self().x=6;}}"
+                + "class Point{int x;Point* self(){return this;}Point(){self().x=6;}}"
                 + "Box identity(Box b){return b;}void main(){Box b;Point p;b.p=p;Box alias=identity(b);print(alias.p.x);}"));
         assertDoesNotThrow(() -> compile("class P{int x;int f(int n){if(n<=1){return 1;}return n*f(n-1);}}void main(){P p();print(p.f(5));}"));
         for (String invalid : new String[]{"class P{}void main(){}", "class P{int x;P(int n){}}void main(){P p;}",
@@ -703,7 +704,7 @@ class CompilerTest {
         assertDoesNotThrow(() -> compile("int main(){return 1;}"));
     }
     @Test void memberLoweringCountsAdditionalAbdAddressContainers() throws Exception {
-        String prefix = "class P{P next;int x;}int main(){P p;return p";
+        String prefix = "class P{P* next;int x;}int main(){P p;return p";
         assertDoesNotThrow(() -> compile(prefix + ".next".repeat(10) + ".x;}"));
         var error = assertThrows(IllegalArgumentException.class, () -> compile(prefix + ".next".repeat(40) + ".x;}"));
         assertTrue(error.getMessage().contains("ABD limit"), error::getMessage);
@@ -727,7 +728,7 @@ class CompilerTest {
     @Test void methodsNamedAfterMemoryBuiltinsCannotCaptureCompilerGeneratedOperations() throws Exception {
         JsonObject tree = newTree("class C{int x;int alloc(int n){return n;}int mem_get(int n){return n+1;}"
                 + "void make_free(int n){x=n;}int get(){return x;}}"
-                + "void main(){C c;C p=new C();print(c.alloc(9));print(c.mem_get(9));c.make_free(5);print(c.get());delete p;}");
+                + "void main(){C c;C* p=new C();print(c.alloc(9));print(c.mem_get(9));c.make_free(5);print(c.get());delete p;}");
         JsonObject compiled = Compiler.compile(tree).toJson().getAsJsonObject();
         assertEquals(compiled, Compiler.compile(JsonParser.parseString(tree.toString()).getAsJsonObject()).toJson());
         int generatedFactories = 0;
@@ -739,17 +740,23 @@ class CompilerTest {
             generatedFactories++;
             JsonObject allocation = statements.get(0).getAsJsonObject().getAsJsonObject("val");
             int parameterCount = function.get("param-count").getAsInt();
-            assertEquals(1, function.get("local-count").getAsInt(), "factory object address gets one local slot");
+            assertEquals(1, function.get("local-count").getAsInt(), "factory object storage gets one local slot");
             assertEquals(parameterCount, statements.get(0).getAsJsonObject().get("v").getAsInt());
-            assertEquals(0x0abd0003, allocation.get("id").getAsInt());
-            assertEquals(1, allocation.getAsJsonArray("param").get(0).getAsInt());
+            if (allocation.has("c")) {
+                // The literal-object factory creates slot-block storage instead of a heap allocation.
+                assertEquals("new_block", ExecOpcodes.name(allocation.get("c").getAsInt()));
+                assertEquals(1, allocation.get("size").getAsInt());
+            } else {
+                assertEquals(0x0abd0003, allocation.get("id").getAsInt());
+                assertEquals(1, allocation.getAsJsonArray("param").get(0).getAsInt());
+            }
             assertEquals(1, statements.get(1).getAsJsonObject().get("t").getAsInt(), "factory directly calls the constructor");
             JsonObject binding = statements.asList().stream().filter(JsonElement::isJsonObject).map(JsonElement::getAsJsonObject)
                     .filter(statement -> statement.has("c") && ExecOpcodes.name(statement.get("c").getAsInt()).equals("ob")).findFirst().orElseThrow();
             if (binding.get("manual").getAsBoolean())
                 assertEquals(0x0abd0004, statements.get(statements.size() - 2).getAsJsonObject().get("id").getAsInt());
         }
-        assertEquals(2, generatedFactories);
+        assertEquals(3, generatedFactories);
     }
     private AbdValue rawStack(AbdValue... values) {
         AbdSimpleStack stack = new AbdSimpleStack(); stack.values.addAll(List.of(values)); return stack.toAbd();
@@ -768,7 +775,7 @@ class CompilerTest {
         assertThrows(IllegalArgumentException.class, compiled::typeValue);
         AbdValue payload = compiled.toValue(); var root = payload.getAsAss().values;
         assertEquals(10, root.size()); assertEquals("AZSCRIPT", AbdBasicType.abd2str(root.get(0)));
-        assertEquals(6, AbdBasicType.abd2int(root.get(1)));
+        assertEquals(7, AbdBasicType.abd2int(root.get(1)));
         var functionList = root.get(7).getAsAss().values;
         assertEquals(1, functionList.size()); var function = functionList.get(0).getAsAss().values;
         assertEquals(6, function.size()); assertEquals(0x0fff0000, AbdBasicType.abd2int(function.get(0)));
@@ -915,7 +922,7 @@ class CompilerTest {
         assertTrue(scoped.getMessage().contains("main:3:"), scoped::getMessage);
         assertTrue(scoped.getMessage().contains("P constructor expects 1 arguments, got 2"), scoped::getMessage);
         var manual = assertThrows(IllegalArgumentException.class, () -> compile(
-                "class P { int v; P(int a) { v = a; } }\nvoid main() { P p = new P(\"x\"); }"));
+                "class P { int v; P(int a) { v = a; } }\nvoid main() { P* p = new P(\"x\"); }"));
         assertTrue(manual.getMessage().contains("P constructor argument 1 expected int, got string"), manual::getMessage);
         var method = assertThrows(IllegalArgumentException.class, () -> compile(
                 "class C { int v; void m(int a) { v = a; } }\nvoid main() { C c(); c.m(1, 2); }"));
@@ -994,7 +1001,7 @@ class CompilerTest {
     @Test void externClassesCompileForBothConsumersAndOutOfClassImplementations() throws Exception {
         String header = "#assume_hint POINT abcd\nclass Point{int x=privateSeed();"
                 + "extern Point(int value):abcd0002;extern ~Point():abcd0003;extern int get():abcd0004;}";
-        JsonObject consumer = compile(header + "void main(){Point p(7);Point q=new Point(8);print(p.get());delete q;}");
+        JsonObject consumer = compile(header + "void main(){Point p(7);Point* q=new Point(8);print(p.get());delete q;}");
         assertEquals(3, consumer.getAsJsonArray("extern-signatures").size());
         for (JsonElement item : consumer.getAsJsonArray("f")) {
             JsonObject function = item.getAsJsonObject();
@@ -1033,11 +1040,12 @@ class CompilerTest {
         assertThrows(IllegalArgumentException.class, () -> compile("class C{int x;extern C(int n):abcd0002;}void main(){C c;}"));
     }
     @Test void structuralClassTypesRecurseIgnoreNamesAndNeverBecomeIntegers() throws Exception {
-        String declarations = "class A{A next;int x;}class B{B link;int value;int method(){return value;}}";
-        assertDoesNotThrow(() -> compile(declarations + "B convert(A a){return a;}void main(){A a;B b=a;b=convert(a);print(a==b);}"));
+        String declarations = "class A{A* next;int x;}class B{B* link;int value;int method(){return value;}}";
+        assertDoesNotThrow(() -> compile(declarations + "B* convert(A* a){return a;}void main(){A * a();B* b=a;b=convert(a);print(a==b);}"));
+        // Literal objects of structurally equivalent classes also convert (both have no destructor).
         assertDoesNotThrow(() -> compile(declarations + "extern A f(B):abcd0002;B f(A a){return a;}void main(){A a;B b=f(a);}"));
-        assertDoesNotThrow(() -> compile("class A{B next;}class B{A next;}class C{C next;}void main(){A a;C c=a;}"));
-        for (String bad : List.of("class A{A next;int x;}class B{B next;string x;}void main(){A a;B b=a;}",
+        assertDoesNotThrow(() -> compile("class A{B* next;}class B{A* next;}class C{C* next;}void main(){A * a();C* c=a;}"));
+        for (String bad : List.of("class A{A* next;int x;}class B{B* next;string x;}void main(){A a;B b=a;}",
                 "class A{int x;}void main(){A a;int n=a;}", "class A{int x;}void main(){A a=0;}",
                 "class A{int x;string y;}class B{string x;int y;}void main(){A a;B b=a;}"))
             assertThrows(IllegalArgumentException.class, () -> compile(bad), bad);
@@ -1065,8 +1073,8 @@ class CompilerTest {
     @Test void structuralEquivalenceHandlesLongReferenceChainsWithoutJavaRecursion() throws Exception {
         StringBuilder source = new StringBuilder(); int length = 1500;
         for (String prefix : List.of("A", "B")) for (int i = 0; i < length; i++)
-            source.append("class ").append(prefix).append(i).append("{").append(prefix).append((i+1)%length).append(" next;}\n");
-        source.append("void main(){A0 a;B0 b=a;}");
+            source.append("class ").append(prefix).append(i).append("{").append(prefix).append((i+1)%length).append("* next;}\n");
+        source.append("void main(){A0 * a();B0* b=a;}");
         assertDoesNotThrow(() -> compile(source.toString()));
         assertThrows(IllegalArgumentException.class, () -> compile("#namespace_hint OWN\n#assume_hint OWN abcd\n"
                 + "extern int reserved():abcd0003;int unrelated():0003{return 1;}"));
@@ -1083,7 +1091,7 @@ class CompilerTest {
 
     @Test void addressesHaveDistinctSignaturesAndLosslessNullConstants() throws Exception {
         String source = "address identity(address p){return p;}"
-                + "class C{address slot;C next;}"
+                + "class C{address slot;C* next;}"
                 + "void main(){address p=alloc(2);address q=identity(p+1);"
                 + "q-=1;q++;q--;mem_get(q)=p;print(q==p);mem_free(p);C c;print(c.slot==null);}";
         JsonObject tree = newTree(source);
@@ -1096,6 +1104,75 @@ class CompilerTest {
         assertTrue(result.toJson().toString().contains("\"address\":\"0\""));
         assertArrayEquals(result.toValue().toAbdFormat(), Compiler.compile(JsonParser.parseString(tree.toString()).getAsJsonObject()).toValue().toAbdFormat());
         assertArrayEquals(result.toValue().toAbdFormat(), ExecCodec.decode(result.toValue()).toValue().toAbdFormat());
+    }
+
+    @Test void literalObjectsLowerToSlotBlocksWhilePointersKeepHeapFactories() throws Exception {
+        String source = "class Tag{int id;Tag(int v){id=v;}}"
+                + "class Box{Tag tag(3);Box * next;int n;Box(Tag t){tag=t;}Box * self(){return this;}}"
+                + "Box copy(Box b){return b;}"
+                + "void main(){Tag t(1);Box literal(t);Box * automatic(t);Box * manual=new Box(t);"
+                + "Box other=copy(literal);literal.tag.id=5;print(literal.self().n);delete manual;}";
+        JsonObject tree = newTree(source);
+        JsonObject compiled = Compiler.compile(tree).toJson().getAsJsonObject();
+        assertArrayEquals(Compiler.compile(tree).toValue().toAbdFormat(),
+                Compiler.compile(JsonParser.parseString(tree.toString()).getAsJsonObject()).toValue().toAbdFormat());
+        JsonObject abstracts = tree.getAsJsonObject("abstract");
+        // Three hidden factories per class; only the literal one creates a slot block.
+        JsonObject literalFactory = null;
+        for (JsonElement item : compiled.getAsJsonArray("f")) {
+            JsonObject function = item.getAsJsonObject();
+            if (!function.get("script").isJsonArray()) continue;
+            JsonArray script = function.getAsJsonArray("script");
+            JsonObject first = script.size() > 0 && script.get(0).isJsonObject() ? script.get(0).getAsJsonObject() : null;
+            if (first != null && first.has("val") && first.getAsJsonObject("val").has("c")
+                    && first.getAsJsonObject("val").get("c").getAsInt() == ExecOpcodes.NEW_BLOCK) literalFactory = function;
+        }
+        assertNotNull(literalFactory);
+        assertEquals(8, literalFactory.get("return-type").getAsInt());
+        assertEquals(List.of(8), literalFactory.getAsJsonArray("param-types").asList().stream().map(JsonElement::getAsInt).toList());
+        JsonArray body = literalFactory.getAsJsonArray("script");
+        JsonObject constructorCall = body.get(1).getAsJsonObject();
+        assertEquals(ExecOpcodes.BLOCK_ADDRESS, constructorCall.getAsJsonArray("param").get(0).getAsJsonObject().get("c").getAsInt());
+        assertEquals(ExecOpcodes.MOVE_OUT, constructorCall.getAsJsonArray("param").get(1).getAsJsonObject().get("c").getAsInt(),
+                "a literal constructor argument moves on instead of being copied again");
+        assertEquals(ExecOpcodes.RETURN_OBJECT, body.get(body.size() - 1).getAsJsonObject().get("c").getAsInt());
+        // Box has a literal-object field and no declared destructor: one is synthesized to end it.
+        int destructor = Integer.parseUnsignedInt(abstracts.has("Box::<dtor>") ? abstracts.get("Box::<dtor>").getAsString() : "0", 16);
+        String instructions = compiled.toString();
+        assertTrue(instructions.contains("\"c\":" + ExecOpcodes.DROP), instructions);
+        assertTrue(instructions.contains("\"c\":" + ExecOpcodes.CLEANUP), instructions);
+        assertEquals(0, destructor, "synthesized destructors are compiler functions, not source names");
+        JsonObject copy = function(compiled, Integer.parseUnsignedInt(abstracts.get("copy").getAsString(), 16));
+        assertEquals(8, copy.get("return-type").getAsInt());
+        assertEquals(List.of(8), copy.getAsJsonArray("param-types").asList().stream().map(JsonElement::getAsInt).toList());
+        JsonObject self = function(compiled, Integer.parseUnsignedInt(abstracts.get("Box::self").getAsString(), 16));
+        assertEquals(List.of(7), self.getAsJsonArray("param-types").asList().stream().map(JsonElement::getAsInt).toList(),
+                "this is a pointer to either kind of object");
+        assertEquals("Box*", tree.getAsJsonArray("classes").get(1).getAsJsonObject().getAsJsonArray("fields").get(1)
+                .getAsJsonObject().get("type").getAsString());
+        assertEquals("object-value", tree.getAsJsonArray("classes").get(1).getAsJsonObject().getAsJsonArray("fields").get(0)
+                .getAsJsonObject().getAsJsonObject("initializer").get("call").getAsString());
+    }
+    @Test void pointerAndLiteralDeclarationsHaveDistinctRules() throws Exception {
+        String point = "class P{int x;P(int v){x=v;}P * self(){return this;}}";
+        assertDoesNotThrow(() -> compile(point + "void main(){P a(1);P b=a;P * c(2);P * d=c;P * e=new P(3);P * f=null;"
+                + "P * g=a.self();a=b;delete e;print(c==d);}"));
+        assertDoesNotThrow(() -> compile("class P{int x;}void main(){P a;P b();P * c();for(P * i();false;){}for(P j;false;){}}"));
+        // A method named like a field still parses as a method: the lookahead finds "{" or ":".
+        assertDoesNotThrow(() -> compile("class Q{int x;Q(int v){x=v;}}class P{Q q(1);Q make(int v){Q r(v);return r;}}void main(){}"));
+        for (String invalid : List.of(point + "void main(){P * p;}", point + "void main(){P a=null;}",
+                point + "void main(){P a(1);P * p=a;}", point + "void main(){P * p=new P(1);P a=p;}",
+                point + "void main(){P a(1);P b(2);print(a!=b);}", point + "void main(){P a(1);delete a;}",
+                point + "void main(){P a(1);var v=a;}", point + "#gvar g\nvoid main(){P a(1);g=a;}",
+                point + "void main(){P a(1);print(a);}", "void main(){int * p=null;}",
+                "class N{int v;N next;}void main(){}", "class A{B b;}class B{A a;}void main(){}",
+                point + "class Box{P * p(1);}void main(){}", point + "class Box{P p;}void main(){}"))
+            assertThrows(IllegalArgumentException.class, () -> compile(invalid), invalid);
+        var pointer = assertThrows(IllegalArgumentException.class, () -> compile(point + "void main(){\n  P * p;\n}"));
+        assertTrue(pointer.getMessage().contains(":2:"), pointer::getMessage);
+        assertTrue(pointer.getMessage().contains("P * p()"), pointer::getMessage);
+        var field = assertThrows(IllegalArgumentException.class, () -> compile(point + "class Box{\n  P inner;\n}\nvoid main(){}"));
+        assertTrue(field.getMessage().contains("Box initialization:2:"), field::getMessage);
     }
 
     @Test void addressArithmeticKeepsIntegerAndObjectTypesSeparate() throws Exception {

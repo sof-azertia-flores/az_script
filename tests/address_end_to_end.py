@@ -49,7 +49,7 @@ def main():
             assert again.returncode == 0, (name, again.stdout, again.stderr)
             assert abd.read_bytes() == roundtrip.read_bytes(), (name, 'AST roundtrip differs')
             tree = json.loads(executable.read_text(encoding='utf-8'))
-            assert tree['exec-version'] == 6, (name, tree)
+            assert tree['exec-version'] == 7, (name, tree)
             return abd, tree
 
         def run_case(name, abd, output='', error=None, libraries=()):
@@ -98,7 +98,7 @@ def main():
             address alias=read(refs);print(mem_get(alias));print(mem_get(alias+1));
             print(mem_get(refs+1)==null);mem_get(refs)=alias+1;print(mem_get(mem_get(refs)));}''',
             '41\n42\ntrue\n42\n')
-        execute('address-field-defaults', '''class Holder{address pointer;Holder next;}
+        execute('address-field-defaults', '''class Holder{address pointer;Holder* next;}
             void main(){Holder h;print(h.pointer);print(h.pointer==null);print(h.next==null);
             address p=alloc(1);mem_get(p)=7;h.pointer=p;print(mem_get(h.pointer));}''',
             '0\ntrue\ntrue\n7\n')
@@ -108,11 +108,11 @@ def main():
         execute('address-inheritance-layout', '''class Base{address pointer;int value=5;
             address get(){return pointer;}}
             class Child:Base{address next;int extra=7;}
-            void main(){Child c;c.pointer=alloc(2);c.next=c.pointer+1;
-            mem_get(c.get())=11;mem_get(c.next)=13;Base b=c;
+            void main(){Child * c();c.pointer=alloc(2);c.next=c.pointer+1;
+            mem_get(c.get())=11;mem_get(c.next)=13;Base* b=c;
             print(mem_get(b.get()));print(mem_get(c.next));print(b.value+c.extra);}''', '11\n13\n12\n')
-        execute('structural-address-fields', '''class A{address p;A next;}
-            class B{address renamed;B link;}
+        execute('structural-address-fields', '''class A{address p;A* next;}
+            class B{address renamed;B* link;}
             address offset(){address p=null;return p+4;}void main(){A a;a.p=offset();B b=a;print(b.renamed);print(b.link==null);}''', '4\ntrue\n')
         execute('raw-return-transfer', '''address create(){address p=alloc(2);mem_get(p)=7;
             mem_get(p+1)=9;mem_send_up(p);return p;}
@@ -183,7 +183,7 @@ def main():
             'class-offset': 'class C{int x;}void main(){C c;print(c+1);}',
             'class-equals-raw': 'class C{int x;}void main(){C c;address p=null;print(c==p);}',
             'address-int-layout': 'class A{address p;}class B{int n;}void main(){A a;B b=a;}',
-            'address-class-layout': 'class A{address p;}class B{B next;}void main(){A a;B b=a;}',
+            'address-class-layout': 'class A{address p;}class B{B* next;}void main(){A a;B b=a;}',
             'address-reserved-class': 'class address{int n;}void main(){}',
         }
         for name, source in bad_sources.items():
@@ -223,15 +223,16 @@ def main():
             ('overflow-add', 'print(maximum()+1);', 'Address overflow'),
             ('overflow-negative-subtract', 'print(maximum()-(-1));', 'Address overflow'),
             ('overflow-increment', 'address p=maximum();p++;', 'Address overflow'),
-            ('high-address-access', 'address p=alloc(1);mem_get(p)=17;print(mem_get(high()));', 'Invalid or freed heap pointer'),
+            # Bit 63 marks literal-object storage; no object has id 0, so the address never resolves.
+            ('high-address-access', 'address p=alloc(1);mem_get(p)=17;print(mem_get(high()));', 'Invalid or expired object address'),
         ]:
             execute(name, IMPORTS + 'void main(){' + body + '}', error=message, libraries=(library,))
         execute('high-address-free', IMPORTS + 'void main(){print(mem_free(maximum()));}', 'false\n', libraries=(library,))
 
         # Structural type erasure still distinguishes object/raw-address values
         # from ordinary integer values in every runtime function signature.
-        _, layout = compile_case('''class C{address p;C next;C(address p){this.p=p;}
-            address get(){return p;}C self(){return this;}~C(){}}
+        _, layout = compile_case('''class C{address p;C* next;C(address p){this.p=p;}
+            address get(){return p;}C* self(){return this;}~C(){}}
             address echo(address p){return p;}void main(){C c(null);print(c.self().get());}''', 'signature-erasure')
         assert any(f['return-type'] == 7 for f in layout['f']), layout
         assert all(t in (0, 1, 2, 3, 4, 6, 7) for f in layout['f'] for t in f['param-types']), layout

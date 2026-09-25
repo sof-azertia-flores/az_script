@@ -140,7 +140,7 @@ def main():
         return entry
 
     write_abd(work / 'overlap.snapshot.abd', {
-        'snapshot version': 6, 'module manifest': [manifest('fixture.exec.abd', 2)],
+        'snapshot version': 7, 'module manifest': [manifest('fixture.exec.abd', 2)],
         'variable global': [91, bytes([255])], 'global owned allocations': [], 'objects': [],
         'length heap': 3, 'heap': [bytes([255]), 0, 0],
         'heap allocation': [{'begin position': Address(1), 'length': 2}, {'begin position': Address(2), 'length': 1}]})
@@ -200,14 +200,14 @@ def main():
                                     {'t': 0, 'c': 'divide', 'v1': 1, 'v2': 0}]
     write_abd(work / 'objects.load-failure.exec.abd', failed_load)
     object_snapshot = {
-        'snapshot version': 6, 'module manifest': [manifest('objects.exec.abd', 1)],
+        'snapshot version': 7, 'module manifest': [manifest('objects.exec.abd', 1)],
         'variable global': [66], 'global owned allocations': [Address(2), Address(1)],
         'length heap': 4, 'heap': [bytes([255]), 11, 22, 33],
         'heap allocation': [{'begin position': Address(i), 'length': 1} for i in (1, 2, 3)],
         'objects': [{'begin position': Address(i), 'has destructor': True, 'destructor': 205, 'manual': i == 3} for i in (1, 2, 3)]}
     write_abd(work / 'objects.valid.snapshot.abd', object_snapshot)
     object_empty = copy.deepcopy(object_snapshot)
-    object_empty.update({'snapshot version': 6, 'variable global': [67],
+    object_empty.update({'snapshot version': 7, 'variable global': [67],
                       'global owned allocations': [], 'length heap': 1,
                       'heap': [bytes([255])], 'heap allocation': [], 'objects': []})
     write_abd(work / 'objects.empty.snapshot.abd', object_empty)
@@ -274,7 +274,7 @@ def main():
         write_abd(work / f'objects.invalid-{i}.snapshot.abd', candidate)
 
     # Globals use negative slot ids and local/parameter variables non-negative
-    # ids. write_abd emits only fixed-record exec v6 for all program fixtures.
+    # ids. write_abd emits only fixed-record exec v7 for all program fixtures.
     def numeric_expression(value):
         if isinstance(value, list):
             return [numeric_expression(item) for item in value]
@@ -285,7 +285,7 @@ def main():
             return converted
         return value
 
-    numeric_fixture = {'exec-version': 6, 'gvs': 5, 'f': []}
+    numeric_fixture = {'exec-version': 7, 'gvs': 5, 'f': []}
     for original in object_fixture['f']:
         converted = copy.deepcopy(original)
         converted['local-count'] = 1 if original['id'] in (201, 202, 208) else 0
@@ -308,7 +308,7 @@ def main():
     numeric_other['ext'] = {'fixture': 'different numeric bytecode'}
     write_abd(work / 'numeric.other.exec.abd', numeric_other)
     numeric_snapshot = {
-        'snapshot version': 6, 'module manifest': [manifest('numeric.exec.abd', 5)],
+        'snapshot version': 7, 'module manifest': [manifest('numeric.exec.abd', 5)],
         'variable global': [66, 'restored', False, Address(1), Address(2)], 'global owned allocations': [Address(1)],
         'length heap': 3, 'heap': [bytes([255]), 11, 33],
         'heap allocation': [{'begin position': Address(i), 'length': 1} for i in (1, 2)],
@@ -325,7 +325,7 @@ def main():
     candidate = copy.deepcopy(numeric_snapshot)
     candidate['objects'][0]['destructor'] = 999
     write_abd(work / 'numeric.invalid-7.snapshot.abd', candidate)
-    for version in (0, 2, 3, 4, 5):
+    for version in (0, 2, 3, 4, 5, 6):
         candidate = copy.deepcopy(numeric_snapshot)
         candidate['variable global'] = {'g' + str(i): item for i, item in enumerate(candidate['variable global'])}
         if version:
@@ -436,12 +436,12 @@ def main():
     deep.check_returncode()
     assert 'WARNING in native method' not in deep.stdout + deep.stderr, 'JNI checker reported a warning'
     scalars = read_abd(work / '快照 🐈.abd')
-    assert scalars['snapshot version'] == 6
+    assert scalars['snapshot version'] == 7
     assert Address(0xfedcba9876543210) in scalars['heap']
     assert Address(0) in scalars['heap']
     assert all(isinstance(entry['begin position'], Address) for entry in scalars['heap allocation'])
     snapshot = read_abd(work / 'objects.saved.snapshot.abd')
-    assert snapshot['snapshot version'] == 6
+    assert snapshot['snapshot version'] == 7
     assert snapshot['module manifest'] == [manifest('objects.exec.abd', 1)]
     assert snapshot['variable global'] == [7]
     assert len(snapshot['objects']) == 3
@@ -451,11 +451,11 @@ def main():
     assert set(snapshot['global owned allocations']) == {
         item['begin position'] for item in snapshot['objects'] if not item['manual']}
     detached = read_abd(work / 'objects.detached.snapshot.abd')
-    assert detached['snapshot version'] == 6
+    assert detached['snapshot version'] == 7
     assert len(detached['objects']) == 1 and detached['objects'][0]['manual'] is False
     assert detached['global owned allocations'] == []
     numeric = read_abd(work / 'numeric.saved.snapshot.abd')
-    assert numeric['snapshot version'] == 6
+    assert numeric['snapshot version'] == 7
     assert numeric['module manifest'] == [manifest('numeric.exec.abd', 5)]
     assert len(numeric['variable global']) == 5
     assert numeric['variable global'][:3] == [7, 'numeric\0中文🐈', True]
@@ -463,7 +463,7 @@ def main():
     assert numeric['global owned allocations'] == [numeric['variable global'][3]]
     assert {item['begin position'] for item in numeric['objects']} == set(numeric['variable global'][3:])
     hints = read_abd(work / 'hints.all.snapshot.abd')
-    assert hints['snapshot version'] == 6
+    assert hints['snapshot version'] == 7
     assert hints['module manifest'] == [manifest('hints.consumer.exec.abd', 3),
         manifest('hints.library.exec.abd', 1, 3, 'PointLibrary', 1),
         manifest('hints.extra.exec.abd', 1, 4, 'ExtraLibrary', 2)]

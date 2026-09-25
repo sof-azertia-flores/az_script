@@ -1,4 +1,5 @@
 #include "library.h"
+#include "blocks.h"
 #include "heepalloc.h"
 #include "internelFunctions.h"
 #include <algorithm>
@@ -51,6 +52,10 @@ M object_delete(MV value){auto m=op("od");m->put("v",value);return m;}
 M loop(MV condition,MV body){auto m=op("wi");m->put("v",condition);m->put("val",body);return m;}
 M branch(MV condition,MV body){auto m=op("if");m->put("v",condition);m->put("val",body);return m;}
 M brk(){return op("brk");}
+M new_block(int size){auto m=op("new_block");m->put("size",n(size));return m;}
+M block_address(MV value){auto m=op("block_address");m->put("v",value);return m;}
+M move_out(std::string name){auto m=op("mv");m->put("v",s(name));return m;}
+M drop(MV target){auto m=op("drop");m->put("v",target);return m;}
 M call(int id,std::initializer_list<MV> args={}){auto m=std::make_shared<AbdMap>();m->put("t",n(1));m->put("id",n(id));m->put("param",block(args));return m;}
 M fn(int id,int type,MV body,int arity=0){auto m=std::make_shared<AbdMap>();m->put("id",n(id));m->put("return-type",n(type));m->put("param-count",n(arity));m->put("script",body);return m;}
 M typed_fn(int id,int type,MV body,std::initializer_list<int> params){auto m=fn(id,type,body,static_cast<int>(params.size()));m->put("param-types",type_list(params));return m;}
@@ -78,7 +83,7 @@ R rfn(int id,int type,R body,int locals=0,std::initializer_list<int> params={}){
     return raw({ri(id),ri(type),ri(static_cast<int>(params.size())),ri(locals),types.toAbdValue(),body});
 }
 R rmodule(std::initializer_list<R> functions,int globals=0,R signatures=nullptr){
-    return raw({rs("AZSCRIPT"),ri(6),ri(1),rs("test"),ri(globals),std::make_shared<AbdMap>()->toAbdValue(),signatures?signatures:raw({}),raw(functions),rs(""),raw({})});
+    return raw({rs("AZSCRIPT"),ri(7),ri(1),rs("test"),ri(globals),std::make_shared<AbdMap>()->toAbdValue(),signatures?signatures:raw({}),raw(functions),rs(""),raw({})});
 }
 R replace_raw(R value,std::size_t field,R replacement){AbdStack fields(value);fields.vs.at(field)=std::move(replacement);return fields.toAbdValue();}
 R append_raw(R value,R extra){AbdStack fields(value);fields.vs.push_back(std::move(extra));return fields.toAbdValue();}
@@ -109,7 +114,7 @@ std::shared_ptr<script> load_raw(R value,bool ready=true){
 }
 void insert_raw(const std::shared_ptr<script>& target,R value,bool ready=true){auto bytes=value->toBytes();target->insert_script(bytes.get(),value->size+4);if(ready)target->flush();}
 // Test fixture authoring retains readable names; only this test encoder resolves
-// them to slots. The interpreter is always given the public raw v6 format.
+// them to slots. The interpreter is always given the public raw v7 format.
 int fixture_int(MV value){auto p=std::dynamic_pointer_cast<IntAbdValue>(value);if(!p)throw std::invalid_argument("fixture requires int");return p->data;}
 std::string fixture_string(MV value){auto p=std::dynamic_pointer_cast<StringAbdValue>(value);if(!p)throw std::invalid_argument("fixture requires string");return p->data;}
 A fixture_array(MV value){auto p=std::dynamic_pointer_cast<AbdArray>(value);if(!p)throw std::invalid_argument("fixture requires array");return p;}
@@ -160,6 +165,10 @@ struct fixture_encoder {
         }
         if(code=="od")return rx(11,{node(map->get("v"))});
         if(code=="brk")return rx(29);
+        if(code=="new_block")return rx(32,{map->get("size")->toAbdValue()});
+        if(code=="block_address")return rx(33,{node(map->get("v"))});
+        if(code=="mv")return rx(34,{ri(slot(map->get("v")))});
+        if(code=="drop")return rx(35,{node(map->get("v"))});
         if(code=="not"||code=="neg")return rx(code=="not"?25:26,{node(map->get("v"))});
         if(code=="if") {
             auto condition=node(map->get("v"));auto then=scoped(map->get("val"));
@@ -197,7 +206,7 @@ R encode_fixture(M source) {
         const int locals=numbered?fixture_int(entry->get("local-count")):encoder.next-params;
         functions.vs.push_back(raw({entry->get("id")->toAbdValue(),entry->get("return-type")->toAbdValue(),ri(params),ri(locals),types.toAbdValue(),body}));
     }
-    return raw({rs("AZSCRIPT"),ri(6),ri(1),rs("fixture"),ri(global_count),std::make_shared<AbdMap>()->toAbdValue(),signatures.toAbdValue(),functions.toAbdValue(),rs(""),raw({})});
+    return raw({rs("AZSCRIPT"),ri(7),ri(1),rs("fixture"),ri(global_count),std::make_shared<AbdMap>()->toAbdValue(),signatures.toAbdValue(),functions.toAbdValue(),rs(""),raw({})});
 }
 void fixture_names(const std::shared_ptr<script>& target,M source,std::size_t offset=0) {
     if(source->get("exec-version"))return;
@@ -380,7 +389,7 @@ int main(){try{
             rhint("",{},0,raw({assume("A",1),assume("B",1)})),
             rhint("",{},0,raw({assume("A",1),assume("A",2)})),
             rhint("",{rfn(0x00010002,VOID_VALUE,rblock({}))},0,raw({assume("A",1)}))})
-            rejects([&]{load_raw(malformed,false);},"v6 malformed hint module rejected before mounting");
+            rejects([&]{load_raw(malformed,false);},"v7 malformed hint module rejected before mounting");
         rejects([&]{load_raw(rmodule({rfn(10,VOID_VALUE,rx(10,{rc(n(0)),rb(true),ri(0x0fff0000),rb(false)}))}),false);},
                 "main entry is not a valid object destructor");
     }
@@ -465,9 +474,9 @@ int main(){try{
     {
         auto twenty=rc(n(20));auto zero=rc(n(0));
         auto compact=load_raw(rmodule({rfn(10,INT_VALUE,rx(7,{rb(true),rx(12,{twenty,rc(n(22))})}))}));
-        check(integer(compact->invoke(10))==42,"raw v6 directly executes native arithmetic expressions");
-        for(int opcode=0;opcode<29;++opcode)
-            rejects([&]{load_raw(rmodule({rfn(10,VOID_VALUE,rx(opcode))}));},"v6 opcode rejects missing fields");
+        check(integer(compact->invoke(10))==42,"raw v7 directly executes native arithmetic expressions");
+        for(int opcode=0;opcode<36;++opcode)if(opcode!=29&&opcode!=30)
+            rejects([&]{load_raw(rmodule({rfn(10,VOID_VALUE,rx(opcode))}));},"v7 opcode rejects missing fields");
         auto byte=[](unsigned char value){return std::make_shared<AbdValue>(&value,1);};
         const unsigned char bad_text[]={0xed,0xa0,0x80};
         const auto invalid_utf8=std::make_shared<AbdValue>(bad_text,3);
@@ -482,7 +491,7 @@ int main(){try{
             rc(std::make_shared<DoubleAbdValue>(std::numeric_limits<double>::infinity())),
             rc(std::make_shared<FloatAbdValue>(std::numeric_limits<float>::quiet_NaN())),
             rx(0,{raw({ri(0xce2009),byte(sentinel)})}),rx(0,{raw({ri(0xce200a),byte(0)})})})
-            rejects([&]{load_raw(rmodule({rfn(10,VOID_VALUE,expression,1)},1));},"v6 malformed expression is rejected");
+            rejects([&]{load_raw(rmodule({rfn(10,VOID_VALUE,expression,1)},1));},"v7 malformed expression is rejected");
         auto good_function=rfn(10,VOID_VALUE,rblock({}));auto good_module=rmodule({good_function});
         for(auto malformed:{replace_raw(good_module,1,ri(3)),replace_raw(good_module,1,ri(4)),replace_raw(good_module,1,ri(5)),replace_raw(good_module,1,byte(4)),
             replace_raw(good_module,2,byte(1)),replace_raw(good_module,3,invalid_utf8),replace_raw(good_module,4,ri(-1)),
@@ -492,41 +501,41 @@ int main(){try{
             rmodule({replace_raw(good_function,3,ri(1048577))}),rmodule({replace_raw(good_function,4,raw({ri(INT_VALUE)}))}),
             rmodule({rfn(10,VOID_VALUE,rx(4,{ri(0),ri(0),rb(false)}),0,{INT_VALUE})}),
             rmodule({good_function,good_function}),rmodule({},0,raw({raw({ri(0x01230001),ri(0),raw({}),ri(9)})}))})
-            rejects([&]{load_raw(malformed);},"v6 malformed module or function record rejected");
+            rejects([&]{load_raw(malformed);},"v7 malformed module or function record rejected");
         // The new interpreter intentionally rejects the retired Map formats.
         rejects([&]{load_raw(module({fn(10,VOID_VALUE,block({}))})->toAbdValue());},"named Map executable is unsupported");
         rejects([&]{load_raw(slot_module({slot_fn(10,VOID_VALUE,block({}))})->toAbdValue());},"v3 Map executable is unsupported");
         auto constant_null=rx(0,{raw({ri(0xce200a),byte(sentinel)})});
         auto scalar_program=load_raw(rmodule({rfn(10,VOID_VALUE,rx(7,{rb(true),constant_null})),
             rfn(11,STRING_VALUE,rx(7,{rb(true),rc(s(std::string("中文\0",7)))}))}));
-        check(scalar_program->invoke(10)->type==VOID_VALUE,"v6 current void sentinel round-trips");
-        check(value_to_string(scalar_program->invoke(11))==std::string("中文\0",7),"v6 UTF-8 string preserves embedded zero");
+        check(scalar_program->invoke(10)->type==VOID_VALUE,"v7 current void sentinel round-trips");
+        check(value_to_string(scalar_program->invoke(11))==std::string("中文\0",7),"v7 UTF-8 string preserves embedded zero");
         auto metadata=std::make_shared<AbdMap>();auto child=std::make_shared<AbdMap>();
         child->put("flag",std::make_shared<BoolAbdValue>(true));metadata->put("nested",block({n(3),child}));
         auto metadata_program=load_raw(replace_raw(good_module,5,metadata->toAbdValue()));
-        check(metadata_program->meta->get("nested")!=nullptr,"v6 extensions preserve generic typed nested metadata");
+        check(metadata_program->meta->get("nested")!=nullptr,"v7 extensions preserve generic typed nested metadata");
         for(auto extension:{raw({rs("x"),ri(1),invalid_utf8}),raw({rs("x"),ri(3),byte(1)}),
             raw({rs("x"),ri(0x0d00),byte(2)}),raw({rs("x"),ri(0xce2009),raw({})}),
             raw({rs("x"),ri(999),raw({})}),raw({rs("x"),ri(3),ri(1),rs("x"),ri(3),ri(2)})})
-            rejects([&]{load_raw(replace_raw(good_module,5,extension));},"v6 extension metadata validates types and fields");
+            rejects([&]{load_raw(replace_raw(good_module,5,extension));},"v7 extension metadata validates types and fields");
         auto chain=rc(n(0));for(int i=0;i<100;++i)chain=rx(12,{chain,rc(n(1))});
         check(integer(load_raw(rmodule({rfn(10,INT_VALUE,rx(7,{rb(true),chain}))}))->invoke(10))==100,
-              "v6 keeps 100-level arithmetic chains executable");
+              "v7 keeps 100-level arithmetic chains executable");
         for(int i=0;i<35;++i)chain=rx(12,{chain,rc(n(1))});
-        rejects([&]{load_raw(rmodule({rfn(10,INT_VALUE,rx(7,{rb(true),chain}))}));},"v6 raw stack nesting is bounded");
+        rejects([&]{load_raw(rmodule({rfn(10,INT_VALUE,rx(7,{rb(true),chain}))}));},"v7 raw stack nesting is bounded");
         auto deep_metadata=raw({});for(int i=0;i<128;++i)deep_metadata=raw({rs("nested"),ri(2),deep_metadata});
         rejects([&]{load_raw(replace_raw(good_module,5,deep_metadata));},"metadata cannot bypass enclosing module depth");
         auto data=good_module->toBytes();const auto length=static_cast<std::size_t>(good_module->size)+4;
-        rejects([&]{load_script(data.get(),length-1);},"v6 truncated outer frame rejected");
+        rejects([&]{load_script(data.get(),length-1);},"v7 truncated outer frame rejected");
         std::vector<unsigned char> trailing(data.get(),data.get()+length);trailing.push_back(0);
-        rejects([&]{load_script(trailing.data(),trailing.size());},"v6 trailing bytes rejected");
-        rejects([&]{load_script(data.get(),64*1024*1024+1);},"v6 file size checked before reading payload");
+        rejects([&]{load_script(trailing.data(),trailing.size());},"v7 trailing bytes rejected");
+        rejects([&]{load_script(data.get(),64*1024*1024+1);},"v7 file size checked before reading payload");
         auto truncated=std::make_shared<AbdValue>(good_module->data,good_module->size-1);
-        rejects([&]{load_raw(truncated);},"v6 truncated child frame rejected");
+        rejects([&]{load_raw(truncated);},"v7 truncated child frame rejected");
         const auto function_count=compact->functions.size();
-        rejects([&]{insert_raw(compact,replace_raw(rmodule({},2),1,ri(99)));},"v6 invalid inserted header rejected");
+        rejects([&]{insert_raw(compact,replace_raw(rmodule({},2),1,ri(99)));},"v7 invalid inserted header rejected");
         check(compact->baseEnv->variables.empty()&&compact->functions.size()==function_count&&integer(compact->invoke(10))==42,
-              "invalid v6 insertion preserves the old state");
+              "invalid v7 insertion preserves the old state");
     }
     {
         auto numeric=load_module(slot_module({
@@ -945,6 +954,96 @@ int main(){try{
         rejects([&]{heap::set_owner(address{host_block.value+7},owner_script->baseEnv.get());},"owner requires an allocation start");
         heap::free(host_block);
         owner_script->destroy();check(heap::lenAlloc()==0,"base scope releases its allocation on destroy");
+    }
+    // Literal objects: slot blocks with value semantics and expiring addresses.
+    {
+        auto host=blocks::create(3);auto base=blocks::address_of(host);
+        check(blocks::is_block_address(base)&&!blocks::is_block_address(address{5}),"object addresses carry the block tag");
+        heap::getAt(address{base.value+2})->setValue(7);
+        check(integer(heap::getAt(address{base.value+2}))==7&&heap::object_address(base,1).value==base.value+1,
+              "object slots resolve through the public heap accessors");
+        rejects([&]{heap::getAt(address{base.value+3});},"object slot beyond its length rejected");
+        rejects([&]{heap::object_address(address{base.value+1},0);},"member address requires the object start");
+        blocks::resize(host,5);heap::getAt(address{base.value+4})->setValue(1);
+        check(blocks::length(host)==5&&integer(heap::getAt(address{base.value+2}))==7,"growing keeps existing slots and addresses");
+        blocks::resize(host,2);
+        rejects([&]{heap::getAt(address{base.value+2});},"shrinking expires trailing slots");
+        auto copy=blocks::copy(host);
+        check(copy->id!=host->id&&copy->slots.size()==2,"a copy has its own storage and address");
+        host.reset();
+        rejects_containing([&]{heap::getAt(base);},"expired","a released object's address expires");
+        check(blocks::address_of(blocks::create(1)).value!=base.value,"object ids are never reused");
+        rejects_containing([&]{heap::free(address{0});heap::delete_object(blocks::address_of(copy),nullptr);},"literal object","delete rejects literal objects");
+        auto chain=blocks::create(1);
+        rejects_containing([&]{for(int i=0;i<80;++i){auto outer=blocks::create(1);blocks::store(outer->slots[0],std::make_shared<variable>(chain),nullptr);chain=outer;}},
+                           "nesting","object nesting is bounded");
+        auto holder=std::make_shared<variable>(nullptr);blocks::store(holder,std::make_shared<variable>(blocks::create(1)),nullptr);
+        auto owned=blocks::of(holder);blocks::store(owned->slots[0],holder,nullptr);
+        rejects_containing([&]{blocks::store(owned->slots[0],holder,nullptr);},"itself","assigning an object into itself is rejected");
+
+        // log = log*10 + field for each destructor run.
+        auto value_log=[](int destructor){return typed_fn(destructor,VOID_VALUE,block({set("log",binary("add",binary("multiply",var("log"),n(10)),
+            call(0x0abd0006,{var("__func_param0")})))}),{ADDRESS_VALUE});};
+        auto literal=program({
+            typed_fn(20,OBJECT_VALUE,block({def("o",new_block(1)),binary("m",call(0x0abd0006,{block_address(var("o"))}),var("__func_param0")),
+                object_bind(block_address(var("o")),30,false),object_return(var("o"))}),{INT_VALUE}),
+            value_log(30),
+            typed_fn(31,VOID_VALUE,block({set("log",binary("add",binary("multiply",var("log"),n(10)),n(9)))}),{ADDRESS_VALUE}),
+            fn(10,INT_VALUE,block({def("a",call(20,{n(1)})),def("b",call(20,{n(2)})),ret(n(0))})),
+            fn(11,INT_VALUE,block({def("a",call(20,{n(1)})),def("b",var("a")),binary("m",call(0x0abd0006,{block_address(var("b"))}),n(5)),
+                ret(call(0x0abd0006,{block_address(var("a"))}))})),
+            fn(12,INT_VALUE,block({def("a",call(20,{n(1)})),def("p",block_address(var("a"))),def("b",call(20,{n(7)})),set("a",var("b")),
+                ret(call(0x0abd0006,{var("p")}))})),
+            typed_fn(13,OBJECT_VALUE,block({def("x",call(20,{n(4)})),object_return(var("x"))}),{}),
+            fn(14,INT_VALUE,block({def("y",call(13)),ret(call(0x0abd0006,{block_address(var("y"))}))})),
+            typed_fn(15,ADDRESS_VALUE,block({def("x",call(20,{n(4)})),ret(block_address(var("x")))}),{}),
+            fn(16,INT_VALUE,block({ret(call(0x0abd0006,{call(15)}))})),
+            fn(17,INT_VALUE,block({set("log",n(0)),call(20,{n(3)}),ret(var("log"))})),
+            fn(18,INT_VALUE,block({def("i",n(0)),def("seen",n(0)),
+                loop(binary("lt",binary("add",var("i"),call(0x0abd0006,{block_address(call(33))})),n(100)),
+                     block({set("seen",var("log")),set("i",binary("add",var("i"),n(1)))})),ret(var("seen"))})),
+            fn(19,INT_VALUE,block({def("p",call(0x0abd0003,{n(1)})),binary("m",call(0x0abd0006,{var("p")}),call(20,{n(5)})),
+                object_bind(var("p"),31,false),ret(n(0))})),
+            fn(21,INT_VALUE,block({def("p",call(0x0abd0003,{n(1)})),binary("m",call(0x0abd0006,{var("p")}),call(20,{n(5)})),
+                call(0x0abd0002,{var("p")}),ret(var("log"))})),
+            fn(22,INT_VALUE,block({def("a",call(20,{n(1)})),branch(call(0x0abd0002,{block_address(var("a"))}),block({ret(n(1))})),
+                ret(n(0))})),
+            fn(34,VOID_VALUE,block({def("a",call(20,{n(1)})),call(0x0abd0004,{block_address(var("a"))})})),
+            fn(23,INT_VALUE,block({def("a",call(20,{n(1)})),object_delete(block_address(var("a"))),ret(n(0))})),
+            fn(24,INT_VALUE,block({def("a",call(20,{n(1)})),def("b",call(20,{n(2)})),drop(var("a")),set("log",binary("multiply",var("log"),n(10))),ret(n(0))})),
+            fn(25,VOID_VALUE,block({def("o",new_block(1)),binary("m",call(0x0abd0006,{block_address(var("o"))}),call(20,{n(6)})),
+                binary("divide",n(1),n(0))})),
+            typed_fn(26,INT_VALUE,block({ret(call(0x0abd0006,{block_address(var("__func_param0"))}))}),{OBJECT_VALUE}),
+            fn(27,INT_VALUE,block({def("a",call(20,{n(8)})),def("r",call(26,{var("a")})),ret(var("r"))})),
+            typed_fn(32,VOID_VALUE,block({set("log",binary("add",var("log"),n(1)))}),{ADDRESS_VALUE}),
+            typed_fn(33,OBJECT_VALUE,block({def("o",new_block(1)),binary("m",call(0x0abd0006,{block_address(var("o"))}),n(0)),
+                object_bind(block_address(var("o")),32,false),object_return(var("o"))}),{}),
+            typed_fn(28,INT_VALUE,block({def("t",move_out("__func_param0")),ret(call(0x0abd0006,{block_address(var("t"))}))}),{OBJECT_VALUE}),
+            fn(29,INT_VALUE,block({ret(call(28,{call(20,{n(3)})}))}))
+        },block({s("log")}));
+        auto log=literal->baseEnv->getVariable("log");
+        const auto run=[&](int id){log->setValue(0);return integer(literal->invoke(id));};
+        run(10);check(integer(log)==21,"literal locals end in reverse order");
+        check(run(11)==1&&integer(log)==51,"initializing from a named object copies every slot; each copy is destroyed");
+        check(run(12)==7&&integer(log)==77,"assignment copies in place and keeps the object's address");
+        check(run(14)==4&&integer(log)==4,"returning a local moves it to the caller without an extra copy");
+        rejects_containing([&]{run(16);},"expired","an escaped address of an ended object is rejected");
+        check(run(17)==3,"an unbound temporary ends with its statement");
+        check(run(18)==100,"loop-condition temporaries end after each evaluation");
+        run(19);check(integer(log)==95,"value fields end after the containing heap object's destructor");
+        check(run(21)==0&&heap::lenAlloc()==0,"raw free releases value fields without destructors");
+        check(run(22)==0&&integer(log)==1,"mem_free does not release literal-object storage");
+        rejects_containing([&]{literal->invoke(34);},"literal object address","make_free rejects literal objects");
+        rejects_containing([&]{run(23);},"literal object","delete rejects literal objects");
+        run(24);check(integer(log)==102,"drop ends a value immediately and scope cleanup skips it");
+        log->setValue(0);rejects_containing([&]{literal->invoke(25);},"Division by zero","construction failure propagates");
+        check(integer(log)==6,"completed value members end when construction fails");
+        check(run(27)==8&&integer(log)==88,"by-value parameters are separate copies destroyed with the call");
+        check(run(29)==3&&integer(log)==3,"a moved parameter is not destroyed twice");
+        auto result=literal->invoke(13);
+        check(result->type==OBJECT_VALUE&&!blocks::of(result)->owner,"a host call receives a host-held object");
+        literal->destroy();
+        check(heap::lenAlloc()==0,"literal objects leave no heap allocations");
     }
     // Host namespaces never overlap script namespaces.
     rejects_containing([]{registerExecutor(std::make_shared<test_executor>(0));},"reserved host namespace","host cannot bind lifecycle namespace 0");

@@ -25,6 +25,8 @@ public final class AbdInvoker {
     public static final int BOOLEAN_VALUE = 4;
     public static final int VOID_VALUE = 5;
     public static final int ADDRESS_VALUE = 7;
+    /** A literal object value; it never crosses the Java boundary. */
+    public static final int OBJECT_VALUE = 8;
     private static boolean initialized;
     private static boolean loaded;
     private static int activeCalls;
@@ -132,6 +134,7 @@ public final class AbdInvoker {
             case STRING_VALUE: return Caller.getMemStr(pointer);
             case ADDRESS_VALUE: return Address.of(Caller.getMemAddress(pointer));
             case VOID_VALUE: return null;
+            case OBJECT_VALUE: throw new IllegalStateException("A literal object cannot be read from Java; read its fields through a pointer");
             default: throw new IllegalStateException("Unknown native value type");
         }
     }

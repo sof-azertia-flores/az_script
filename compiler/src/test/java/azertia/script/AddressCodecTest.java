@@ -39,7 +39,7 @@ class AddressCodecTest {
 
     @Test void addressesKeepTheirDistinctTypeAndAllUnsignedBits() {
         ExecProgram program = program(); AbdValue payload = program.toValue();
-        assertEquals(6, AbdBasicType.abd2int(payload.getAsAss().values.get(1)));
+        assertEquals(7, AbdBasicType.abd2int(payload.getAsAss().values.get(1)));
         AcsObject decoded = ExecCodec.decode(payload);
         assertEquals(program.toJson(), decoded.toJson());
         assertArrayEquals(payload.toAbdFormat(), decoded.toValue().toAbdFormat());
@@ -79,7 +79,8 @@ class AddressCodecTest {
         ((AcsObject)function.getAsAcsArray("script").acsa.get(0)).put("v", new AcsAddress(1L));
         assertThrows(IllegalArgumentException.class, slots::toValue);
         ExecProgram types = program();
-        ((AcsObject)types.getAsAcsArray("f").acsa.get(0)).put("return-type", 8);
+        // 7 is address and 8 is a literal object; 9 is not a type code.
+        ((AcsObject)types.getAsAcsArray("f").acsa.get(0)).put("return-type", 9);
         assertThrows(IllegalArgumentException.class, types::toValue);
     }
 }

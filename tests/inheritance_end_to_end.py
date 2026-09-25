@@ -70,8 +70,8 @@ def main():
 
         execute('prefix-methods', '''class Base{int x=3;int get(){return x;}void set(int n){x=n;}}
             class Child:Base{int y=7;int sum(){return get()+y;}}
-            void main(){Child c;print(c.get());print(c.sum());c.set(9);print(c.x);print(c.y);
-            Base b=c;b.x=11;print(c.sum());}''', '3\n10\n9\n7\n18\n')
+            void main(){Child * c();print(c.get());print(c.sum());c.set(9);print(c.x);print(c.y);
+            Base* b=c;b.x=11;print(c.sum());}''', '3\n10\n9\n7\n18\n')
         execute('public-base', '''class Base{int x=4;}class Child:public Base{int y=6;}
             void main(){Child c;print(c.x+c.y);}''', '10\n')
         execute('commented-underscored-base', '''class Base_Type{int x;Base_Type(int n){x=n;}}
@@ -102,54 +102,54 @@ def main():
             void main(){B b;print(b.first);print(b.later);}''', '9\n4\n')
         execute('field-shadowing', '''class A{int x=2;int read(){return x;}}
             class B:A{int x=8;int own(){return x;}}
-            void main(){B b;A a=b;print(b.x);print(a.x);print(b.read());print(b.own());
+            void main(){B * b();A* a=b;print(b.x);print(a.x);print(b.read());print(b.own());
             b.x=9;a.x=3;print(b.read());print(b.own());}''', '8\n2\n2\n8\n3\n9\n')
         execute('field-method-cross-hiding', '''class A{int x=3;int value(){return 4;}}
             class B:A{int value=9;int x(){return 8;}}
-            void main(){B b;A a=b;print(b.x());print(a.x);print(b.value);print(a.value());}''', '8\n3\n9\n4\n')
+            void main(){B * b();A* a=b;print(b.x());print(a.x);print(b.value);print(a.value());}''', '8\n3\n9\n4\n')
         execute('static-method-binding', '''class A{int x;int value(){return 1;}int call(){return value();}}
             class B:A{int y;int value(){return 2;}int own(){return value();}}
-            void main(){B b;A a=b;print(b.value());print(a.value());print(b.call());print(b.own());}''', '2\n1\n1\n2\n')
+            void main(){B * b();A* a=b;print(b.value());print(a.value());print(b.call());print(b.own());}''', '2\n1\n1\n2\n')
         execute('inherited-recursion', '''class A{int x=1;int sum(int n){if(n==0){return x;}return x+sum(n-1);}}
             class B:A{int x=10;}
             void main(){B b;print(b.sum(3));}''', '4\n')
         execute('upcast-assignment-parameter-return', '''class A{int x=5;}
             class B:A{int y=7;}
-            int read(A a){return a.x;}A asBase(B b){return b;}
-            void main(){B b;A a=null;a=b;print(read(b));print(asBase(b).x);print(a==b);}''', '5\n5\ntrue\n')
+            int read(A* a){return a.x;}A* asBase(B* b){return b;}
+            void main(){B * b();A* a=null;a=b;print(read(b));print(asBase(b).x);print(a==b);}''', '5\n5\ntrue\n')
         execute('upcast-owned-return', '''class A{int x=3;~A(){print("A");}}
             class B:A{int y=7;~B(){print("B");}}
-            A make(){B b;return b;}A forward(){return make();}
-            void main(){A a=forward();print(a.x);}''', '3\nB\nA\n')
+            A* make(){B * b();return b;}A* forward(){return make();}
+            void main(){A* a=forward();print(a.x);}''', '3\nB\nA\n')
         execute('upcast-borrowed-return', '''class A{int x=3;~A(){print("A");}}
             class B:A{int y;~B(){print("B");}}
-            A borrow(B b){return b;}
-            void main(){B b;{A a=borrow(b);}print(b.x);}''', '3\nB\nA\n')
+            A* borrow(B* b){return b;}
+            void main(){B * b();{A* a=borrow(b);}print(b.x);}''', '3\nB\nA\n')
         execute('upcast-manual-return', '''class A{int x=3;~A(){print("A");}}
             class B:A{int y;~B(){print("B");}}
-            A make(){return new B();}void main(){A a=make();print(a.x);delete a;}''', '3\nB\nA\n')
+            A* make(){return new B();}void main(){A* a=make();print(a.x);delete a;}''', '3\nB\nA\n')
         execute('base-alias-delete', '''class A{int x=3;~A(){print(x);}}
             class B:A{int y=7;~B(){print(y);}}
-            void main(){B b=new B();A a=b;delete a;}''', '7\n3\n')
+            void main(){B* b=new B();A* a=b;delete a;}''', '7\n3\n')
         execute('base-alias-delete-automatic', '''class A{int x=3;~A(){print(x);}}
             class B:A{int y=7;~B(){print(y);}}
-            void main(){B b;A a=b;delete a;}''', '7\n3\n', error=True)
+            void main(){B * b();A* a=b;delete a;}''', '7\n3\n', error=True)
         execute('most-derived-destructor-structural-alias', '''class A{int x=3;~A(){print("A");}}
             class B:A{int y=7;~B(){print("B");}}class C{int first;int second;~C(){print("wrong");}}
-            void main(){B b=new B();C c=b;delete c;}''', 'B\nA\n')
+            void main(){B* b=new B();C* c=b;delete c;}''', 'B\nA\n')
         execute('structural-flat-equivalence', '''class A{int x=3;}class B:A{double y=4.5;}
             class C{int first;double second;}
             void main(){B b;C c=b;print(c.first);print(c.second);}''', '3\n4.5\n')
-        execute('recursive-structural-equivalence', '''class A{int x;A next;}
-            class B:A{int y;}class C{int renamed;D next;int end;}class D{int renamed;D next;}
+        execute('recursive-structural-equivalence', '''class A{int x;A* next;}
+            class B:A{int y;}class C{int renamed;D* next;int end;}class D{int renamed;D* next;}
             void main(){B b;C c=b;print(c.next==null);}''', 'true\n')
-        execute('inherited-self-return', '''class A{int x=5;A self(){return this;}}
+        execute('inherited-self-return', '''class A{int x=5;A* self(){return this;}}
             class B:A{int y=7;}
             void main(){B b;print(b.self().x);}''', '5\n')
         execute('receiver-once', '''#gvar count
             class A{int x=5;int get(){return x;}}class B:A{int y=7;}
-            B select(B b){count+=1;return b;}
-            void main(){count=0;B b;print(select(b).get());select(b).x=8;print(count);print(b.x);}''', '5\n2\n8\n')
+            B* select(B* b){count+=1;return b;}
+            void main(){count=0;B * b();print(select(b).get());select(b).x=8;print(count);print(b.x);}''', '5\n2\n8\n')
         execute('destructor-early-return', '''class A{int x;~A(){print("A");}}
             class B:A{int y;~B(){print("B");return;}}
             void main(){B b;}''', 'B\nA\n')
@@ -161,7 +161,7 @@ def main():
             void main(){B b;int bad=2147483647+1;}''', 'B\nA\n', error='Integer overflow')
         execute('manual-destructor-error-chain', '''class A{int x;~A(){print("A");}}
             class B:A{int y;~B(){print("B");int bad=1/0;}}
-            void main(){A a=new B();delete a;}''', 'B\nA\n', error='Division by zero')
+            void main(){A* a=new B();delete a;}''', 'B\nA\n', error='Division by zero')
         execute('destructor-locals-before-parent', '''class Marker{int x;~Marker(){print("local");}}
             class A{int x;~A(){print("A");}}class B:A{int y;~B(){Marker m;print("B");}}
             void main(){B b;}''', 'B\nlocal\nA\n')
@@ -173,7 +173,7 @@ def main():
             void main(){B b;}''', 'A\nB\n~A\n', error='Division by zero')
         execute('derived-initializer-failure', '''class A{int x;~A(){print("A");}}
             class B:A{int y=1/0;~B(){print("B");}}
-            void main(){B b=new B();}''', 'A\n', error='Division by zero')
+            void main(){B* b=new B();}''', 'A\n', error='Division by zero')
         execute('intermediate-constructor-failure', '''class A{int x;~A(){print("A");}}
             class B:A{int y;B(){print("B");int bad=1/0;}~B(){print("~B");}}
             class C:B{int z;~C(){print("C");}}
@@ -182,19 +182,19 @@ def main():
             class B:A{int y;B(){int bad=2147483647+1;}~B(){print("B");}}
             void main(){B b;}''', 'A\n', error='Integer overflow')
         execute('base-argument-temporary-cleanup-failure', '''class T{int x=7;~T(){print("T");int bad=1/0;}}
-            T make(){T t;return t;}
-            class A{int x;A(T t){print(t.x);}~A(){print("A");}}
+            T* make(){T * t();return t;}
+            class A{int x;A(T* t){print(t.x);}~A(){print("A");}}
             class B:A{int y;B():A(make()){print("body");}~B(){print("B");}}
             void main(){B b;}''', '7\nbody\nT\nA\n', error='Division by zero')
         execute('constructor-early-return', '''class A{int x=3;~A(){print("A");}}
             class B:A{int y=7;B(){return;}~B(){print("B");}}
             void main(){B b;print(b.x+b.y);}''', '10\nB\nA\n')
         execute('null-inherited-member', '''class A{int x;}class B:A{int y;}
-            void main(){B b=null;print(b.x);}''', error=True)
+            void main(){B* b=null;print(b.x);}''', error=True)
         execute('null-inherited-method', '''class A{int x;int get(){return 3;}}class B:A{int y;}
-            void main(){B b=null;print(b.get());}''', error=True)
+            void main(){B* b=null;print(b.get());}''', error=True)
         execute('base-alias-use-after-delete', '''class A{int x;}class B:A{int y;}
-            void main(){B b=new B();A a=b;delete a;print(b.y);}''', error=True)
+            void main(){B* b=new B();A* a=b;delete a;print(b.y);}''', error=True)
 
         layout = execute('exact-prefix-layout', '''class A{int x;double y;}
             class B:A{string z;}class C:B{boolean q;}
@@ -233,7 +233,7 @@ def main():
             'implicit-downcast': 'class A{int x;}class B:A{int y;}void main(){A a;B b=a;}',
             'argument-downcast': 'class A{int x;}class B:A{int y;}void take(B b){}void main(){A a;take(a);}',
             'return-downcast': 'class A{int x;}class B:A{int y;}B bad(A a){return a;}void main(){}',
-            'inherited-self-downcast': 'class A{int x;A self(){return this;}}class B:A{int y;}void main(){B b;B c=b.self();}',
+            'inherited-self-downcast': 'class A{int x;A* self(){return this;}}class B:A{int y;}void main(){B b;B* c=b.self();}',
             'unrelated-prefix': 'class A{int x;}class B{int x;int y;}void main(){B b;A a=b;}',
             'hidden-field-wrong-type': 'class A{int x;}class B:A{string x;}void main(){B b;b.x=7;}',
             'hidden-method-wrong-signature': 'class A{int x;int f(int n){return n;}}class B:A{int y;int f(){return 2;}}void main(){B b;b.f(3);}',
@@ -277,7 +277,7 @@ class Child:Base{
             Base::Base(int seed):0002{this.seed=this.seed+seed;}
             int Base::get():0003{return seed;}
             Base::~Base():0004{print("base:"+seed);}
-            int readBase(Base b):0006{return b.get();}''', 'base')
+            int readBase(Base* b):0006{return b.get();}''', 'base')
         child, _ = compile_case('''#namespace_hint INHERITANCE_CHILD
             #include "child.include.azs"
             #gvar seed
@@ -286,15 +286,15 @@ class Child:Base{
             Child::Child(int seed):0002 : Base(seed+1){extra=extra+seed;if(seed<0){int bad=1/0;}}
             int Child::sum():0003{return get()+extra;}
             Child::~Child():0004{print("child:"+extra);if(extra==199){int bad=1/0;}}
-            Base produce():0006{Child c(2);return c;}
-            Base manual():0007{return new Child(3);}''', 'child')
+            Base* produce():0006{Child * c(2);return c;}
+            Base* manual():0007{return new Child(3);}''', 'child')
         client, _ = compile_case('''#include "child.include.azs"
             #gvar seed
-            extern Base produce():c0010006;
-            extern int readBase(Base b):b0010006;
-            extern Base manual():c0010007;
-            void main(){seed=1000;{Child c(4);Base b=c;print(b.get());print(c.sum());print(readBase(c));}
-            {Base a=produce();print(a.get());}Base m=manual();print(m.get());delete m;print(seed);}''', 'client')
+            extern Base* produce():c0010006;
+            extern int readBase(Base* b):b0010006;
+            extern Base* manual():c0010007;
+            void main(){seed=1000;{Child * c(4);Base* b=c;print(b.get());print(c.sum());print(readBase(c));}
+            {Base* a=produce();print(a.get());}Base* m=manual();print(m.get());delete m;print(seed);}''', 'client')
         expected = '15\n119\n15\nchild:104\nbase:15\n13\nchild:102\nbase:13\n14\nchild:103\nbase:14\n1000\n'
         run_case('cross-hint-base-first', client, expected, libraries=(base, child))
         run_case('cross-hint-child-first', client, expected, libraries=(child, base))
@@ -304,7 +304,7 @@ class Child:Base{
         run_case('cross-hint-constructor-rollback', failed_construction, 'base:9\n',
                  error='Division by zero', libraries=(child, base))
         failed_destructor, _ = compile_case('''#include "child.include.azs"
-            void main(){Base b=new Child(99);delete b;}''', 'cross-hint-failed-destructor')
+            void main(){Base* b=new Child(99);delete b;}''', 'cross-hint-failed-destructor')
         run_case('cross-hint-destructor-finally', failed_destructor, 'child:199\nbase:110\n',
                  error='Division by zero', libraries=(child, base))
 
@@ -316,17 +316,17 @@ class Child:Base{
                 class ConstructorLoop:Base{int y;ConstructorLoop(){while(true){}}}
                 class DestructorLoop:Base{int y;~DestructorLoop(){while(true){}}}
                 class Temporary{int x;~Temporary(){int bad=1/0;}}
-                Temporary make(){Temporary t;return t;}
-                class TemporaryBase{int x;TemporaryBase(Temporary t){}~TemporaryBase(){}}
+                Temporary* make(){Temporary * t();return t;}
+                class TemporaryBase{int x;TemporaryBase(Temporary* t){}~TemporaryBase(){}}
                 class TemporaryChild:TemporaryBase{int y;TemporaryChild():TemporaryBase(make()){}}
-                void constructorError():0002{BadConstructor c;}
-                void destructorError():0003{BadDestructor c;}
-                void manualDestructorError():0004{Base b=new BadDestructor();delete b;}
-                void constructorBudget():0005{ConstructorLoop c;}
-                void destructorBudget():0006{Base other;DestructorLoop c;}
-                void bodyBudget():0007{BadDestructor c;while(true){}}
-                void baseArgumentTemporaryError():0008{TemporaryChild c;}
-                void good():0009{Base b;}''', 'heap-reclamation')
+                void constructorError():0002{BadConstructor * c();}
+                void destructorError():0003{BadDestructor * c();}
+                void manualDestructorError():0004{Base* b=new BadDestructor();delete b;}
+                void constructorBudget():0005{ConstructorLoop * c();}
+                void destructorBudget():0006{Base * other();DestructorLoop * c();}
+                void bodyBudget():0007{BadDestructor * c();while(true){}}
+                void baseArgumentTemporaryError():0008{TemporaryChild * c();}
+                void good():0009{Base * b();}''', 'heap-reclamation')
             commands = [str(args.host), str(heap_program), 'flush', 'heap-empty', 'step-limit', '500']
             expected_heap = ['empty']
             # Repeat against one live runtime: shutdown must not hide a leaked allocation.
@@ -344,10 +344,10 @@ class Child:Base{
         if args.library:
             assert args.bridge, '--library requires --bridge'
             binary, _ = compile_case('''#include "child.include.azs"
-                Base create(){return new Child(6);}
-                Base createAuto(){Child c(7);return c;}
-                int read(Base b){return b.get();}
-                void release(Base b){delete b;}''', 'jni-client')
+                Base* create(){return new Child(6);}
+                Base* createAuto(){Child * c(7);return c;}
+                int read(Base* b){return b.get();}
+                void release(Base* b){delete b;}''', 'jni-client')
             names = json.loads((work / 'jni-client.ast.json').read_text(encoding='utf-8'))['abstract']
             java = work / 'InheritanceSourceBridge.java'
             java.write_text('''import azertia.AbdInvoker;

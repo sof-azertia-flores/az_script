@@ -195,7 +195,7 @@ public final class JniRegression {
         File[] malformed = work.listFiles((directory, name) -> name.startsWith("numeric.invalid-") && name.endsWith(".snapshot.abd"));
         if (malformed == null || malformed.length < 8) throw new AssertionError("Missing malformed numeric fixtures");
         List<File> rejected = new ArrayList<>(List.of(malformed));
-        for (int version : new int[]{0, 2, 3, 4, 5}) rejected.add(new File(work, "numeric.named-v" + version + ".snapshot.abd"));
+        for (int version : new int[]{0, 2, 3, 4, 5, 6}) rejected.add(new File(work, "numeric.named-v" + version + ".snapshot.abd"));
         for (File invalid : rejected) {
             fails(IllegalArgumentException.class, () -> AbdInvoker.loadStatus(invalid));
             equal(7, AbdInvoker.invoke(207));
