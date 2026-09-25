@@ -1,0 +1,10 @@
+package azertia.binary.structures;
+
+import java.lang.annotation.Retention;
+import java.lang.annotation.RetentionPolicy;
+
+@Retention(RetentionPolicy.RUNTIME)
+public @interface AsMap {
+    Class key ();
+    Class value ();
+}

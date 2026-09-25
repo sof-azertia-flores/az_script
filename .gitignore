@@ -1,0 +1,56 @@
+# Local operating system and editor state.
+.DS_Store
+.idea/
+.vscode/
+*.iml
+*.ipr
+*.iws
+*.swp
+*.swo
+
+# Build directories, dependency caches, and exported distributions.
+.gradle/
+build/
+dist/
+cmake-build*/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+install_manifest.txt
+compile_commands.json
+CTestTestfile.cmake
+Testing/
+__pycache__/
+*.py[cod]
+
+# Compiled artifacts; the Gradle bootstrap JARs remain versioned.
+*.o
+*.obj
+*.a
+*.lib
+*.dylib
+*.so
+*.so.*
+*.dll
+*.exe
+*.pdb
+*.dSYM/
+*.class
+*.jar
+!**/gradle/wrapper/gradle-wrapper.jar
+
+# Compiler outputs. Deliberate ABD fixtures are kept under version control.
+*.exec.abd
+*.exec.json
+*.ast.json
+/interpreter/output.abd
+
+# Historical submodule metadata: this repository tracks all modules directly.
+/interpreter/.gitmodules
+/abdjni/.gitmodules
+
+# Machine-local environment settings; share only example files.
+.env
+.env.*
+!.env.example
+!.env.*.example

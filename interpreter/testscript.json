@@ -1,0 +1,28 @@
+{
+  "meta": {
+    "author": "Miss Azertia Flores"
+  },
+  "body": {
+    "000":{
+      "main": {
+        "meta": {
+          "param": [
+          ],
+          "return-type": "void",
+          "position": 0
+        },
+        "script": [
+          {
+            "t": "call",
+            "call": "print",
+            "param": ["Hello,world!"]
+          },
+          {
+            "t": "ctrl",
+            "call": "return"
+          }
+        ]
+      }
+    }
+  }
+}

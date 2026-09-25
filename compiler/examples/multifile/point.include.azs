@@ -1,0 +1,12 @@
+#ifndef POINT_INCLUDED
+#define POINT_INCLUDED 1
+#assume_hint POINT_LIB addd
+
+class Point {
+    int x;
+    int serial = nextSerial();
+    extern Point(int value):addd0002;
+    extern int get():addd0003;
+    extern ~Point():addd0004;
+}
+#fi

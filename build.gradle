@@ -1,0 +1,17 @@
+allprojects {
+    group = 'azertia'
+    version = '0.2.0'
+    repositories { mavenCentral() }
+}
+subprojects {
+    plugins.withType(JavaPlugin).configureEach {
+        java {
+            sourceCompatibility = JavaVersion.VERSION_17
+            targetCompatibility = JavaVersion.VERSION_17
+        }
+        tasks.withType(JavaCompile).configureEach {
+            options.encoding = 'UTF-8'
+            options.release = 17
+        }
+    }
+}

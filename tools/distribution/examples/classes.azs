@@ -1,0 +1,25 @@
+class Point {
+    int x;
+    Point next; // Non-owning reference; defaults to null.
+
+    Point(int value) { this.x = value; }
+    int get() { return x; }
+    ~Point() { print("destroy Point(" + x + ")"); }
+}
+
+Point makePoint(int value) {
+    Point point(value);
+    return point; // The caller's block now owns this automatic object.
+}
+
+int main() {
+    Point automatic = makePoint(3);
+    Point alias = automatic;
+    alias.x = 7;
+    print(automatic.get());
+
+    Point manual = new Point(5);
+    print(manual.get());
+    delete manual;
+    return 0; // automatic is destroyed before main returns.
+}

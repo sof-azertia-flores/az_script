@@ -1,0 +1,9 @@
+#namespace_hint POINT_LIB
+#include "point.include.azs"
+#gvar serialCounter
+
+void __script_onload() { serialCounter = 40; print("library-load"); }
+int nextSerial():0005 { serialCounter += 1; return serialCounter; }
+Point::Point(int value):0002 { this.x = value; }
+int Point::get():0003 { return this.x + this.serial; }
+Point::~Point():0004 { print("point:" + this.serial); }

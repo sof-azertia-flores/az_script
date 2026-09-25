@@ -1,0 +1,12 @@
+# Normalize text in Git and keep executable Unix entry points portable.
+* text=auto
+*.sh text eol=lf
+*.py text eol=lf
+azscript text eol=lf
+gradlew text eol=lf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Serialized regression fixtures and Gradle bootstrap archives are binary.
+*.abd binary
+*.jar binary

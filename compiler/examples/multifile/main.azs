@@ -1,0 +1,11 @@
+#include "point.include.azs"
+
+void __script_onload() { print("main-load"); }
+int main() {
+    Point a(1);
+    Point b = new Point(2);
+    print(a.get());
+    print(b.get());
+    delete b;
+    return a.get();
+}

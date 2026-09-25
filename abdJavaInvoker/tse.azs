@@ -1,0 +1,42 @@
+#author Azertia Flores
+#setattr rmm rmm
+#ifdef rmm
+void rommm(){};
+#fi
+void main(){
+    print("Hello,World!");
+    def(fuck);
+    fuck=1;
+    print(fuck);
+    def(pointer);
+    pointer=alloc(25);
+    def(pointer2);
+    pointer2=alloc(25);
+    print("pointer1="+pointer);
+    print("pointer2="+pointer2);
+    fuck=0;
+    def(counter);
+    counter=2;
+    while(fuck<25,{
+        mem_get(pointer+fuck)=counter;
+        counter=counter*2;
+        fuck=fuck+1;
+    });
+    mem_get(pointer)=25;
+    print(mem_get(pointer));
+    fuck=0;
+    while(fuck<25,{
+        print(fuck+":"+mem_get(pointer+fuck));
+        fuck=fuck+1;
+    });
+    print("printed");
+};
+void __script_onload(){
+    print("onload");
+};
+void __script_pre_destroy(){
+    print("predestroy2");
+};
+int add(a,b){
+    return(a+b);
+};

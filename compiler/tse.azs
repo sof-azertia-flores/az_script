@@ -1,0 +1,18 @@
+#author Azertia Flores
+#setattr romannia romannia
+#ifdef romannia
+void rommm(){};
+#fi
+void main(){
+    print("Hello,World!");
+    def(fuck);
+    fuck=1;
+    print(fuck);
+    while(fuck<25,{print("114514");fuck=fuck+1;});
+};
+void __script_onload(){
+    print("onload");
+};
+void __script_pre_destroy(){
+    print("predestroy");
+};

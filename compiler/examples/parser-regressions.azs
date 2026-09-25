@@ -1,0 +1,38 @@
+#author AzScript compiler regression fixture
+#define LIMIT 5
+#gvar total
+
+void __script_onload() {
+    total = 0;
+}
+
+int factorial(int n) {
+    if (n <= 1) { return 1; }
+    return n * factorial(n - 1);
+}
+
+int subtract(a, b, c) {
+    return a - b - c;
+}
+
+int main() {
+    // Parentheses, commas and semicolons inside strings must not split code.
+    print("quoted: \"a,(b);{c}\" and a backslash: \\");
+    def(i, 0);
+    while (i < LIMIT, {
+        if (i % 2 == 0) { total += i; } else { total += 10; }
+        i += 1;
+    });
+    print(subtract(20, 3, 2));
+    print(100 / 5 / 2);
+    print(2 + 3 * (4 + 1));
+    print(factorial(5));
+    print(total);
+    print(false && (1 / 0 == 1));
+    print(true || (1 / 0 == 1));
+    return factorial(5) + total;
+}
+
+void __script_pre_destroy() {
+    print("done");
+}

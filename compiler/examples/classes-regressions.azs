@@ -1,0 +1,44 @@
+// Success returns 0. Objects are references; fields use one slot each.
+#gvar destroyed
+
+class Point {
+    int x;
+    Point next;
+
+    Point(int value) { this.x = value; }
+    int get() { return x; }
+    Point self() { return this; }
+    ~Point() { destroyed = destroyed + x; }
+}
+
+Point create(int value) {
+    {
+        Point result(value);
+        return result;
+    }
+}
+
+Point identity(Point value) { return value; }
+
+int main() {
+    destroyed = 0;
+    {
+        Point first(2);
+        Point alias = first;
+        alias.x = 7;
+        if (first.get() != 7 || first.next != null) { return 1; }
+    }
+    if (destroyed != 7) { return 2; }
+    {
+        Point returned = create(3);
+        { Point borrowed = identity(returned); }
+        if (returned.self().get() != 3) { return 3; }
+    }
+    if (destroyed != 10) { return 4; }
+    Point manual = null;
+    { manual = new Point(5); }
+    if (manual.get() != 5 || destroyed != 10) { return 5; }
+    delete manual;
+    if (destroyed != 15) { return 6; }
+    return 0;
+}

@@ -1,0 +1,2 @@
+rootProject.name = 'azscript'
+include 'abdJava', 'compiler', 'abdJavaInvoker'

@@ -1,0 +1,200 @@
+# 数学库独立 hint 模块重构（2026-09-25）
+
+数学库已拆分为 `compiler/stdlib/math.include.azs` 共享声明和 `compiler/stdlib/math.azs` 独立实现。hint 为 `AZSCRIPT_MATH`，头文件使用假定 namespace `4d41`；52个公开函数固定低位编号0002–0035，两个内部辅助函数不进入头文件。实现保留原有算法、定义域和精度约定。浮点接口参数明确为double，整数接口为int，math_pow为(double,int)，按extern契约精确检查类型。
+
+回归示例只include声明；编译后仅包含main和本地测试函数两个定义，数学库本身包含54个定义。库与调用方的源码→AST→ABD往返字节一致。测试独立固定公开ABI编号，验证重复include合并、缺库拒绝、擦除签名不符、两个consumer共享同一库、不同装载顺序、库先装载、重复flush，以及JNI查询实际namespace后直接调用公开函数和拒绝错误参数类型。
+
+`python3 tools/build_and_test.py --offline` 全套通过。数学库保留93项示例断言、114项数值比较、23项运行错误及负零验证；原先以动态参数触发的factorial(3.5)移为编译期类型错误，并补齐其他类型错误，共6项。正常构建中的真实JNI执行通过，无JNI警告。另以现有ASan/UBSan解释器执行更新后的整个数学库测试，全部通过且无报告；本次未修改C++运行时。
+
+```sh
+python3 tests/math_library.py --classpath "$(cat build/java/classpath.txt)" \
+  --runner build/sanitize/interpreter/azscript-run
+python3 tools/export_distribution.py dist/azscript-macos-arm64 --offline --force
+```
+
+发行包已刷新，增加预编译 `stdlib/math.exec.abd`、`math.ast.json`、`math.exec.json` 和共享声明头，manifest新增standardLibraries索引。搬迁后的14项发行包验收全部通过，包括重编数学库字节一致、调用方不携带实现及装配运行。138个清单文件的长度与SHA-256均匹配，包内文档链接有效。`build/math.*` 与 `build/math-regressions.*` 为可直接查看的本次产物。
+
+日志为 `build/math-hint-validation.log`、`build/math-hint-sanitize.log`、`build/math-hint-export.log`。使用方法及完整参数契约见 `compiler/stdlib/MATH.md`。
+
+# 多文件库、运行时 hint 链接与类外实现（2026-09-25）
+
+当前执行文件和 JNI 快照均为 v5，只接受新格式。新增独立库 hint、模块独立 assume、普通 extern 与显式函数编号、类外实现、结构类型、构造实现中的字段初始化和显式 flush。类名与布局不进入 exec；函数与析构 ID 保留完整32位，0xffffffff 不再作为无析构哨兵。以下较早记录仅保留历史验证结果，其兼容性和装载流程说明不再代表当前实现。
+
+以下命令均退出0：
+
+```sh
+python3 tools/build_and_test.py --offline
+python3 tools/build_and_test.py --offline --sanitize
+python3 tools/export_distribution.py dist/azscript-macos-arm64 --offline --force
+```
+
+JUnit 63/63（编译器60、归档3）、原生运行时428项通过。JNI通过2526条断言及四线程800次调用；另用256 KiB线程栈成功链接1000个依赖模块，无JNI警告。结构类型测试覆盖3000个相互引用的类，比较使用迭代遍历。运行时链接图也使用迭代遍历，避免合法的深依赖链耗尽宿主线程栈。
+
+普通源码端到端72项、类端到端70项通过，包含源码→AST→ABD字节一致及真实JNI执行。数学库93项回归、114项数值比较、24项错误路径和负零检查通过。数字槽三模块全局offset隔离、全部30种opcode和82个独立wire用例继续通过。sanitizer构建的对应源码67项、类69项及多库测试通过，无ASan/UBSan报告；JNI在普通构建的真实JVM中单独验证。
+
+新 `tests/hint_linking_end_to_end.py` 从独立源码验证共享类声明、消费者工厂、库私有全局初始化、构造参数遮蔽、初始化临时对象生命周期、跨库自动对象连续返回、手动对象返回、逆序析构、同一假定namespace的模块间复用、不同装载顺序、循环依赖、缺库后重试、重复flush、结构等价和高位函数/析构ID。它还通过JNI保存和恢复完整源码生成的多模块对象状态。原生与JNI回归覆盖链接失败原子性、擦除签名不符、初始化失败、未flush关闭、缓存函数及直接宿主回调的执行门禁、重复hint和宿主namespace冲突、快照身份不符与64 MiB超限保存保留旧文件。
+
+发行包 `dist/azscript-macos-arm64` 已重新导出，搬迁后的13项验收通过，包括默认ABD与两份JSON、独立多文件类库、脱离共享库的runner、C++静态/动态消费者和真实JNI消费者。manifest中的134个文件长度与SHA-256全部匹配，21个包内文档链接均存在；execFormatVersion与jniSnapshotVersion均为5。共享头文件及库/调用方示例位于 `compiler/examples/multifile/`，发行包内对应 `examples/multifile/`。`build/demo.*` 和 `build/classes-regressions.*` 也已按v5重新生成并执行验证。
+
+完整日志为 `build/hints-validation.log`、`build/hints-sanitize-validation.log` 和 `build/hints-export.log`。语法、装配和二进制契约见 `docs/HINT_LINKING.md` 与 `docs/EXEC_FORMAT.md`。实机验证范围为macOS arm64；Linux/Windows产物须在对应系统构建验证。
+
+# 缺陷修复验证（2026-09-25）
+
+本次修复 7 个缺陷，均先用最小源程序或 C++ 宿主复现，再补回归测试：
+
+- 字符串 `\uXXXX` 转义产生孤立 UTF-16 代理项时（如 `"\ud800"`），原先被静默写成 `?`；现在词法分析和 `compile-json` 都会报错，成对代理项正常。
+- 预处理器把宏展开粘到数字后面：`#define N 5` 后 `5N` 被编译为 `55`，`0x10`（宏 `x10`）变为 `07`，`2e`（宏 `e`）变为 `29`。现在紧贴数字的标识符字符视为同一数值字面量，交由词法分析报告非法后缀。
+- `C x(args);` 自动对象构造的参数错误丢失行列号，并显示内部名 `C::<scoped>`；现在带行列并显示为 `C constructor`，`new C(...)` 同样使用该名称。
+- 方法调用的参数数量和序号把隐式 `this` 计入：`c.m(1, 2)` 原报 `expects 2 arguments, got 3`，现报 `expects 1 arguments, got 2`，首个实参报为 argument 1。
+- 类字段类型未知、方法参数写 `void`、类名为保留类型名时，错误缺少文件与行列；现在与其他语法错误格式一致。
+- C++ 宿主 `script::destroy()` 后，未 `delete` 的 `new` 对象永久留在进程级堆和对象登记中，每次加载/销毁循环泄漏一份。现在销毁时释放其存储和登记，仍不补调用户析构（JNI 原本在销毁后清空堆，行为不变）。
+- 堆查找对全部分配线性扫描，`alloc` 每次复制并排序整张分配表，大量对象时呈平方级：40,000 个活跃对象时分配耗时 8.7 s、五轮成员访问 17.8 s。现在分配表保持有序并二分查找，首次适配跳过无空洞前缀，同规模分别约 0.1 s 与 0.08 s（Debug 库）。首次适配地址复用顺序不变。
+
+以下命令均退出 0：
+
+```sh
+python3 tools/build_and_test.py --offline
+python3 tools/build_and_test.py --offline --sanitize
+```
+
+JUnit 53/53（新增 3 项：孤立代理项、数值字面量内不展开宏、类诊断的位置/名称/实参序号），原生运行时 356 项（新增 6,000 步随机操作与朴素首次适配模型的差分比较、20,000 次连续分配及空洞复用、销毁释放未删除手动对象且不运行析构）。其余端到端、类、数学库、数字槽、紧凑格式及 JNI 回归与上一版一致通过；sanitizer 构建无 ASan/UBSan 报告。本次未重新导出 `dist/` 发行包。
+
+# Exec v4 裸 stack 与数字 opcode 验证（2026-09-24）
+
+当前编译器和解释器统一使用 exec v4：原来 27 种 `c` 控制字符串全部改为整数，加上 constant/block/call 共 30 个 opcode。根、函数、签名、表达式及列表使用固定字段顺序的裸 ABD stack；动态常量保留单元素 typed array，扩展元数据保留 typed map。解释器直接创建原生执行节点，不重建指令 Map/Array。旧字符串变量与 exec v3 Map 加载路径、旧节点构造器、字符串变量执行分支已移除；JNI 仅接受当前 v4 快照。下方较早阶段关于兼容读取的记录不再代表当前实现。
+
+以下命令均退出 0：
+
+```sh
+python3 tools/build_and_test.py --offline
+python3 tools/build_and_test.py --offline --sanitize
+python3 tools/export_distribution.py dist/azscript-macos-arm64 --offline --force
+```
+
+JUnit 50/50（编译器 47、归档 3）、原生运行时 350 项、JNI 2334 条断言及四线程 800 次调用通过。普通端到端 72 项、类端到端 70 项通过；sanitizer 对应 67/69 项，ASan/UBSan 无报告。数学库的 93 项回归、114 项数值比较、24 项错误路径、负零与普通构建中的 JNI 执行均通过。三模块数字槽和 insert offset 的源码→AST→ABD 测试在普通与 sanitizer 构建都通过。
+
+新增独立 wire 测试覆盖全部 30 个 opcode、固定字段顺序、完整标量类型、可选字段两种状态、82 个合法/非法编码用例及 JNI 对紧凑脚本字节的快照往返。源代码→可读 AST→ABD、Java 解码再编码、独立 Python 解码再编码均验证字节一致。未知版本和旧 Map 格式明确拒绝；缺失/额外字段、错误宽度、非法布尔、无效 UTF-8、非有限浮点、越界变量、无效类型和超过 128 层的嵌套均有覆盖。原有运行时和 JNI 功能样例通过测试侧编码器迁移为 v4，未因取消兼容而删除生命周期、回调、内存恢复及错误清理的覆盖。
+
+`tests/compact_exec_end_to_end.py` 的同一源程序实测新 ABD 为 4,702 字节，同等内容的旧 Map 编码为 14,504 字节，新文件占原体积 32.4%，减少约 67.6%。此数字仅表示该样例的文件大小，不代表执行速度；旧编码仅由测试构造用于对比及拒绝测试。
+
+发行包已刷新到 `dist/azscript-macos-arm64`，包含当前编译器、独立解释器、C++/JNI SDK、运行环境与 `docs/EXEC_FORMAT.md`。搬迁后的 12 项验收通过，默认同时输出 ABD 和两份 JSON；130 个文件的清单长度及 SHA-256 全部匹配，包内文档链接存在。`build/demo.*` 与 `build/classes-regressions.*` 已重新生成 v4 并执行验证。实机验证范围为 macOS arm64，Linux/Windows 仍需在目标平台构建和验证。
+
+日志为 `build/compact-validation.log`、`build/compact-sanitize-validation.log`、`build/compact-export.log`；规范见 `docs/EXEC_FORMAT.md`。
+
+# 数字变量与 insert 全局偏移验证（2026-09-24）
+
+编译器现输出 `exec-version: 3`、整数 `gvs` 和变量槽号；AST 继续保留源码名称。参数从 0 开始，局部槽紧随参数，全局从 -1 开始。每个加载的函数保存模块的 `global_offset/global_count`，访问全局时解码负数编号再加 offset；旧字符串执行文件继续可读。JNI 快照写 v4 全局值数组，保留旧脚本对应的 v2/v3/无版本格式兼容。
+
+以下命令均退出 0：
+
+```sh
+python3 tools/build_and_test.py --offline
+python3 tools/build_and_test.py --offline --sanitize
+python3 tools/export_distribution.py dist/azscript-macos-arm64 --offline --force
+```
+
+JUnit 46/46（编译器 43、归档 3）、原生运行时 250 项、JNI 2329 条断言及 800 次并发调用通过。原有端到端普通构建 72 项、sanitizer 67 项；类端到端普通 70 项、sanitizer 69 项；数学库与跨语言 ABD 检查全部通过。ASan/UBSan 无错误报告，真实 JNI 使用 `-Xcheck:jni` 无警告。
+
+新增 `tests/numeric_slots_end_to_end.py` 和 `tests/numeric_module_host.cpp`，将三个独立源码模块分别编译并经 AST 往返，再通过公开 C++ API 插入。三个模块都声明同名全局，函数记录的偏移分别为 0、1、3；递归、局部遮蔽、循环重入、类析构、内部创建函数及关闭钩子均访问自己的全局。重复插入被拒绝后，全局数量与原函数行为不变。运行时额外覆盖双向跨模块调用、旧模块混合加载、越界/错误类型/超大数量拒绝；JNI 覆盖新快照恢复及损坏数组拒绝的原子性。
+
+完整日志为 `build/numeric-slots-validation.log`、`build/numeric-slots-sanitize-validation.log` 和 `build/numeric-slots-export.log`。`dist/azscript-macos-arm64` 已刷新为配套的新编译器、解释器及 C++/JNI SDK，搬迁后的 12 项发行包验收通过。`build/classes-regressions.ast.json`、`.exec.json` 和 `.exec.abd` 已按新格式重新生成。
+
+实机范围仍为 macOS arm64。数字 exec 需要配套新版解释器；`insert` 的函数 ID 冲突规则和加载钩子运行失败后不回滚已完成写入的行为保持不变。
+
+# 发行包导出验证（2026-09-24）
+
+新增 `tools/export_distribution.py`，在 macOS arm64 上实际生成 `dist/azscript-macos-arm64`。包内附带 Java 运行环境，含完整编译器、独立 main 解释器、C++ 静态/动态 SDK、JNI JAR/dylib、语法与使用文档及接入示例。另以 `--system-java` 生成精简包验证依赖系统 Java 的路径。
+
+两种发行包均通过 `tools/test_distribution.py` 的 12 项检查。检查在安装后将整包移动到包含空格的新位置，从第三个工作目录调用；默认三份输出、显式输出路径、错误退出码、AST→ABD 逐字节一致、类析构、单独复制的解释器、真实 CMake 静态/动态宿主及 `-Xcheck:jni` Java 宿主均通过。带运行环境的编译器在 `PATH` 中没有 Java、`JAVA_HOME` 失效时仍可运行。
+
+`tests/test_export_distribution.py` 的 11 项回归验证非空目录拒绝、非法清单、源码目录保护、替换失败恢复以及并发占用目标时保留旧包备份；该回归已接入统一构建入口。发行包的 129 个文件校验值逐一验证，文档内部链接均存在，安装 CMake 配置及 Mach-O 的加载路径不引用源码/构建目录。
+
+本次重新运行 `python3 tools/build_and_test.py --offline`，全部语言、ABD、运行时与 JNI 回归通过，包括类端到端 70 项、既有端到端 72 项。日志为 `build/export-distribution.log`、`build/export-system-java.log` 和 `build/distribution-regressions.log`。本节未重新运行 sanitizer；此前类功能的 sanitizer 结果见下一节。
+
+Linux/Windows 的安装规则、扩展名和启动脚本已提供，但本机未作实机验证。原生包须匹配目标系统、架构及 C++ ABI，不能把当前 macOS 包用于其他系统。
+
+# 类语法更新验证（2026-09-24）
+
+本次在 macOS 工作区完成了类语法、引用语义、构造与析构、自动对象返回转移，以及 JNI v3 对象快照。以下两条统一入口均退出 `0`：
+
+```sh
+python3 tools/build_and_test.py --offline
+python3 tools/build_and_test.py --offline --sanitize
+```
+
+- JUnit：43/43 通过，其中编译器 40 项、归档 3 项。
+- 原生运行时：198 项检查；普通 CTest 3/3、ASan/UBSan CTest 2/2 通过。
+- JNI：2210 条断言及 4 个线程的 800 次调用通过，`-Xcheck:jni` 无警告。
+- 类端到端：普通构建 70 个场景（含源码编译产物经 JNI 执行、保存、恢复、删除），sanitizer 构建 69 个原生场景；全部有效源程序都通过 AST 再编译的 ABD 逐字节一致性检查。
+- 既有端到端：普通构建 72 个场景、sanitizer 构建 67 个场景；数学库的 93 个断言、114 组数值比较、24 个错误边界和正零测试通过，Java/C++ ABD 互读及字节一致性检查通过。
+
+类回归覆盖每字段一个 slot、隐式 `this`、名义类型、动态变量不推断类类型、类前向引用、成员默认值与初始化顺序、接收者和实参一次求值、别名共享、自动/手动对象、空引用、逆序析构、多层块返回及借用对象不降级。还覆盖构造/析构失败、原异常优先、执行预算耗尽、析构重入、原始释放注销、加载失败后的选择性清理，以及同名 `alloc/mem_get/make_free` 成员不能干扰编译器内部操作。
+
+JNI 回归验证快照恢复的原子性、旧格式兼容、已脱离作用域的自动对象、析构顺序，以及 Java 析构回调抛错后继续执行剩余析构并恢复同一个原始异常对象。
+
+当前可检查输出：
+
+- `build/classes-validation.log`：完整离线构建日志。
+- `build/classes-sanitize-validation.log`：完整 ASan/UBSan 构建日志；无 sanitizer 错误报告。
+- `build/native/Testing/Temporary/LastTest.log`：原生/JNI 检查明细。
+- `compiler/examples/classes-regressions.azs`：可执行类示例，真实运行返回 `0`。
+- `build/classes-regressions.ast.json`、`build/classes-regressions.exec.json`、`build/classes-regressions.exec.abd`：该示例本次生成的 AST、指令树和二进制。
+
+本次没有验证 Linux/Windows 或 Gradle 构建。对象仍使用整数地址，不提供地址世代识别；成员引用不拥有对象，`new` 对象须显式删除。这些是已确定的语言边界，详见 `compiler/LANGUAGE.md`。
+
+# 此前版本的验证记录
+
+以下保留历史记录，其中的测试数量和原文件校验结果不代表本次重新执行。
+
+环境：macOS arm64，AppleClang 21，JDK 21.0.5（所有 Java 源码按 `--release 17` 编译），CMake，Python 3。Linux、Windows 和用户的大项目接入尚未实际运行验证。
+
+## 已通过
+
+| 验证 | 结果 |
+| --- | --- |
+| 统一离线构建 `python3 tools/build_and_test.py --offline` | 退出码 0 |
+| 编译器与归档 JUnit | 33/33 通过 |
+| Java ABD 数据与反射结构回归 | 通过 |
+| C++ ABD 回归 | 通过，包含 10,000 个损坏输入变异样本 |
+| C++ 解释器 | 135 项检查通过 |
+| CTest：数据、运行时、JNI | 3/3 通过 |
+| 真实 JNI/JVM `-Xcheck:jni` | 2078 项断言；4 个工作线程共 800 次调用，通过 |
+| 源码→编译器→ABD→C++，及编译结果→Java/JNI | 72 个集成用例通过 |
+| 纯脚本数学库 | 93 个回归断言、114 组 Python `math` 差分比较、24 个错误边界及正零位模式；原生解释器全量、JNI 加载/数值/异常/重载路径通过 |
+| Java→C++、C++→Java 数据互读 | 每个字段一致，重新编码及两端独立生成的字节完全一致 |
+| ASan + UBSan 原生构建/CTest | 2/2 通过，无 sanitizer 报告 |
+| 静态链接 C++ 嵌入示例 `azscript-embed` | 宿主收到整数 146，销毁钩子输出 done |
+| 原文件校验 `python3 tools/verify_originals.py` | 292 个原文件逐字节未变 |
+
+## 关键回归场景
+
+- `20-3-2` → `15`、`100/5/2` → `10`、`2+3*(4+1)` → `17`。
+- `5e0/2` 和 `5./2` → `2.5`；`1.5f` 保持 float 类型；`-0.0` 保留负零位模式。
+- 字符串内部的引号、反斜杠、逗号、括号、分号、注释符号，以及中文/NUL/emoji。
+- 宏尾随 `//` 注释，未启用分支的多行注释，数值内部不展开宏，宏总展开量限制，include 相对路径、循环引用。
+- `#namespace` 的脚本函数 ID、带完整签名的 `#extern` 到真实 Java 回调，以及保留固定 ID 的 `main`。
+- 七个内置函数使用固定公开名称直接调用，保留名称和 `0xabd` ID 不能被源码或手写 AST 覆盖，未知预处理指令会被拒绝。
+- `#extern` 的所有标量参数/返回类型、精确类型和参数数量检查、嵌套返回类型推断、未知动态值拒绝、旧无签名语法拒绝，以及重复/保留 ID。
+- 绕过编译器的手工 ABD 与宿主直接调用仍会检查签名；错误参数不会进入回调，错误 Java 回调返回值立即成为 `IllegalStateException`。
+- 数学库覆盖 int32 极值、最小 subnormal 到最大 finite double 邻域、`exp(-745..709.78)`、`±1e12` 角度约化、稳定 mean/lerp/hypot、正零位模式、取整边界、定义域错误和重复 include guard。
+- 递归/前向调用、短路逻辑、嵌套循环、`break`、循环内 return、单语句循环作用域、参数从左到右按值求值。
+- 迁移后的 `abdJavaInvoker/tse.azs` 重新编译后运行，堆输出从 `0:25` 到 `24:33554432`，随后输出 `printed`、`predestroy2`。
+- 非法字符、缺括号、未知变量/函数、参数个数、非法赋值、错误返回形式、坏 JSON 都有正常错误退出。
+- 2000 层括号/一元/赋值/JSON 以及循环 AST 正常拒绝，宿主随后可继续编译。
+- int、float、double 的正负零除法都精确报告 `Division by zero`，并验证了 JNI 异常映射；整数溢出、无限循环、无限递归、损坏 ABD 和无效堆地址均有受控错误。
+- JNI 的关闭与 onload/onclose 异常、回调返回/重入/异常、零参数、快照坏输入和恢复原子性；onload 期间的回调可以 `invoke`。
+- 自动回收所有权：宿主回调重入的脚本函数不能释放挂起作用域的分配（报错且不留残留），调用者链上的释放和 `make_free` 后的释放照常；Java `memFree` 拒绝释放脚本作用域持有的块。
+- 数值转字符串使用最短可往返表示（`0.30000000000000004`、`123456789`、`0.1`、`-0`、`1e+20`）。
+- 100 项串联运算、40 层嵌套 if 可编译；130 项串联运算报告带行列的 ABD 上限错误；保留字不能声明为名字；UTF-8 BOM 不影响首行指令；非 void 函数缺少 return 在编译期报错。
+- 宿主不能绑定命名空间 `0`/`0xfff`，`#extern` 不能使用脚本命名空间，脚本命名空间中不存在的 ID 不会转给宿主。
+- 归档打包/解包拒绝同名文件与目录冲突及空数据条目，且不写出任何文件。
+
+## 日志和可检查输出
+
+- `build/native/Testing/Temporary/LastTest.log`：C++/JNI 详细输出。
+- `build/demo.ast.json`：示例的可读代码树。
+- `build/demo.exec.json`、`build/demo.exec.abd`：对应指令树和二进制。
+
+当前机器的 Gradle native-platform 动态库无法为 macOS arm64 初始化，因此没有完成 Gradle 路径验证；已通过的统一入口直接调用 javac、jar、JUnit、CMake 和真实 JVM，并复用经 SHA-256 校验的依赖，不依赖 Gradle daemon。Gradle 配置作为另一种构建方式保留。
+
+这些测试覆盖已实现功能和发现的回归，不代表不存在其他缺陷；运行时仍有共享堆、整数地址复用、宿主回调时间不受脚本预算限制等边界，详见 README。

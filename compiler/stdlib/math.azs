@@ -1,0 +1,473 @@
+#namespace_hint AZSCRIPT_MATH
+#include "math.include.azs"
+
+// AzScript basic mathematics library.
+// Public functions use the math_ prefix. Names containing math__ are internal.
+
+double math_pi():0002 { return 3.141592653589793; }
+double math_tau():0003 { return 6.283185307179586; }
+double math_e():0004 { return 2.718281828459045; }
+double math_ln2():0005 { return 0.6931471805599453; }
+double math_epsilon():0006 { return 2.220446049250313e-16; }
+
+// Produce the runtime's standard arithmetic exception for invalid domains.
+double math__domain_error() { return 1.0 / 0.0; }
+
+double math_abs(double x):0007 {
+    // The double subtraction also makes abs(INT_MIN) representable.
+    if (x == 0) { return 0.0; }
+    if (x < 0) { return 0.0 - x; }
+    return x;
+}
+
+int math_abs_int(int x):0008 {
+    if (x == -2147483648) { return math__domain_error(); }
+    if (x < 0) { return -x; }
+    return x;
+}
+
+int math_sign(double x):0009 {
+    if (x > 0) { return 1; }
+    if (x < 0) { return -1; }
+    return 0;
+}
+
+double math_min(double a, double b):000a {
+    if (a < b) { return a; }
+    return b;
+}
+
+double math_max(double a, double b):000b {
+    if (a > b) { return a; }
+    return b;
+}
+
+double math_clamp(double x, double lower, double upper):000c {
+    if (lower > upper) { return math__domain_error(); }
+    if (x < lower) { return lower; }
+    if (x > upper) { return upper; }
+    return x;
+}
+
+int math_min_int(int a, int b):000d {
+    if (a < b) { return a; }
+    return b;
+}
+
+int math_max_int(int a, int b):000e {
+    if (a > b) { return a; }
+    return b;
+}
+
+int math_clamp_int(int x, int lower, int upper):000f {
+    if (lower > upper) { return math__domain_error(); }
+    if (x < lower) { return lower; }
+    if (x > upper) { return upper; }
+    return x;
+}
+
+double math_square(double x):0010 { return (x * 1.0) * x; }
+double math_cube(double x):0011 { return ((x * 1.0) * x) * x; }
+double math_mean(double a, double b):0012 {
+    double first = a * 1.0;
+    double second = b * 1.0;
+    if ((first < 0 && second > 0) || (first > 0 && second < 0)) {
+        return (first + second) / 2.0;
+    }
+    if (math_abs(first) <= 8.988465674311579e307 &&
+        math_abs(second) <= 8.988465674311579e307) {
+        return (first + second) / 2.0;
+    }
+    return first + (second - first) / 2.0;
+}
+double math_lerp(double a, double b, double t):0013 {
+    double start = a * 1.0;
+    double end = b * 1.0;
+    if (t == 0) { return start; }
+    if (t == 1) { return end; }
+    if (start == end) { return start; }
+    if (t > 0 && t < 1) {
+        return start * (1.0 - t) + end * t;
+    }
+    if ((start < 0 && end > 0) || (start > 0 && end < 0)) {
+        return start * (1.0 - t) + end * t;
+    }
+    return start + (end - start) * t;
+}
+double math_to_radians(double degrees):0014 {
+    if (math_abs(degrees) <= 1e307) {
+        return (degrees * math_pi()) / 180.0;
+    }
+    return (degrees / 180.0) * math_pi();
+}
+double math_to_degrees(double radians):0015 {
+    if (math_abs(radians) <= 1e305) {
+        return (radians * 180.0) / math_pi();
+    }
+    return (radians / math_pi()) * 180.0;
+}
+
+boolean math_is_close(double a, double b, double relative_tolerance, double absolute_tolerance):0016 {
+    if (relative_tolerance < 0 || absolute_tolerance < 0) {
+        math__domain_error();
+        return false; // Unreachable; keeps this boolean path type-correct.
+    }
+    if (a == b) { return true; }
+    double first = math_abs(a);
+    double second = math_abs(b);
+    double scale = math_max(first, second);
+    if (scale == 0) { return true; }
+    if ((a < 0 && b > 0) || (a > 0 && b < 0)) {
+        // Subtract directly when the opposite-sign magnitude sum is finite.
+        // This retains boundary accuracy for absolute tolerances.
+        if (first <= 1.7976931348623157e308 - second) {
+            double finite_difference = math_abs(a * 1.0 - b * 1.0);
+            if (finite_difference <= absolute_tolerance) { return true; }
+            return finite_difference / scale <= relative_tolerance;
+        }
+        // If the sum overflows, no finite absolute tolerance can contain it.
+        double normalized_difference = math_abs(a / scale - b / scale);
+        return normalized_difference <= relative_tolerance;
+    }
+    double difference = math_abs(a * 1.0 - b * 1.0);
+    if (difference <= absolute_tolerance) { return true; }
+    return difference / scale <= relative_tolerance;
+}
+
+boolean math_approximately_equal(double a, double b):0017 {
+    return math_is_close(a, b, 1e-9, 1e-12);
+}
+
+// Exponent must be a signed int. Negative exponents return reciprocals.
+double math_pow(double base, int exponent):0018 {
+    if (base == 0 && exponent < 0) { return math__domain_error(); }
+    int power = exponent;
+    double result = 1.0;
+    double factor = base * 1.0;
+    if (power < 0) { factor = 1.0 / factor; }
+    while (power != 0) {
+        if (power % 2 != 0) { result = result * factor; }
+        power = power / 2;
+        if (power != 0) { factor = factor * factor; }
+    }
+    return result;
+}
+
+// Checked int32 power. Exponent must be a non-negative int.
+int math_int_pow(int base, int exponent):0019 {
+    if (exponent < 0) { return math__domain_error(); }
+    int power = exponent;
+    int result = 1;
+    int factor = base;
+    while (power != 0) {
+        if (power % 2 != 0) { result *= factor; }
+        power /= 2;
+        if (power != 0) { factor *= factor; }
+    }
+    return result;
+}
+
+// Newton iteration; valid for finite x >= 0.
+double math_sqrt(double x):001a {
+    double value = x * 1.0;
+    if (value < 0) { return math__domain_error(); }
+    if (value == 0) { return value; }
+    double guess = 1.0;
+    if (value > 1) { guess = value; }
+    int iteration = 0;
+    while (iteration < 1100) {
+        double next = (guess + value / guess) / 2.0;
+        if (next == guess) {
+            guess = next;
+            break;
+        }
+        guess = next;
+        iteration += 1;
+    }
+    return guess;
+}
+
+// Efficient truncation without a native cast. Result must fit signed int32.
+int math_trunc(double x):001b {
+    if (x >= 2147483648.0 || x <= -2147483649.0) { return math__domain_error(); }
+    boolean negative = x < 0;
+    double value = math_abs(x);
+    double step = 1.0;
+    while (step <= value / 2.0) { step *= 2.0; }
+    double whole = 0.0;
+    while (step >= 1.0) {
+        if (step <= value) {
+            whole += step;
+            value -= step;
+        }
+        step /= 2.0;
+    }
+    if (negative) { return -whole; }
+    return whole;
+}
+
+int math_floor(double x):001c {
+    if (x < -2147483648.0 || x >= 2147483648.0) { return math__domain_error(); }
+    int result = math_trunc(x);
+    if (x < 0 && result != x) { result -= 1; }
+    return result;
+}
+
+int math_ceil(double x):001d {
+    if (x <= -2147483649.0 || x > 2147483647.0) { return math__domain_error(); }
+    int result = math_trunc(x);
+    if (x > 0 && result != x) { result += 1; }
+    return result;
+}
+
+// Half values are rounded away from zero.
+int math_round(double x):001e {
+    if (x >= 2147483647.5 || x <= -2147483648.5) { return math__domain_error(); }
+    if (x >= 0) { return math_floor(x + 0.5); }
+    return math_ceil(x - 0.5);
+}
+
+double math_fraction(double x):001f { return x - math_floor(x); }
+
+int math_gcd(int a, int b):0020 {
+    a = math_abs_int(a);
+    b = math_abs_int(b);
+    while (b != 0) {
+        int remainder = a % b;
+        a = b;
+        b = remainder;
+    }
+    return a;
+}
+
+// Remainder in [0, modulus). Both operands must be int and modulus > 0.
+int math_positive_mod(int value, int modulus):0021 {
+    if (modulus <= 0) { return math__domain_error(); }
+    int result = value % modulus;
+    if (result < 0) { result += modulus; }
+    return result;
+}
+
+// Integer division rounded toward negative or positive infinity.
+int math_floor_div(int a, int b):0022 {
+    int quotient = a / b;
+    int remainder = a % b;
+    if (remainder != 0 && ((remainder < 0 && b > 0) || (remainder > 0 && b < 0))) {
+        quotient -= 1;
+    }
+    return quotient;
+}
+
+int math_ceil_div(int a, int b):0023 {
+    int quotient = a / b;
+    int remainder = a % b;
+    if (remainder != 0 && ((remainder > 0 && b > 0) || (remainder < 0 && b < 0))) {
+        quotient += 1;
+    }
+    return quotient;
+}
+
+boolean math_is_even(int value):0024 { return value % 2 == 0; }
+boolean math_is_odd(int value):0025 { return value % 2 != 0; }
+
+int math_lcm(int a, int b):0026 {
+    if (a == 0 || b == 0) { return 0; }
+    return math_abs_int((a / math_gcd(a, b)) * b);
+}
+
+int math_factorial(int n):0027 {
+    if (n < 0 || n > 12 || n != math_trunc(n * 1.0)) { return math__domain_error(); }
+    int result = 1;
+    int i = 2;
+    while (i <= n) {
+        result *= i;
+        i += 1;
+    }
+    return result;
+}
+
+int math_fibonacci(int n):0028 {
+    if (n < 0 || n > 46 || n != math_trunc(n * 1.0)) { return math__domain_error(); }
+    if (n == 0) { return 0; }
+    int previous = 0;
+    int current = 1;
+    int i = 1;
+    while (i < n) {
+        int next = previous + current;
+        previous = current;
+        current = next;
+        i += 1;
+    }
+    return current;
+}
+
+// Scaled form avoids overflowing while squaring finite inputs.
+double math_hypot(double a, double b):0029 {
+    double x = math_abs(a);
+    double y = math_abs(b);
+    double largest = math_max(x, y);
+    if (largest == 0) { return 0.0; }
+    double smallest = math_min(x, y);
+    double ratio = smallest / largest;
+    return largest * math_sqrt(1.0 + ratio * ratio);
+}
+
+// Range reduction uses powers of two, avoiding a linear loop for large angles.
+double math__normalize_angle(double angle) {
+    // Beyond this range the input itself no longer carries useful low bits,
+    // and repeated reduction would consume an unreasonable instruction budget.
+    if (math_abs(angle) > 1000000000000.0) { return math__domain_error(); }
+    double pi = math_pi();
+    double tau = math_tau();
+    while (angle > pi) {
+        double step = tau;
+        while (step < angle / 2.0) { step *= 2.0; }
+        angle -= step;
+    }
+    while (angle < -pi) {
+        double step = tau;
+        while (step < (0.0 - angle) / 2.0) { step *= 2.0; }
+        angle += step;
+    }
+    return angle;
+}
+
+double math_sin(double angle):002a {
+    double x = math__normalize_angle(angle);
+    double term = x;
+    double result = x;
+    int i = 1;
+    while (i < 13) {
+        term = -term * x * x / ((2 * i) * (2 * i + 1));
+        result += term;
+        i += 1;
+    }
+    return result;
+}
+
+double math_cos(double angle):002b {
+    double x = math__normalize_angle(angle);
+    double term = 1.0;
+    double result = 1.0;
+    int i = 1;
+    while (i < 13) {
+        term = -term * x * x / ((2 * i - 1) * (2 * i));
+        result += term;
+        i += 1;
+    }
+    return result;
+}
+
+double math_tan(double angle):002c {
+    double cosine = math_cos(angle);
+    if (math_abs(cosine) <= math_epsilon()) { return math__domain_error(); }
+    return math_sin(angle) / cosine;
+}
+
+// Natural exponential. Results outside finite double range raise an arithmetic error.
+double math_exp(double x):002d {
+    if (x > 709.782712893384) { return math__domain_error(); }
+    if (x < -745.1332191019411) { return 0.0; }
+    if (x == -745.1332191019411) { return 5e-324; }
+    double ln2 = math_ln2();
+    int exponent = math_trunc(x / ln2);
+    double reduced = x - exponent * ln2;
+    // 2^1024 itself overflows, while 2^1023 * exp(reduced + ln(2))
+    // can still represent exp(log(DBL_MAX)).
+    if (exponent == 1024) {
+        exponent = 1023;
+        reduced += ln2;
+    }
+    double scale = 1.0;
+    while (exponent > 0) {
+        scale *= 2.0;
+        exponent -= 1;
+    }
+    while (exponent < 0) {
+        scale /= 2.0;
+        exponent += 1;
+    }
+    double term = 1.0;
+    double result = 1.0;
+    int i = 1;
+    while (i <= 32) {
+        term = term * reduced / i;
+        result += term;
+        if (math_abs(term) <= math_epsilon() * math_abs(result)) { break; }
+        i += 1;
+    }
+    return result * scale;
+}
+
+// Natural logarithm using range reduction and the atanh series.
+double math_log(double x):002e {
+    if (x <= 0) { return math__domain_error(); }
+    double reduced = x;
+    int exponent = 0;
+    while (reduced > 1.5) {
+        reduced /= 2.0;
+        exponent += 1;
+    }
+    while (reduced < 0.75) {
+        reduced *= 2.0;
+        exponent -= 1;
+    }
+    double z = (reduced - 1.0) / (reduced + 1.0);
+    double z_squared = z * z;
+    double term = z;
+    double sum = z;
+    int i = 1;
+    while (i < 32) {
+        term *= z_squared;
+        sum += term / (2 * i + 1);
+        i += 1;
+    }
+    return 2.0 * sum + exponent * math_ln2();
+}
+
+double math_log2(double x):002f { return math_log(x) / math_ln2(); }
+double math_log10(double x):0030 { return math_log(x) / 2.302585092994046; }
+
+double math_log_base(double x, double base):0031 {
+    if (base <= 0 || base == 1) { return math__domain_error(); }
+    return math_log(x) / math_log(base);
+}
+
+double math_exp2(double x):0032 {
+    if (x >= 1024) { return math__domain_error(); }
+    if (x <= -1075) { return 0.0; }
+    return math_exp(x * math_ln2());
+}
+
+double math_sinh(double x):0033 {
+    if (math_abs(x) < 1e-5) {
+        double square = x * x;
+        return x + x * square / 6.0 + x * square * square / 120.0;
+    }
+    if (math_abs(x) > 20) {
+        double large = math_exp(math_abs(x) - math_ln2());
+        if (x < 0) { return 0.0 - large; }
+        return large;
+    }
+    double positive = math_exp(x);
+    double negative = math_exp(0.0 - x);
+    return (positive - negative) / 2.0;
+}
+
+double math_cosh(double x):0034 {
+    if (math_abs(x) > 20) {
+        return math_exp(math_abs(x) - math_ln2());
+    }
+    double positive = math_exp(x);
+    double negative = math_exp(0.0 - x);
+    return (positive + negative) / 2.0;
+}
+
+double math_tanh(double x):0035 {
+    if (x > 20) { return 1.0; }
+    if (x < -20) { return -1.0; }
+    if (math_abs(x) < 1e-8) { return x; }
+    double positive = math_exp(x);
+    double negative = math_exp(0.0 - x);
+    return (positive - negative) / (positive + negative);
+}

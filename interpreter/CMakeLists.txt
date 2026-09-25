@@ -1,0 +1,46 @@
+cmake_minimum_required(VERSION 3.20)
+project(abdInvoker LANGUAGES CXX)
+include(GNUInstallDirs)
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(THREADS_PREFER_PTHREAD_FLAG TRUE)
+find_package(Threads REQUIRED)
+if(NOT TARGET azertianBinaryData)
+    add_subdirectory(../abdC "${CMAKE_CURRENT_BINARY_DIR}/abdC")
+endif()
+add_library(abdInvoker SHARED library.cpp internelFunctions.cpp heepalloc.cpp)
+add_library(abdInvokero STATIC library.cpp internelFunctions.cpp heepalloc.cpp)
+foreach(target abdInvoker abdInvokero)
+    target_compile_features(${target} PUBLIC cxx_std_20)
+    target_include_directories(${target} PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/../include>
+        $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
+        $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}/azscript/detail/interpreter>)
+    target_link_libraries(${target} PUBLIC azertianBinaryData Threads::Threads)
+endforeach()
+set_target_properties(abdInvokero PROPERTIES EXPORT_NAME Runtime)
+set_target_properties(abdInvoker PROPERTIES EXPORT_NAME RuntimeShared WINDOWS_EXPORT_ALL_SYMBOLS ON)
+add_library(AzScript::Runtime ALIAS abdInvokero)
+add_library(AzScript::RuntimeShared ALIAS abdInvoker)
+add_executable(azscript-run test.cpp)
+target_link_libraries(azscript-run PRIVATE abdInvokero)
+if(APPLE)
+    set_target_properties(azscript-run PROPERTIES INSTALL_RPATH "@loader_path/../${CMAKE_INSTALL_LIBDIR}")
+elseif(UNIX)
+    set_target_properties(azscript-run PROPERTIES INSTALL_RPATH "$ORIGIN/../${CMAKE_INSTALL_LIBDIR}")
+endif()
+install(TARGETS abdInvoker abdInvokero EXPORT AzScriptTargets
+    RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}"
+    LIBRARY DESTINATION "${CMAKE_INSTALL_LIBDIR}"
+    ARCHIVE DESTINATION "${CMAKE_INSTALL_LIBDIR}")
+install(TARGETS azscript-run RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
+install(FILES library.h internelFunctions.h heepalloc.h azertianBinaryDataValues.h acs.h
+    DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/azscript/detail/interpreter")
+if(BUILD_TESTING)
+    add_executable(runtime-tests runtime_tests.cpp)
+    target_link_libraries(runtime-tests PRIVATE abdInvoker)
+    add_test(NAME runtime-tests COMMAND runtime-tests)
+    add_executable(numeric-module-host ../tests/numeric_module_host.cpp)
+    target_link_libraries(numeric-module-host PRIVATE abdInvoker)
+endif()

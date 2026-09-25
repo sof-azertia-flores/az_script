@@ -1,0 +1,61 @@
+#ifndef AZSCRIPT_MATH_INCLUDED
+#define AZSCRIPT_MATH_INCLUDED 1
+
+// Public declarations for the independently compiled AzScript math library.
+// Keep these low 16-bit IDs stable when extending the library.
+#assume_hint AZSCRIPT_MATH 4d41
+
+extern double math_pi():4d410002;
+extern double math_tau():4d410003;
+extern double math_e():4d410004;
+extern double math_ln2():4d410005;
+extern double math_epsilon():4d410006;
+extern double math_abs(double x):4d410007;
+extern int math_abs_int(int x):4d410008;
+extern int math_sign(double x):4d410009;
+extern double math_min(double a, double b):4d41000a;
+extern double math_max(double a, double b):4d41000b;
+extern double math_clamp(double x, double lower, double upper):4d41000c;
+extern int math_min_int(int a, int b):4d41000d;
+extern int math_max_int(int a, int b):4d41000e;
+extern int math_clamp_int(int x, int lower, int upper):4d41000f;
+extern double math_square(double x):4d410010;
+extern double math_cube(double x):4d410011;
+extern double math_mean(double a, double b):4d410012;
+extern double math_lerp(double a, double b, double t):4d410013;
+extern double math_to_radians(double degrees):4d410014;
+extern double math_to_degrees(double radians):4d410015;
+extern boolean math_is_close(double a, double b, double relative_tolerance, double absolute_tolerance):4d410016;
+extern boolean math_approximately_equal(double a, double b):4d410017;
+extern double math_pow(double base, int exponent):4d410018;
+extern int math_int_pow(int base, int exponent):4d410019;
+extern double math_sqrt(double x):4d41001a;
+extern int math_trunc(double x):4d41001b;
+extern int math_floor(double x):4d41001c;
+extern int math_ceil(double x):4d41001d;
+extern int math_round(double x):4d41001e;
+extern double math_fraction(double x):4d41001f;
+extern int math_gcd(int a, int b):4d410020;
+extern int math_positive_mod(int value, int modulus):4d410021;
+extern int math_floor_div(int a, int b):4d410022;
+extern int math_ceil_div(int a, int b):4d410023;
+extern boolean math_is_even(int value):4d410024;
+extern boolean math_is_odd(int value):4d410025;
+extern int math_lcm(int a, int b):4d410026;
+extern int math_factorial(int n):4d410027;
+extern int math_fibonacci(int n):4d410028;
+extern double math_hypot(double a, double b):4d410029;
+extern double math_sin(double angle):4d41002a;
+extern double math_cos(double angle):4d41002b;
+extern double math_tan(double angle):4d41002c;
+extern double math_exp(double x):4d41002d;
+extern double math_log(double x):4d41002e;
+extern double math_log2(double x):4d41002f;
+extern double math_log10(double x):4d410030;
+extern double math_log_base(double x, double base):4d410031;
+extern double math_exp2(double x):4d410032;
+extern double math_sinh(double x):4d410033;
+extern double math_cosh(double x):4d410034;
+extern double math_tanh(double x):4d410035;
+
+#fi

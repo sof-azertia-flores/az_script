@@ -1,0 +1,50 @@
+# Runs only during a native MinGW installation, after project DLLs are installed.
+# Toolchain locations remain in this build-time script, never the installed SDK.
+set(CMAKE_GET_RUNTIME_DEPENDENCIES_PLATFORM "windows+pe")
+set(CMAKE_GET_RUNTIME_DEPENDENCIES_TOOL "objdump")
+set(CMAKE_GET_RUNTIME_DEPENDENCIES_COMMAND [==[@CMAKE_OBJDUMP@]==])
+set(_azscript_search_directories [==[@AZSCRIPT_COMPILER_DIRECTORY@;@CMAKE_CXX_IMPLICIT_LINK_DIRECTORIES@]==])
+set(_azscript_bin "$ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/@CMAKE_INSTALL_BINDIR@")
+file(GLOB _azscript_executables "${_azscript_bin}/*.exe")
+file(GLOB _azscript_libraries "${_azscript_bin}/*.dll")
+if(NOT _azscript_executables)
+    message(FATAL_ERROR "AzScript MinGW runtime collection found no installed interpreter")
+endif()
+if(NOT EXISTS "${CMAKE_GET_RUNTIME_DEPENDENCIES_COMMAND}")
+    message(FATAL_ERROR "AzScript MinGW runtime collection requires the toolchain objdump")
+endif()
+if(NOT DEFINED ENV{SystemRoot} OR "$ENV{SystemRoot}" STREQUAL "")
+    message(FATAL_ERROR "AzScript MinGW runtime collection requires Windows SystemRoot")
+endif()
+file(REAL_PATH "$ENV{SystemRoot}" _azscript_system_root)
+string(TOLOWER "${_azscript_system_root}/" _azscript_system_root)
+file(REAL_PATH "${_azscript_bin}" _azscript_bin_real)
+string(TOLOWER "${_azscript_bin_real}/" _azscript_bin_lower)
+
+file(GET_RUNTIME_DEPENDENCIES
+    EXECUTABLES ${_azscript_executables}
+    LIBRARIES ${_azscript_libraries}
+    DIRECTORIES ${_azscript_search_directories}
+    RESOLVED_DEPENDENCIES_VAR _azscript_dependencies
+    UNRESOLVED_DEPENDENCIES_VAR _azscript_unresolved
+    CONFLICTING_DEPENDENCIES_PREFIX _azscript_conflicts
+    PRE_EXCLUDE_REGEXES "^api-ms-" "^ext-ms-"
+    POST_EXCLUDE_REGEXES ".*[/\\\\][Ss][Yy][Ss][Tt][Ee][Mm]32[/\\\\].*"
+                         ".*[/\\\\][Ss][Yy][Ss][Ww][Oo][Ww]64[/\\\\].*")
+if(_azscript_unresolved)
+    message(FATAL_ERROR "AzScript runtime DLLs could not be resolved: ${_azscript_unresolved}")
+endif()
+if(_azscript_conflicts_FILENAMES)
+    message(FATAL_ERROR "AzScript runtime DLLs have conflicting paths: ${_azscript_conflicts_FILENAMES}")
+endif()
+foreach(_azscript_dependency IN LISTS _azscript_dependencies)
+    file(REAL_PATH "${_azscript_dependency}" _azscript_dependency_real)
+    string(TOLOWER "${_azscript_dependency_real}" _azscript_dependency_lower)
+    string(FIND "${_azscript_dependency_lower}" "${_azscript_system_root}" _azscript_in_system)
+    string(FIND "${_azscript_dependency_lower}" "${_azscript_bin_lower}" _azscript_in_bin)
+    # Never redistribute Windows itself or recopy the project's installed DLLs.
+    if(NOT _azscript_in_system EQUAL 0 AND NOT _azscript_in_bin EQUAL 0)
+        file(INSTALL DESTINATION "${CMAKE_INSTALL_PREFIX}/@CMAKE_INSTALL_BINDIR@"
+            TYPE SHARED_LIBRARY FILES "${_azscript_dependency_real}")
+    endif()
+endforeach()

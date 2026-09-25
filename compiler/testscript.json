@@ -1,0 +1,128 @@
+{
+  "metadata": {
+    "author": "Azertia Flores",
+    "version": -1
+  },
+  "ext": {
+    "qaqaq": "qaqaq"
+  },
+  "abstract": {
+    "test-main": "fff0000"
+  },
+  "global-variable": [
+    "aesc"
+  ],
+  "body": {
+    "fff":{
+      "main": {
+        "metadata": {
+          "param": [
+          ],
+          "return-type": "void",
+          "position": 0
+        },
+        "script":
+        [
+          {
+            "call": "vardef",
+            "t": "ctrl",
+            "param": [
+              "i"
+            ]
+          },
+          {
+            "t": "ctrl",
+            "call": "varset",
+            "param": [
+              "i",
+              1
+            ]
+          },
+          {
+            "call": "if",
+            "t": "ctrl",
+            "param": [
+              {
+                "t": "ctrl",
+                "call": "cmp",
+                "param": [
+                  {
+                    "t": "ctrl",
+                    "call": "var",
+                    "param": [
+                      "i"
+                    ]
+                  },
+                  5
+                ]
+              },
+              [
+                {
+                  "call": "print",
+                  "t": "call",
+                  "param": [
+                    {
+                      "t": "ctrl",
+                      "call": "var",
+                      "param": [
+                        "i"
+                      ]
+                    }
+                  ]
+                }
+              ]
+            ]
+          },
+          {
+            "call": "if",
+            "t": "ctrl",
+            "param": [
+              {
+                "t": "ctrl",
+                "call": "cmp",
+                "param": [
+                  {
+                    "t": "ctrl",
+                    "call": "var",
+                    "param": [
+                      "i"
+                    ]
+                  },
+                  1
+                ]
+              },
+              [
+                {
+                  "call": "print",
+                  "t": "call",
+                  "param": [
+                    "i\u003d\u003d1"
+                  ]
+                }
+              ]
+            ]
+          }
+        ]
+      },
+      "tesx": {
+        "metadata": {
+          "param": [
+            "p1",
+            "p2"
+          ],
+          "return-type": "int",
+          "position": 1
+        },
+        "script": [
+          {
+            "call": "print",
+            "t": "call",
+            "param": [
+              "hello,world"
+            ]
+          }
+        ]
+      }
+    }
+  }
+}
