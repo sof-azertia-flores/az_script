@@ -30,7 +30,7 @@ def main():
             run(compiler + ['compile', src, '-o', abd, '--ast', ast, '--exec-json', executable])
             tree = json.loads(ast.read_text(encoding='utf-8'))
             code = json.loads(executable.read_text(encoding='utf-8'))
-            assert code['exec-version'] == 5 and code['gvs'] == global_count
+            assert code['exec-version'] == 6 and code['gvs'] == global_count
             found_globals = set()
             for function in code['f']:
                 assert function['local-count'] >= 0

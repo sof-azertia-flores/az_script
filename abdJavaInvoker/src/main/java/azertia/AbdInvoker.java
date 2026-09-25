@@ -24,6 +24,7 @@ public final class AbdInvoker {
     public static final int DOUBLE_VALUE = 3;
     public static final int BOOLEAN_VALUE = 4;
     public static final int VOID_VALUE = 5;
+    public static final int ADDRESS_VALUE = 7;
     private static boolean initialized;
     private static boolean loaded;
     private static int activeCalls;
@@ -84,11 +85,11 @@ public final class AbdInvoker {
         tryInit(); requireLoaded();
         for (Object arg : args) checkValue(arg);
         activeCalls++;
-        int block = 0;
-        int result = 0;
+        long block = 0;
+        long result = 0;
         try {
             block = args.length == 0 ? 0 : Caller20.memAlloc(args.length);
-            int[] pointers = new int[args.length];
+            long[] pointers = new long[args.length];
             for (int i = 0; i < args.length; i++) {
                 pointers[i] = block + i;
                 putValue(pointers[i], args[i]);
@@ -107,26 +108,29 @@ public final class AbdInvoker {
     }
     private static void checkValue(Object value) {
         if (value != null && !(value instanceof Integer) && !(value instanceof Float)
-                && !(value instanceof Double) && !(value instanceof Boolean) && !(value instanceof String)) {
+                && !(value instanceof Double) && !(value instanceof Boolean) && !(value instanceof String)
+                && !(value instanceof Address)) {
             throw new IllegalArgumentException("Unsupported argument type: " + value.getClass().getName());
         }
     }
-    private static void putValue(int pointer, Object value) {
+    private static void putValue(long pointer, Object value) {
         if (value == null) Caller220.ACputMemNull(pointer);
         else if (value instanceof Integer) Caller220.ACputMem(pointer, (Integer) value);
         else if (value instanceof Float) Caller220.ACputMem(pointer, (Float) value);
         else if (value instanceof Double) Caller220.ACputMem(pointer, (Double) value);
         else if (value instanceof Boolean) Caller220.ACputMem(pointer, (Boolean) value);
+        else if (value instanceof Address) Caller220.ACputMemAddress(pointer, ((Address) value).bits());
         else Caller220.ACputMem(pointer, (String) value);
     }
     /** Read a caller-owned native slot without releasing it. */
-    public static Object readValue(int pointer) {
+    public static Object readValue(long pointer) {
         switch (Caller.getMemType(pointer)) {
             case INT_VALUE: return Caller.getMemInt(pointer);
             case FLOAT_VALUE: return Caller.getMemFloat(pointer);
             case DOUBLE_VALUE: return Caller.getMemDouble(pointer);
             case BOOLEAN_VALUE: return Caller.getMemBool(pointer);
             case STRING_VALUE: return Caller.getMemStr(pointer);
+            case ADDRESS_VALUE: return Address.of(Caller.getMemAddress(pointer));
             case VOID_VALUE: return null;
             default: throw new IllegalStateException("Unknown native value type");
         }
@@ -139,7 +143,7 @@ public final class AbdInvoker {
         Caller.returningExecutors.remove(executor.getId());
         Caller.executors.put(executor.getId(), executor);
     }
-    /** Register a callback returning Integer, Float, Double, Boolean, String or null. */
+    /** Register a callback returning Integer, Float, Double, Boolean, String, Address or null. */
     public static synchronized void registerJfunction(int functionId, Function<Object[], Object> executor) {
         Objects.requireNonNull(executor, "executor");
         tryInit();

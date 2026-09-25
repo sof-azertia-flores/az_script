@@ -10,9 +10,9 @@ AZ_HEAP_FUNCTION(f_send_up)
 AZ_HEAP_FUNCTION(f_get)
 #undef AZ_HEAP_FUNCTION
 namespace heap {
-struct heap_allocation {int startpos;int len;};
+struct heap_allocation {address startpos;int len;};
 struct object_record {
-    int startpos;
+    address startpos;
     std::optional<int> destructor_id;
     bool manual;
     std::weak_ptr<azertian::script> script_owner;
@@ -20,9 +20,9 @@ struct object_record {
 inline constexpr int max_slots=1048576;
 int resize_heap();
 void resize_heap(int size);
-int alloc(int size);
-bool free(int startpos);
-std::shared_ptr<variable> getAt(int pointer);
+address alloc(int size);
+bool free(address startpos);
+std::shared_ptr<variable> getAt(address pointer);
 // Raw slot access is for snapshots only; getAt checks allocation membership.
 std::shared_ptr<variable> getSlot(int index);
 int lenHeap();
@@ -35,21 +35,21 @@ void clearHeap();
 void restore(std::vector<std::shared_ptr<variable>> slots,std::vector<heap_allocation> allocations);
 void restore(std::vector<std::shared_ptr<variable>> slots,std::vector<heap_allocation> allocations,
              std::vector<object_record> objects,std::shared_ptr<environment> restored_owner,
-             std::vector<int> owned);
+             std::vector<address> owned);
 std::vector<object_record> object_records();
-int object_address(int pointer,int offset);
-void register_object(int pointer,std::optional<int> destructor_id,bool manual,const std::shared_ptr<environment>& env);
-void delete_object(int pointer,const std::shared_ptr<environment>& env);
-void release_owned(int pointer,const std::shared_ptr<environment>& env);
-void return_object(int pointer,const std::shared_ptr<environment>& env);
+address object_address(address pointer,int offset);
+void register_object(address pointer,std::optional<int> destructor_id,bool manual,const std::shared_ptr<environment>& env);
+void delete_object(address pointer,const std::shared_ptr<environment>& env);
+void release_owned(address pointer,const std::shared_ptr<environment>& env);
+void return_object(address pointer,const std::shared_ptr<environment>& env);
 void discard_owned(const environment* env) noexcept;
 void discard_script_objects(const azertian::script* script_owner) noexcept;
 // Automatic-release bookkeeping. An active allocation has at most one owning
 // environment (the scope whose exit frees it). Explicit frees are only
 // accepted from that owner's execution chain, so a scope can never keep a
 // stale entry for an address that was freed and reused elsewhere.
-void set_owner(int startpos,const environment* owner);
-const environment* owner_of(int startpos);
+void set_owner(address startpos,const environment* owner);
+const environment* owner_of(address startpos);
 }
 }
 #endif

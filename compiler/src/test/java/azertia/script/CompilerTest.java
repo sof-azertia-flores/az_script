@@ -83,7 +83,7 @@ class CompilerTest {
                 + "int main(){return helper(3,\"__func_param0\");}");
         tree.getAsJsonObject("metadata").addProperty("version", 29);
         JsonObject compiled = Compiler.compile(tree).toJson().getAsJsonObject();
-        assertEquals(5, compiled.get("exec-version").getAsInt());
+        assertEquals(6, compiled.get("exec-version").getAsInt());
         assertEquals(29, compiled.get("version").getAsInt(), "source version is not the executable format version");
         assertTrue(compiled.get("gvs").getAsJsonPrimitive().isNumber());
         assertEquals(2, compiled.get("gvs").getAsInt());
@@ -354,7 +354,7 @@ class CompilerTest {
     }
     @Test void builtinSignaturesAndKnownOperatorOperandsAreChecked() throws Exception {
         var direct = new GeneraterJson.AzScript();
-        direct.execute("void main(){print(1);getDepth();mem_free(1);alloc(1);make_free(1);mem_send_up(1);mem_get(1);}");
+        direct.execute("void main(){print(1);getDepth();mem_free(null);alloc(1);make_free(null);mem_send_up(null);mem_get(null);}");
         JsonObject directTree = direct.toObj();
         assertFalse(directTree.getAsJsonObject("abstract").has("print"));
         JsonArray calls = Compiler.compile(directTree).toJson().getAsJsonObject().getAsJsonArray("f")
@@ -364,7 +364,7 @@ class CompilerTest {
                 calls.asList().stream().map(JsonElement::getAsJsonObject)
                         .map(call -> call.get("id").getAsInt()).toList());
         assertDoesNotThrow(() -> compile(
-                "int take(int value){return value;} int main(){return take(alloc(1));}"));
+                "address take(address value){return value;} address main(){return take(alloc(1));}"));
         assertThrows(IllegalArgumentException.class, () -> compile(
                 "int main(){return alloc(\"one\");}"));
         assertThrows(IllegalArgumentException.class, () -> compile(
@@ -402,11 +402,11 @@ class CompilerTest {
                 "void main(){mem_get(\"x\");}"})
             assertThrows(IllegalArgumentException.class, () -> compile(invalidBuiltinCall), invalidBuiltinCall);
         assertDoesNotThrow(() -> compile("int main(){return getDepth();}"));
-        assertDoesNotThrow(() -> compile("boolean main(){return mem_free(1);}"));
-        assertDoesNotThrow(() -> compile("int main(){return alloc(1);}"));
-        assertThrows(IllegalArgumentException.class, () -> compile("int main(){return mem_free(1);}"));
-        assertThrows(IllegalArgumentException.class, () -> compile("int main(){return make_free(1);}"));
-        assertThrows(IllegalArgumentException.class, () -> compile("int main(){return mem_send_up(1);}"));
+        assertDoesNotThrow(() -> compile("boolean main(){return mem_free(null);}"));
+        assertDoesNotThrow(() -> compile("address main(){return alloc(1);}"));
+        assertThrows(IllegalArgumentException.class, () -> compile("int main(){return mem_free(null);}"));
+        assertThrows(IllegalArgumentException.class, () -> compile("int main(){return make_free(null);}"));
+        assertThrows(IllegalArgumentException.class, () -> compile("int main(){return mem_send_up(null);}"));
         for (String body : new String[]{
                 "return \"a\">\"b\";", "return \"a\"&&true;", "return !\"a\";",
                 "if(\"a\"){return true;}return false;"})
@@ -458,7 +458,7 @@ class CompilerTest {
         }
     }
     @Test void nativeMemoryAssignmentHasOneTargetEvaluationAndRejectsOtherLvalues() throws Exception {
-        JsonArray body = main("int main(){mem_get(next())=42;return 0;} int next(){return 1;}").getAsJsonArray("script");
+        JsonArray body = main("int main(){mem_get(next())=42;return 0;} address next(){return null;}").getAsJsonArray("script");
         JsonObject move = body.get(0).getAsJsonObject();
         assertEquals("m", ExecOpcodes.name(move.get("c").getAsInt()));
         assertEquals(0x0abd0006, move.getAsJsonObject("v1").get("id").getAsInt());
@@ -603,13 +603,13 @@ class CompilerTest {
                 .filter(function -> function.get("id").getAsInt() == ctor).findFirst().orElseThrow();
         assertEquals(3, constructor.get("param-count").getAsInt());
         assertEquals(0, constructor.get("local-count").getAsInt());
-        assertEquals(List.of(0, 0, 0), constructor.getAsJsonArray("param-types").asList().stream().map(JsonElement::getAsInt).toList());
+        assertEquals(List.of(7, 0, 0), constructor.getAsJsonArray("param-types").asList().stream().map(JsonElement::getAsInt).toList());
         assertEquals("oa", ExecOpcodes.name(constructor.getAsJsonArray("script").get(0).getAsJsonObject().get("c").getAsInt()));
         assertEquals(0, constructor.getAsJsonArray("script").get(0).getAsJsonObject().getAsJsonObject("v").get("v").getAsInt());
         for (JsonElement element : compiled.getAsJsonArray("f")) {
             JsonObject function = element.getAsJsonObject();
-            assertTrue(function.get("return-type").getAsInt() < 7);
-            for (JsonElement type : function.getAsJsonArray("param-types")) assertTrue(type.getAsInt() < 7);
+            assertTrue(function.get("return-type").getAsInt() <= 7);
+            for (JsonElement type : function.getAsJsonArray("param-types")) assertTrue(type.getAsInt() <= 7);
             for (JsonObject variable : variableInstructions(function.get("script")))
                 assertTrue(variable.get("v").getAsJsonPrimitive().isNumber());
         }
@@ -768,7 +768,7 @@ class CompilerTest {
         assertThrows(IllegalArgumentException.class, compiled::typeValue);
         AbdValue payload = compiled.toValue(); var root = payload.getAsAss().values;
         assertEquals(10, root.size()); assertEquals("AZSCRIPT", AbdBasicType.abd2str(root.get(0)));
-        assertEquals(5, AbdBasicType.abd2int(root.get(1)));
+        assertEquals(6, AbdBasicType.abd2int(root.get(1)));
         var functionList = root.get(7).getAsAss().values;
         assertEquals(1, functionList.size()); var function = functionList.get(0).getAsAss().values;
         assertEquals(6, function.size()); assertEquals(0x0fff0000, AbdBasicType.abd2int(function.get(0)));
@@ -810,6 +810,19 @@ class CompilerTest {
         assertEquals(42, decoded.getAsAcsObject("ext").getAsAcsObject("custom").getAsInt("number"));
         assertArrayEquals(compiled.toValue().toAbdFormat(), decoded.toValue().toAbdFormat());
     }
+    @Test void inheritanceCleanupAndContinueRetainExactWireAndRejectForgedAst() throws Exception {
+        JsonObject tree = newTree("class A{int x;~A(){}}class B:A{int y;~B(){return;}}"
+                + "void main(){for(int i=0;i<2;i++){B b;if(i==0)continue;}}");
+        AcsObject compiled = Compiler.compile(tree);
+        byte[] bytes = compiled.toValue().toAbdFormat();
+        assertArrayEquals(bytes, ExecCodec.decode(compiled.toValue()).toValue().toAbdFormat());
+        JsonObject cycle = tree.deepCopy();
+        cycle.getAsJsonArray("classes").get(0).getAsJsonObject().addProperty("base", "B");
+        assertThrows(IllegalArgumentException.class, () -> Compiler.compile(cycle));
+        JsonObject unknown = tree.deepCopy();
+        unknown.getAsJsonArray("classes").get(1).getAsJsonObject().addProperty("base", "Missing");
+        assertThrows(IllegalArgumentException.class, () -> Compiler.compile(unknown));
+    }
     @Test void compactExecRejectsMalformedRecordsTypesWidthsAndLegacyMaps() throws Exception {
         AbdValue program = Compiler.compile(newTree("void main(){}")).toValue();
         var root = program.getAsAss(); root.values.add(AbdBasicType.int2Abd(0));
@@ -823,7 +836,11 @@ class CompilerTest {
         AbdValue integer = rawStack(AbdBasicType.int2Abd(ExecOpcodes.CONSTANT),
                 rawStack(AbdBasicType.int2Abd(3), AbdBasicType.int2Abd(7)));
         for(AbdValue invalid : List.of(
-                rawStack(AbdBasicType.int2Abd(30)),
+                rawStack(AbdBasicType.int2Abd(32)),
+                rawStack(AbdBasicType.int2Abd(ExecOpcodes.CONTINUE), AbdBasicType.int2Abd(0)),
+                rawStack(AbdBasicType.int2Abd(ExecOpcodes.CLEANUP), integer, integer),
+                rawStack(AbdBasicType.int2Abd(ExecOpcodes.CLEANUP), integer, integer, new AbdValue(new byte[]{2})),
+                rawStack(AbdBasicType.int2Abd(ExecOpcodes.CLEANUP), integer, integer, AbdBasicType.bol2Abd(false), integer),
                 rawStack(AbdBasicType.int2Abd(ExecOpcodes.BREAK), AbdBasicType.int2Abd(0)),
                 rawStack(AbdBasicType.int2Abd(ExecOpcodes.RETURN), new AbdValue(new byte[]{2})),
                 rawStack(AbdBasicType.int2Abd(ExecOpcodes.RETURN), AbdBasicType.bol2Abd(false), integer),
@@ -1025,7 +1042,7 @@ class CompilerTest {
                 "class A{int x;string y;}class B{string x;int y;}void main(){A a;B b=a;}"))
             assertThrows(IllegalArgumentException.class, () -> compile(bad), bad);
     }
-    @Test void v5AssumptionsAndOptionalDestructorHaveStrictFixedRecords() throws Exception {
+    @Test void assumptionsAndOptionalDestructorHaveStrictFixedRecords() throws Exception {
         AcsObject compiled = Compiler.compile(newTree("class C{int x;extern C():fffe0002;extern ~C():ffffffff;}void main(){C c;}"));
         AcsObject decoded = ExecCodec.decode(compiled.toValue());assertEquals(compiled.toJson(), decoded.toJson());
         JsonObject json = decoded.toJson().getAsJsonObject();
@@ -1062,6 +1079,43 @@ class CompilerTest {
         assertDoesNotThrow(() -> compile(classes + "extern A f(B):abcd0002;extern B f(A value):abcd0002;void main(){}"));
         assertThrows(IllegalArgumentException.class, () -> compile("class A{int x;}class B{string y;}"
                 + "extern A f():abcd0002;extern B f():abcd0002;void main(){}"));
+    }
+
+    @Test void addressesHaveDistinctSignaturesAndLosslessNullConstants() throws Exception {
+        String source = "address identity(address p){return p;}"
+                + "class C{address slot;C next;}"
+                + "void main(){address p=alloc(2);address q=identity(p+1);"
+                + "q-=1;q++;q--;mem_get(q)=p;print(q==p);mem_free(p);C c;print(c.slot==null);}";
+        JsonObject tree = newTree(source);
+        AcsObject result = Compiler.compile(tree);
+        JsonObject identity = function(result.toJson().getAsJsonObject(),
+                Integer.parseInt(tree.getAsJsonObject("abstract").get("identity").getAsString(), 16));
+        assertEquals(7, identity.get("return-type").getAsInt());
+        assertEquals(List.of(7), identity.getAsJsonArray("param-types").asList().stream().map(JsonElement::getAsInt).toList());
+        assertEquals(ExecOpcodes.RETURN, identity.getAsJsonArray("script").get(0).getAsJsonObject().get("c").getAsInt());
+        assertTrue(result.toJson().toString().contains("\"address\":\"0\""));
+        assertArrayEquals(result.toValue().toAbdFormat(), Compiler.compile(JsonParser.parseString(tree.toString()).getAsJsonObject()).toValue().toAbdFormat());
+        assertArrayEquals(result.toValue().toAbdFormat(), ExecCodec.decode(result.toValue()).toValue().toAbdFormat());
+    }
+
+    @Test void addressArithmeticKeepsIntegerAndObjectTypesSeparate() throws Exception {
+        assertDoesNotThrow(() -> compile("address shift(address p,int n){return n+p;}"
+                + "void main(){address p=null;address q=p-(-1);print(q>=p);print(\"address=\"+p);}"));
+        assertDoesNotThrow(() -> compile("void main(){var p=alloc(1);print(p!=null);print(null==p);}"));
+        JsonObject checkedPlus = main("void main(){var p=null;print(+p);}")
+                .getAsJsonArray("script").get(1).getAsJsonObject().getAsJsonArray("param").get(0).getAsJsonObject();
+        assertEquals(ExecOpcodes.MULTIPLY, checkedPlus.get("c").getAsInt());
+        for (String body : List.of("int p=alloc(1);", "address p=1;", "address p=null;int i=p;",
+                "mem_get(1);", "mem_free(0);", "alloc(null);", "make_free(1);", "mem_send_up(1);",
+                "address p=null;print(p==0);", "address p=null;print(p<1);",
+                "address p=null;print(p+p);", "address p=null;print(p-p);", "address p=null;print(1-p);",
+                "address p=null;print(p+1.0);", "address p=null;print(p*1);", "address p=null;print(-p);",
+                "address p=null;if(p){}", "address p=null;delete p;"))
+            assertThrows(IllegalArgumentException.class, () -> compile("void main(){"+body+"}"), body);
+        for (String body : List.of("C c;address p=c;", "address p=null;C c=p;", "C c;print(c+1);"))
+            assertThrows(IllegalArgumentException.class, () -> compile("class C{int x;}void main(){"+body+"}"), body);
+        assertThrows(IllegalArgumentException.class, () -> compile("class A{int x;}class B{address x;}void main(){A a;B b=a;}"));
+        assertThrows(IllegalArgumentException.class, () -> compile("extern int f(address):abcd0002;extern int f(int):abcd0002;void main(){}"));
     }
 
 }

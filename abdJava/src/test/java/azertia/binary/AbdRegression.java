@@ -36,10 +36,13 @@ public final class AbdRegression {
         result.put("array", array);
         result.put("negativeZero", -0.0);
         result.put("nan", Float.intBitsToFloat(0x7fc12345));
+        result.put("addressZero", new AcsAddress(0L));
+        result.put("addressEndian", new AcsAddress(0x0102030405060708L));
+        result.put("addressMax", new AcsAddress("18446744073709551615"));
         return result;
     }
     private static void validate(AcsObject result) {
-        check(result.mmp.size() == 12, "map cardinality");
+        check(result.mmp.size() == 15, "map cardinality");
         check(result.getAsInt("intMin") == Integer.MIN_VALUE, "minimum integer");
         check(result.getAsInt("intMax") == Integer.MAX_VALUE, "maximum integer");
         check(result.getAsDouble("double") == -1234.125, "double endian");
@@ -54,6 +57,11 @@ public final class AbdRegression {
         check(!((AcsObject)array.acsa.get(1)).getAsBool("nested"), "nested object");
         check(Double.doubleToRawLongBits(result.getAsDouble("negativeZero")) == Long.MIN_VALUE, "negative zero");
         check(Float.floatToRawIntBits(result.getAsFloat("nan")) == 0x7fc12345, "NaN payload");
+        check(result.getAsAddress("addressZero").rawBits() == 0L, "zero address");
+        check(result.getAsAddress("addressEndian").rawBits() == 0x0102030405060708L, "address endian");
+        check(result.getAsAddress("addressMax").rawBits() == -1L, "unsigned maximum address bits");
+        check(result.getAsAddress("addressMax").toUnsignedString().equals("18446744073709551615"), "unsigned address string");
+        check(result.getAsAddress("addressMax").toBigInteger().equals(BigInteger.ONE.shiftLeft(64).subtract(BigInteger.ONE)), "unsigned address BigInteger");
     }
     @AsStructure public static class Record {
         @AsColum(order = 3) public String text;
@@ -122,7 +130,7 @@ public final class AbdRegression {
         validate(restored);
         check(Arrays.equals(restored.toValue().toAbdFormat(), frame), "byte-exact roundtrip");
         source.put("intMin", 12);
-        check(source.mmp.size() == 12 && source.getAsInt("intMin") == 12, "map replacement");
+        check(source.mmp.size() == 15 && source.getAsInt("intMin") == 12, "map replacement");
         for (int size = 0; size < frame.length; size++) {
             byte[] truncated = Arrays.copyOf(frame, size);
             rejected(() -> AbdValue.fromAbd(truncated));
@@ -134,6 +142,22 @@ public final class AbdRegression {
         rejected(() -> new AcsFloat(new AbdValue(new byte[3])));
         rejected(() -> new AcsIntegerElement(new AbdValue(new byte[5])));
         rejected(() -> new AcsBooleanElement(new AbdValue(new byte[]{2})));
+        check(Arrays.equals(new AcsAddress(0x0102030405060708L).toValue().getData(), new byte[]{8, 7, 6, 5, 4, 3, 2, 1}), "exact address bytes");
+        check(new AcsAddress(-1L).equals(new AcsAddress(BigInteger.ONE.shiftLeft(64).subtract(BigInteger.ONE))), "raw bits and checked integer address agree");
+        check(new AcsAddress(-1L).toJson().toString().equals("{\"address\":\"18446744073709551615\"}"), "address JSON is unsigned and typed");
+        for (int size = 0; size <= 9; size++) {
+            if (size == 8) continue;
+            AbdValue payload = new AbdValue(new byte[size]);
+            rejected(() -> new AcsAddress(payload));
+            AbdSimpleStack typedPayload = new AbdSimpleStack();
+            typedPayload.values.add(AbdBasicType.int2Abd(AcsAddress.TYPE));
+            typedPayload.values.add(payload);
+            rejected(() -> AcsArray.aoa(typedPayload.toAbd()));
+        }
+        for (String bad : List.of("", "-1", "+1", "1.0", "0x1", "18446744073709551616"))
+            rejected(() -> new AcsAddress(bad));
+        rejected(() -> new AcsAddress(BigInteger.valueOf(-1)));
+        rejected(() -> new AcsAddress(BigInteger.ONE.shiftLeft(64)));
         byte[] backing = {1, 2};
         AbdValue owned = new AbdValue(backing); backing[0] = 9;
         owned.getData()[0] = 5;

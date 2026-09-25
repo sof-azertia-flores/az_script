@@ -39,7 +39,7 @@ def main():
             run(compiler + ['compile-json', ast, '-o', roundtrip])
             assert abd.read_bytes() == roundtrip.read_bytes(), name
             tree = json.loads(executable.read_text())
-            assert tree['exec-version'] == 5
+            assert tree['exec-version'] == 6
             return abd, tree
 
         def execute(abd, libraries, expected):
@@ -198,7 +198,7 @@ public class HintSourceSnapshot {
    AbdInvoker.flush();
    int namespace=AbdInvoker.namespaceForHint("POINT_LIB");
    if(namespace<=0)throw new AssertionError("namespace");
-   int automatic=(Integer)AbdInvoker.invoke(autoId), manual=(Integer)AbdInvoker.invoke(manualId);
+   Object automatic=AbdInvoker.invoke(autoId), manual=AbdInvoker.invoke(manualId);
    if(!AbdInvoker.saveStatus(saved))throw new AssertionError("save");
    AbdInvoker.invoke(release,manual);
    AbdInvoker.loadStatus(saved);

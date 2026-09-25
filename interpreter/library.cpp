@@ -44,6 +44,7 @@ const char* type_name(int type) {
     case BOOLEAN_VALUE:return "boolean";
     case VOID_VALUE:return "void";
     case ANY_VALUE:return "any";
+    case ADDRESS_VALUE:return "address";
     default:return "unknown";
     }
 }
@@ -118,6 +119,33 @@ V checked_int(std::int64_t n) {
 V binary(const std::string& op,const V& a,const V& b) {
     if(op=="add"&&(a->type==STRING_VALUE||b->type==STRING_VALUE))
         return std::make_shared<variable>(value_to_string(a)+value_to_string(b));
+    if(a->type==ADDRESS_VALUE||b->type==ADDRESS_VALUE) {
+        if(a->type==ADDRESS_VALUE&&b->type==ADDRESS_VALUE) {
+            const auto x=static_cast<address*>(a->value)->value,y=static_cast<address*>(b->value)->value;
+            if(op=="eq")return std::make_shared<variable>(x==y);
+            if(op=="ne")return std::make_shared<variable>(x!=y);
+            if(op=="lt")return std::make_shared<variable>(x<y);
+            if(op=="le")return std::make_shared<variable>(x<=y);
+            if(op=="gt")return std::make_shared<variable>(x>y);
+            if(op=="ge")return std::make_shared<variable>(x>=y);
+        }
+        const bool left_address=a->type==ADDRESS_VALUE;
+        if((op=="add"||(op=="minus"&&left_address))&&
+           (left_address?b->type==INT_VALUE:a->type==INT_VALUE)) {
+            const auto base=static_cast<address*>((left_address?a:b)->value)->value;
+            std::int64_t offset=*static_cast<int*>((left_address?b:a)->value);
+            if(op=="minus")offset=-offset;
+            if(offset>=0) {
+                const auto magnitude=static_cast<std::uint64_t>(offset);
+                if(base>std::numeric_limits<std::uint64_t>::max()-magnitude)throw std::overflow_error("Address overflow");
+                return std::make_shared<variable>(address{base+magnitude});
+            }
+            const auto magnitude=static_cast<std::uint64_t>(-offset);
+            if(base<magnitude)throw std::overflow_error("Address underflow");
+            return std::make_shared<variable>(address{base-magnitude});
+        }
+        throw std::runtime_error("Unsupported address operands for "+op);
+    }
     if(op=="eq"||op=="ne") {
         bool eq=false;
         if(numeric(a)&&numeric(b)) eq=number(a)==number(b);
@@ -229,6 +257,30 @@ V scoped_execute(const std::shared_ptr<expression>& body,E env) {
     scope->parent=env;scope->script=env->script;scope->frame=env->frame;
     return with_cleanup(scope,[&]{return body->execute(scope);});
 }
+// Compiler-generated base cleanup. It does not encode classes or object layouts:
+// both operands are ordinary code, and the finalizer is usually a function call.
+class cleanup_expression final:public expression {
+    std::shared_ptr<expression> body,cleanup;
+    bool on_error;
+public:
+    cleanup_expression(std::shared_ptr<expression> body,std::shared_ptr<expression> cleanup,bool on_error)
+        :body(std::move(body)),cleanup(std::move(cleanup)),on_error(on_error) {}
+    V execute(E env) override {
+        std::exception_ptr failure;
+        try {tick(env);scoped_execute(body,env);}catch(...){failure=std::current_exception();}
+        if(!on_error||failure) {
+            auto frame=env->frame;
+            const bool returned=frame&&frame->returned,broken=frame&&frame->break_requested,
+                continued=frame&&frame->continue_requested;
+            const auto result=frame?frame->result:nullptr;
+            if(frame){frame->returned=false;frame->break_requested=false;frame->continue_requested=false;}
+            try {scoped_execute(cleanup,env);}catch(...){if(!failure)failure=std::current_exception();}
+            if(frame){frame->returned=returned;frame->break_requested=broken;frame->continue_requested=continued;frame->result=result;}
+        }
+        if(failure)std::rethrow_exception(failure);
+        return nil();
+    }
+};
 class object_expression final:public expression {
     std::string op;
     std::shared_ptr<expression> value;
@@ -245,11 +297,11 @@ public:
     int* destructor_address(){return destructor?&*destructor:nullptr;}
     V execute(E env) override {
         tick(env);auto pointer=value->execute(env);
-        if(pointer->type!=INT_VALUE)throw std::runtime_error("Object address must be int");
-        const int address=*static_cast<int*>(pointer->value);
-        if(op=="oa")return std::make_shared<variable>(heap::object_address(address,offset));
-        if(op=="ob")heap::register_object(address,destructor,manual,env);
-        else heap::delete_object(address,env);
+        if(pointer->type!=ADDRESS_VALUE)throw std::runtime_error("Object pointer requires address type");
+        const auto object_pointer=*static_cast<address*>(pointer->value);
+        if(op=="oa")return std::make_shared<variable>(heap::object_address(object_pointer,offset));
+        if(op=="ob")heap::register_object(object_pointer,destructor,manual,env);
+        else heap::delete_object(object_pointer,env);
         return nil();
     }
 };
@@ -274,7 +326,7 @@ V convert_return(V v,int type) {
     }
     throw std::runtime_error("Function return type mismatch or missing return");
 }
-// v5 records are raw ABD stacks. Views borrow the caller's input only while
+// v6 records are raw ABD stacks. Views borrow the caller's input only while
 // decoding; the resulting native expression tree owns all retained data.
 struct raw_view {
     const unsigned char* data;
@@ -344,7 +396,7 @@ void check_typed_metadata(raw_view view,int type) {
     case 1:validate_utf8(view);return;
     case 3:case 0xce867:
         if(view.size!=4)throw std::invalid_argument("Invalid extension scalar width");return;
-    case 0xce1066:
+    case 0xce1066:case 0xce200b:
         if(view.size!=8)throw std::invalid_argument("Invalid extension scalar width");return;
     case 0x0d00:
         if(view.size!=1||view.data[0]>1)throw std::invalid_argument("Invalid extension boolean");return;
@@ -364,6 +416,7 @@ std::shared_ptr<expression> parse_raw_constant(raw_view envelope) {
     switch(type) {
     case 1:validate_utf8(payload);scalar=std::make_shared<StringAbdValue>(value);break;
     case 3:scalar=std::make_shared<IntAbdValue>(value);break;
+    case 0xce200b:scalar=std::make_shared<AddressAbdValue>(value);break;
     case 0xce1066: {
         auto number=std::make_shared<DoubleAbdValue>(value);
         if(!std::isfinite(number->data))throw std::invalid_argument("Non-finite exec constant");
@@ -428,7 +481,7 @@ X parse_raw_expression(raw_view view,const raw_function_layout& layout,std::size
     }
     case 4: {
         const int slot=fields.integer();layout.check_slot(slot,true);const int type=fields.integer();
-        if(type<INT_VALUE||type>ANY_VALUE||type==VOID_VALUE)throw std::invalid_argument("Invalid declared variable type");
+        if(type<INT_VALUE||type>ADDRESS_VALUE||type==VOID_VALUE)throw std::invalid_argument("Invalid declared variable type");
         auto node=std::make_shared<varDefineExpression>();node->varindex=slot;
         if(fields.boolean())node->initializer=child();result=std::move(node);break;
     }
@@ -487,6 +540,11 @@ X parse_raw_expression(raw_view view,const raw_function_layout& layout,std::size
     }
     case 28: {auto condition=child();auto body=child();result=raw_binary<whileExpression>(std::move(condition),std::move(body));break;}
     case 29:result=std::make_shared<breakExpression>();break;
+    case 30:result=std::make_shared<continueExpression>();break;
+    case 31: {
+        auto body=child();auto cleanup=child();const bool on_error=fields.boolean();
+        result=std::make_shared<cleanup_expression>(std::move(body),std::move(cleanup),on_error);break;
+    }
     default:throw std::invalid_argument("Unknown exec opcode: "+std::to_string(opcode));
     }
     fields.finish();return result;
@@ -496,7 +554,7 @@ std::vector<int> parse_raw_types(raw_view view,bool script_parameters) {
     while(!fields.empty()) {
         if(result.size()>=MAX_VARIABLE_SLOTS)throw std::invalid_argument("Too many parameter types");
         const int type=fields.integer();
-        if(type<INT_VALUE||(type>BOOLEAN_VALUE&&!(script_parameters&&type==ANY_VALUE)))
+        if(type<INT_VALUE||(type>BOOLEAN_VALUE&&type!=ADDRESS_VALUE&&!(script_parameters&&type==ANY_VALUE)))
             throw std::invalid_argument("Invalid parameter type");
         result.push_back(type);
     }
@@ -505,7 +563,7 @@ std::vector<int> parse_raw_types(raw_view view,bool script_parameters) {
 parsed_module parse_raw_module(raw_view root,std::size_t offset) {
     raw_cursor fields(root);parsed_module module;
     if(fields.string()!="AZSCRIPT")throw std::invalid_argument("Invalid exec magic");
-    if(fields.integer()!=5)throw std::invalid_argument("Unsupported exec version");
+    if(fields.integer()!=6)throw std::invalid_argument("Unsupported exec version");
     fields.integer();fields.string(); // Source version/author are non-executable metadata.
     const int globals=fields.integer();
     if(globals<0||static_cast<std::size_t>(globals)>MAX_VARIABLE_SLOTS||offset>MAX_VARIABLE_SLOTS-static_cast<std::size_t>(globals))
@@ -518,7 +576,7 @@ parsed_module parse_raw_module(raw_view root,std::size_t offset) {
         raw_cursor entry(signatures.take());const int id=entry.integer();function_signature signature;
         if(id==0||id==1||id==0x0fff0000||namespace_of(id)==0x0abd)throw std::invalid_argument("Invalid external function id");
         signature.return_type=entry.integer();
-        if(signature.return_type<INT_VALUE||signature.return_type>VOID_VALUE)throw std::invalid_argument("Invalid external return type");
+        if(signature.return_type<INT_VALUE||(signature.return_type>VOID_VALUE&&signature.return_type!=ADDRESS_VALUE))throw std::invalid_argument("Invalid external return type");
         signature.param_types=parse_raw_types(entry.take(),false);entry.finish();
         if(!module.extern_signatures.emplace(id,std::move(signature)).second)throw std::invalid_argument("Duplicate external signature id: "+std::to_string(id));
     }
@@ -542,7 +600,7 @@ parsed_module parse_raw_module(raw_view root,std::size_t offset) {
         if(!module.hint.empty()&&namespace_of(fn->function_id)!=0)throw std::invalid_argument("Hint module definitions require namespace zero");
         if(module.hint.empty()&&fn->function_id!=0&&fn->function_id!=1&&module.assumptions.contains(namespace_of(fn->function_id)))
             throw std::invalid_argument("Namespace assumption overlaps module definitions");
-        if(fn->rett<INT_VALUE||fn->rett>VOID_VALUE)throw std::invalid_argument("Unknown return type");
+        if(fn->rett<INT_VALUE||(fn->rett>VOID_VALUE&&fn->rett!=ADDRESS_VALUE))throw std::invalid_argument("Unknown return type");
         if(fn->param_count<0||fn->local_count<0||static_cast<std::size_t>(fn->param_count)>MAX_VARIABLE_SLOTS||
            static_cast<std::size_t>(fn->local_count)>MAX_VARIABLE_SLOTS-static_cast<std::size_t>(fn->param_count))
             throw std::invalid_argument("Invalid function variable count");
@@ -568,7 +626,7 @@ parsed_module decode_module(const unsigned char* bytes,std::size_t length,std::s
         const auto first=fields.take();
         if(first.size==8&&std::memcmp(first.data,"AZSCRIPT",8)==0)return parse_raw_module(root,offset);
     }
-    throw std::invalid_argument("Unsupported script format: expected raw exec v5");
+    throw std::invalid_argument("Unsupported script format: expected raw exec v6");
 }
 }
 std::recursive_mutex& runtime_mutex(){static std::recursive_mutex m;return m;}
@@ -737,8 +795,8 @@ void script::flush() {
                 if(target==functions.end())throw std::runtime_error("Referenced script function is missing: "+std::to_string(id));
                 if(reference.destructor) {
                     auto fn=std::dynamic_pointer_cast<ofunction>(target->second);
-                    if(!fn||fn->rett!=VOID_VALUE||fn->param_types!=std::vector<int>{INT_VALUE})
-                        throw std::runtime_error("Object destructor must be a script function void(int)");
+                    if(!fn||fn->rett!=VOID_VALUE||fn->param_types!=std::vector<int>{ADDRESS_VALUE})
+                        throw std::runtime_error("Object destructor must be a script function void(address)");
                 }
             }
             patches.emplace_back(&reference,id);
@@ -849,7 +907,7 @@ V ofunction::invoke(E ev,std::vector<V> args) {
 V complex_expression::execute_body(E env) {
     tick(env);
     for(auto& e:expressions) {
-        if(env->frame&&(env->frame->returned||env->frame->break_requested)) break;
+        if(env->frame&&(env->frame->returned||env->frame->break_requested||env->frame->continue_requested)) break;
         e->execute(env);
     }
     return nil();
@@ -886,13 +944,14 @@ V returnExpression::execute(E env) {
     tick(env);if(!env->frame) throw std::runtime_error("Return outside function");
     auto result=returnType?returnType->execute(env)->deepCopy():nil();
     if(object_return) {
-        if(result->type!=INT_VALUE)throw std::runtime_error("Object return requires an int address");
-        heap::return_object(*static_cast<int*>(result->value),env);
+        if(result->type!=ADDRESS_VALUE)throw std::runtime_error("Object return requires address type");
+        heap::return_object(*static_cast<address*>(result->value),env);
     }
     env->frame->result=std::move(result);env->frame->returned=true;return nil();
 }
 constantExpression::constantExpression(std::shared_ptr<AbdMapValue> v) {
     if(auto p=std::dynamic_pointer_cast<IntAbdValue>(v)) value=std::make_shared<variable>(p->data);
+    else if(auto p=std::dynamic_pointer_cast<AddressAbdValue>(v)) value=std::make_shared<variable>(p->data);
     else if(auto p=std::dynamic_pointer_cast<StringAbdValue>(v)) value=std::make_shared<variable>(p->data);
     else if(auto p=std::dynamic_pointer_cast<FloatAbdValue>(v)) value=std::make_shared<variable>(p->data);
     else if(auto p=std::dynamic_pointer_cast<DoubleAbdValue>(v)) value=std::make_shared<variable>(p->data);
@@ -922,6 +981,7 @@ V whileExpression::execute(E env) {
         while(!frame->returned&&truth(exp1->execute(env))) {
             tick(env);scoped_execute(exp2,env);
             if(frame->break_requested) {frame->break_requested=false;break;}
+            frame->continue_requested=false;
         }
     } catch(...) {--frame->loop_depth;throw;}
     --frame->loop_depth;
@@ -933,9 +993,16 @@ V breakExpression::execute(E env) {
     env->frame->break_requested=true;
     return nil();
 }
+V continueExpression::execute(E env) {
+    tick(env);
+    if(!env->frame||env->frame->loop_depth==0) throw std::runtime_error("Continue outside loop");
+    env->frame->continue_requested=true;
+    return nil();
+}
 void variable::clear() noexcept {
     switch(type) {
     case INT_VALUE:delete static_cast<int*>(value);break;
+    case ADDRESS_VALUE:delete static_cast<address*>(value);break;
     case STRING_VALUE:delete static_cast<std::string*>(value);break;
     case FLOAT_VALUE:delete static_cast<float*>(value);break;
     case DOUBLE_VALUE:delete static_cast<double*>(value);break;
@@ -948,6 +1015,7 @@ variable::~variable(){clear();}
 variable::variable(T v){setValue(std::move(v));} \
 void variable::setValue(T v){auto p=std::make_unique<T>(std::move(v));clear();value=p.release();type=Tag;}
 VALUE_IMPL(int,INT_VALUE)
+VALUE_IMPL(address,ADDRESS_VALUE)
 VALUE_IMPL(std::string,STRING_VALUE)
 VALUE_IMPL(float,FLOAT_VALUE)
 VALUE_IMPL(double,DOUBLE_VALUE)
@@ -960,6 +1028,7 @@ void variable::setValue(std::nullptr_t){clear();}
 void variable::copy_value(const variable& v) {
     switch(v.type) {
     case INT_VALUE:setValue(*static_cast<int*>(v.value));break;
+    case ADDRESS_VALUE:setValue(*static_cast<address*>(v.value));break;
     case STRING_VALUE:setValue(*static_cast<std::string*>(v.value));break;
     case FLOAT_VALUE:setValue(*static_cast<float*>(v.value));break;
     case DOUBLE_VALUE:setValue(*static_cast<double*>(v.value));break;
@@ -978,7 +1047,7 @@ void environment::cleanup(const std::shared_ptr<environment>& self) {
     closing=true;
     std::exception_ptr failure;
     while(!owned_pointer.empty()) {
-        int pointer=owned_pointer.back();owned_pointer.pop_back();
+        address pointer=owned_pointer.back();owned_pointer.pop_back();
         try {heap::release_owned(pointer,self);}catch(...){if(!failure)failure=std::current_exception();}
     }
     // Destructors may still observe the current block through host callbacks;
@@ -1030,6 +1099,7 @@ std::string value_to_string(const V& v) {
     if(v->type==BOOLEAN_VALUE)return *static_cast<bool*>(v->value)?"true":"false";
     if(v->type==VOID_VALUE)return "null";
     if(v->type==INT_VALUE)return shortest_number(*static_cast<int*>(v->value));
+    if(v->type==ADDRESS_VALUE)return shortest_number(static_cast<address*>(v->value)->value);
     if(v->type==FLOAT_VALUE)return shortest_number(*static_cast<float*>(v->value));
     if(v->type==DOUBLE_VALUE)return shortest_number(*static_cast<double*>(v->value));
     throw std::runtime_error("Unknown runtime value type");

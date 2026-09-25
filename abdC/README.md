@@ -45,6 +45,12 @@ Stack payload 是拼接帧。Map 的条目是 name/type/value 三个帧；Array
 | double | `0xce1066` | IEEE 754 binary64 little-endian |
 | 历史 BigInteger/raw | `0xce2009` | Java BigInteger 为 big-endian 二进制补码；C++ 原样保留字节 |
 | 新 raw bytes | `0xce200a` | 原样字节，可为空且可含前导零 |
+| address | `0xce200b` | 恰好 8 字节 uint64 little-endian，0 为空地址 |
+
+`address.h` 定义独立的 `azertian::address` 值类型，原始无符号值通过
+`.value` 访问，与 `int32` 不发生隐式转换。`AddressAbdValue(address(...))`
+编码该值；从 ABD 解码会严格检查 8 字节宽度，完整保留最高位和
+`18446744073709551615`，不把地址解释为有符号整数。
 
 旧标签和合法数据仍可读取。Java 原 `put(key, byte[])` 经 BigInteger
 转换，会不可逆丢弃前导零，新版改用 `0xce200a`；旧程序不理解新标签，
@@ -64,4 +70,4 @@ Map 更新、深拷贝、所有截断点、畸形类型/长度、循环结构，
 `abd_regression --write PATH` 生成跨语言样本；`--read PATH` 验证其
 内容和重新编码后的逐字节一致性。Java 的
 `azertia.binary.AbdRegression` 提供同样参数。`tests/cpp-fixture.abd`
-是包含数值极值、NaN payload、负零、中文/NUL、二进制和嵌套结构的样本。
+是包含数值和地址极值、NaN payload、负零、中文/NUL、二进制和嵌套结构的样本。

@@ -10,18 +10,18 @@ extern "C" {
 /*
  * Class:     azertia_jni_Caller20
  * Method:    memAlloc
- * Signature: (I)I
+ * Signature: (I)J
  */
-JNIEXPORT jint JNICALL Java_azertia_jni_Caller20_memAlloc
+JNIEXPORT jlong JNICALL Java_azertia_jni_Caller20_memAlloc
   (JNIEnv *, jclass, jint);
 
 /*
  * Class:     azertia_jni_Caller20
  * Method:    memFree
- * Signature: (I)V
+ * Signature: (J)V
  */
 JNIEXPORT void JNICALL Java_azertia_jni_Caller20_memFree
-  (JNIEnv *, jclass, jint);
+  (JNIEnv *, jclass, jlong);
 
 /*
  * Class:     azertia_jni_Caller20

@@ -5,6 +5,7 @@
 #ifndef AZERTIANBINARYDATAVALUES_H
 #define AZERTIANBINARYDATAVALUES_H
 #include "library.h"
+#include "address.h"
 
 namespace azertian {
     class StringAbdValue : public AbdMapValue {
@@ -29,6 +30,17 @@ namespace azertian {
         std::shared_ptr<AbdValue> toAbdValue() override;
         std::shared_ptr<AbdValue> typeValue() override;
         AbdMapValue * deepCopy() override;
+    };
+
+    class AddressAbdValue : public AbdMapValue {
+    public:
+        address data;
+        AddressAbdValue() = default;
+        explicit AddressAbdValue(address data);
+        explicit AddressAbdValue(const std::shared_ptr<AbdValue>& value);
+        std::shared_ptr<AbdValue> toAbdValue() override;
+        std::shared_ptr<AbdValue> typeValue() override;
+        AbdMapValue* deepCopy() override;
     };
 
 

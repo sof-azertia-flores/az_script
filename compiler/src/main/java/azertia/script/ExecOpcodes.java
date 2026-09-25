@@ -9,10 +9,10 @@ public final class ExecOpcodes {
             MOVE=6, RETURN=7, RETURN_OBJECT=8, OBJECT_ADDRESS=9, OBJECT_BIND=10,
             OBJECT_DELETE=11, ADD=12, SUBTRACT=13, MULTIPLY=14, DIVIDE=15, MODULO=16,
             GREATER=17, LESS=18, EQUAL=19, NOT_EQUAL=20, GREATER_EQUAL=21, LESS_EQUAL=22,
-            AND=23, OR=24, NOT=25, NEGATE=26, IF=27, WHILE=28, BREAK=29;
+            AND=23, OR=24, NOT=25, NEGATE=26, IF=27, WHILE=28, BREAK=29, CONTINUE=30, CLEANUP=31;
     private static final String[] NAMES={"constant","block","call","v","vd","vs","m","r","ro",
             "oa","ob","od","add","minus","multiply","divide","mod","gt","lt","eq","ne","ge","le",
-            "and","or","not","neg","if","wi","brk"};
+            "and","or","not","neg","if","wi","brk","cont","cleanup"};
     private static final Map<String,Integer> CODES=new LinkedHashMap<>();
     static { for(int i=0;i<NAMES.length;i++) CODES.put(NAMES[i],i); }
     private ExecOpcodes() {}

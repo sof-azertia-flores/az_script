@@ -1,0 +1,44 @@
+// Success returns 0. Each base occupies the first slots of its derived object.
+#gvar destroyed
+
+class Point {
+    int x;
+    Point(int value) { x = value; }
+    int get() { return x; }
+    ~Point() { destroyed = destroyed * 10 + 1; }
+}
+
+class TaggedPoint : public Point {
+    int tag;
+    TaggedPoint(int value, int label) : Point(value) { tag = label; }
+    int total() { return get() + tag; }
+    ~TaggedPoint() { destroyed = destroyed * 10 + 2; }
+}
+
+Point create() {
+    TaggedPoint point(3, 4);
+    return point;
+}
+
+int main() {
+    destroyed = 0;
+    {
+        TaggedPoint point(5, 6);
+        Point base = point;
+        base.x = 7;
+        if (point.total() != 13 || base.get() != 7) { return 1; }
+    }
+    if (destroyed != 21) { return 2; }
+    destroyed = 0;
+    Point manual = new TaggedPoint(8, 9);
+    if (manual.get() != 8) { return 3; }
+    delete manual;
+    if (destroyed != 21) { return 4; }
+    destroyed = 0;
+    {
+        Point returned = create();
+        if (returned.get() != 3) { return 5; }
+    }
+    if (destroyed != 21) { return 6; }
+    return 0;
+}

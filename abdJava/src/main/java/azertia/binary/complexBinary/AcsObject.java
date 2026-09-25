@@ -61,6 +61,9 @@ public class AcsObject implements AcsElement{
     public int getAsInt(String key){
         return ((AcsIntegerElement)mmp.get(key)).s;
     }
+    public AcsAddress getAsAddress(String key){
+        return (AcsAddress)mmp.get(key);
+    }
     public long getAsLong(String key){
         return ((AcsBigInteger)mmp.get(key)).value.longValueExact();
 

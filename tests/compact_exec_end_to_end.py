@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Independent exec-v5 wire checks, malformed inputs, source execution and JNI."""
+"""Independent exec-v6 wire checks, malformed inputs, source execution and JNI."""
 import argparse
 from dataclasses import dataclass
 import json
@@ -13,12 +13,13 @@ import tempfile
 ROOT = Path(__file__).resolve().parents[1]
 MAIN = 0x0FFF0000
 INT, STRING, BOOL, FLOAT, DOUBLE, BYTES = 3, 1, 0xD00, 0xCE867, 0xCE1066, 0xCE200A
+ADDRESS = 0xCE200B
 ARRAY, MAP = 0xAD, 2
 OP_NAMES = {3: 'v', 4: 'vd', 5: 'vs', 6: 'm', 7: 'r', 8: 'ro', 9: 'oa',
             10: 'ob', 11: 'od', 12: 'add', 13: 'minus', 14: 'multiply',
             15: 'divide', 16: 'mod', 17: 'gt', 18: 'lt', 19: 'eq', 20: 'ne',
             21: 'ge', 22: 'le', 23: 'and', 24: 'or', 25: 'not', 26: 'neg',
-            27: 'if', 28: 'wi', 29: 'brk'}
+            27: 'if', 28: 'wi', 29: 'brk', 30: 'cont', 31: 'cleanup'}
 
 
 def integer(value):
@@ -56,11 +57,22 @@ def bool_value(payload):
 
 
 @dataclass(frozen=True)
+class Address:
+    value: int
+
+    def __post_init__(self):
+        assert 0 <= self.value < 2**64, 'uint64 address range'
+
+
+@dataclass(frozen=True)
 class Scalar:
     tag: int
     payload: bytes
 
     def value(self):
+        if self.tag == ADDRESS:
+            assert len(self.payload) == 8, 'address width'
+            return Address(struct.unpack('<Q', self.payload)[0])
         if self.tag == INT:
             return int_value(self.payload)
         if self.tag == BOOL:
@@ -75,6 +87,8 @@ class Scalar:
 
 
 def scalar(value):
+    if isinstance(value, Address):
+        return Scalar(ADDRESS, struct.pack('<Q', value.value))
     if isinstance(value, bool):
         return Scalar(BOOL, bytes([value]))
     if isinstance(value, int):
@@ -138,7 +152,7 @@ def function(body, ident=MAIN, return_type=0, params=(), locals_count=0):
 
 
 def module(functions, globals_count=0, signatures=()):
-    return [b'AZSCRIPT', integer(5), integer(2), b'independent wire fixture',
+    return [b'AZSCRIPT', integer(6), integer(2), b'independent wire fixture',
             integer(globals_count), typed_encode({})[1], stack(*signatures), stack(*functions), b'', b'']
 
 
@@ -148,6 +162,8 @@ def encode_compact_expression(value):
         return block(*(encode_compact_expression(item) for item in value))
     if not isinstance(value, dict):
         return constant(value)
+    if set(value) == {'address'}:
+        return constant(Address(int(value['address'])))
     if value.get('t') == 1:
         return expression(2, integer(value['id']), stack(*(encode_compact_expression(item) for item in value['param'])))
     name = value['c']
@@ -180,14 +196,16 @@ def encode_compact_expression(value):
             fields.append(child('else'))
     elif opcode == 28:
         fields = [child('v'), child('val')]
+    elif opcode == 31:
+        fields = [child('v'), child('val'), bytes([value['on-error']])]
     else:
-        assert opcode == 29
+        assert opcode in (29, 30)
         fields = []
     return expression(opcode, *fields)
 
 
 def encode_compact_module(program):
-    """Encode fixtures expressed as readable dictionaries into only v5 wire."""
+    """Encode fixtures expressed as readable dictionaries into only v6 wire."""
     global_names = program.get('gvs', [])
     numeric = isinstance(global_names, int)
     global_count = global_names if numeric else len(global_names)
@@ -244,7 +262,7 @@ class WireReader:
         fields = frames(payload)
         assert fields
         opcode = int_value(fields.pop(0))
-        assert 0 <= opcode <= 29, opcode
+        assert 0 <= opcode <= 31, opcode
         self.opcodes.add(opcode)
         if opcode == 0:
             assert len(fields) == 1
@@ -272,7 +290,7 @@ class WireReader:
             assert len(fields) == 3 + present
             result['v'] = int_value(fields[0])
             kind = int_value(fields[1])
-            assert kind in (0, 1, 2, 3, 4, 6)
+            assert kind in (0, 1, 2, 3, 4, 6, 7)
             if kind != 6:
                 result['declared-type'] = kind
             if present:
@@ -314,8 +332,12 @@ class WireReader:
         elif opcode == 28:
             assert len(fields) == 2
             result.update(v=self.expression(fields[0]), val=self.expression(fields[1]))
+        elif opcode == 31:
+            assert len(fields) == 3
+            result.update(v=self.expression(fields[0]), val=self.expression(fields[1]))
+            result['on-error'] = bool_value(fields[2])
         else:
-            assert opcode == 29 and not fields
+            assert opcode in (29, 30) and not fields
         return result
 
     def read(self, data):
@@ -323,8 +345,8 @@ class WireReader:
         assert len(file_fields) == 1, 'file must contain one root frame'
         fields = frames(file_fields[0])
         assert len(fields) == 10 and fields[0] == b'AZSCRIPT'
-        assert int_value(fields[1]) == 5
-        legacy = {'exec-version': 5, 'version': int_value(fields[2]),
+        assert int_value(fields[1]) == 6
+        legacy = {'exec-version': 6, 'version': int_value(fields[2]),
                   'author': fields[3].decode('utf-8'), 'gvs': int_value(fields[4]),
                   'ext': typed_decode(MAP, fields[5]), 'extern-signatures': [], 'f': [],
                   'namespace-hint': fields[8].decode('utf-8'), 'assume-hints': []}
@@ -367,7 +389,7 @@ int main() {
     int total=a+b+a-b+a*b+a/b+a%b;
     boolean comparisons=a>b && b<a || a==b || a!=b || a>=b || b<=a;
     print(-a); print(!comparisons); print(f); print(d); print(text);
-    int pointer=alloc(1); mem_get(pointer)=41; print(mem_get(pointer)); mem_free(pointer);
+    address pointer=alloc(1); mem_get(pointer)=41; print(mem_get(pointer)); mem_free(pointer);
     if(false) { print("unreachable"); } else { print("else"); }
     if(true) { empty(); }
     int i=0; while(i<3) { i+=1; if(i==2) { break; } }
@@ -407,12 +429,12 @@ def main():
             run(compiler + ['compile-json', ast, '-o', roundtrip])
             assert abd.read_bytes() == roundtrip.read_bytes(), 'readable AST roundtrip'
             debug = json.loads(executable.read_text(encoding='utf-8'))
-            assert debug['exec-version'] == 5
+            assert debug['exec-version'] == 6
 
             def inspect(value):
                 if isinstance(value, dict):
                     if value.get('t') == 0 and 'c' in value:
-                        assert type(value['c']) is int and 3 <= value['c'] <= 29, value
+                        assert type(value['c']) is int and 3 <= value['c'] <= 31, value
                     for item in value.values():
                         inspect(item)
                 elif isinstance(value, list):
@@ -467,12 +489,13 @@ def main():
         for name, value, kind, expected in [('float', Scalar(FLOAT, struct.pack('<f', 1.25)), 2, '1.25\n'),
                 ('double', Scalar(DOUBLE, struct.pack('<d', 2.5)), 3, '2.5\n'),
                 ('string', '中文\0wire', 1, '中文\0wire\n'), ('bool', True, 4, 'true\n'),
+                ('address', Address(2**64-1), 7, '18446744073709551615\n'),
                 ('void', b'\xff', 5, '')]:
             execute_wire('independent-' + name, module([function(block(returning(constant(value))), return_type=kind)]), expected=expected)
         execute_wire('independent-void-return', module([function(block(returning()), return_type=5)]), expected='')
 
         mutations = [('root-missing', minimum[:-1]), ('root-extra', minimum + [b''])]
-        for index, value, label in [(0, b'AZSCRIPX', 'magic'), (1, integer(4), 'version'),
+        for index, value, label in [(0, b'AZSCRIPX', 'magic'), (1, integer(5), 'version'),
                 (1, b'\4', 'version-width'), (2, b'\2', 'source-version-width'),
                 (4, integer(-1), 'negative-globals'), (4, integer(2**31 - 1), 'huge-globals'),
                 (4, b'\0', 'global-width'), (5, b'\1', 'extension-frame'),
@@ -482,7 +505,7 @@ def main():
             mutations.append((label, changed))
         valid_function = frames(frames(minimum[7])[0])
         bad_functions = [('function-missing', valid_function[:-1]), ('function-extra', valid_function + [b''])]
-        for index, value, label in [(0, b'\1', 'function-id-width'), (1, integer(7), 'return-type'),
+        for index, value, label in [(0, b'\1', 'function-id-width'), (1, integer(8), 'return-type'),
                 (2, integer(-1), 'negative-params'), (3, integer(-1), 'negative-locals'),
                 (4, stack(b'\0'), 'parameter-type-width'), (4, stack(integer(0)), 'parameter-count'),
                 (3, b'\0', 'local-width')]:
@@ -505,11 +528,13 @@ def main():
 
         bad_expressions = {
             'empty-expression': b'', 'opcode-width': stack(b'\0'),
-            'unknown-opcode': expression(30), 'negative-opcode': expression(-1),
+            'unknown-opcode': expression(32), 'negative-opcode': expression(-1),
             'constant-missing': expression(0), 'constant-empty': expression(0, b''),
             'constant-multiple': expression(0, typed_encode([1, 2])[1]),
             'constant-map': expression(0, typed_encode([{}])[1]),
             'constant-bool': expression(0, stack(integer(BOOL), b'\2')),
+            'constant-address-short': expression(0, stack(integer(ADDRESS), b'1234')),
+            'constant-address-long': expression(0, stack(integer(ADDRESS), b'123456789')),
             'constant-float-width': expression(0, stack(integer(FLOAT), b'123')),
             'constant-double-width': expression(0, stack(integer(DOUBLE), b'1234')),
             'constant-float-nan': expression(0, stack(integer(FLOAT), struct.pack('<f', float('nan')))),
@@ -587,7 +612,7 @@ public class CompactSnapshot {
    AbdInvoker.loadScript(new File(args[0]));
    AbdInvoker.flush();
    if(!Integer.valueOf(41).equals(AbdInvoker.invoke(set,41))) throw new AssertionError("set");
-   int pointer=(Integer)AbdInvoker.invoke(make,7);
+   Object pointer=AbdInvoker.invoke(make,7);
    if(!AbdInvoker.saveStatus(saved)) throw new AssertionError("save");
    AbdInvoker.invoke(set,99); AbdInvoker.invoke(make,9);
    AbdInvoker.loadStatus(saved);
@@ -611,7 +636,7 @@ public class CompactSnapshot {
                  '-cp', os.pathsep.join((str(work), str(args.bridge))), 'CompactSnapshot', native, saved, other, *ids],
                 'Compact JNI snapshot passed\n')
             snapshot = typed_decode(MAP, frames(saved.read_bytes())[0])
-            assert snapshot['snapshot version'].value() == 5
+            assert snapshot['snapshot version'].value() == 6
             assert snapshot['module manifest'][0]['bytes'].payload == native.read_bytes()
             assert [item.value() for item in snapshot['variable global']] == [41]
             assert len(snapshot['objects']) == 1

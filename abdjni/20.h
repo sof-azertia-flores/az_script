@@ -17,6 +17,9 @@ inline std::string name2str(int type){
     if(type==azertian::BOOLEAN_VALUE){
         return "bool";
     }
+    if(type==azertian::ADDRESS_VALUE){
+        return "address";
+    }
     if(type==azertian::VOID_VALUE){
         return "null";
     }

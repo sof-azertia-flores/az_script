@@ -2,6 +2,7 @@
 """Dependency-free real JVM/JNI regression suite; fixtures use the documented ABD wire format."""
 import argparse
 import copy
+from dataclasses import dataclass
 from pathlib import Path
 import shutil
 import struct
@@ -12,11 +13,18 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'tests'))
 from compact_exec_end_to_end import encode_compact_module
 
 
+@dataclass(frozen=True)
+class Address:
+    bits: int
+
+
 def frame(payload):
     return struct.pack('<i', len(payload)) + payload
 
 
 def encode(value):
+    if isinstance(value, Address):
+        return 0xCE200B, struct.pack('<Q', value.bits)
     if isinstance(value, bool):
         return 0xD00, bytes([value])
     if isinstance(value, int):
@@ -51,8 +59,13 @@ def read_abd(path):
             at += length
 
     def decode(kind, payload):
+        if kind == 0xCE200B:
+            assert len(payload) == 8
+            return Address(struct.unpack('<Q', payload)[0])
         if kind == 3:
             return struct.unpack('<i', payload)[0]
+        if kind in (0xCE867, 0xCE1066):
+            return struct.unpack('<f' if kind == 0xCE867 else '<d', payload)[0]
         if kind == 0xD00:
             assert payload in (b'\0', b'\1')
             return payload == b'\1'
@@ -98,6 +111,8 @@ def main():
         function(i + 1, kind, [ret(var('__func_param0'))], 1)
         for i, kind in enumerate([0, 1, 2, 3, 4])
     ] + [
+        {'id': 112, 'return-type': 7, 'param-count': 1, 'param-types': [7],
+         'script': [ret(var('__func_param0'))]},
         function(6, 5, [{'t': 0, 'c': 'r'}], 0),
         function(7, 0, [{'t': 0, 'c': 'vs', 'v': 'counter', 'val': var('__func_param0')}, ret(var('counter'))], 1),
         function(8, 0, [ret(var('counter'))]),
@@ -125,14 +140,14 @@ def main():
         return entry
 
     write_abd(work / 'overlap.snapshot.abd', {
-        'snapshot version': 5, 'module manifest': [manifest('fixture.exec.abd', 2)],
+        'snapshot version': 6, 'module manifest': [manifest('fixture.exec.abd', 2)],
         'variable global': [91, bytes([255])], 'global owned allocations': [], 'objects': [],
         'length heap': 3, 'heap': [bytes([255]), 0, 0],
-        'heap allocation': [{'begin position': 1, 'length': 2}, {'begin position': 2, 'length': 1}]})
+        'heap allocation': [{'begin position': Address(1), 'length': 2}, {'begin position': Address(2), 'length': 1}]})
     write_abd(work / 'legacy.snapshot.abd', {
         'variable global': {'counter': 91, 'empty': '--------SAVE-----NULL-PTR'},
         'length heap': 1, 'heap': [bytes([255])],
-        'heap allocation': [{'begin position': 0, 'length': 1}]})
+        'heap allocation': [{'begin position': Address(0), 'length': 1}]})
     write_abd(work / 'v2.snapshot.abd', {
         'snapshot version': 2, 'script bytes': (work / 'fixture.exec.abd').read_bytes(),
         'variable global': {'counter': 92, 'empty': bytes([255])},
@@ -163,14 +178,14 @@ def main():
     checked_address = {'t': 0, 'c': 'oa', 'v': var('__func_param0'), 'offset': 0}
     object_fixture = {'gvs': ['counter'], 'f': [
         object_function(0, 5, [{'t': 0, 'c': 'vs', 'v': 'counter', 'val': 7}]),
-        object_function(201, 0, object_factory(False), [0]),
-        object_function(202, 0, object_factory(True), [0]),
-        object_function(203, 5, [{'t': 0, 'c': 'od', 'v': var('__func_param0')}], [0]),
-        object_function(204, 0, [ret(call(0x0ABD0006, checked_address))], [0]),
-        object_function(205, 5, [call(0x34560004, call(0x0ABD0006, checked_address))], [0]),
+        object_function(201, 7, object_factory(False), [0]),
+        object_function(202, 7, object_factory(True), [0]),
+        object_function(203, 5, [{'t': 0, 'c': 'od', 'v': var('__func_param0')}], [7]),
+        object_function(204, 0, [ret(call(0x0ABD0006, checked_address))], [7]),
+        object_function(205, 5, [call(0x34560004, call(0x0ABD0006, checked_address))], [7]),
         object_function(206, 5, [{'t': 0, 'c': 'vs', 'v': 'counter', 'val': var('__func_param0')}], [0]),
         object_function(207, 0, [ret(var('counter'))]),
-        object_function(208, 0, object_factory(False)[:-1] + [call(0x0ABD0004, var('p')),
+        object_function(208, 7, object_factory(False)[:-1] + [call(0x0ABD0004, var('p')),
                         {'t': 0, 'c': 'ro', 'r': var('p')}], [0]),
         object_function(209, 0, [ret(0)], [0]),
         object_function(210, 5, [], [1]),
@@ -185,14 +200,14 @@ def main():
                                     {'t': 0, 'c': 'divide', 'v1': 1, 'v2': 0}]
     write_abd(work / 'objects.load-failure.exec.abd', failed_load)
     object_snapshot = {
-        'snapshot version': 5, 'module manifest': [manifest('objects.exec.abd', 1)],
-        'variable global': [66], 'global owned allocations': [2, 1],
+        'snapshot version': 6, 'module manifest': [manifest('objects.exec.abd', 1)],
+        'variable global': [66], 'global owned allocations': [Address(2), Address(1)],
         'length heap': 4, 'heap': [bytes([255]), 11, 22, 33],
-        'heap allocation': [{'begin position': i, 'length': 1} for i in (1, 2, 3)],
-        'objects': [{'begin position': i, 'has destructor': True, 'destructor': 205, 'manual': i == 3} for i in (1, 2, 3)]}
+        'heap allocation': [{'begin position': Address(i), 'length': 1} for i in (1, 2, 3)],
+        'objects': [{'begin position': Address(i), 'has destructor': True, 'destructor': 205, 'manual': i == 3} for i in (1, 2, 3)]}
     write_abd(work / 'objects.valid.snapshot.abd', object_snapshot)
     object_empty = copy.deepcopy(object_snapshot)
-    object_empty.update({'snapshot version': 5, 'variable global': [67],
+    object_empty.update({'snapshot version': 6, 'variable global': [67],
                       'global owned allocations': [], 'length heap': 1,
                       'heap': [bytes([255])], 'heap allocation': [], 'objects': []})
     write_abd(work / 'objects.empty.snapshot.abd', object_empty)
@@ -201,7 +216,8 @@ def main():
     del without_destructor['objects'][2]['destructor']
     write_abd(work / 'objects.no-destructor.snapshot.abd', without_destructor)
     bad_objects = []
-    for field, invalid in [('begin position', 0), ('begin position', 4), ('destructor', -2),
+    for field, invalid in [('begin position', Address(0)), ('begin position', Address(4)),
+                           ('begin position', Address(0xffffffffffffffff)), ('begin position', 1), ('destructor', -2),
                            ('destructor', 999), ('destructor', 0x34560004),
                            ('destructor', 209), ('destructor', 210), ('destructor', 211),
                            ('manual', True), ('manual', 1)]:
@@ -212,13 +228,22 @@ def main():
     candidate['objects'].append(candidate['objects'][0].copy())
     bad_objects.append(candidate)
     candidate = copy.deepcopy(object_snapshot)
-    candidate['global owned allocations'].append(3)
+    candidate['global owned allocations'].append(Address(3))
     bad_objects.append(candidate)
     candidate = copy.deepcopy(object_snapshot)
-    candidate['global owned allocations'].append(4)
+    candidate['global owned allocations'].append(Address(4))
     bad_objects.append(candidate)
     candidate = copy.deepcopy(object_snapshot)
-    candidate['global owned allocations'] = [2, 1, 1]
+    candidate['global owned allocations'] = [Address(2), Address(1), Address(1)]
+    bad_objects.append(candidate)
+    candidate = copy.deepcopy(object_snapshot)
+    candidate['global owned allocations'] = [2, 1]
+    bad_objects.append(candidate)
+    candidate = copy.deepcopy(object_snapshot)
+    candidate['heap allocation'][0]['begin position'] = 1
+    bad_objects.append(candidate)
+    candidate = copy.deepcopy(object_snapshot)
+    candidate['heap allocation'][0]['begin position'] = Address(0xffffffffffffffff)
     bad_objects.append(candidate)
     candidate = copy.deepcopy(object_snapshot)
     del candidate['objects']
@@ -249,7 +274,7 @@ def main():
         write_abd(work / f'objects.invalid-{i}.snapshot.abd', candidate)
 
     # Globals use negative slot ids and local/parameter variables non-negative
-    # ids. write_abd emits only fixed-record exec v5 for all program fixtures.
+    # ids. write_abd emits only fixed-record exec v6 for all program fixtures.
     def numeric_expression(value):
         if isinstance(value, list):
             return [numeric_expression(item) for item in value]
@@ -260,7 +285,7 @@ def main():
             return converted
         return value
 
-    numeric_fixture = {'exec-version': 5, 'gvs': 5, 'f': []}
+    numeric_fixture = {'exec-version': 6, 'gvs': 5, 'f': []}
     for original in object_fixture['f']:
         converted = copy.deepcopy(original)
         converted['local-count'] = 1 if original['id'] in (201, 202, 208) else 0
@@ -273,7 +298,7 @@ def main():
         {'t': 0, 'c': 'vs', 'v': -4, 'val': call(201, 11)},
         call(0x0ABD0005, var(-4)),
         {'t': 0, 'c': 'vs', 'v': -5, 'val': call(202, 33)}]
-    for ident, kind, index in [(220, 1, -2), (222, 4, -3), (224, 0, -4), (225, 0, -5)]:
+    for ident, kind, index in [(220, 1, -2), (222, 4, -3), (224, 7, -4), (225, 7, -5)]:
         numeric_fixture['f'].append({**object_function(ident, kind, [ret(var(index))]), 'local-count': 0})
     for ident, kind, index in [(221, 1, -2), (223, 4, -3)]:
         numeric_fixture['f'].append({**object_function(ident, kind, [
@@ -283,11 +308,11 @@ def main():
     numeric_other['ext'] = {'fixture': 'different numeric bytecode'}
     write_abd(work / 'numeric.other.exec.abd', numeric_other)
     numeric_snapshot = {
-        'snapshot version': 5, 'module manifest': [manifest('numeric.exec.abd', 5)],
-        'variable global': [66, 'restored', False, 1, 2], 'global owned allocations': [1],
+        'snapshot version': 6, 'module manifest': [manifest('numeric.exec.abd', 5)],
+        'variable global': [66, 'restored', False, Address(1), Address(2)], 'global owned allocations': [Address(1)],
         'length heap': 3, 'heap': [bytes([255]), 11, 33],
-        'heap allocation': [{'begin position': i, 'length': 1} for i in (1, 2)],
-        'objects': [{'begin position': i, 'has destructor': True, 'destructor': 205, 'manual': i == 2} for i in (1, 2)]}
+        'heap allocation': [{'begin position': Address(i), 'length': 1} for i in (1, 2)],
+        'objects': [{'begin position': Address(i), 'has destructor': True, 'destructor': 205, 'manual': i == 2} for i in (1, 2)]}
     write_abd(work / 'numeric.valid.snapshot.abd', numeric_snapshot)
     invalid_globals = [[], [66, 'restored', False, 1], [66, 'restored', False, 1, 2, 3],
                        {'one': 66, 'two': 'restored', 'three': False, 'four': 1, 'five': 2},
@@ -300,7 +325,7 @@ def main():
     candidate = copy.deepcopy(numeric_snapshot)
     candidate['objects'][0]['destructor'] = 999
     write_abd(work / 'numeric.invalid-7.snapshot.abd', candidate)
-    for version in (0, 2, 3, 4):
+    for version in (0, 2, 3, 4, 5):
         candidate = copy.deepcopy(numeric_snapshot)
         candidate['variable global'] = {'g' + str(i): item for i, item in enumerate(candidate['variable global'])}
         if version:
@@ -334,23 +359,23 @@ def main():
 
     hint_library = {'gvs': 1, 'namespace-hint': 'PointLibrary',
         'assume-hints': [{'hint': 'PointLibrary', 'namespace': self_alias >> 16}],
-        'extern-signatures': [signature(self_alias + 5, 5, [0])], 'f': [
+        'extern-signatures': [signature(self_alias + 5, 5, [7])], 'f': [
             object_function(0, 5, [{'t': 0, 'c': 'vs', 'v': -1, 'val': 42}, call(event, 10)]),
             object_function(1, 5, [call(event, 20)]),
             object_function(2, 0, [ret(var(-1))]),
-            {**object_function(3, 0, hinted_factory(False), [0]), 'local-count': 1},
-            {**object_function(4, 0, hinted_factory(True), [0]), 'local-count': 1},
+            {**object_function(3, 7, hinted_factory(False), [0]), 'local-count': 1},
+            {**object_function(4, 7, hinted_factory(True), [0]), 'local-count': 1},
             object_function(5, 5, [call(0x34560004, call(0x0ABD0006,
-                {'t': 0, 'c': 'oa', 'v': var(0), 'offset': 0}))], [0]),
+                {'t': 0, 'c': 'oa', 'v': var(0), 'offset': 0}))], [7]),
             object_function(6, 5, [{'t': 0, 'c': 'vs', 'v': -1, 'val': var(0)}], [0]),
             object_function(7, 0, [ret(call(0x0ABD0006,
-                {'t': 0, 'c': 'oa', 'v': var(0), 'offset': 0}))], [0]),
-            object_function(8, 5, [{'t': 0, 'c': 'od', 'v': var(0)}], [0])
+                {'t': 0, 'c': 'oa', 'v': var(0), 'offset': 0}))], [7]),
+            object_function(8, 5, [{'t': 0, 'c': 'od', 'v': var(0)}], [7])
         ]}
     hint_consumer = {'gvs': 3, 'assume-hints': [{'hint': 'PointLibrary', 'namespace': alias >> 16}],
-        'extern-signatures': [signature(alias + 2, 0), signature(alias + 3, 0, [0]),
-                              signature(alias + 4, 0, [0]), signature(alias + 7, 0, [0]),
-                              signature(alias + 8, 5, [0])],
+        'extern-signatures': [signature(alias + 2, 0), signature(alias + 3, 7, [0]),
+                              signature(alias + 4, 7, [0]), signature(alias + 7, 0, [7]),
+                              signature(alias + 8, 5, [7])],
         'f': [object_function(0, 5, [
             {'t': 0, 'c': 'vs', 'v': -1, 'val': call(alias + 2)},
             {'t': 0, 'c': 'vs', 'v': -2, 'val': call(alias + 3, 11)},
@@ -358,10 +383,10 @@ def main():
             {'t': 0, 'c': 'vs', 'v': -3, 'val': call(alias + 4, 33)}, call(event, 100)]),
             object_function(1, 5, [call(event, 110)]),
             object_function(0x12000002, 0, [ret(var(-1))]),
-            object_function(0x12000003, 0, [ret(var(-2))]),
-            object_function(0x12000004, 0, [ret(var(-3))]),
-            object_function(0x12000005, 0, [ret(call(alias + 7, var(0)))], [0]),
-            object_function(0x12000006, 5, [call(alias + 8, var(0))], [0])]}
+            object_function(0x12000003, 7, [ret(var(-2))]),
+            object_function(0x12000004, 7, [ret(var(-3))]),
+            object_function(0x12000005, 0, [ret(call(alias + 7, var(0)))], [7]),
+            object_function(0x12000006, 5, [call(alias + 8, var(0))], [7])]}
     hint_extra = {'gvs': 1, 'namespace-hint': 'ExtraLibrary',
         'assume-hints': [{'hint': 'ExtraLibrary', 'namespace': 0x5EEE}], 'f': [
         object_function(0, 5, [{'t': 0, 'c': 'vs', 'v': -1, 'val': 88}, call(event, 200)]),
@@ -373,8 +398,8 @@ def main():
     modified_library['ext'] = {'identity': 'same schema, different original bytes'}
     write_abd(work / 'hints.changed-library.exec.abd', modified_library)
     high_destructor = {'gvs': 0, 'f': [
-        object_function(-1, 5, [call(0x34560004, call(0x0ABD0006, var(0)))], [0]),
-        {**object_function(0x7FFF0002, 0, [
+        object_function(-1, 5, [call(0x34560004, call(0x0ABD0006, var(0)))], [7]),
+        {**object_function(0x7FFF0002, 7, [
             {'t': 0, 'c': 'vd', 'v': 0, 'val': call(0x0ABD0003, 1)},
             {'t': 0, 'c': 'm', 'v1': call(0x0ABD0006, var(0)), 'v2': 55},
             {'t': 0, 'c': 'ob', 'v': var(0), 'destructor': -1, 'manual': False},
@@ -410,8 +435,13 @@ def main():
     print(deep.stderr, end='')
     deep.check_returncode()
     assert 'WARNING in native method' not in deep.stdout + deep.stderr, 'JNI checker reported a warning'
+    scalars = read_abd(work / '快照 🐈.abd')
+    assert scalars['snapshot version'] == 6
+    assert Address(0xfedcba9876543210) in scalars['heap']
+    assert Address(0) in scalars['heap']
+    assert all(isinstance(entry['begin position'], Address) for entry in scalars['heap allocation'])
     snapshot = read_abd(work / 'objects.saved.snapshot.abd')
-    assert snapshot['snapshot version'] == 5
+    assert snapshot['snapshot version'] == 6
     assert snapshot['module manifest'] == [manifest('objects.exec.abd', 1)]
     assert snapshot['variable global'] == [7]
     assert len(snapshot['objects']) == 3
@@ -421,11 +451,11 @@ def main():
     assert set(snapshot['global owned allocations']) == {
         item['begin position'] for item in snapshot['objects'] if not item['manual']}
     detached = read_abd(work / 'objects.detached.snapshot.abd')
-    assert detached['snapshot version'] == 5
+    assert detached['snapshot version'] == 6
     assert len(detached['objects']) == 1 and detached['objects'][0]['manual'] is False
     assert detached['global owned allocations'] == []
     numeric = read_abd(work / 'numeric.saved.snapshot.abd')
-    assert numeric['snapshot version'] == 5
+    assert numeric['snapshot version'] == 6
     assert numeric['module manifest'] == [manifest('numeric.exec.abd', 5)]
     assert len(numeric['variable global']) == 5
     assert numeric['variable global'][:3] == [7, 'numeric\0中文🐈', True]
@@ -433,7 +463,7 @@ def main():
     assert numeric['global owned allocations'] == [numeric['variable global'][3]]
     assert {item['begin position'] for item in numeric['objects']} == set(numeric['variable global'][3:])
     hints = read_abd(work / 'hints.all.snapshot.abd')
-    assert hints['snapshot version'] == 5
+    assert hints['snapshot version'] == 6
     assert hints['module manifest'] == [manifest('hints.consumer.exec.abd', 3),
         manifest('hints.library.exec.abd', 1, 3, 'PointLibrary', 1),
         manifest('hints.extra.exec.abd', 1, 4, 'ExtraLibrary', 2)]

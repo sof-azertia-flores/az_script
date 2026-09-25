@@ -30,6 +30,7 @@ void rejects_containing(std::function<void()> f,const std::string& expected,cons
         throw std::runtime_error(std::string(what)+": expected error containing '"+expected+"', got '"+actual+"'");
     ++assertions;
 }
+MV ptr(std::uint64_t v){return std::make_shared<AddressAbdValue>(address{v});}
 MV n(int v){return std::make_shared<IntAbdValue>(v);}
 MV s(std::string v){return std::make_shared<StringAbdValue>(v);}
 A block(std::initializer_list<MV> nodes){auto a=std::make_shared<AbdArray>();for(auto x:nodes)a->push_back(x);return a;}
@@ -77,7 +78,7 @@ R rfn(int id,int type,R body,int locals=0,std::initializer_list<int> params={}){
     return raw({ri(id),ri(type),ri(static_cast<int>(params.size())),ri(locals),types.toAbdValue(),body});
 }
 R rmodule(std::initializer_list<R> functions,int globals=0,R signatures=nullptr){
-    return raw({rs("AZSCRIPT"),ri(5),ri(1),rs("test"),ri(globals),std::make_shared<AbdMap>()->toAbdValue(),signatures?signatures:raw({}),raw(functions),rs(""),raw({})});
+    return raw({rs("AZSCRIPT"),ri(6),ri(1),rs("test"),ri(globals),std::make_shared<AbdMap>()->toAbdValue(),signatures?signatures:raw({}),raw(functions),rs(""),raw({})});
 }
 R replace_raw(R value,std::size_t field,R replacement){AbdStack fields(value);fields.vs.at(field)=std::move(replacement);return fields.toAbdValue();}
 R append_raw(R value,R extra){AbdStack fields(value);fields.vs.push_back(std::move(extra));return fields.toAbdValue();}
@@ -108,7 +109,7 @@ std::shared_ptr<script> load_raw(R value,bool ready=true){
 }
 void insert_raw(const std::shared_ptr<script>& target,R value,bool ready=true){auto bytes=value->toBytes();target->insert_script(bytes.get(),value->size+4);if(ready)target->flush();}
 // Test fixture authoring retains readable names; only this test encoder resolves
-// them to slots. The interpreter is always given the public raw v5 format.
+// them to slots. The interpreter is always given the public raw v6 format.
 int fixture_int(MV value){auto p=std::dynamic_pointer_cast<IntAbdValue>(value);if(!p)throw std::invalid_argument("fixture requires int");return p->data;}
 std::string fixture_string(MV value){auto p=std::dynamic_pointer_cast<StringAbdValue>(value);if(!p)throw std::invalid_argument("fixture requires string");return p->data;}
 A fixture_array(MV value){auto p=std::dynamic_pointer_cast<AbdArray>(value);if(!p)throw std::invalid_argument("fixture requires array");return p;}
@@ -196,7 +197,7 @@ R encode_fixture(M source) {
         const int locals=numbered?fixture_int(entry->get("local-count")):encoder.next-params;
         functions.vs.push_back(raw({entry->get("id")->toAbdValue(),entry->get("return-type")->toAbdValue(),ri(params),ri(locals),types.toAbdValue(),body}));
     }
-    return raw({rs("AZSCRIPT"),ri(5),ri(1),rs("fixture"),ri(global_count),std::make_shared<AbdMap>()->toAbdValue(),signatures.toAbdValue(),functions.toAbdValue(),rs(""),raw({})});
+    return raw({rs("AZSCRIPT"),ri(6),ri(1),rs("fixture"),ri(global_count),std::make_shared<AbdMap>()->toAbdValue(),signatures.toAbdValue(),functions.toAbdValue(),rs(""),raw({})});
 }
 void fixture_names(const std::shared_ptr<script>& target,M source,std::size_t offset=0) {
     if(source->get("exec-version"))return;
@@ -206,6 +207,7 @@ std::shared_ptr<script> load_module(M m){auto result=load_raw(encode_fixture(m))
 void insert_module(const std::shared_ptr<script>& target,M m){const auto offset=target->baseEnv->variables.size();insert_raw(target,encode_fixture(m));fixture_names(target,m,offset);}
 std::shared_ptr<script> program(std::initializer_list<MV> funcs,A globals=block({}),A signatures=nullptr){return load_module(module(funcs,std::move(globals),std::move(signatures)));}
 void insert_program(const std::shared_ptr<script>& target,std::initializer_list<MV> funcs,A globals=block({}),A signatures=nullptr){insert_module(target,module(funcs,std::move(globals),std::move(signatures)));}
+address pointer(std::shared_ptr<variable> v){check(v->type==ADDRESS_VALUE,"expected address result");return *static_cast<address*>(v->value);}
 int integer(std::shared_ptr<variable> v){check(v->type==INT_VALUE,"expected int result");return *static_cast<int*>(v->value);}
 class test_function final:public function {
     int declared_type;
@@ -234,6 +236,83 @@ public:
 };
 int main(){try{
     check(getiFunction(0x0abd0006)->return_type()==ANY_VALUE,"mem_get reports its dynamic return type");
+    {
+        constexpr auto maximum=std::numeric_limits<std::uint64_t>::max();
+        constexpr std::uint64_t high=0x8000000000000001ull;
+        check(getiFunction(0x0abd0003)->return_type()==ADDRESS_VALUE,"alloc advertises address return type");
+        auto high_value=std::make_shared<variable>(address{high});
+        auto copy=high_value->deepCopy();high_value->setValue(7);
+        check(pointer(copy)==address{high}&&integer(high_value)==7,"address copies retain type and all 64 bits");
+        copy->copy_from(std::make_shared<variable>(address{maximum}));
+        check(value_to_string(copy)=="18446744073709551615","address prints lossless unsigned decimal");
+        auto addresses=program({
+            fn(10,ADDRESS_VALUE,block({ret(binary("add",ptr(high),n(17)))})),
+            fn(11,ADDRESS_VALUE,block({ret(binary("add",n(-1),ptr(high)))})),
+            fn(12,ADDRESS_VALUE,block({ret(binary("minus",ptr(high),n(17)))})),
+            fn(13,ADDRESS_VALUE,block({ret(binary("minus",ptr(0),n(std::numeric_limits<int>::min())))})),
+            fn(14,BOOLEAN_VALUE,block({ret(binary("eq",ptr(maximum),ptr(maximum)))})),
+            fn(15,BOOLEAN_VALUE,block({ret(binary("gt",ptr(high),ptr(17)))})),
+            typed_fn(16,ADDRESS_VALUE,block({ret(var("__func_param0"))}),{ADDRESS_VALUE}),
+            typed_fn(17,INT_VALUE,block({ret(var("__func_param0"))}),{INT_VALUE}),
+            fn(18,INT_VALUE,block({ret(ptr(high))})),
+            fn(19,ADDRESS_VALUE,block({ret(n(1))})),
+            fn(20,VOID_VALUE,block({object_return(n(0))})),
+            fn(21,VOID_VALUE,block({object_delete(n(0))})),
+            fn(22,VOID_VALUE,block({object_address(n(1))})),
+            fn(23,VOID_VALUE,block({object_delete(ptr(0))})),
+            fn(24,VOID_VALUE,block({call(0x0abd0006,{n(1)})})),
+            fn(25,VOID_VALUE,block({call(0x0abd0002,{n(1)})})),
+            fn(26,VOID_VALUE,block({call(0x0abd0004,{n(1)})})),
+            fn(27,VOID_VALUE,block({call(0x0abd0005,{n(1)})})),
+            fn(28,VOID_VALUE,block({call(0x0abd0003,{ptr(1)})})),
+            fn(29,STRING_VALUE,block({ret(binary("add",s("address="),ptr(maximum)))}))
+        });
+        check(pointer(addresses->invoke(10))==address{high+17},"address plus int preserves high bits");
+        check(pointer(addresses->invoke(11))==address{high-1},"int plus address supports negative offsets");
+        check(pointer(addresses->invoke(12))==address{high-17},"address minus int preserves high bits");
+        check(pointer(addresses->invoke(13))==address{2147483648ull},"INT_MIN address subtraction avoids signed overflow");
+        check(*static_cast<bool*>(addresses->invoke(14)->value)&&*static_cast<bool*>(addresses->invoke(15)->value),"address equality and ordering compare unsigned values");
+        check(pointer(addresses->invoke(16,{copy}))==address{maximum},"typed address argument and return round-trip exactly");
+        rejects([&]{addresses->invoke(16,{std::make_shared<variable>(1)});},"address parameter rejects integer");
+        rejects([&]{addresses->invoke(17,{copy});},"integer parameter rejects address");
+        for(int id:{18,19,20,21,22,24,25,26,27,28})rejects([&]{addresses->invoke(id);},"address and integer are distinct in returns, objects, and memory functions");
+        check(value_to_string(addresses->invoke(29))=="address=18446744073709551615","string concatenation formats addresses losslessly");
+        addresses->invoke(23);addresses->destroy();
+        for(auto expression:{binary("add",ptr(maximum),n(1)),binary("add",ptr(0),n(-1)),
+            binary("minus",ptr(0),n(1)),binary("minus",ptr(maximum),n(-1)),
+            binary("minus",n(1),ptr(1)),binary("minus",ptr(1),ptr(1)),binary("add",ptr(1),ptr(1)),
+            binary("multiply",ptr(1),n(2)),binary("divide",ptr(1),n(2)),binary("mod",ptr(1),n(2)),
+            binary("add",ptr(1),std::make_shared<DoubleAbdValue>(1.0)),binary("eq",ptr(1),n(1)),
+            binary("lt",ptr(1),n(2))}) {
+            auto invalid=program({fn(10,ADDRESS_VALUE,block({ret(expression)}))});
+            rejects([&]{invalid->invoke(10);},"invalid address arithmetic is rejected");invalid->destroy();
+        }
+        for(auto payload:{ri(1),raw({}),raw({ri(1),ri(2)})})
+            rejects([&]{load_raw(rmodule({rfn(10,ADDRESS_VALUE,rreturn(rx(0,{raw({ri(0xce200b),payload})})))}));},"address constant requires exactly eight payload bytes");
+        auto metadata=std::make_shared<AbdMap>();metadata->put("address",ptr(maximum));
+        auto metadata_script=load_raw(replace_raw(rmodule({}),5,metadata->toAbdValue()));
+        check(std::dynamic_pointer_cast<AddressAbdValue>(metadata_script->meta->get("address"))->data==address{maximum},"address survives typed extension metadata");
+        metadata_script->destroy();
+        auto allocated=heap::alloc(1);heap::getAt(allocated)->setValue(91);
+        for(auto invalid:{address{high},address{0x100000001ull},address{maximum}}) {
+            rejects([&]{heap::getAt(invalid);},"large address cannot alias an existing slot by truncation");
+            rejects([&]{heap::object_address(invalid,0);},"large object address cannot alias slot base");
+            check(!heap::free(invalid),"free rejects addresses beyond the current heap");
+        }
+        rejects([&]{heap::restore({std::make_shared<variable>(nullptr)},{{address{maximum},1}});},"snapshot allocation range cannot wrap address width");
+        check(integer(heap::getAt(allocated))==91&&heap::lenAlloc()==1,"invalid address operations preserve active allocations");
+        heap::free(allocated);
+        constexpr int host_id=0x01310002;
+        auto host=std::make_shared<test_executor>(0x0131);
+        host->functions[host_id]=std::make_shared<test_function>(ADDRESS_VALUE,[](const std::vector<V>& values){return values.at(0)->deepCopy();});
+        registered_executor registered(host);
+        auto external=program({fn(10,ADDRESS_VALUE,block({ret(call(host_id,{ptr(high)}))}))},block({}),block({signature(host_id,ADDRESS_VALUE,{ADDRESS_VALUE})}));
+        check(pointer(external->invoke(10))==address{high},"external address signatures retain high bits");
+        rejects([&]{external->invoke(host_id,{std::make_shared<variable>(1)});},"external address parameter rejects int");
+        host->functions[host_id]=std::make_shared<test_function>(ADDRESS_VALUE,[](const std::vector<V>&){return std::make_shared<variable>(1);});
+        rejects([&]{external->invoke(10);},"external address result rejects int");external->destroy();
+    }
+
     {
         constexpr int alias=0x12340002;
         auto root_module=rhint("",{
@@ -301,7 +380,7 @@ int main(){try{
             rhint("",{},0,raw({assume("A",1),assume("B",1)})),
             rhint("",{},0,raw({assume("A",1),assume("A",2)})),
             rhint("",{rfn(0x00010002,VOID_VALUE,rblock({}))},0,raw({assume("A",1)}))})
-            rejects([&]{load_raw(malformed,false);},"v5 malformed hint module rejected before mounting");
+            rejects([&]{load_raw(malformed,false);},"v6 malformed hint module rejected before mounting");
         rejects([&]{load_raw(rmodule({rfn(10,VOID_VALUE,rx(10,{rc(n(0)),rb(true),ri(0x0fff0000),rb(false)}))}),false);},
                 "main entry is not a valid object destructor");
     }
@@ -376,7 +455,7 @@ int main(){try{
     {
         const int maker=static_cast<int>(0xffff0002u);
         auto high=load_raw(rmodule({rfn(0,VOID_VALUE,rset(-1,rc(n(0)))),
-            rfn(-1,VOID_VALUE,rset(-1,rx(12,{rvar(-1),rc(n(1))})),0,{INT_VALUE}),
+            rfn(-1,VOID_VALUE,rset(-1,rx(12,{rvar(-1),rc(n(1))})),0,{ADDRESS_VALUE}),
             rfn(maker,VOID_VALUE,rblock({rdef(0,rcall(0x0abd0003,{rc(n(1))})),
                 rx(10,{rvar(0),rb(true),ri(-1),rb(true)}),rcall(0x0abd0004,{rvar(0)}),rx(11,{rvar(0)})}),1)
         },1));
@@ -386,15 +465,15 @@ int main(){try{
     {
         auto twenty=rc(n(20));auto zero=rc(n(0));
         auto compact=load_raw(rmodule({rfn(10,INT_VALUE,rx(7,{rb(true),rx(12,{twenty,rc(n(22))})}))}));
-        check(integer(compact->invoke(10))==42,"raw v5 directly executes native arithmetic expressions");
+        check(integer(compact->invoke(10))==42,"raw v6 directly executes native arithmetic expressions");
         for(int opcode=0;opcode<29;++opcode)
-            rejects([&]{load_raw(rmodule({rfn(10,VOID_VALUE,rx(opcode))}));},"v5 opcode rejects missing fields");
+            rejects([&]{load_raw(rmodule({rfn(10,VOID_VALUE,rx(opcode))}));},"v6 opcode rejects missing fields");
         auto byte=[](unsigned char value){return std::make_shared<AbdValue>(&value,1);};
         const unsigned char bad_text[]={0xed,0xa0,0x80};
         const auto invalid_utf8=std::make_shared<AbdValue>(bad_text,3);
         const unsigned char sentinel=0xff;
         for(auto expression:{
-            rx(30),rx(-1),rx(29,{ri(1)}),raw({byte(3),ri(0)}),rx(3,{ri(1)}),rx(3,{ri(-2)}),rx(3,{ri(std::numeric_limits<int>::min())}),
+            rx(32),rx(-1),rx(29,{ri(1)}),raw({byte(3),ri(0)}),rx(3,{ri(1)}),rx(3,{ri(-2)}),rx(3,{ri(std::numeric_limits<int>::min())}),
             rx(4,{ri(-1),ri(0),rb(false)}),rx(4,{ri(0),ri(VOID_VALUE),rb(false)}),rx(4,{ri(0),ri(0),byte(2)}),
             rx(4,{ri(0),ri(0),rb(false),twenty}),rx(5,{ri(0)}),rx(6,{twenty,zero}),rx(7,{ri(0)}),rx(7,{rb(false),twenty}),
             rx(9,{zero,ri(-1)}),rx(10,{zero,ri(0),rb(false)}),rx(10,{zero,ri(-2),rb(false)}),rx(10,{zero,ri(-1),byte(2)}),
@@ -403,9 +482,9 @@ int main(){try{
             rc(std::make_shared<DoubleAbdValue>(std::numeric_limits<double>::infinity())),
             rc(std::make_shared<FloatAbdValue>(std::numeric_limits<float>::quiet_NaN())),
             rx(0,{raw({ri(0xce2009),byte(sentinel)})}),rx(0,{raw({ri(0xce200a),byte(0)})})})
-            rejects([&]{load_raw(rmodule({rfn(10,VOID_VALUE,expression,1)},1));},"v5 malformed expression is rejected");
+            rejects([&]{load_raw(rmodule({rfn(10,VOID_VALUE,expression,1)},1));},"v6 malformed expression is rejected");
         auto good_function=rfn(10,VOID_VALUE,rblock({}));auto good_module=rmodule({good_function});
-        for(auto malformed:{replace_raw(good_module,1,ri(3)),replace_raw(good_module,1,ri(4)),replace_raw(good_module,1,byte(4)),
+        for(auto malformed:{replace_raw(good_module,1,ri(3)),replace_raw(good_module,1,ri(4)),replace_raw(good_module,1,ri(5)),replace_raw(good_module,1,byte(4)),
             replace_raw(good_module,2,byte(1)),replace_raw(good_module,3,invalid_utf8),replace_raw(good_module,4,ri(-1)),
             replace_raw(good_module,4,ri(1048577)),append_raw(good_module,ri(0)),
             rmodule({append_raw(good_function,ri(0))}),rmodule({replace_raw(good_function,0,byte(1))}),
@@ -413,41 +492,41 @@ int main(){try{
             rmodule({replace_raw(good_function,3,ri(1048577))}),rmodule({replace_raw(good_function,4,raw({ri(INT_VALUE)}))}),
             rmodule({rfn(10,VOID_VALUE,rx(4,{ri(0),ri(0),rb(false)}),0,{INT_VALUE})}),
             rmodule({good_function,good_function}),rmodule({},0,raw({raw({ri(0x01230001),ri(0),raw({}),ri(9)})}))})
-            rejects([&]{load_raw(malformed);},"v5 malformed module or function record rejected");
+            rejects([&]{load_raw(malformed);},"v6 malformed module or function record rejected");
         // The new interpreter intentionally rejects the retired Map formats.
         rejects([&]{load_raw(module({fn(10,VOID_VALUE,block({}))})->toAbdValue());},"named Map executable is unsupported");
         rejects([&]{load_raw(slot_module({slot_fn(10,VOID_VALUE,block({}))})->toAbdValue());},"v3 Map executable is unsupported");
         auto constant_null=rx(0,{raw({ri(0xce200a),byte(sentinel)})});
         auto scalar_program=load_raw(rmodule({rfn(10,VOID_VALUE,rx(7,{rb(true),constant_null})),
             rfn(11,STRING_VALUE,rx(7,{rb(true),rc(s(std::string("中文\0",7)))}))}));
-        check(scalar_program->invoke(10)->type==VOID_VALUE,"v5 current void sentinel round-trips");
-        check(value_to_string(scalar_program->invoke(11))==std::string("中文\0",7),"v5 UTF-8 string preserves embedded zero");
+        check(scalar_program->invoke(10)->type==VOID_VALUE,"v6 current void sentinel round-trips");
+        check(value_to_string(scalar_program->invoke(11))==std::string("中文\0",7),"v6 UTF-8 string preserves embedded zero");
         auto metadata=std::make_shared<AbdMap>();auto child=std::make_shared<AbdMap>();
         child->put("flag",std::make_shared<BoolAbdValue>(true));metadata->put("nested",block({n(3),child}));
         auto metadata_program=load_raw(replace_raw(good_module,5,metadata->toAbdValue()));
-        check(metadata_program->meta->get("nested")!=nullptr,"v5 extensions preserve generic typed nested metadata");
+        check(metadata_program->meta->get("nested")!=nullptr,"v6 extensions preserve generic typed nested metadata");
         for(auto extension:{raw({rs("x"),ri(1),invalid_utf8}),raw({rs("x"),ri(3),byte(1)}),
             raw({rs("x"),ri(0x0d00),byte(2)}),raw({rs("x"),ri(0xce2009),raw({})}),
             raw({rs("x"),ri(999),raw({})}),raw({rs("x"),ri(3),ri(1),rs("x"),ri(3),ri(2)})})
-            rejects([&]{load_raw(replace_raw(good_module,5,extension));},"v5 extension metadata validates types and fields");
+            rejects([&]{load_raw(replace_raw(good_module,5,extension));},"v6 extension metadata validates types and fields");
         auto chain=rc(n(0));for(int i=0;i<100;++i)chain=rx(12,{chain,rc(n(1))});
         check(integer(load_raw(rmodule({rfn(10,INT_VALUE,rx(7,{rb(true),chain}))}))->invoke(10))==100,
-              "v5 keeps 100-level arithmetic chains executable");
+              "v6 keeps 100-level arithmetic chains executable");
         for(int i=0;i<35;++i)chain=rx(12,{chain,rc(n(1))});
-        rejects([&]{load_raw(rmodule({rfn(10,INT_VALUE,rx(7,{rb(true),chain}))}));},"v5 raw stack nesting is bounded");
+        rejects([&]{load_raw(rmodule({rfn(10,INT_VALUE,rx(7,{rb(true),chain}))}));},"v6 raw stack nesting is bounded");
         auto deep_metadata=raw({});for(int i=0;i<128;++i)deep_metadata=raw({rs("nested"),ri(2),deep_metadata});
         rejects([&]{load_raw(replace_raw(good_module,5,deep_metadata));},"metadata cannot bypass enclosing module depth");
         auto data=good_module->toBytes();const auto length=static_cast<std::size_t>(good_module->size)+4;
-        rejects([&]{load_script(data.get(),length-1);},"v5 truncated outer frame rejected");
+        rejects([&]{load_script(data.get(),length-1);},"v6 truncated outer frame rejected");
         std::vector<unsigned char> trailing(data.get(),data.get()+length);trailing.push_back(0);
-        rejects([&]{load_script(trailing.data(),trailing.size());},"v5 trailing bytes rejected");
-        rejects([&]{load_script(data.get(),64*1024*1024+1);},"v5 file size checked before reading payload");
+        rejects([&]{load_script(trailing.data(),trailing.size());},"v6 trailing bytes rejected");
+        rejects([&]{load_script(data.get(),64*1024*1024+1);},"v6 file size checked before reading payload");
         auto truncated=std::make_shared<AbdValue>(good_module->data,good_module->size-1);
-        rejects([&]{load_raw(truncated);},"v5 truncated child frame rejected");
+        rejects([&]{load_raw(truncated);},"v6 truncated child frame rejected");
         const auto function_count=compact->functions.size();
-        rejects([&]{insert_raw(compact,replace_raw(rmodule({},2),1,ri(99)));},"v5 invalid inserted header rejected");
+        rejects([&]{insert_raw(compact,replace_raw(rmodule({},2),1,ri(99)));},"v6 invalid inserted header rejected");
         check(compact->baseEnv->variables.empty()&&compact->functions.size()==function_count&&integer(compact->invoke(10))==42,
-              "invalid v5 insertion preserves the old state");
+              "invalid v6 insertion preserves the old state");
     }
     {
         auto numeric=load_module(slot_module({
@@ -483,8 +562,8 @@ int main(){try{
             slot_fn(1,VOID_VALUE,block({set(-1,binary("add",var(-1),n(10)))})),
             slot_fn(200,INT_VALUE,block({ret(var(-1))})),
             slot_fn(201,INT_VALUE,block({ret(binary("add",call(100),var(-1)))})),
-            slot_fn(203,VOID_VALUE,block({set(-1,binary("add",var(-1),n(1)))}),0,{INT_VALUE}),
-            slot_fn(204,INT_VALUE,block({def(0,call(0x0abd0003,{n(1)})),object_bind(var(0),203,false),object_return(var(0))}),1)
+            slot_fn(203,VOID_VALUE,block({set(-1,binary("add",var(-1),n(1)))}),0,{ADDRESS_VALUE}),
+            slot_fn(204,ADDRESS_VALUE,block({def(0,call(0x0abd0003,{n(1)})),object_bind(var(0),203,false),object_return(var(0))}),1)
         },1));
         auto second=numeric->baseEnv->getVariable(-3);
         auto inserted=std::dynamic_pointer_cast<ofunction>(numeric->functions.at(200));
@@ -530,36 +609,36 @@ int main(){try{
             auto body=block({def("p",call(0x0abd0003,{n(1)})),binary("m",field(var("p")),var("__func_param0")),object_bind(var("p"),destructor,manual)});
             if(manual)body->push_back(call(0x0abd0004,{var("p")}));
             body->push_back(object_return(var("p")));
-            return typed_fn(id,INT_VALUE,body,{INT_VALUE});
+            return typed_fn(id,ADDRESS_VALUE,body,{id==29?ADDRESS_VALUE:INT_VALUE});
         };
         auto objects=program({
             fn(10,VOID_VALUE,block({set("log",n(0)),block({def("a",call(20,{n(1)})),def("b",call(20,{n(2)}))})})),
             fn(11,VOID_VALUE,block({set("log",n(0)),def("a",call(20,{n(1)})),def("b",call(22,{n(2)}))})),
             fn(12,VOID_VALUE,block({set("log",n(0)),def("a",call(20,{n(1)})),def("b",call(22,{n(2)})),var("missing")})),
-            fn(13,INT_VALUE,block({set("log",n(0)),block({block({def("a",call(20,{n(3)})),object_return(var("a"))})})})),
-            fn(14,INT_VALUE,block({object_return(call(21,{n(4)}))})),
-            typed_fn(15,VOID_VALUE,block({object_delete(var("__func_param0"))}),{INT_VALUE}),
-            typed_fn(16,INT_VALUE,block({object_return(var("__func_param0"))}),{INT_VALUE}),
+            fn(13,ADDRESS_VALUE,block({set("log",n(0)),block({block({def("a",call(20,{n(3)})),object_return(var("a"))})})})),
+            fn(14,ADDRESS_VALUE,block({object_return(call(21,{n(4)}))})),
+            typed_fn(15,VOID_VALUE,block({object_delete(var("__func_param0"))}),{ADDRESS_VALUE}),
+            typed_fn(16,ADDRESS_VALUE,block({object_return(var("__func_param0"))}),{ADDRESS_VALUE}),
             fn(17,VOID_VALUE,block({set("log",n(0)),def("a",call(20,{n(5)})),block({call(16,{var("a")})}),set("observed",field(var("a")))})),
-            typed_fn(18,BOOLEAN_VALUE,block({ret(call(0x0abd0002,{var("__func_param0")}))}),{INT_VALUE}),
+            typed_fn(18,BOOLEAN_VALUE,block({ret(call(0x0abd0002,{var("__func_param0")}))}),{ADDRESS_VALUE}),
             factory(20,30,false),factory(21,30,true),factory(22,31,false),factory(23,33,true),factory(28,34,true),factory(29,35,true),factory(36,37,true),
-            fn(24,INT_VALUE,block({def("p",call(0x0abd0003,{n(1)})),binary("m",field(var("p")),n(9)),binary("divide",n(1),n(0)),object_bind(var("p"),30,false),object_return(var("p"))})),
+            fn(24,ADDRESS_VALUE,block({def("p",call(0x0abd0003,{n(1)})),binary("m",field(var("p")),n(9)),binary("divide",n(1),n(0)),object_bind(var("p"),30,false),object_return(var("p"))})),
             fn(25,VOID_VALUE,block({set("log",n(0)),call(24)})),
             fn(26,VOID_VALUE,block({set("log",n(0)),loop(n(1),block({def("a",call(20,{n(6)})),brk()}))})),
             fn(27,VOID_VALUE,block({set("log",n(0)),def("a",call(20,{n(7)})),loop(n(1),block({}))})),
-            typed_fn(30,VOID_VALUE,block({append()}),{INT_VALUE}),
-            typed_fn(31,VOID_VALUE,block({append(),binary("divide",n(1),n(0))}),{INT_VALUE}),
-            typed_fn(33,VOID_VALUE,block({object_delete(var("__func_param0"))}),{INT_VALUE}),
-            typed_fn(34,VOID_VALUE,block({call(0x0abd0002,{var("__func_param0")})}),{INT_VALUE}),
-            typed_fn(35,VOID_VALUE,block({object_delete(field(var("__func_param0")))}),{INT_VALUE}),
-            typed_fn(37,VOID_VALUE,block({set("observed",field(call(41,{var("__func_param0")})))}),{INT_VALUE}),
-            fn(40,INT_VALUE,block({def("p",call(0x0abd0003,{n(1)})),binary("m",field(call(41,{var("p")})),n(9)),object_bind(var("p"),-1,false),object_return(var("p"))})),
-            typed_fn(41,INT_VALUE,block({object_return(var("__func_param0"))}),{INT_VALUE}),
-            fn(42,INT_VALUE,block({def("p",call(0x0abd0003,{n(1)})),object_return(var("p"))}))
+            typed_fn(30,VOID_VALUE,block({append()}),{ADDRESS_VALUE}),
+            typed_fn(31,VOID_VALUE,block({append(),binary("divide",n(1),n(0))}),{ADDRESS_VALUE}),
+            typed_fn(33,VOID_VALUE,block({object_delete(var("__func_param0"))}),{ADDRESS_VALUE}),
+            typed_fn(34,VOID_VALUE,block({call(0x0abd0002,{var("__func_param0")})}),{ADDRESS_VALUE}),
+            typed_fn(35,VOID_VALUE,block({object_delete(field(var("__func_param0")))}),{ADDRESS_VALUE}),
+            typed_fn(37,VOID_VALUE,block({set("observed",field(call(41,{var("__func_param0")})))}),{ADDRESS_VALUE}),
+            fn(40,ADDRESS_VALUE,block({def("p",call(0x0abd0003,{n(1)})),binary("m",field(call(41,{var("p")})),n(9)),object_bind(var("p"),-1,false),object_return(var("p"))})),
+            typed_fn(41,ADDRESS_VALUE,block({object_return(var("__func_param0"))}),{ADDRESS_VALUE}),
+            fn(42,ADDRESS_VALUE,block({def("p",call(0x0abd0003,{n(1)})),object_return(var("p"))}))
         },block({s("log"),s("observed")}));
         auto log=objects->baseEnv->getVariable("log");
         objects->invoke(10);check(integer(log)==21&&heap::lenAlloc()==0,"automatic objects destruct in reverse construction order");
-        int constructing=integer(objects->invoke(40));
+        address constructing=pointer(objects->invoke(40));
         check(integer(heap::getAt(constructing))==9,"construction may call a member returning borrowed this");
         heap::free(constructing);
         rejects_containing([&]{objects->invoke(42);},"before construction is complete","unconstructed object cannot escape its owning function");
@@ -572,47 +651,47 @@ int main(){try{
         objects->invoke(26);check(integer(log)==6&&heap::lenAlloc()==0,"break runs block destructors");
         rejects([&]{objects->invoke(25);},"constructor failure propagates");
         check(integer(log)==0&&heap::lenAlloc()==0,"failed construction releases slots without running destructor");
-        int automatic=integer(objects->invoke(13));
+        address automatic=pointer(objects->invoke(13));
         check(integer(heap::getAt(automatic))==3&&integer(log)==0,"nested object return survives all callee blocks");
         rejects_containing([&]{objects->invoke(15,{std::make_shared<variable>(automatic)});},"automatic object","delete rejects automatic objects");
         check(heap::lenAlloc()==1&&integer(log)==0,"rejected automatic delete preserves object");
-        int manual=integer(objects->invoke(14));
+        address manual=pointer(objects->invoke(14));
         check(heap::owner_of(manual)==nullptr&&heap::lenAlloc()==2,"new remains manual after object returns");
         objects->invoke(15,{std::make_shared<variable>(manual)});
         check(integer(log)==4&&heap::lenAlloc()==1,"delete runs manual destructor and releases slots");
-        objects->invoke(15,{std::make_shared<variable>(0)});
+        objects->invoke(15,{std::make_shared<variable>(address{})});
         rejects([&]{objects->invoke(15,{std::make_shared<variable>(manual)});},"second delete rejects freed object");
-        manual=integer(objects->invoke(14));
+        manual=pointer(objects->invoke(14));
         objects->invoke(18,{std::make_shared<variable>(manual)});
         check(integer(log)==4&&heap::object_records().size()==1,"raw free bypasses destructor and removes object registration");
-        int reentrant=integer(objects->invoke(23,{std::make_shared<variable>(8)}));
+        address reentrant=pointer(objects->invoke(23,{std::make_shared<variable>(8)}));
         rejects_containing([&]{objects->invoke(15,{std::make_shared<variable>(reentrant)});},"being destroyed","recursive self-delete rejected");
         check(heap::lenAlloc()==1,"failed recursive destructor still frees object once");
-        reentrant=integer(objects->invoke(28,{std::make_shared<variable>(8)}));
+        reentrant=pointer(objects->invoke(28,{std::make_shared<variable>(8)}));
         rejects_containing([&]{objects->invoke(15,{std::make_shared<variable>(reentrant)});},"being destroyed","raw free cannot invalidate a running destructor");
         check(heap::lenAlloc()==1,"raw-free reentry still releases the object once");
-        manual=integer(objects->invoke(14));
-        int parent=integer(objects->invoke(29,{std::make_shared<variable>(manual)}));
+        manual=pointer(objects->invoke(14));
+        address parent=pointer(objects->invoke(29,{std::make_shared<variable>(manual)}));
         objects->invoke(15,{std::make_shared<variable>(parent)});
         check(integer(log)==44&&heap::lenAlloc()==1,"destructor can explicitly delete another manual object");
-        manual=integer(objects->invoke(36,{std::make_shared<variable>(8)}));
+        manual=pointer(objects->invoke(36,{std::make_shared<variable>(8)}));
         objects->invoke(15,{std::make_shared<variable>(manual)});
         check(integer(objects->baseEnv->getVariable("observed"))==8&&heap::lenAlloc()==1,
               "destructor may call a member returning its borrowed this pointer");
         rejects([&]{heap::object_address(automatic,1);},"member address rejects an adjacent allocation offset");
-        rejects([&]{heap::object_address(automatic+1,0);},"member address requires allocation start");
+        rejects([&]{heap::object_address(address{automatic.value+1},0);},"member address requires allocation start");
         objects->destroy();check(integer(log)==443&&heap::lenAlloc()==0,"base owned returned objects destruct before script unload");
         objects->destroy();
 
         auto limited=program({fn(10,VOID_VALUE,block({def("p",call(0x0abd0003,{n(1)})),object_bind(var("p"),11,false),loop(n(1),block({}))})),
-            typed_fn(11,VOID_VALUE,block({loop(n(1),block({}))}),{INT_VALUE})});
+            typed_fn(11,VOID_VALUE,block({loop(n(1),block({}))}),{ADDRESS_VALUE})});
         limited->max_steps=40;
         rejects_containing([&]{limited->invoke(10);},"step limit","cleanup never resets an exhausted execution budget");
         check(heap::lenAlloc()==0,"budget failure still releases object storage");limited->destroy();
 
         auto shutdown=program({
-            fn(10,INT_VALUE,block({set("log",n(0)),def("p",call(0x0abd0003,{n(1)})),object_bind(var("p"),30,false),object_return(var("p"))})),
-            typed_fn(30,VOID_VALUE,block({set("log",binary("add",var("log"),n(1)))}),{INT_VALUE}),
+            fn(10,ADDRESS_VALUE,block({set("log",n(0)),def("p",call(0x0abd0003,{n(1)})),object_bind(var("p"),30,false),object_return(var("p"))})),
+            typed_fn(30,VOID_VALUE,block({set("log",binary("add",var("log"),n(1)))}),{ADDRESS_VALUE}),
             fn(1,VOID_VALUE,block({binary("divide",n(1),n(0))}))
         },block({s("log")}));
         shutdown->invoke(10);auto shutdown_log=shutdown->baseEnv->getVariable("log");
@@ -620,15 +699,15 @@ int main(){try{
         check(integer(shutdown_log)==1&&heap::lenAlloc()==0&&shutdown->closed,"pre-destroy error cannot skip object destructors");
         shutdown->destroy();
 
-        auto shutdown_budget=program({fn(10,INT_VALUE,block({def("p",call(0x0abd0003,{n(1)})),object_bind(var("p"),11,false),object_return(var("p"))})),
-            typed_fn(11,VOID_VALUE,block({loop(n(1),block({}))}),{INT_VALUE})});
+        auto shutdown_budget=program({fn(10,ADDRESS_VALUE,block({def("p",call(0x0abd0003,{n(1)})),object_bind(var("p"),11,false),object_return(var("p"))})),
+            typed_fn(11,VOID_VALUE,block({loop(n(1),block({}))}),{ADDRESS_VALUE})});
         shutdown_budget->invoke(10);shutdown_budget->max_steps=40;
         rejects_containing([&]{shutdown_budget->destroy();},"step limit","base destructor respects shutdown execution budget");
         check(heap::lenAlloc()==0&&shutdown_budget->closed,"shutdown budget exhaustion releases all storage");
 
         auto undeleted=program({
             fn(10,VOID_VALUE,block({def("p",call(0x0abd0003,{n(1)})),object_bind(var("p"),30,true),call(0x0abd0004,{var("p")})})),
-            typed_fn(30,VOID_VALUE,block({set("log",n(7))}),{INT_VALUE})
+            typed_fn(30,VOID_VALUE,block({set("log",n(7))}),{ADDRESS_VALUE})
         },block({s("log")}));
         auto undeleted_log=undeleted->baseEnv->getVariable("log");undeleted_log->setValue(0);
         undeleted->invoke(10);
@@ -637,7 +716,7 @@ int main(){try{
         check(heap::lenAlloc()==0&&heap::object_records().empty()&&integer(undeleted_log)==0,
               "destroy releases undeleted manual objects without running their destructors");
 
-        int host_block=heap::alloc(1);heap::getAt(host_block)->setValue(99);
+        auto host_block=heap::alloc(1);heap::getAt(host_block)->setValue(99);
         rejects_containing([&]{program({
             fn(0,VOID_VALUE,block({def("p",call(0x0abd0003,{n(1)})),object_bind(var("p"),-1,true),call(0x0abd0004,{var("p")}),binary("divide",n(1),n(0))}))
         });},"Division by zero","onload failure propagates");
@@ -768,12 +847,12 @@ int main(){try{
     bad->max_call_depth=8;rejects([&]{bad->invoke(14);},"recursion budget");check(bad->active_calls==0,"call depth unwound after failure");
     auto lazy=program({fn(10,BOOLEAN_VALUE,block({ret(binary("and",n(0),binary("divide",n(1),n(0))))})),fn(11,BOOLEAN_VALUE,block({ret(binary("or",n(1),binary("divide",n(1),n(0))))}))});
     check(!*static_cast<bool*>(lazy->invoke(10)->value),"and short circuits");check(*static_cast<bool*>(lazy->invoke(11)->value),"or short circuits");
-    heap::clearHeap();check(heap::alloc(0)==0,"zero allocation");rejects([]{heap::alloc(-1);},"negative allocation");
-    int a=heap::alloc(2),b=heap::alloc(2);check(a==1&&b==3,"zero address reserved");
+    heap::clearHeap();check(heap::alloc(0)==address{},"zero allocation");rejects([]{heap::alloc(-1);},"negative allocation");
+    auto a=heap::alloc(2),b=heap::alloc(2);check(a==address{1}&&b==address{3},"zero address reserved");
     heap::getAt(a)->setValue(99);check(heap::free(a),"free allocation");rejects([&]{heap::getAt(a);},"freed address rejection");
-    check(heap::alloc(1)==1,"reuse leading hole");check(heap::getAt(1)->type==VOID_VALUE,"reused allocation cleared");
-    rejects([]{heap::getAt(0);},"null address");rejects([&]{heap::getAt(b+2);},"out of bounds");
-    rejects([]{heap::restore({std::make_shared<variable>(nullptr)},{{1,1}});},"invalid snapshot");check(heap::lenAlloc()==2,"snapshot failure atomic");
+    check(heap::alloc(1)==address{1},"reuse leading hole");check(heap::getAt(address{1})->type==VOID_VALUE,"reused allocation cleared");
+    rejects([]{heap::getAt(address{});},"null address");rejects([&]{heap::getAt(address{b.value+2});},"out of bounds");
+    rejects([]{heap::restore({std::make_shared<variable>(nullptr)},{{address{1},1}});},"invalid snapshot");check(heap::lenAlloc()==2,"snapshot failure atomic");
     {
         // Indexed lookups and the packed-prefix hint must keep exact first-fit
         // addresses and range checks; compare with a straightforward model.
@@ -796,27 +875,27 @@ int main(){try{
             const unsigned action=next(10);
             if(action<5||model.empty()) {
                 const int size=static_cast<int>(next(4))+1;
-                same=heap::alloc(size)==model_alloc(size);
+                same=heap::alloc(size).value==static_cast<std::uint64_t>(model_alloc(size));
             } else if(action<8) {
                 auto it=std::next(model.begin(),static_cast<long>(next(static_cast<unsigned>(model.size()))));
                 // action 7 targets start+1: an interior slot, the next start, or a hole.
                 const int pointer=it->first+(action==7?1:0);
                 const bool expected=model.erase(pointer)==1;
-                same=heap::free(pointer)==expected;
+                same=heap::free(address{static_cast<std::uint64_t>(pointer)})==expected;
             } else {
                 const int pointer=static_cast<int>(next(static_cast<unsigned>(heap::lenHeap())+3));
-                bool found=true;try{heap::getAt(pointer);}catch(const std::out_of_range&){found=false;}
+                bool found=true;try{heap::getAt(address{static_cast<std::uint64_t>(pointer)});}catch(const std::out_of_range&){found=false;}
                 same=found==model_contains(pointer);
-                if(same&&model.count(pointer))same=heap::object_address(pointer,model[pointer]-1)==pointer+model[pointer]-1;
+                if(same&&model.count(pointer))same=heap::object_address(address{static_cast<std::uint64_t>(pointer)},model[pointer]-1).value==static_cast<std::uint64_t>(pointer+model[pointer]-1);
             }
             same=same&&heap::lenAlloc()==static_cast<int>(model.size());
         }
         check(same,"indexed heap keeps first-fit addresses and bounds");
         heap::clearHeap();
-        std::vector<int> many;
+        std::vector<address> many;
         for(int i=0;i<20000;++i)many.push_back(heap::alloc(2));
-        check(many.back()==39999&&heap::getAt(many[10000]+1)->type==VOID_VALUE,"appending allocations stays contiguous");
-        check(heap::free(many[5])&&heap::alloc(2)==many[5]&&heap::alloc(1)==40001,"freed gap is reused before appending");
+        check(many.back()==address{39999}&&heap::getAt(address{many[10000].value+1})->type==VOID_VALUE,"appending allocations stays contiguous");
+        check(heap::free(many[5])&&heap::alloc(2)==many[5]&&heap::alloc(1)==address{40001},"freed gap is reused before appending");
     }
     heap::clearHeap();
     auto memory=program({fn(10,INT_VALUE,block({def("p",call(0x0abd0003,{n(3)})),binary("m",call(0x0abd0006,{var("p")}),n(42)),ret(call(0x0abd0006,{var("p")}))})),fn(11,INT_VALUE,block({def("p",call(0x0abd0003,{n(3)})),ret(binary("divide",n(1),n(0)))}))});
@@ -862,8 +941,8 @@ int main(){try{
         check(*static_cast<bool*>(owner_script->invoke(14)->value),"callee may free an allocation owned by its caller chain");
         check(*static_cast<bool*>(owner_script->invoke(16)->value),"make_free detaches ownership so any scope may free");
         check(heap::lenAlloc()==1,"only the global allocation remains");
-        int host_block=heap::alloc(1);check(heap::owner_of(host_block)==nullptr,"host allocations are untracked");
-        rejects([&]{heap::set_owner(host_block+7,owner_script->baseEnv.get());},"owner requires an allocation start");
+        auto host_block=heap::alloc(1);check(heap::owner_of(host_block)==nullptr,"host allocations are untracked");
+        rejects([&]{heap::set_owner(address{host_block.value+7},owner_script->baseEnv.get());},"owner requires an allocation start");
         heap::free(host_block);
         owner_script->destroy();check(heap::lenAlloc()==0,"base scope releases its allocation on destroy");
     }

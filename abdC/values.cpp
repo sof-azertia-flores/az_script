@@ -49,6 +49,20 @@ IntAbdValue::IntAbdValue(const std::shared_ptr<AbdValue>& value) { requireValue(
 std::shared_ptr<AbdValue> IntAbdValue::toAbdValue() { return type(data); }
 std::shared_ptr<AbdValue> IntAbdValue::typeValue() { return type(3); }
 AbdMapValue* IntAbdValue::deepCopy() { return new IntAbdValue(data); }
+AddressAbdValue::AddressAbdValue(address value) : data(value) {}
+AddressAbdValue::AddressAbdValue(const std::shared_ptr<AbdValue>& value) {
+    requireValue(value, 8);
+    std::uint64_t bits = 0;
+    for (unsigned i = 0; i < 8; ++i) bits |= std::uint64_t(value->data[i]) << (8 * i);
+    data = address(bits);
+}
+std::shared_ptr<AbdValue> AddressAbdValue::toAbdValue() {
+    std::array<unsigned char, 8> bytes{};
+    for (unsigned i = 0; i < bytes.size(); ++i) bytes[i] = static_cast<unsigned char>(data.value >> (8 * i));
+    return std::make_shared<AbdValue>(bytes.data(), static_cast<int>(bytes.size()));
+}
+std::shared_ptr<AbdValue> AddressAbdValue::typeValue() { return type(0xce200b); }
+AbdMapValue* AddressAbdValue::deepCopy() { return new AddressAbdValue(data); }
 DoubleAbdValue::DoubleAbdValue(double value) : data(value) {}
 DoubleAbdValue::DoubleAbdValue(const std::shared_ptr<AbdValue>& value) : data(decodeFloating<double>(value)) {}
 std::shared_ptr<AbdValue> DoubleAbdValue::toAbdValue() { return encodeFloating(data); }

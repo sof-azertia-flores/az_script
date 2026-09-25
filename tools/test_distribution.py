@@ -63,11 +63,11 @@ def _outputs(abd: Path, ast: Path, executable_json: Path) -> None:
             raise RuntimeError(f"Invalid JSON output {path}: {error}") from error
         _require(isinstance(decoded, dict), f"Expected a JSON object in {path}")
         if path == executable_json:
-            _require(decoded.get("exec-version") == 5, "Expected exec v5 output")
+            _require(decoded.get("exec-version") == 6, "Expected exec v6 output")
             def inspect(value):
                 if isinstance(value, dict):
                     if value.get("t") == 0:
-                        _require(type(value.get("c")) is int and 3 <= value["c"] <= 29,
+                        _require(type(value.get("c")) is int and 3 <= value["c"] <= 31,
                                  "Control instruction must use a numeric opcode")
                     for child in value.values():
                         inspect(child)
@@ -125,6 +125,8 @@ def verify(package: Path, java: Optional[Path] = None) -> Dict[str, object]:
                 package / "stdlib/math.azs", package / "stdlib/math.include.azs", package / "stdlib/MATH.md",
                 package / "stdlib/math.exec.abd", package / "stdlib/math.ast.json", package / "stdlib/math.exec.json",
                 package / "examples/hello.azs", package / "examples/classes.azs",
+                package / "examples/loops-regressions.azs", package / "examples/inheritance-regressions.azs",
+                package / "examples/address-regressions.azs", package / "include/azscript/detail/abdC/address.h",
                 package / "examples/cpp/CMakeLists.txt", package / "examples/cpp/main.cpp",
                 package / "examples/java/RunScript.java"]
     for path in required:
@@ -212,6 +214,18 @@ def verify(package: Path, java: Optional[Path] = None) -> Dict[str, object]:
         _require(result.stdout.splitlines() == ["7", "5", "destroy Point(5)", "destroy Point(7)", "0"],
                  f"Class example or destructor order failed: {result.stdout!r}")
         passed("class construction, references and destructor execution")
+
+        for name, expected in (("loops-regressions", "9"), ("inheritance-regressions", "0"), ("address-regressions", "0")):
+            output = cwd / "language output" / (name + ".exec.abd")
+            _run([compiler, package / "examples" / (name + ".azs"), "-o", output], cwd, compiler_environment)
+            ast = output.with_name(name + ".ast.json")
+            _outputs(output, ast, output.with_name(name + ".exec.json"))
+            result = _run([runner, output], cwd, environment)
+            _require(result.stdout.splitlines() == [expected], f"{name} failed: {result.stdout!r}")
+            rebuilt = output.with_name(name + ".roundtrip.abd")
+            _run([compiler, "compile-json", ast, "-o", rebuilt], cwd, compiler_environment)
+            _require(rebuilt.read_bytes() == output.read_bytes(), f"{name} AST roundtrip differs")
+            passed(name + " source, AST and standalone execution")
 
         main_abd = cwd / "multifile output/main.exec.abd"
         library_abd = cwd / "multifile output/point.exec.abd"
