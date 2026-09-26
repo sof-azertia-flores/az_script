@@ -5,6 +5,20 @@
 #include <iterator>
 #include <string>
 #include <vector>
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#include <fcntl.h>
+#include <io.h>
+#include <sys/stat.h>
+#else
+#include <cerrno>
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
 namespace {
 std::string usage() {
     return "Usage:\n"
@@ -16,12 +30,45 @@ std::vector<unsigned char> read_file(const std::filesystem::path& path) {
     if(!input)throw std::runtime_error("Cannot open "+path.string());
     return {std::istreambuf_iterator<char>(input),{}};
 }
+void write_secret(const std::filesystem::path& path,const std::string& text) {
+#if defined(_WIN32)
+    const auto temporary=path.wstring()+L".tmp";
+    int fd=-1;
+    if(_wsopen_s(&fd,temporary.c_str(),_O_CREAT|_O_EXCL|_O_WRONLY|_O_BINARY,_SH_DENYRW,_S_IREAD|_S_IWRITE)!=0||fd<0)
+        throw std::runtime_error("Cannot write "+path.string());
+    const auto wrote=_write(fd,text.data(),static_cast<unsigned>(text.size()));
+    _close(fd);
+    if(wrote<0||static_cast<std::size_t>(wrote)!=text.size()||!MoveFileExW(temporary.c_str(),path.c_str(),MOVEFILE_REPLACE_EXISTING)) {
+        _wunlink(temporary.c_str());
+        throw std::runtime_error("Cannot write "+path.string());
+    }
+#else
+    auto pattern=path.string()+".XXXXXX";
+    std::vector<char> temporary(pattern.begin(),pattern.end());
+    temporary.push_back('\0');
+    const int fd=::mkstemp(temporary.data());
+    if(fd<0)throw std::runtime_error("Cannot write "+path.string());
+    if(::fchmod(fd,0600)!=0){::close(fd);::unlink(temporary.data());throw std::runtime_error("Cannot write "+path.string());}
+    std::size_t written=0;bool ok=true;
+    while(written<text.size()) {
+        const ssize_t n=::write(fd,text.data()+written,text.size()-written);
+        if(n<0){if(errno==EINTR)continue;ok=false;break;}
+        written+=static_cast<std::size_t>(n);
+    }
+    if(ok)ok=::fsync(fd)==0;
+    ::close(fd);
+    if(!ok||::rename(temporary.data(),path.c_str())!=0) {
+        ::unlink(temporary.data());
+        throw std::runtime_error("Cannot write "+path.string());
+    }
+#endif
+}
 void write_file(const std::filesystem::path& path,const std::string& text,bool secret) {
+    if(secret){write_secret(path,text);return;}
     std::ofstream output(path,std::ios::binary|std::ios::trunc);
     if(!output)throw std::runtime_error("Cannot write "+path.string());
     output.write(text.data(),static_cast<std::streamsize>(text.size()));
     if(!output)throw std::runtime_error("Cannot write "+path.string());
-    if(secret)std::filesystem::permissions(path,std::filesystem::perms::owner_read|std::filesystem::perms::owner_write);
 }
 void write_bytes(const std::filesystem::path& path,const std::vector<std::uint8_t>& bytes) {
     std::ofstream output(path,std::ios::binary|std::ios::trunc);

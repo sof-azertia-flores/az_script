@@ -27,7 +27,10 @@ if [ -z "$include" ] || [ -z "$libdir" ]; then
     fi
 fi
 output=
+nl='
+'
 sources=
+count=0
 while [ $# -gt 0 ]; do
     case "$1" in
         -o)
@@ -44,15 +47,18 @@ while [ $# -gt 0 ]; do
             exit 2
             ;;
         *)
-            sources="$sources $1"
+            sources=${sources}${1}${nl}
+            count=$((count + 1))
             ;;
     esac
     shift
 done
-for extra in "$@"; do
-    sources="$sources $extra"
+while [ $# -gt 0 ]; do
+    sources=${sources}${1}${nl}
+    count=$((count + 1))
+    shift
 done
-if [ -z "$output" ] || [ -z "$sources" ]; then
+if [ -z "$output" ] || [ "$count" -eq 0 ]; then
     echo 'Usage: compile_extern_lib.sh -o stem source.cpp [more.cpp...]' >&2
     exit 2
 fi
@@ -65,6 +71,12 @@ case "$output" in
     *.so|*.dylib|*.dll) target=$output ;;
     *) target=$output$suffix ;;
 esac
-cxx=${CXX:-c++}
+old_ifs=$IFS
+set -f
+IFS=$nl
 # shellcheck disable=SC2086
-"$cxx" -std=c++20 -fPIC $shared -I "$include" $sources -L "$libdir" -labdInvoker -Wl,-rpath,"$libdir" -o "$target"
+set -- $sources
+set +f
+IFS=$old_ifs
+cxx=${CXX:-c++}
+"$cxx" -std=c++20 -fPIC $shared -I "$include" "$@" -L "$libdir" -labdInvoker -Wl,-rpath,"$libdir" -o "$target"

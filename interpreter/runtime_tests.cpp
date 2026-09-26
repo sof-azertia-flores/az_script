@@ -5,9 +5,12 @@
 #include "p256.h"
 #include "extern_library.h"
 #include <algorithm>
+#include <cstdint>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <initializer_list>
 #include <iostream>
 #include <limits>
 #include <map>
@@ -15,6 +18,37 @@
 #include <string>
 #include <utility>
 #include <vector>
+namespace {
+std::vector<std::uint8_t> elf64_with_needed(std::initializer_list<const char*> names) {
+    std::string table(1,'\0');
+    std::vector<std::size_t> offsets;
+    for(const char* name:names){offsets.push_back(table.size());table.append(name);table.push_back('\0');}
+    const std::size_t dyn_count=offsets.size()+3;
+    const std::size_t phoff=64;
+    const std::size_t dynoff=phoff+2*56;
+    const std::size_t stroff=dynoff+dyn_count*16;
+    std::vector<std::uint8_t> bytes(stroff+table.size(),0);
+    auto w16=[&](std::size_t at,std::uint16_t value){bytes[at]=value&0xff;bytes[at+1]=value>>8;};
+    auto w32=[&](std::size_t at,std::uint32_t value){for(int i=0;i<4;++i)bytes[at+i]=static_cast<std::uint8_t>(value>>(8*i));};
+    auto w64=[&](std::size_t at,std::uint64_t value){for(int i=0;i<8;++i)bytes[at+i]=static_cast<std::uint8_t>(value>>(8*i));};
+    bytes[0]=0x7f;bytes[1]='E';bytes[2]='L';bytes[3]='F';bytes[4]=2;bytes[5]=1;bytes[6]=1;
+    w16(16,3);w16(18,62);w32(20,1);w64(32,phoff);w16(52,64);w16(54,56);w16(56,2);
+    auto program=[&](int index,std::uint32_t type,std::uint64_t offset,std::uint64_t filesz,std::uint32_t flags){
+        const std::size_t at=phoff+static_cast<std::size_t>(index)*56;
+        w32(at,type);w32(at+4,flags);w64(at+8,offset);w64(at+16,offset);w64(at+24,offset);
+        w64(at+32,filesz);w64(at+40,filesz);w64(at+48,8);
+    };
+    program(0,1,0,bytes.size(),5);
+    program(1,2,dynoff,dyn_count*16,6);
+    for(std::size_t i=0;i<offsets.size();++i){w64(dynoff+i*16,1);w64(dynoff+i*16+8,offsets[i]);}
+    const std::size_t tail=dynoff+offsets.size()*16;
+    w64(tail,5);w64(tail+8,stroff);
+    w64(tail+16,10);w64(tail+24,table.size());
+    w64(tail+32,0);w64(tail+40,0);
+    std::memcpy(bytes.data()+stroff,table.data(),table.size());
+    return bytes;
+}
+}
 using namespace azertian;
 using MV=std::shared_ptr<AbdMapValue>;
 using M=std::shared_ptr<AbdMap>;
@@ -1097,7 +1131,16 @@ int main(){try{
         {std::ofstream out(signature,std::ios::binary);out.write(reinterpret_cast<const char*>(der.data()),static_cast<std::streamsize>(der.size()));}
         rejects_containing([&]{load_named_extern_library((dir/"demo").string());},"No trusted public key","unsigned trust store rejects a signed library");
         add_trusted_public_key_pem(p256_public_pem(key.public_key));
-        rejects_containing([&]{load_named_extern_library((dir/"demo").string());},"Cannot load extern library","verified bytes are mapped before dlopen");
+        rejects_containing([&]{load_named_extern_library((dir/"demo").string());},"Cannot load extern library","an image that is not a library is rejected after verification");
+        auto publish=[&](const std::filesystem::path& path,const std::vector<std::uint8_t>& image){
+            {std::ofstream out(path,std::ios::binary);out.write(reinterpret_cast<const char*>(image.data()),static_cast<std::streamsize>(image.size()));}
+            std::uint8_t image_hash[32];p256_sha256(image.data(),image.size(),image_hash);
+            std::vector<std::uint8_t> image_der;check(p256_sign(key.d,image_hash,image_der),"dependency fixture signature");
+            auto sig=path;sig.replace_filename(path.stem().string()+".signature");
+            {std::ofstream out(sig,std::ios::binary);out.write(reinterpret_cast<const char*>(image_der.data()),static_cast<std::streamsize>(image_der.size()));}
+        };
+        publish(dir/"evil.so",elf64_with_needed({"libevil.so"}));
+        rejects_containing([&]{load_named_extern_library((dir/"evil").string());},"untrusted","a signed plugin cannot import an unlisted dependency");
         image[0]^=0x01;{std::ofstream out(library,std::ios::binary);out.write(reinterpret_cast<const char*>(image.data()),static_cast<std::streamsize>(image.size()));}
         rejects_containing([&]{load_named_extern_library((dir/"demo.so").string());},"signature","a changed library no longer matches its signature");
         rejects_containing([&]{load_named_extern_library("missing-extern-library-name");},"not found","a bare library name must exist on the search path");

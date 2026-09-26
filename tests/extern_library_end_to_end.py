@@ -3,7 +3,9 @@
 import argparse
 import os
 from pathlib import Path
+import stat
 import subprocess
+import sys
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -56,7 +58,9 @@ def main():
     parser.add_argument('--library', type=Path)
     args = parser.parse_args()
     checks = 0
-    compile_script = ROOT / 'tools/distribution/compile_extern_lib.sh'
+    windows = sys.platform == 'win32'
+    suffix = '.dll' if windows else ('.dylib' if sys.platform == 'darwin' else '.so')
+    compile_script = ROOT / ('tools/distribution/compile_extern_lib.cmd' if windows else 'tools/distribution/compile_extern_lib.sh')
     env_base = os.environ.copy()
     env_base['AZSCRIPT_INCLUDE'] = str(ROOT / 'include')
     env_base['AZSCRIPT_LIBDIR'] = str(args.libdir)
@@ -74,15 +78,22 @@ def main():
 
     with tempfile.TemporaryDirectory(prefix='extern-e2e-', dir=ROOT / 'build') as temporary:
         work = Path(temporary)
-        plugin = work / 'demo.cpp'
+        source_dir = work / 'source files'
+        source_dir.mkdir()
+        plugin = source_dir / 'demo.cpp'
         plugin.write_text(PLUGIN, encoding='utf-8')
-        compiled = run([str(compile_script), '-o', str(work / 'demo'), str(plugin)], cwd=work, env=env_base)
+        compile_command = [str(compile_script), '-o', str(work / 'demo'), str(plugin)]
+        if windows:
+            compile_command = ['cmd', '/c', *compile_command]
+        compiled = run(compile_command, cwd=work, env=env_base)
         check(compiled.returncode == 0, compiled.stderr)
-        library = work / 'demo.so'
+        library = work / ('demo' + suffix)
         check(library.is_file(), f'missing {library}')
         generated = run([str(args.signer), 'genkey', '--private', str(work / 'private.pem'),
                          '--public', str(work / 'trusted_key.pem')], cwd=work, env=env_base)
         check(generated.returncode == 0, generated.stderr)
+        if os.name == 'posix':
+            check(stat.S_IMODE((work / 'private.pem').stat().st_mode) == 0o600, 'private key is owner-only before publication')
         signed = run([str(args.signer), 'sign', '--key', str(work / 'private.pem'),
                       '--library', str(library)], cwd=work, env=env_base)
         check(signed.returncode == 0 and (work / 'demo.signature').is_file(), signed.stderr)
@@ -117,8 +128,11 @@ def main():
         library.write_bytes(original)
         empty = work / 'empty.cpp'
         empty.write_text(EMPTY, encoding='utf-8')
-        empty_lib = work / 'empty.so'
-        built_empty = run([str(compile_script), '-o', str(work / 'empty'), str(empty)], cwd=work, env=env_base)
+        empty_lib = work / ('empty' + suffix)
+        empty_command = [str(compile_script), '-o', str(work / 'empty'), str(empty)]
+        if windows:
+            empty_command = ['cmd', '/c', *empty_command]
+        built_empty = run(empty_command, cwd=work, env=env_base)
         check(built_empty.returncode == 0 and empty_lib.is_file(), built_empty.stderr)
         signed_empty = run([str(args.signer), 'sign', '--key', str(work / 'private.pem'), '--library', str(empty_lib)],
                            cwd=work, env=env_base)
