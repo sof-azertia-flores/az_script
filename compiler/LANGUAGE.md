@@ -57,7 +57,7 @@ void __script_pre_destroy() { print("done"); }
 
 `#namespace_hint NAME` 声明独立库；库内普通函数（包括 `main`）以0000占位，0/1保留给生命周期，自动编号从2开始。`#assume_hint NAME abcd` 为调用声明假定 namespace，运行时在 `flush()` 中重定位。一个编译单元及其有效 include 最多包含一个 namespace 或 namespace_hint 指令。完整规则及可运行类库示例见 [多文件库与 hint 链接](../docs/HINT_LINKING.md)。
 
-七个内置函数无需声明即可直接调用：
+八个内置函数无需声明即可直接调用：
 
 | 名称 | 签名 | ID |
 | --- | --- | --- |
@@ -68,8 +68,11 @@ void __script_pre_destroy() { print("done"); }
 | `make_free` | `void(address)` | `0x0abd0004` |
 | `mem_send_up` | `void(address)` | `0x0abd0005` |
 | `mem_get` | `any(address)` | `0x0abd0006` |
+| `load_extern_library` | `void(string)` | `0x0abd0007` |
 
 这些名称和 `0xabd` ID 是保留的，不能声明为脚本函数或外部函数；内置函数不会写入 AST 的 `abstract` 或 `extern-signatures`。
+
+`load_extern_library("xxx")` 按当前系统把 `xxx` 解析成 `xxx.dylib`、`xxx.dll` 或 `xxx.so`，并读取同目录的 `xxx.signature`。签名通过后，运行时调用动态库导出的 `azscript_load_extern`。库内使用与 C++ 宿主相同的 `registerExecutor` 注册外部函数；脚本仍用编译期 `extern` 声明携带签名。它不装载 hint 模块，也不调用 `flush`。查找规则、公钥和插件写法见 [外部动态库](../docs/EXTERN_LIBRARY.md)。
 
 外部函数统一写作 `extern int custom_call(string, double):12340001;`，参数名可省略，类型必须明确；零参数写 `extern void notify():12340002;`，`void` 不能作为参数类型。ID 支持完整32位十六进制位模式，也支持 `0x` 前缀。旧 `#extern` 不再接受。声明可绑定宿主函数或 hint 库；同名 extern 与定义签名一致时可共存，调用优先绑定 extern。宿主必须用相同 ID 注册；保留 namespace 0000、0abd、0fff 及活动脚本 namespace 不能被宿主占用。
 

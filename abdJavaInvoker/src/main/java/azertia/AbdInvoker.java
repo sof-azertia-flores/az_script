@@ -8,6 +8,8 @@ import azertia.jni.Caller2220;
 import azertia.jni.Caller22220;
 
 import java.io.File;
+import java.io.IOException;
+import java.nio.file.Files;
 import java.util.Objects;
 import java.util.function.Function;
 
@@ -160,6 +162,21 @@ public final class AbdInvoker {
             Caller2220.bindNamespace(namespace);
             Caller.namespaces.add(namespace);
         }
+    }
+    /** Trust one or more PEM SubjectPublicKeyInfo blocks for load_extern_library. */
+    public static synchronized void addTrustedPublicKey(String pem) {
+        Objects.requireNonNull(pem, "pem");
+        tryInit();
+        Caller2220.addTrustedPublicKey(pem);
+    }
+    /** Read a PEM public key file and trust it for load_extern_library. */
+    public static synchronized void addTrustedPublicKey(File pemFile) throws IOException {
+        Objects.requireNonNull(pemFile, "pemFile");
+        addTrustedPublicKey(Files.readString(pemFile.toPath()));
+    }
+    public static synchronized void clearTrustedPublicKeys() {
+        tryInit();
+        Caller2220.clearTrustedPublicKeys();
     }
     public static synchronized void unregisterJfunction(int functionId) {
         Caller.executors.remove(functionId);

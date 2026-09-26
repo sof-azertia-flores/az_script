@@ -23,6 +23,22 @@ JNIEXPORT void JNICALL Java_azertia_jni_Caller2220_bindNamespace
 JNIEXPORT void JNICALL Java_azertia_jni_Caller2220_unbindNamespace
   (JNIEnv *, jclass, jint);
 
+/*
+ * Class:     azertia_jni_Caller2220
+ * Method:    addTrustedPublicKey
+ * Signature: (Ljava/lang/String;)V
+ */
+JNIEXPORT void JNICALL Java_azertia_jni_Caller2220_addTrustedPublicKey
+  (JNIEnv *, jclass, jstring);
+
+/*
+ * Class:     azertia_jni_Caller2220
+ * Method:    clearTrustedPublicKeys
+ * Signature: ()V
+ */
+JNIEXPORT void JNICALL Java_azertia_jni_Caller2220_clearTrustedPublicKeys
+  (JNIEnv *, jclass);
+
 #ifdef __cplusplus
 }
 #endif

@@ -151,6 +151,12 @@ def main():
            '--runner', native/'interpreter/azscript-run', '--host', native/'interpreter/numeric-module-host']
     if jni:hints += ['--bridge', bridge, '--library', native/'abdjni'/libname]
     run(hints)
+    extern=[sys.executable, ROOT/'tests/extern_library_end_to_end.py', '--classpath', classpath,
+            '--runner', native/'interpreter/azscript-run',
+            '--signer', native/'interpreter/azscript-sign-extern',
+            '--libdir', native/'interpreter']
+    if jni:extern += ['--bridge', bridge, '--library', native/'abdjni'/libname]
+    run(extern)
     print('Build and all selected tests passed. Use ./azscript --help.')
 
 if __name__=='__main__':

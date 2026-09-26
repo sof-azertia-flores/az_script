@@ -43,6 +43,8 @@ int main() { return host_add(20, 22); }
 
 Java 桥可以编解码 `Integer`、`Float`、`Double`、`Boolean`、`String`、`Address` 和 `null`；不隐式截断 `Long` 等不支持的对象。带签名的外部函数不允许 `void` 参数，因此 Java `null` 不能作为它的实参；在带签名调用中，只有声明 `void` 返回的回调可以返回 `null`。无类型脚本参数仍可保存这个空值。字符串统一 UTF-8，支持中文、补充平面字符、空串和内嵌 NUL。函数调用不需要手动分配或释放堆槽。脚本函数 `0` 为加载入口，`1` 为卸载入口；`0x0abd` 命名空间保留给内置函数。`registerJfunction` 不能使用命名空间 `0`、`0xfff` 或 `0xabd`（`IllegalArgumentException`），脚本 `#namespace` 所在命名空间中不存在的 ID 会作为未知函数报错，不会转到 Java 回调。
 
+`AbdInvoker.addTrustedPublicKey(String)` 和 `addTrustedPublicKey(File)` 把 PEM 公钥交给 `load_extern_library`。`clearTrustedPublicKeys()` 清空这组公钥。Java 宿主不会自动读取 `AZSCRIPT_TRUSTED_KEY` 或 `trusted_key.pem`。动态库注册的是同一进程里的 C++ `registerExecutor`，与 `registerJfunction` 共用命名空间规则。
+
 普通函数可用显式 `:0003` 编号，否则 ID 会随源码变化。AST 的 `abstract` 保存 extern 优先的源码名称绑定，同名 extern 与本地定义共存时，它指向 extern；本地定义位置应读取 `body` 中的 namespace 和 `metadata.position/name`。hint 库的定义 namespace 是0000占位，宿主通过 `namespaceForHint` 查询该库实际 namespace，再与其公开低16位编号组合。不能把本模块 namespace 套到所有 abstract 项；跨库导入须使用其对应库的位置。AST 与 ABD 必须成对部署。
 
 原有 `JfuncExecutor` 的 `void run(Object[])` 继续支持，在脚本中返回 `null`。新的 `registerJfunction(int, Function<Object[],Object>)` 可以返回任一种支持的值。回调抛出的 Java 异常传回最初调用方；未知回调、类型错误、文件错误和非法地址均转换为 Java 异常，C++ 异常不会越过 JNI。

@@ -81,9 +81,11 @@ def copy_assets(package):
     (package / 'docs').mkdir()
     for name in ('USAGE.md', 'QUICKSTART.md'):
         shutil.copy2(TEMPLATES / name, package / 'docs' / name)
-    for name in ('EXEC_FORMAT.md', 'HINT_LINKING.md'):
+    for name in ('EXEC_FORMAT.md', 'HINT_LINKING.md', 'EXTERN_LIBRARY.md'):
         shutil.copy2(ROOT / 'docs' / name, package / 'docs' / name)
-    for name in ('compile.sh', 'compile.cmd', 'run.sh', 'run.cmd'):
+    for name in ('compile.sh', 'compile.cmd', 'run.sh', 'run.cmd',
+                 'compile_extern_lib.sh', 'compile_extern_lib.cmd',
+                 'sign_extern_lib.sh', 'sign_extern_lib.cmd'):
         shutil.copy2(TEMPLATES / name, package / name)
         if name.endswith('.sh'):
             (package / name).chmod(0o755)
@@ -104,7 +106,7 @@ def copy_assets(package):
         '默认同时输出 `example.ast.json` 和 `example.exec.json`。'
         '完整参数及 C++ / JNI 接入见 [使用说明](USAGE.md)。\n\n') + language[end:]
     language = language.replace('](stdlib/', '](../stdlib/').replace('](examples/', '](../examples/')
-    language = language.replace('](../docs/EXEC_FORMAT.md)', '](EXEC_FORMAT.md)').replace('](../docs/HINT_LINKING.md)', '](HINT_LINKING.md)')
+    language = language.replace('](../docs/EXEC_FORMAT.md)', '](EXEC_FORMAT.md)').replace('](../docs/HINT_LINKING.md)', '](HINT_LINKING.md)').replace('](../docs/EXTERN_LIBRARY.md)', '](EXTERN_LIBRARY.md)')
     (package / 'docs/LANGUAGE.md').write_text(language, encoding='utf-8')
     shutil.copytree(TEMPLATES / 'licenses', package / 'licenses')
     shutil.copy2(TEMPLATES / 'THIRD_PARTY.md', package / 'THIRD_PARTY.md')

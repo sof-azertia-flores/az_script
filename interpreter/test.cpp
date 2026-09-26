@@ -1,4 +1,5 @@
 #include "library.h"
+#include "extern_library.h"
 #include <bit>
 #include <cstdint>
 #include <fstream>
@@ -40,6 +41,7 @@ int main(int argc,char* argv[]) {
             else throw std::invalid_argument("Unexpected interpreter argument: "+argument);
         }
         if(source.empty())throw std::invalid_argument("A primary script path is required");
+        azertian::load_standalone_trusted_keys();
         auto bytes=read_script(source);script=azertian::load_script(bytes.data(),bytes.size());
         for(auto& path:additions){auto module=read_script(path);script->insert_script(module.data(),module.size());}
         script->flush();auto value=script->invoke(id);

@@ -2,7 +2,11 @@
 #include "blocks.h"
 #include "heepalloc.h"
 #include "internelFunctions.h"
+#include "p256.h"
+#include "extern_library.h"
 #include <algorithm>
+#include <filesystem>
+#include <fstream>
 #include <functional>
 #include <iostream>
 #include <limits>
@@ -1074,5 +1078,31 @@ int main(){try{
         check(*static_cast<bool*>(deferred->invoke(10)->value),"onload effects visible after flush");
     }
     p->destroy();p->destroy();rejects([&]{p->invoke(10);},"closed script");
+    p256_self_test();check(true,"P-256 vectors, reduction, and sign/verify roundtrip");
+    clear_trusted_public_keys();
+    rejects_containing([]{add_trusted_public_key_pem("-----BEGIN EC PRIVATE KEY-----\nMHc=\n-----END EC PRIVATE KEY-----\n");},"private","trusted key material rejects a private key");
+    {
+        auto fn=getiFunction(0x0abd0007);
+        check(fn&&fn->return_type()==VOID_VALUE,"load_extern_library is builtin 7");
+        auto env=std::make_shared<environment>();
+        rejects([&]{fn->invoke(env,{});},"load_extern_library requires one string");
+        auto dir=std::filesystem::temp_directory_path()/"azscript-extern-runtime-test";
+        std::filesystem::remove_all(dir);std::filesystem::create_directories(dir);
+        std::vector<std::uint8_t> image{'n','o','t','-','a','-','l','i','b','r','a','r','y'};
+        auto library=dir/"demo.so";auto signature=dir/"demo.signature";
+        {std::ofstream out(library,std::ios::binary);out.write(reinterpret_cast<const char*>(image.data()),static_cast<std::streamsize>(image.size()));}
+        p256_keypair key;check(p256_generate(key),"extern test key");
+        std::uint8_t hash[32];p256_sha256(image.data(),image.size(),hash);
+        std::vector<std::uint8_t> der;check(p256_sign(key.d,hash,der),"extern test signature");
+        {std::ofstream out(signature,std::ios::binary);out.write(reinterpret_cast<const char*>(der.data()),static_cast<std::streamsize>(der.size()));}
+        rejects_containing([&]{load_named_extern_library((dir/"demo").string());},"No trusted public key","unsigned trust store rejects a signed library");
+        add_trusted_public_key_pem(p256_public_pem(key.public_key));
+        rejects_containing([&]{load_named_extern_library((dir/"demo").string());},"Cannot load extern library","verified bytes are mapped before dlopen");
+        image[0]^=0x01;{std::ofstream out(library,std::ios::binary);out.write(reinterpret_cast<const char*>(image.data()),static_cast<std::streamsize>(image.size()));}
+        rejects_containing([&]{load_named_extern_library((dir/"demo.so").string());},"signature","a changed library no longer matches its signature");
+        rejects_containing([&]{load_named_extern_library("missing-extern-library-name");},"not found","a bare library name must exist on the search path");
+        std::filesystem::remove_all(dir);
+        clear_trusted_public_keys();
+    }
     std::cout<<"Runtime regression checks passed: "<<assertions<<'\n';return 0;
 }catch(const std::exception& e){std::cerr<<"Runtime test failure: "<<e.what()<<'\n';return 1;}}

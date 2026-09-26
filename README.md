@@ -43,7 +43,7 @@ cd /path/to/azscript
 
 `compile.sh xxx.azs` 默认在源码旁同时生成 `xxx.exec.abd`、`xxx.ast.json` 和 `xxx.exec.json`。指定 `-o out/demo.abd` 或 `-o out/demo.exec.abd` 后，两份 JSON 默认变为 `out/demo.ast.json`、`out/demo.exec.json`，也能通过 `--ast` / `--exec-json` 单独指定。Windows 使用 `compile.cmd` 和 `run.cmd`。
 
-发行包包含完整编译器及依赖、由 `jlink` 生成的 Java 运行环境、默认调用 `main`（`0x0fff0000`）的独立解释器、C++ 静态/动态库与公开头文件、可迁移的 `find_package(AzScript CONFIG REQUIRED)` 配置、JNI JAR 和本系统的 `.dylib` / `.so` / `.dll`，以及语法文档、使用文档、数学库和 C++ / Java 接入示例。解释器静态链接 AzScript 运行库，运行 ABD 无需 Java；C++ 宿主可链接 `AzScript::Runtime` 或 `AzScript::RuntimeShared`。
+发行包包含完整编译器及依赖、由 `jlink` 生成的 Java 运行环境、默认调用 `main`（`0x0fff0000`）的独立解释器、C++ 静态/动态库与公开头文件、可迁移的 `find_package(AzScript CONFIG REQUIRED)` 配置、JNI JAR 和本系统的 `.dylib` / `.so` / `.dll`，以及语法文档、使用文档、数学库和 C++ / Java 接入示例。独立解释器链接共享运行库 `AzScript::RuntimeShared`，因此签名动态库与解释器共用同一份函数注册表；运行 ABD 无需 Java。嵌入式 C++ 宿主可链接 `AzScript::Runtime` 或 `AzScript::RuntimeShared`，只有后者能和 `load_extern_library` 插件共用注册表。
 
 导出使用独立 Release 构建和临时安装目录，实际搬迁目录后验证编译、两个 JSON、独立执行、C++ SDK 和 JNI，再发布到目标目录。`manifest.json` 保存平台、工具链、Java 版本、验收结果及逐文件 SHA-256。失败时保留上一次发行包。非空目录默认拒绝覆盖；`--force` 仅允许替换带有效发行包标识的已有导出。`--system-java` 可省略内置运行环境，此时使用者需自行提供 Java 17+；离线缓存未准备好时去掉 `--offline` 下载经过校验的 Gson。
 
@@ -74,7 +74,7 @@ int main() {
 }
 ```
 
-内置函数 `print`、`getDepth`、`mem_free`、`alloc`、`make_free`、`mem_send_up` 和 `mem_get` 由编译器直接提供，不需要 include 或声明。include 仍按源文件所在目录解析。
+内置函数 `print`、`getDepth`、`mem_free`、`alloc`、`make_free`、`mem_send_up`、`mem_get` 和 `load_extern_library` 由编译器直接提供，不需要 include 或声明。`load_extern_library("xxx")` 按当前系统加载已签名的 `xxx.so` / `xxx.dylib` / `xxx.dll`，库内用现有的 C++ 宿主注册接口挂上外部函数。独立运行时从 `AZSCRIPT_TRUSTED_KEY` 或 `trusted_key.pem` 读取公钥；嵌入式宿主通过 C++ / Java API 提供公钥。完整约定见 [外部动态库](docs/EXTERN_LIBRARY.md)。include 仍按源文件所在目录解析。
 
 `address` 是独立的无符号 64 位地址类型，表示 slot 位置，空地址写作 `null`。例如 `address p = alloc(2); mem_get(p + 1) = 42; mem_free(p);`。地址支持与 int32 偏移加减并检查越界；对象引用也使用该运行时类型，类成员的静态类型检查和继承规则保持不变。地址值、变量槽编号、分配数量和函数 ID 是不同概念，后面三者仍使用既有 32 位表示。
 
