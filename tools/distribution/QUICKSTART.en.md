@@ -108,7 +108,7 @@ Clients include declarations only. The independently assembled math ABD is bundl
 
 Floating APIs require double, e.g. 3.0; integer APIs require int. Multiply integer expressions by 1.0 for floating APIs. Bind dynamic variables to explicitly typed locals first. The library links through AZSCRIPT_MATH; assumed namespace 4d41 is not its actual runtime address.
 
-The container library is also declarations-only. `List<int> * xs = new List<int>();` creates a list, and `delete xs;` releases its nodes. The package includes stdlib/containers.exec.abd:
+The container library is also declarations-only. `List<int> * xs = new List<int>();` creates a list, and `delete xs;` releases its nodes. `Vector<int> * xs = new Vector<int>();` is a contiguous array. `Set` and `Map` stay ordered by the default comparison. The package includes stdlib/containers.exec.abd:
 
 ```sh
 ./compile.sh examples/containers-regressions.azs

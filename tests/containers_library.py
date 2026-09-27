@@ -60,7 +60,55 @@ PUBLIC_IDS = {
     'list_count_string': 0x002f,
     'list_count_bool': 0x0030,
     'list_count_address': 0x0031,
+    'Entry::<ctor>': 0x0038,
+    'Entry::<dtor>': 0x0039,
+    'Vector::<ctor>': 0x0040,
+    'Vector::<dtor>': 0x0041,
+    'Vector::size': 0x0042,
+    'Vector::empty': 0x0043,
+    'Vector::capacity': 0x0044,
+    'Vector::reserve': 0x0045,
+    'Vector::push_back': 0x0046,
+    'Vector::pop_back': 0x0047,
+    'Vector::resize': 0x0048,
+    'Vector::clear': 0x0049,
+    'Vector::at': 0x004a,
+    'Vector::set': 0x004b,
+    'Vector::front': 0x004c,
+    'Vector::back': 0x004d,
+    'Vector::insert': 0x004e,
+    'Vector::erase': 0x004f,
+    'Vector::<op:index-get>': 0x0050,
+    'Vector::<op:index-set>': 0x0051,
+    'Set::<ctor>': 0x0052,
+    'Set::<dtor>': 0x0053,
+    'Set::size': 0x0054,
+    'Set::empty': 0x0055,
+    'Set::insert': 0x0056,
+    'Set::erase': 0x0057,
+    'Set::contains': 0x0058,
+    'Set::at': 0x0059,
+    'Set::set_order': 0x005a,
+    'Map::<ctor>': 0x005b,
+    'Map::<dtor>': 0x005c,
+    'Map::size': 0x005d,
+    'Map::empty': 0x005e,
+    'Map::put': 0x005f,
+    'Map::get': 0x0060,
+    'Map::contains': 0x0061,
+    'Map::erase': 0x0062,
+    'Map::set_order': 0x0063,
+    'Map::<op:index-get>': 0x0064,
+    'Map::<op:index-set>': 0x0065,
 }
+
+
+def expected_hidden(name):
+    if name.startswith('list_'):
+        return 0
+    if name.startswith('Map::') or name.startswith('Entry::'):
+        return 2
+    return 1
 
 
 def main():
@@ -112,7 +160,7 @@ def main():
             assert int(library_ast['abstract'][name], 16) == (ALIAS << 16 | local), name
             assert f'{ALIAS << 16 | local:08x}' in header_text.lower() or f'{local:04x}' in header_text, name
             signature = next(item for item in library_exec['f'] if item['id'] == local)
-            assert signature['hidden-count'] == (0 if name.startswith('list_') else 1), name
+            assert signature['hidden-count'] == expected_hidden(name), name
         assert 'containers__bounds' in definitions
         assert definitions['containers__bounds']['metadata']['position'] not in PUBLIC_IDS.values()
 
@@ -178,6 +226,71 @@ def main():
         compile_source(bomb_source, bomb_binary)
         result = execute(bomb_binary, [library_binary])
         if result.returncode == 0 or 'Division by zero' not in result.stderr or result.stdout != '0\n1\n2\n3\n3\n2\n1\n0\n':
+            raise AssertionError((result.stdout, result.stderr))
+
+        buffer_example = ROOT / 'compiler/examples/containers-buffer.azs'
+        buffer_binary = work / 'buffer.abd'
+        compile_source(buffer_example, buffer_binary)
+        result = execute(buffer_binary, [library_binary])
+        if result.returncode != 0 or result.stdout != '0\n':
+            raise AssertionError((result.stdout, result.stderr))
+
+        def run_source(name, source):
+            path = work / name
+            path.write_text(source, encoding='utf-8')
+            binary = work / (name + '.abd')
+            compile_source(path, binary)
+            return execute(binary, [library_binary])
+
+        header_include = f'#include "{header.as_posix()}"\n'
+        for name, body in {
+            'vector-empty-front.azs': 'void main(){Vector<int>* xs=new Vector<int>();xs.front();delete xs;}\n',
+            'vector-empty-pop.azs': 'void main(){Vector<int>* xs=new Vector<int>();xs.pop_back();delete xs;}\n',
+            'vector-negative-resize.azs': 'void main(){Vector<int>* xs=new Vector<int>();xs.resize(-1);delete xs;}\n',
+            'map-missing-get.azs': 'void main(){Map<int,int>* xs=new Map<int,int>();xs.put(1,2);int missing=xs.get(0);delete xs;}\n',
+            'map-missing-index.azs': 'void main(){Map<int,int>* xs=new Map<int,int>();xs.put(1,2);int missing=xs[0];delete xs;}\n',
+        }.items():
+            result = run_source(name, header_include + body)
+            if result.returncode == 0 or 'Division by zero' not in result.stderr:
+                raise AssertionError((name, result.stdout, result.stderr))
+
+        result = run_source(
+            'class-compare.azs',
+            header_include +
+            'class Point { int x; }\n'
+            'void main(){Set<Point>* xs=new Set<Point>();Point a;a.x=1;Point b;b.x=2;'
+            'xs.insert(a);xs.insert(b);delete xs;}\n',
+        )
+        if result.returncode == 0 or 'This type requires a custom comparison function' not in result.stderr:
+            raise AssertionError((result.stdout, result.stderr))
+
+        # 0x1234<<16 | 0x0042 == 305397826, 0x0043 == 305397827, 0x0044 == 305397828.
+        result = run_source(
+            'class-order.azs',
+            '#namespace 1234\n' + header_include +
+            'class Point { int x; Point(int n){x=n;} }\n'
+            'int compare_point(Point a, Point b):0042 { return value_compare<int>(a.x, b.x); }\n'
+            'int compare_point_rev(Point a, Point b):0043 { return value_compare<int>(b.x, a.x); }\n'
+            'int compare_int_rev(int a, int b):0044 { return value_compare<int>(b, a); }\n'
+            'int main(){\n'
+            '    Set<Point>* xs=new Set<Point>();\n'
+            '    xs.set_order(305397826);\n'
+            '    Point a(2); Point b(1); Point c(3); Point d(2);\n'
+            '    xs.insert(a); xs.insert(b); xs.insert(c); xs.insert(d);\n'
+            '    if (xs.size()!=3 || xs.at(0).x!=1 || xs.at(1).x!=2 || xs.at(2).x!=3) { delete xs; return 1; }\n'
+            '    xs.set_order(305397827);\n'
+            '    if (xs.at(0).x!=3 || xs.at(1).x!=2 || xs.at(2).x!=1) { delete xs; return 2; }\n'
+            '    delete xs;\n'
+            '    Map<int,int>* ys=new Map<int,int>();\n'
+            '    ys.put(1,10); ys.put(3,30); ys.put(2,20);\n'
+            '    ys.set_order(305397828);\n'
+            '    ys.put(0,5);\n'
+            '    if (ys.size()!=4 || ys.get(0)!=5 || ys.get(1)!=10 || ys.get(2)!=20 || ys.get(3)!=30) { delete ys; return 3; }\n'
+            '    delete ys;\n'
+            '    return 0;\n'
+            '}\n',
+        )
+        if result.returncode != 0 or result.stdout != '0\n':
             raise AssertionError((result.stdout, result.stderr))
 
     print(f'Container library checks passed: {regression_checks}')

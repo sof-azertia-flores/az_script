@@ -396,3 +396,270 @@ int list_count_address(List<address> * xs, address value):0031 {
     }
     return found;
 }
+
+// Empty storage grows to 4, then doubles. A double that would overflow int32 uses the exact size.
+int containers__next_capacity(int cap, int needed) {
+    if (needed < 0) { containers__bounds(); }
+    if (cap >= needed) { return cap; }
+    int next = needed;
+    if (cap == 0) { next = 4; }
+    else if (cap <= 1073741823) { next = cap * 2; }
+    if (next < needed) { next = needed; }
+    return next;
+}
+
+<T> int containers__order(int id, T left, T right) {
+    if (id == 0) { return value_compare<T>(left, right); }
+    return reflect_invoke_function<int>(id, left, right);
+}
+
+<T> int containers__set_lower(Set<T> * xs, T value) {
+    int lo = 0;
+    int hi = xs.items.length();
+    while (lo < hi) {
+        int mid = lo + (hi - lo) / 2;
+        if (containers__order(xs.order, xs.items.get(mid), value) < 0) { lo = mid + 1; }
+        else { hi = mid; }
+    }
+    return lo;
+}
+
+<K, V> int containers__map_lower(Map<K, V> * xs, K key) {
+    int lo = 0;
+    int hi = xs.items.length();
+    while (lo < hi) {
+        int mid = lo + (hi - lo) / 2;
+        Entry<K, V> found = xs.items.get(mid);
+        if (containers__order(xs.order, found.key, key) < 0) { lo = mid + 1; }
+        else { hi = mid; }
+    }
+    return lo;
+}
+
+Entry<K, V>::Entry():0038 {}
+Entry<K, V>::~Entry():0039 {}
+
+Vector<T>::Vector():0040 {}
+Vector<T>::~Vector():0041 {}
+int Vector<T>::size():0042 { return items.length(); }
+boolean Vector<T>::empty():0043 { return items.length() == 0; }
+int Vector<T>::capacity():0044 { return items.capacity(); }
+
+void Vector<T>::reserve(int n):0045 {
+    if (n < 0) { containers__bounds(); }
+    if (n > items.capacity()) { items.reserve(n); }
+}
+
+void Vector<T>::push_back(T value):0046 {
+    int length = items.length();
+    int next = containers__next_capacity(items.capacity(), length + 1);
+    if (next != items.capacity()) { items.reserve(next); }
+    items.push(value);
+}
+
+void Vector<T>::pop_back():0047 {
+    if (items.length() == 0) { containers__bounds(); }
+    items.resize(items.length() - 1);
+}
+
+void Vector<T>::resize(int n):0048 {
+    if (n < 0) { containers__bounds(); }
+    int next = containers__next_capacity(items.capacity(), n);
+    if (next != items.capacity()) { items.reserve(next); }
+    items.resize(n);
+}
+
+void Vector<T>::clear():0049 { items.resize(0); }
+
+T Vector<T>::at(int index):004a {
+    if (index < 0 || index >= items.length()) { containers__bounds(); }
+    return items.get(index);
+}
+
+void Vector<T>::set(int index, T value):004b {
+    if (index < 0 || index >= items.length()) { containers__bounds(); }
+    items.set(index, value);
+}
+
+T Vector<T>::front():004c {
+    if (items.length() == 0) { containers__bounds(); }
+    return items.get(0);
+}
+
+T Vector<T>::back():004d {
+    if (items.length() == 0) { containers__bounds(); }
+    return items.get(items.length() - 1);
+}
+
+void Vector<T>::insert(int index, T value):004e {
+    int length = items.length();
+    if (index < 0 || index > length) { containers__bounds(); }
+    int next = containers__next_capacity(items.capacity(), length + 1);
+    if (next != items.capacity()) { items.reserve(next); }
+    if (index == length) { items.push(value); return; }
+    items.push(items.get(length - 1));
+    int cursor = length;
+    while (cursor > index) {
+        items.set(cursor, items.get(cursor - 1));
+        cursor = cursor - 1;
+    }
+    items.set(index, value);
+}
+
+void Vector<T>::erase(int index):004f {
+    int length = items.length();
+    if (index < 0 || index >= length) { containers__bounds(); }
+    int cursor = index;
+    while (cursor < length - 1) {
+        items.set(cursor, items.get(cursor + 1));
+        cursor = cursor + 1;
+    }
+    items.resize(length - 1);
+}
+
+T Vector<T>::operator[](int index):0050 { return at(index); }
+void Vector<T>::operator[]=(int index, T value):0051 { set(index, value); }
+
+Set<T>::Set():0052 {}
+Set<T>::~Set():0053 {}
+int Set<T>::size():0054 { return items.length(); }
+boolean Set<T>::empty():0055 { return items.length() == 0; }
+
+void Set<T>::insert(T value):0056 {
+    int index = containers__set_lower(this, value);
+    int length = items.length();
+    if (index < length) {
+        if (containers__order(order, items.get(index), value) == 0) { return; }
+    }
+    int next = containers__next_capacity(items.capacity(), length + 1);
+    if (next != items.capacity()) { items.reserve(next); }
+    if (index == length) { items.push(value); return; }
+    items.push(items.get(length - 1));
+    int cursor = length;
+    while (cursor > index) {
+        items.set(cursor, items.get(cursor - 1));
+        cursor = cursor - 1;
+    }
+    items.set(index, value);
+}
+
+void Set<T>::erase(T value):0057 {
+    int index = containers__set_lower(this, value);
+    int length = items.length();
+    if (index >= length) { return; }
+    if (containers__order(order, items.get(index), value) != 0) { return; }
+    int cursor = index;
+    while (cursor < length - 1) {
+        items.set(cursor, items.get(cursor + 1));
+        cursor = cursor + 1;
+    }
+    items.resize(length - 1);
+}
+
+boolean Set<T>::contains(T value):0058 {
+    int index = containers__set_lower(this, value);
+    if (index >= items.length()) { return false; }
+    return containers__order(order, items.get(index), value) == 0;
+}
+
+T Set<T>::at(int index):0059 {
+    if (index < 0 || index >= items.length()) { containers__bounds(); }
+    return items.get(index);
+}
+
+void Set<T>::set_order(int id):005a {
+    order = id;
+    int length = items.length();
+    int i = 1;
+    while (i < length) {
+        T saved = items.get(i);
+        int j = i;
+        while (j > 0 && containers__order(order, items.get(j - 1), saved) > 0) {
+            items.set(j, items.get(j - 1));
+            j = j - 1;
+        }
+        items.set(j, saved);
+        i = i + 1;
+    }
+}
+
+Map<K, V>::Map():005b {}
+Map<K, V>::~Map():005c {}
+int Map<K, V>::size():005d { return items.length(); }
+boolean Map<K, V>::empty():005e { return items.length() == 0; }
+
+void Map<K, V>::put(K key, V value):005f {
+    int index = containers__map_lower(this, key);
+    int length = items.length();
+    if (index < length) {
+        Entry<K, V> existing = items.get(index);
+        if (containers__order(order, existing.key, key) == 0) {
+            existing.value = value;
+            items.set(index, existing);
+            return;
+        }
+    }
+    int next = containers__next_capacity(items.capacity(), length + 1);
+    if (next != items.capacity()) { items.reserve(next); }
+    Entry<K, V> entry;
+    entry.key = key;
+    entry.value = value;
+    if (index == length) { items.push(entry); return; }
+    items.push(items.get(length - 1));
+    int cursor = length;
+    while (cursor > index) {
+        items.set(cursor, items.get(cursor - 1));
+        cursor = cursor - 1;
+    }
+    items.set(index, entry);
+}
+
+V Map<K, V>::get(K key):0060 {
+    int index = containers__map_lower(this, key);
+    if (index < items.length()) {
+        Entry<K, V> existing = items.get(index);
+        if (containers__order(order, existing.key, key) == 0) { return existing.value; }
+    }
+    containers__bounds();
+    return items.get(0).value;
+}
+
+boolean Map<K, V>::contains(K key):0061 {
+    int index = containers__map_lower(this, key);
+    if (index >= items.length()) { return false; }
+    Entry<K, V> existing = items.get(index);
+    return containers__order(order, existing.key, key) == 0;
+}
+
+void Map<K, V>::erase(K key):0062 {
+    int index = containers__map_lower(this, key);
+    int length = items.length();
+    if (index >= length) { return; }
+    Entry<K, V> existing = items.get(index);
+    if (containers__order(order, existing.key, key) != 0) { return; }
+    int cursor = index;
+    while (cursor < length - 1) {
+        items.set(cursor, items.get(cursor + 1));
+        cursor = cursor + 1;
+    }
+    items.resize(length - 1);
+}
+
+void Map<K, V>::set_order(int id):0063 {
+    order = id;
+    int length = items.length();
+    int i = 1;
+    while (i < length) {
+        Entry<K, V> saved = items.get(i);
+        int j = i;
+        while (j > 0 && containers__order(order, items.get(j - 1).key, saved.key) > 0) {
+            items.set(j, items.get(j - 1));
+            j = j - 1;
+        }
+        items.set(j, saved);
+        i = i + 1;
+    }
+}
+
+V Map<K, V>::operator[](K key):0064 { return get(key); }
+void Map<K, V>::operator[]=(K key, V value):0065 { put(key, value); }

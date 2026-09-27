@@ -69,7 +69,7 @@ Clients include stdlib/containers.include.azs, for example `#include "../stdlib/
 ./run.sh examples/containers-regressions.exec.abd --insert stdlib/containers.exec.abd
 ```
 
-The regression returns 0. `List<T>` is a doubly linked list; `Stack<T>` and `Queue<T>` each own one list. Create them with new and destroy them with delete. Assumed namespace c071 is not the runtime address. See [the container guide](../stdlib/CONTAINERS.en.md) for operations, default construction, and IDs.
+The regression returns 0. `List<T>` is a doubly linked list; `Stack<T>` and `Queue<T>` each own one list and keep O(1) ends. `Vector<T>` is a contiguous array. `Set<T>` and `Map<K, V>` are sorted flat tables; class-value keys need a comparator first. Create them with new and destroy them with delete. Assumed namespace c071 is not the runtime address. See [the container guide](../stdlib/CONTAINERS.en.md) for operations, default construction, and IDs.
 
 ## C++ embedding
 
