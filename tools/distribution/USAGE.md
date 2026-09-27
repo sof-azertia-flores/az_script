@@ -71,7 +71,7 @@ C++ 使用 `insert_script`，Java 使用 `insertScript(new File("stdlib/math.exe
 ./run.sh examples/containers-regressions.exec.abd --insert stdlib/containers.exec.abd
 ```
 
-回归示例成功返回 `0`。`List<T>` 是双向链表，`Stack<T>` 和 `Queue<T>` 持有一份链表。用 `new` 创建并用 `delete` 销毁。假定 namespace `c071` 不是运行时地址。操作、默认构造和编号见 [容器库文档](../stdlib/CONTAINERS.md)。
+回归示例成功返回 `0`。`List<T>` 是双向链表，`Stack<T>` 和 `Queue<T>` 持有一份链表，两端为 O(1)。`Vector<T>` 是连续数组，`Set<T>` 和 `Map<K, V>` 是有序平坦表；类值键要先设置比较器。用 `new` 创建并用 `delete` 销毁。假定 namespace `c071` 不是运行时地址。操作、默认构造和编号见 [容器库文档](../stdlib/CONTAINERS.md)。
 
 ## 嵌入 C++
 
@@ -192,4 +192,4 @@ JNI v9 快照仅保存和恢复初始化完成的空闲脚本（含堆对象字�
 - `examples/`：基础脚本、类脚本及 C++ / Java 嵌入示例。
 - `stdlib/`：数学库与容器库的共享声明、实现源码、预编译 ABD、配套 AST / exec JSON 与 API 说明。
 
-初次写脚本见 [基本语法](QUICKSTART.md)，完整语义见 [语言文档](LANGUAGE.md)，数学函数及精度边界见 [数学库说明](../stdlib/MATH.md)，链表、栈和队列见 [容器库说明](../stdlib/CONTAINERS.md)。
+初次写脚本见 [基本语法](QUICKSTART.md)，完整语义见 [语言文档](LANGUAGE.md)，数学函数及精度边界见 [数学库说明](../stdlib/MATH.md)，链表、连续数组、集合和映射见 [容器库说明](../stdlib/CONTAINERS.md)。

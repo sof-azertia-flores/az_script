@@ -31,7 +31,7 @@ byte[] executable = instructions.toValue().toAbdFormat();
 
 纯脚本基础数学库 [`stdlib/math.azs`](stdlib/math.azs) 使用 `#namespace_hint AZSCRIPT_MATH` 独立编译。调用方只通过相对路径 include [`stdlib/math.include.azs`](stdlib/math.include.azs) 中的类型声明；运行时插入库 ABD 并 `flush()`，独立解释器可用 `--insert math.exec.abd` 自动完成链接。头文件的 `4d41` 为假定 namespace，实际位置由运行时分配。浮点 API 接收 `double`，整数 API 接收 `int`，`math_pow` 为 `(double, int)`；extern 参数类型须精确匹配。编译和接入步骤、API、int32 输入域、取整边界及精度约定见 [`stdlib/MATH.md`](stdlib/MATH.md)。
 
-容器库 [`stdlib/containers.azs`](stdlib/containers.azs) 同样独立编译，hint 为 `AZSCRIPT_CONTAINERS`。调用方 include [`stdlib/containers.include.azs`](stdlib/containers.include.azs)。`List<T>`、`Stack<T>` 和 `Queue<T>` 共用一份泛型正文；元素放在链表节点字段中，因为类型参数不能写入 `mem_get`。假定 namespace 是 `c071`。操作、所有权和编号见 [`stdlib/CONTAINERS.md`](stdlib/CONTAINERS.md)。
+容器库 [`stdlib/containers.azs`](stdlib/containers.azs) 同样独立编译，hint 为 `AZSCRIPT_CONTAINERS`。调用方 include [`stdlib/containers.include.azs`](stdlib/containers.include.azs)。`List<T>`、`Stack<T>` 和 `Queue<T>` 仍把元素放在链表节点字段中，两端保持 O(1)。`Vector<T>`、`Set<T>` 和 `Map<K, V>` 使用连续 `buffer`；`Set` 和 `Map` 默认用 `value_compare`，类值键要另设普通比较函数。假定 namespace 是 `c071`。操作、所有权和编号见 [`stdlib/CONTAINERS.md`](stdlib/CONTAINERS.md)。
 
 ## 函数、变量与作用域
 

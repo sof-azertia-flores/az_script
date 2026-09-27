@@ -65,6 +65,73 @@ class Queue<T> {
     extern boolean empty():c0710024;
 }
 
+// Map record. Fields are default-initialized, so class-value keys and values need a zero-argument constructor.
+class Entry<K, V> {
+    K key;
+    V value;
+
+    extern Entry():c0710038;
+    extern ~Entry():c0710039;
+}
+
+// Contiguous buffer. Copying the class value deep-copies elements.
+class Vector<T> {
+    buffer<T> items;
+
+    extern Vector():c0710040;
+    extern ~Vector():c0710041;
+    extern int size():c0710042;
+    extern boolean empty():c0710043;
+    extern int capacity():c0710044;
+    extern void reserve(int n):c0710045;
+    extern void push_back(T value):c0710046;
+    extern void pop_back():c0710047;
+    extern void resize(int n):c0710048;
+    extern void clear():c0710049;
+    extern T at(int index):c071004a;
+    extern void set(int index, T value):c071004b;
+    extern T front():c071004c;
+    extern T back():c071004d;
+    extern void insert(int index, T value):c071004e;
+    extern void erase(int index):c071004f;
+    extern T operator[](int index):c0710050;
+    extern void operator[]=(int index, T value):c0710051;
+}
+
+// Sorted unique values. order 0 uses value_compare; any other id is an ordinary comparator.
+class Set<T> {
+    buffer<T> items;
+    int order;
+
+    extern Set():c0710052;
+    extern ~Set():c0710053;
+    extern int size():c0710054;
+    extern boolean empty():c0710055;
+    extern void insert(T value):c0710056;
+    extern void erase(T value):c0710057;
+    extern boolean contains(T value):c0710058;
+    extern T at(int index):c0710059;
+    extern void set_order(int id):c071005a;
+}
+
+// Sorted unique keys. operator[] reads with a bounds failure and writes by inserting.
+class Map<K, V> {
+    buffer<Entry<K, V>> items;
+    int order;
+
+    extern Map():c071005b;
+    extern ~Map():c071005c;
+    extern int size():c071005d;
+    extern boolean empty():c071005e;
+    extern void put(K key, V value):c071005f;
+    extern V get(K key):c0710060;
+    extern boolean contains(K key):c0710061;
+    extern void erase(K key):c0710062;
+    extern void set_order(int id):c0710063;
+    extern V operator[](K key):c0710064;
+    extern void operator[]=(K key, V value):c0710065;
+}
+
 extern void list_sort_int(List<int> * xs):c0710025;
 extern void list_sort_double(List<double> * xs):c0710026;
 extern void list_sort_address(List<address> * xs):c0710027;

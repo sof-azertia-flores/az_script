@@ -1,0 +1,122 @@
+#include ../stdlib/containers.include.azs
+
+class Token {
+    int value;
+    Token(int n) { value = n; }
+}
+
+int containers_check(boolean condition) {
+    if (condition) { return 0; }
+    return 1;
+}
+
+int main() {
+    int failures = 0;
+
+    Vector<int> * xs = new Vector<int>();
+    failures += containers_check(xs.empty() && xs.size() == 0 && xs.capacity() == 0);
+    xs.reserve(1);
+    failures += containers_check(xs.capacity() == 1);
+    xs.push_back(1);
+    failures += containers_check(xs.capacity() == 1 && xs.front() == 1 && xs.back() == 1);
+    xs.push_back(2);
+    failures += containers_check(xs.capacity() == 2 && xs.size() == 2);
+    delete xs;
+
+    xs = new Vector<int>();
+    xs.push_back(1);
+    failures += containers_check(xs.capacity() == 4);
+    xs.push_back(2);
+    xs.push_back(3);
+    xs.push_back(4);
+    failures += containers_check(xs.capacity() == 4 && xs.size() == 4);
+    xs.push_back(5);
+    failures += containers_check(xs.capacity() == 8 && xs.size() == 5 && xs[0] == 1 && xs.at(4) == 5);
+    xs[1] = 9;
+    failures += containers_check(xs.at(1) == 9);
+    xs.set(1, 2);
+    xs.insert(0, 7);
+    failures += containers_check(xs.size() == 6 && xs.at(0) == 7 && xs.at(1) == 1 && xs.back() == 5);
+    xs.insert(xs.size(), 6);
+    failures += containers_check(xs.back() == 6 && xs.size() == 7);
+    xs.erase(0);
+    failures += containers_check(xs.front() == 1 && xs.size() == 6);
+    xs.pop_back();
+    failures += containers_check(xs.back() == 5 && xs.size() == 5);
+    xs.resize(6);
+    failures += containers_check(xs.size() == 6 && xs.at(5) == 0 && xs.capacity() == 8);
+    xs.clear();
+    failures += containers_check(xs.empty() && xs.capacity() == 8);
+    delete xs;
+
+    Vector<int> original;
+    original.push_back(1);
+    original.push_back(2);
+    Vector<int> copy = original;
+    copy.set(0, 9);
+    copy.push_back(3);
+    failures += containers_check(original.at(0) == 1 && original.size() == 2 && copy.at(0) == 9 && copy.size() == 3);
+
+    Vector<Token> * tokens = new Vector<Token>();
+    Token first(4);
+    Token second(5);
+    tokens.push_back(first);
+    tokens.insert(0, second);
+    failures += containers_check(tokens.size() == 2 && tokens.at(0).value == 5 && tokens.at(1).value == 4);
+    Token edited = tokens[0];
+    edited.value = 0;
+    failures += containers_check(tokens[0].value == 5);
+    delete tokens;
+
+    Set<int> * numbers = new Set<int>();
+    numbers.insert(3);
+    numbers.insert(1);
+    numbers.insert(3);
+    numbers.insert(2);
+    failures += containers_check(numbers.size() == 3 && numbers.at(0) == 1 && numbers.at(1) == 2 && numbers.at(2) == 3);
+    failures += containers_check(numbers.contains(2) && numbers.contains(4) == false);
+    numbers.erase(2);
+    numbers.erase(9);
+    failures += containers_check(numbers.size() == 2 && numbers.at(0) == 1 && numbers.at(1) == 3 && numbers.contains(2) == false);
+    delete numbers;
+
+    Set<string> * words = new Set<string>();
+    words.insert("b");
+    words.insert("a");
+    words.insert("b");
+    failures += containers_check(words.size() == 2 && words.at(0) == "a" && words.at(1) == "b");
+    delete words;
+
+    Set<boolean> * flags = new Set<boolean>();
+    flags.insert(true);
+    flags.insert(false);
+    flags.insert(true);
+    failures += containers_check(flags.size() == 2 && flags.at(0) == false && flags.at(1) == true);
+    delete flags;
+
+    address slot = alloc(1);
+    Set<address> * pointers = new Set<address>();
+    pointers.insert(slot);
+    pointers.insert(null);
+    pointers.insert(slot);
+    failures += containers_check(pointers.size() == 2 && pointers.at(0) == null && pointers.at(1) == slot);
+    delete pointers;
+    mem_free(slot);
+
+    Map<int, string> * labels = new Map<int, string>();
+    failures += containers_check(labels.empty());
+    labels.put(2, "b");
+    labels.put(1, "a");
+    labels.put(2, "c");
+    failures += containers_check(labels.size() == 2 && labels.get(1) == "a" && labels.get(2) == "c" && labels.contains(1));
+    failures += containers_check(labels[1] == "a");
+    labels[2] = "e";
+    labels[3] = "d";
+    failures += containers_check(labels.get(2) == "e" && labels.get(3) == "d" && labels.size() == 3);
+    labels.erase(1);
+    labels.erase(9);
+    failures += containers_check(labels.contains(1) == false && labels.size() == 2 && labels[3] == "d");
+    delete labels;
+
+    return failures;
+}

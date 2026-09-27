@@ -118,7 +118,7 @@ int main() {
 
 ## 脚本容器库
 
-[`compiler/stdlib/containers.azs`](compiler/stdlib/containers.azs) 提供泛型双向链表 `List<T>`，以及建立在它上面的 `Stack<T>` 和 `Queue<T>`。调用方只包含共享声明。排序和查找是具体类型的普通函数，因为无界类型参数不能比较：
+[`compiler/stdlib/containers.azs`](compiler/stdlib/containers.azs) 提供泛型双向链表 `List<T>`，以及建立在它上面的 `Stack<T>` 和 `Queue<T>`。`Vector<T>` 是连续数组，`Set<T>` 和 `Map<K, V>` 是按 `value_compare` 排序的平坦表；类值键要先设置普通比较函数。调用方只包含共享声明。链表的排序和查找仍是具体类型的普通函数，因为无界类型参数不能直接比较：
 
 ```c
 #include "../stdlib/containers.include.azs"
@@ -140,7 +140,7 @@ int main() {
 ./build/native/interpreter/azscript-run build/containers-regressions.exec.abd --insert build/containers.exec.abd
 ```
 
-回归示例成功返回 `0`。元素放在节点字段里，按下标访问要沿链表行走。类值元素需要无参构造。说明见 [`compiler/stdlib/CONTAINERS.md`](compiler/stdlib/CONTAINERS.md)。
+回归示例成功返回 `0`。链表元素放在节点字段里，按下标访问要沿链表行走，类值需要无参构造。`Vector` 和 `Set` 可以写入已有的类值；按下标得到的是副本。说明见 [`compiler/stdlib/CONTAINERS.md`](compiler/stdlib/CONTAINERS.md)。
 
 ## 主要修复
 
@@ -225,7 +225,7 @@ ABD 地址标量新增标签 `0xce200b`，payload 恰为 8 字节 uint64 小端�
 
 类指针、隐式 `this` 和底层内存指针统一使用 address（运行时类型编号 7），字面量对象以运行时对象值传递（类型编号 8），普通整数仍为 int32。已有 `oa/ob/od/ro` 对象指令保持生命周期语义，新增 `new_block/block_address/mv/drop` 实现字面量对象。exec v9 使用数字变量与数字 opcode，固定结构直接使用裸 `AbdStack`，仅动态常量和扩展元数据保留带类型的容器。exec JSON 是带字段名的检查视图；完整布局见 [Exec v9 格式](docs/EXEC_FORMAT.md)。解释器只接受 exec v9；包括 v8 在内的旧执行文件均须从源码或可读 AST 重新编译，旧源码中的类对象须按新写法迁移：原来的 `C x(...)` 若依赖引用语义应改为 `C * x(...)`，`C y = new C()` 改为 `C * y = new C()`，类类型的引用参数、字段和返回值改为 `C *`。JNI 快照只接受 v9，使用独立地址值保存堆分配、对象登记和自动清理顺序，同时保留全局槽、模块身份和字段中的字面量对象；旧快照不再受支持。
 
-编译器提供拥有型 `buffer<T>`：元素直接 slots 连续，支持深复制、自动清理及带检查的 reserve/get/set/push/resize。`value_compare<T>` 提供基础值顺序，类的 `+ - * / [] []= ()` 声明降为普通方法调用，详见[语言说明](compiler/LANGUAGE.md)。此次提供语言和运行时原语，已有链表容器 API 保持现有实现。
+编译器提供拥有型 `buffer<T>`：元素直接 slots 连续，支持深复制、自动清理及带检查的 reserve/get/set/push/resize。`value_compare<T>` 提供基础值顺序，类的 `+ - * / [] []= ()` 声明降为普通方法调用，详见[语言说明](compiler/LANGUAGE.md)。`List`、`Stack`、`Queue` 仍是链表。`Vector`、`Set`、`Map` 用这些原语做连续存储和默认比较。
 
 ## 验证
 

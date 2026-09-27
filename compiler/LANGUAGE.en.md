@@ -31,7 +31,7 @@ byte[] executable = instructions.toValue().toAbdFormat();
 
 Pure-script [`stdlib/math.azs`](stdlib/math.azs) compiles independently with `#namespace_hint AZSCRIPT_MATH`. Clients include only typed declarations in [`stdlib/math.include.azs`](stdlib/math.include.azs). Insert its ABD and flush at runtime; standalone `--insert math.exec.abd` links automatically. Header namespace `4d41` is assumed; the runtime assigns its actual location. Floating APIs take double, integer APIs int, and math_pow `(double, int)`; extern types must match exactly. See [the math guide](stdlib/MATH.en.md) for compilation, integration, APIs, int32 domains, rounding boundaries, and accuracy.
 
-[`stdlib/containers.azs`](stdlib/containers.azs) is the same kind of library, hinted `AZSCRIPT_CONTAINERS`. Clients include [`stdlib/containers.include.azs`](stdlib/containers.include.azs). `List<T>`, `Stack<T>`, and `Queue<T>` share one generic body. Elements live in linked-node fields because a type parameter cannot be stored with `mem_get`. The assumed namespace is `c071`. See [the container guide](stdlib/CONTAINERS.en.md) for operations, ownership, and IDs.
+[`stdlib/containers.azs`](stdlib/containers.azs) is the same kind of library, hinted `AZSCRIPT_CONTAINERS`. Clients include [`stdlib/containers.include.azs`](stdlib/containers.include.azs). `List<T>`, `Stack<T>`, and `Queue<T>` still store elements in linked nodes and keep O(1) ends. `Vector<T>`, `Set<T>`, and `Map<K, V>` use a contiguous `buffer`. `Set` and `Map` default to `value_compare`; class-value keys need an ordinary comparator. The assumed namespace is `c071`. See [the container guide](stdlib/CONTAINERS.en.md) for operations, ownership, and IDs.
 
 ## Functions, variables, and scopes
 

@@ -114,7 +114,7 @@ See [math API/domains/accuracy](compiler/stdlib/MATH.en.md). [Math regressions](
 
 ## Script containers
 
-[`compiler/stdlib/containers.azs`](compiler/stdlib/containers.azs) provides a generic doubly linked `List<T>`, plus `Stack<T>` and `Queue<T>` built on it. Clients include the shared declarations only. Sort and find are ordinary functions of concrete types, because an unbounded type parameter cannot be compared:
+[`compiler/stdlib/containers.azs`](compiler/stdlib/containers.azs) provides a generic doubly linked `List<T>`, plus `Stack<T>` and `Queue<T>` built on it. `Vector<T>` is a contiguous array. `Set<T>` and `Map<K, V>` are flat tables ordered by `value_compare`; class-value keys need an ordinary comparator first. Clients include the shared declarations only. List sort and find remain ordinary functions of concrete types, because an unbounded type parameter cannot be compared directly:
 
 ```c
 #include "../stdlib/containers.include.azs"
@@ -136,7 +136,7 @@ int main() {
 ./build/native/interpreter/azscript-run build/containers-regressions.exec.abd --insert build/containers.exec.abd
 ```
 
-The regression returns `0`. Elements live in node fields, so indexing walks the list. Class-value elements need a zero-argument constructor. See [`compiler/stdlib/CONTAINERS.en.md`](compiler/stdlib/CONTAINERS.en.md).
+The regression returns `0`. List elements live in node fields, so indexing walks the list, and class values need a zero-argument constructor. `Vector` and `Set` can store an existing class value. Subscripting returns a copy. See [`compiler/stdlib/CONTAINERS.en.md`](compiler/stdlib/CONTAINERS.en.md).
 
 ## Principal fixes
 
@@ -219,7 +219,7 @@ New operations, else, initialization, parameter types, and extern signatures req
 
 Class pointers/this/raw pointers use address type 7; literal values object type 8; int remains int32. Existing oa/ob/od/ro retain lifetime behavior; new_block/block_address/mv/drop implement literals. Exec v9 uses numeric variables/opcodes and raw fixed stacks, retaining typed containers only for dynamic constants/metadata. See [Exec v9](docs/EXEC_FORMAT.en.md). Only v9 is accepted; recompile older source/AST. Migrate reference-style C x(...) to C * x(...), C y = new C() to C * y = new C(), and reference parameters/fields/returns to C *. JNI accepts only v9 snapshots with address scalars, allocations, object records, cleanup order, globals, module identity, and literal fields.
 
-The compiler also provides owning `buffer<T>` with contiguous direct element slots, deep copies, automatic cleanup, and checked reserve/get/set/push/resize operations. `value_compare<T>` orders basic values; class `+ - * / [] []= ()` declarations lower to ordinary method calls. See the [language guide](compiler/LANGUAGE.en.md). This change provides language/runtime primitives; existing linked-list container APIs keep their implementation.
+The compiler also provides owning `buffer<T>` with contiguous direct element slots, deep copies, automatic cleanup, and checked reserve/get/set/push/resize operations. `value_compare<T>` orders basic values; class `+ - * / [] []= ()` declarations lower to ordinary method calls. See the [language guide](compiler/LANGUAGE.en.md). `List`, `Stack`, and `Queue` stay linked lists. `Vector`, `Set`, and `Map` use these primitives for contiguous storage and the default order.
 
 ## Validation
 

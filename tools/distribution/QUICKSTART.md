@@ -108,7 +108,7 @@ int main() { return math_round(math_hypot(3.0, 4.0)); }
 
 浮点 API 的实参必须为 `double`，如 `3.0`；整数 API 必须传 `int`。整数表达式可乘 `1.0` 后传给浮点 API。动态变量须先绑定到显式类型的局部变量。库以 `AZSCRIPT_MATH` hint 链接，头文件中的假定 namespace `4d41` 不代表实际运行地址。
 
-容器库同样只 include 声明。`List<int> * xs = new List<int>();` 创建链表，`delete xs;` 释放节点。发行包附带 `stdlib/containers.exec.abd`：
+容器库同样只 include 声明。`List<int> * xs = new List<int>();` 创建链表，`delete xs;` 释放节点。`Vector<int> * xs = new Vector<int>();` 是连续数组，`Set` 和 `Map` 按默认比较保持有序。发行包附带 `stdlib/containers.exec.abd`：
 
 ```sh
 ./compile.sh examples/containers-regressions.azs
