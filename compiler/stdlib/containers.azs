@@ -581,6 +581,16 @@ void Set<T>::set_order(int id):005a {
         items.set(j, saved);
         i = i + 1;
     }
+    int write = 1;
+    int read = 1;
+    while (read < length) {
+        if (containers__order(order, items.get(write - 1), items.get(read)) != 0) {
+            if (write != read) { items.set(write, items.get(read)); }
+            write = write + 1;
+        }
+        read = read + 1;
+    }
+    if (write < length) { items.resize(write); }
 }
 
 Map<K, V>::Map():005b {}
@@ -659,6 +669,18 @@ void Map<K, V>::set_order(int id):0063 {
         items.set(j, saved);
         i = i + 1;
     }
+    int write = 0;
+    int read = 0;
+    while (read < length) {
+        int last = read;
+        while (last + 1 < length && containers__order(order, items.get(last).key, items.get(last + 1).key) == 0) {
+            last = last + 1;
+        }
+        if (write != last) { items.set(write, items.get(last)); }
+        write = write + 1;
+        read = last + 1;
+    }
+    if (write < length) { items.resize(write); }
 }
 
 V Map<K, V>::operator[](K key):0064 { return get(key); }

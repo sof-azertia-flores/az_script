@@ -264,7 +264,7 @@ def main():
         if result.returncode == 0 or 'This type requires a custom comparison function' not in result.stderr:
             raise AssertionError((result.stdout, result.stderr))
 
-        # 0x1234<<16 | 0x0042 == 305397826, 0x0043 == 305397827, 0x0044 == 305397828.
+        # 0x1234<<16 | 0x0042 == 305397826, 0x0043 == 305397827, 0x0044 == 305397828, 0x0045 == 305397829.
         result = run_source(
             'class-order.azs',
             '#namespace 1234\n' + header_include +
@@ -272,6 +272,7 @@ def main():
             'int compare_point(Point a, Point b):0042 { return value_compare<int>(a.x, b.x); }\n'
             'int compare_point_rev(Point a, Point b):0043 { return value_compare<int>(b.x, a.x); }\n'
             'int compare_int_rev(int a, int b):0044 { return value_compare<int>(b, a); }\n'
+            'int compare_parity(int a, int b):0045 { return value_compare<int>(a % 2, b % 2); }\n'
             'int main(){\n'
             '    Set<Point>* xs=new Set<Point>();\n'
             '    xs.set_order(305397826);\n'
@@ -287,6 +288,20 @@ def main():
             '    ys.put(0,5);\n'
             '    if (ys.size()!=4 || ys.get(0)!=5 || ys.get(1)!=10 || ys.get(2)!=20 || ys.get(3)!=30) { delete ys; return 3; }\n'
             '    delete ys;\n'
+            '    Set<int>* parity=new Set<int>();\n'
+            '    parity.insert(1); parity.insert(2); parity.insert(3); parity.insert(4);\n'
+            '    parity.set_order(305397829);\n'
+            '    if (parity.size()!=2 || parity.at(0)!=2 || parity.at(1)!=1 || parity.contains(4)==false) { delete parity; return 4; }\n'
+            '    parity.erase(4);\n'
+            '    if (parity.size()!=1 || parity.contains(2) || parity.at(0)!=1) { delete parity; return 5; }\n'
+            '    delete parity;\n'
+            '    Map<int,int>* grouped=new Map<int,int>();\n'
+            '    grouped.put(1,10); grouped.put(2,20); grouped.put(3,30); grouped.put(4,40);\n'
+            '    grouped.set_order(305397829);\n'
+            '    if (grouped.size()!=2 || grouped.get(2)!=40 || grouped.get(4)!=40 || grouped.get(1)!=30) { delete grouped; return 6; }\n'
+            '    grouped.erase(2);\n'
+            '    if (grouped.size()!=1 || grouped.contains(4) || grouped.get(3)!=30) { delete grouped; return 7; }\n'
+            '    delete grouped;\n'
             '    return 0;\n'
             '}\n',
         )

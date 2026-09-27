@@ -90,7 +90,7 @@ delete xs;
 
 相等元素：`Set::insert` 保留原来的值，`Map::put` 替换值。`Set::erase` 和 `Map::erase` 找不到时什么也不做。`Map::get` 和 `operator[]` 读缺失键时报 `Division by zero`；`operator[]=` 写缺失键则插入。`at` 按下标取已排序元素。
 
-`set_order(int id)` 保存比较器的完整函数 ID。容器非空时按新顺序做稳定插入排序：只有比较结果大于 0 才移动，相等元素保持原来的相对顺序。`id` 为 `0` 时回到 `value_compare`。
+`set_order(int id)` 保存比较器的完整函数 ID。容器非空时按新顺序做稳定插入排序：只有比较结果大于 0 才移动，相等元素保持原来的相对顺序。排序之后，比较结果为 0 的连续元素只保留一个。`Set` 保留这一段里靠前的元素，与 `insert` 保留原值一致；`Map` 保留最后一项，与 `put` 替换值一致。之后的查找、插入和删除都按这一条处理，不会留下第二个等价键。`id` 为 `0` 时回到 `value_compare`。
 
 空容器取端点、弹出、按下标越界、负的 `resize` 或 `reserve`，以及把 `null` 传给 `swap` 或具体类型的排序、查找、计数，都会触发 `Division by zero`。这是前置条件失败，不是可捕获异常。
 

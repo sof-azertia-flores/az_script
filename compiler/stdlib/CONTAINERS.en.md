@@ -90,7 +90,7 @@ Growth calls `reserve` first: an empty vector becomes 4, otherwise the capacity 
 
 Equal elements: `Set::insert` keeps the original value, and `Map::put` replaces the value. `Set::erase` and `Map::erase` do nothing when the element is absent. `Map::get` and `operator[]` raise `Division by zero` for a missing key. `operator[]=` inserts a missing key. `at` reads a sorted element by index.
 
-`set_order(int id)` stores the comparator's full function id. A non-empty container is reordered with a stable insertion sort: an element moves only when the comparison is greater than 0, so equal elements keep their relative order. An id of `0` selects `value_compare`.
+`set_order(int id)` stores the comparator's full function id. A non-empty container is reordered with a stable insertion sort: an element moves only when the comparison is greater than 0, so equal elements keep their relative order. After sorting, a run of elements that compare equal collapses to one entry. `Set` keeps the earlier element, matching `insert`. `Map` keeps the last entry, matching `put`. Later lookup, insert, and erase use that single entry, so a second equivalent key is not left behind. An id of `0` selects `value_compare`.
 
 Reading an end, popping, indexing out of range, passing a negative `resize` or `reserve`, or passing `null` to `swap` or to a concrete sort, find, or count raises `Division by zero`. That is a failed precondition, not a catchable exception.
 
