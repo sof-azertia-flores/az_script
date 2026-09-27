@@ -51,7 +51,7 @@ When `T` is a class value, the node field default-constructs it. A class value w
 
 ## Ownership
 
-Create a container with `new` and destroy it with `delete`. The `List` destructor deletes every node. `Stack` and `Queue` each own one `List` and delete it. `clone` returns a new `List<T> *` that the caller deletes.
+Create a container with `new` and destroy it with `delete`. The `List` destructor deletes every node. If an element destructor fails, the nodes not yet released are still deleted, and the first error is kept. A run of failing element destructors is limited by the call-depth budget. `Stack` and `Queue` each own one `List` and delete it. `clone` returns a new `List<T> *` that the caller deletes.
 
 Copying a container by value copies the node pointers, so both destructors would `delete` the same nodes. Use pointers:
 

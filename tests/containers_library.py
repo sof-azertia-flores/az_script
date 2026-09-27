@@ -142,6 +142,44 @@ def main():
         if result.returncode == 0 or 'Division by zero' not in result.stderr:
             raise AssertionError((result.stdout, result.stderr))
 
+        assert definitions['NodeRest::<dtor>']['metadata']['position'] == 0x0037
+        assert 'c0710037' not in header_text
+
+        # ids 1 and 2 fail. The tail (id 3) must still be destroyed, then the locals.
+        bomb_source = work / 'element-dtor.azs'
+        bomb_source.write_text(
+            '#gvar armed\n'
+            f'#include "{header.as_posix()}"\n'
+            'class Bomb {\n'
+            '    int id;\n'
+            '    ~Bomb() {\n'
+            '        if (armed == 0) { return; }\n'
+            '        print(id);\n'
+            '        if (id == 1 || id == 2) { int broken = 1 / 0; }\n'
+            '    }\n'
+            '}\n'
+            'void main() {\n'
+            '    armed = 0;\n'
+            '    List<Bomb> * xs = new List<Bomb>();\n'
+            '    Bomb a; a.id = 0;\n'
+            '    Bomb b; b.id = 1;\n'
+            '    Bomb c; c.id = 2;\n'
+            '    Bomb d; d.id = 3;\n'
+            '    xs.push_back(a);\n'
+            '    xs.push_back(b);\n'
+            '    xs.push_back(c);\n'
+            '    xs.push_back(d);\n'
+            '    armed = 1;\n'
+            '    delete xs;\n'
+            '}\n',
+            encoding='utf-8',
+        )
+        bomb_binary = work / 'element-dtor.abd'
+        compile_source(bomb_source, bomb_binary)
+        result = execute(bomb_binary, [library_binary])
+        if result.returncode == 0 or 'Division by zero' not in result.stderr or result.stdout != '0\n1\n2\n3\n3\n2\n1\n0\n':
+            raise AssertionError((result.stdout, result.stderr))
+
     print(f'Container library checks passed: {regression_checks}')
 
 

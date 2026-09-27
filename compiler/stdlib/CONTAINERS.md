@@ -51,7 +51,7 @@ int main() {
 
 ## 所有权
 
-用 `new` 创建容器，用 `delete` 销毁。`List` 的析构会 `delete` 全部节点。`Stack` 和 `Queue` 各自持有一份 `List`，析构时释放它。`clone` 返回新的 `List<T> *`，由调用方 `delete`。
+用 `new` 创建容器，用 `delete` 销毁。`List` 的析构会 `delete` 全部节点。某个元素的析构失败时，尚未释放的节点仍会继续 `delete`，并保留最先出现的那个错误；连续失败的次数受调用深度预算限制。`Stack` 和 `Queue` 各自持有一份 `List`，析构时释放它。`clone` 返回新的 `List<T> *`，由调用方 `delete`。
 
 按值复制容器会复制节点指针，两份析构会重复 `delete`。公开用法是指针：
 

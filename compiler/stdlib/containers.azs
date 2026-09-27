@@ -56,17 +56,45 @@ void containers__bounds() {
     return cursor;
 }
 
+// Owns the tail that containers__release has not deleted yet. 0037 is private.
+// If an element destructor fails, this literal still runs and keeps deleting.
+class NodeRest<T> {
+    Node<T> * pending;
+
+    extern ~NodeRest():c0710037;
+}
+
+<T> void containers__release(Node<T> * node) {
+    if (node == null) { return; }
+    NodeRest<T> rest;
+    while (node != null) {
+        Node<T> * next = node.next;
+        rest.pending = next;
+        node.next = null;
+        node.prev = null;
+        delete node;
+        rest.pending = null;
+        node = next;
+    }
+}
+
+NodeRest<T>::~NodeRest():0037 {
+    if (pending == null) { return; }
+    Node<T> * node = pending;
+    pending = null;
+    containers__release(node);
+}
+
 Node<T>::Node():0002 {}
 Node<T>::~Node():0003 {}
 
 List<T>::List():0004 {}
 List<T>::~List():0005 {
-    Node<T> * cursor = head;
-    while (cursor != null) {
-        Node<T> * next = cursor.next;
-        delete cursor;
-        cursor = next;
-    }
+    Node<T> * node = head;
+    head = null;
+    tail = null;
+    count = 0;
+    containers__release(node);
 }
 
 int List<T>::size():0006 { return count; }
