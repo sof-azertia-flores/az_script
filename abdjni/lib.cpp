@@ -640,6 +640,12 @@ JNIEXPORT void JNICALL Java_azertia_jni_Caller2220_bindNamespace(JNIEnv* env, jc
 JNIEXPORT void JNICALL Java_azertia_jni_Caller2220_unbindNamespace(JNIEnv* env, jclass, jint ns) {
     boundary(env, [&] { unregisterExecutor(ns); });
 }
+JNIEXPORT void JNICALL Java_azertia_jni_Caller2220_addTrustedPublicKey(JNIEnv* env, jclass, jstring pem) {
+    boundary(env, [&] { add_trusted_public_key_pem(fromJava(env, pem)); });
+}
+JNIEXPORT void JNICALL Java_azertia_jni_Caller2220_clearTrustedPublicKeys(JNIEnv* env, jclass) {
+    boundary(env, [&] { clear_trusted_public_keys(); });
+}
 JNIEXPORT void JNICALL Java_azertia_jni_Caller22220_printGlobalMemories(JNIEnv* env, jclass) {
     boundary(env, [&] { std::cout << memoryReport(); });
 }

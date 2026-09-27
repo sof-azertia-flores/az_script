@@ -24,7 +24,8 @@ public class Compiler {
             new BuiltinSpec("alloc", 0x0abd0003, AsTypes.ADDRESS_VALUE, List.of(AsTypes.INT_VALUE)),
             new BuiltinSpec("make_free", 0x0abd0004, AsTypes.VOID_VALUE, List.of(AsTypes.ADDRESS_VALUE)),
             new BuiltinSpec("mem_send_up", 0x0abd0005, AsTypes.VOID_VALUE, List.of(AsTypes.ADDRESS_VALUE)),
-            new BuiltinSpec("mem_get", 0x0abd0006, AsTypes.ANY_VALUE, List.of(AsTypes.ADDRESS_VALUE)));
+            new BuiltinSpec("mem_get", 0x0abd0006, AsTypes.ANY_VALUE, List.of(AsTypes.ADDRESS_VALUE)),
+            new BuiltinSpec("load_extern_library", 0x0abd0007, AsTypes.VOID_VALUE, List.of(AsTypes.STRING_VALUE)));
     public static boolean isBuiltinName(String name) {
         return BUILTINS.stream().anyMatch(spec -> spec.name().equals(name));
     }

@@ -40,6 +40,7 @@ configure_file(cmake/data.hpp.in "${CMAKE_CURRENT_BINARY_DIR}/public-headers/azs
 install(FILES
     "${CMAKE_CURRENT_BINARY_DIR}/public-headers/azscript/runtime.hpp"
     "${CMAKE_CURRENT_BINARY_DIR}/public-headers/azscript/data.hpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/include/azscript/extern_library.hpp"
     DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/azscript")
 configure_package_config_file(cmake/AzScriptConfig.cmake.in
     "${CMAKE_CURRENT_BINARY_DIR}/AzScriptConfig.cmake"

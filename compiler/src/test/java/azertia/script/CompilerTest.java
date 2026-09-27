@@ -354,13 +354,13 @@ class CompilerTest {
     }
     @Test void builtinSignaturesAndKnownOperatorOperandsAreChecked() throws Exception {
         var direct = new GeneraterJson.AzScript();
-        direct.execute("void main(){print(1);getDepth();mem_free(null);alloc(1);make_free(null);mem_send_up(null);mem_get(null);}");
+        direct.execute("void main(){print(1);getDepth();mem_free(null);alloc(1);make_free(null);mem_send_up(null);mem_get(null);load_extern_library(\"plugin\");}");
         JsonObject directTree = direct.toObj();
         assertFalse(directTree.getAsJsonObject("abstract").has("print"));
         JsonArray calls = Compiler.compile(directTree).toJson().getAsJsonObject().getAsJsonArray("f")
                 .get(0).getAsJsonObject().getAsJsonArray("script");
         assertEquals(List.of(0x0abd0000, 0x0abd0001, 0x0abd0002, 0x0abd0003,
-                        0x0abd0004, 0x0abd0005, 0x0abd0006),
+                        0x0abd0004, 0x0abd0005, 0x0abd0006, 0x0abd0007),
                 calls.asList().stream().map(JsonElement::getAsJsonObject)
                         .map(call -> call.get("id").getAsInt()).toList());
         assertDoesNotThrow(() -> compile(
@@ -370,7 +370,7 @@ class CompilerTest {
         assertThrows(IllegalArgumentException.class, () -> compile(
                 "int main(){return print(1);}"));
         assertDoesNotThrow(() -> compile("void main(){print(1);}"));
-        String[] builtinNames = {"print", "getDepth", "mem_free", "alloc", "make_free", "mem_send_up", "mem_get"};
+        String[] builtinNames = {"print", "getDepth", "mem_free", "alloc", "make_free", "mem_send_up", "mem_get", "load_extern_library"};
         for (String builtin : builtinNames) {
             assertThrows(IllegalArgumentException.class,
                     () -> compile("void " + builtin + "(){} void main(){}"), builtin);
@@ -399,7 +399,8 @@ class CompilerTest {
                 "void main(){print();}", "void main(){print(1,2);}", "void main(){getDepth(1);}",
                 "void main(){mem_free(\"x\");}", "void main(){alloc(\"x\");}",
                 "void main(){make_free(\"x\");}", "void main(){mem_send_up(\"x\");}",
-                "void main(){mem_get(\"x\");}"})
+                "void main(){mem_get(\"x\");}", "void main(){load_extern_library();}",
+                "void main(){load_extern_library(1);}", "int main(){return load_extern_library(\"plugin\");}"})
             assertThrows(IllegalArgumentException.class, () -> compile(invalidBuiltinCall), invalidBuiltinCall);
         assertDoesNotThrow(() -> compile("int main(){return getDepth();}"));
         assertDoesNotThrow(() -> compile("boolean main(){return mem_free(null);}"));

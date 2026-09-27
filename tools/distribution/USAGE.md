@@ -160,9 +160,17 @@ Java 对应流程是 `loadScript(mainFile)`、依次 `insertScript(libraryFile)`
 
 JNI v7 快照仅保存和恢复初始化完成的空闲脚本（含堆对象字段中的字面量对象）；必须有相同的有序模块字节、实际 namespace 与全局布局。恢复不重新执行 onload。旧执行文件和快照不再支持。语法、类外实现和生命周期细节见 [多文件库与 hint 链接](HINT_LINKING.md)。
 
+## 已签名的外部动态库
+
+`load_extern_library("xxx")` 在 macOS 加载 `xxx.dylib`，在 Windows 加载 `xxx.dll`，在其他系统加载 `xxx.so`，并要求同目录存在 `xxx.signature`。动态库在 `azscript_load_extern` 里调用与嵌入式 C++ 宿主相同的 `registerExecutor`。要用这个功能，C++ 宿主需要链接 `AzScript::RuntimeShared`；静态 `AzScript::Runtime` 与插件不是同一份注册表。
+
+发行包根目录提供 `compile_extern_lib.sh` 和 `sign_extern_lib.sh`（Windows 为对应 `.cmd`）。签名工具是 `bin/azscript-sign-extern`。插件头文件是 `include/azscript/extern_library.hpp`。独立解释器从环境变量 `AZSCRIPT_TRUSTED_KEY` 以及当前目录、可执行文件目录、共享库目录中的 `trusted_key.pem` 读取公钥。嵌入式宿主调用 `add_trusted_public_key_pem` 或 `AbdInvoker.addTrustedPublicKey`，不会自动读取这些位置。细节见 [外部动态库](EXTERN_LIBRARY.md)。
+
 ## 包内容与进一步阅读
 
 - `compile.sh` / `compile.cmd`：源码编译入口，依赖随包的 `compiler/lib/` JAR。
+- `compile_extern_lib.sh` / `compile_extern_lib.cmd`：把插件源码编成当前平台的动态库。
+- `sign_extern_lib.sh` / `sign_extern_lib.cmd`、`bin/azscript-sign-extern`：生成 P-256 密钥并对动态库签名。
 - `run.sh` / `run.cmd`、`bin/azscript-run`：独立 ABD 执行入口。
 - `include/`、`lib/`、`lib/cmake/AzScript/`：C++ 接口、原生库与 CMake 包。
 - `java/abdJavaInvoker.jar`：JNI 高层及兼容低层 Java API。
