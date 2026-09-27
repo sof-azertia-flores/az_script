@@ -1,6 +1,16 @@
-# 内联缓冲区、默认比较与类运算符（2026-09-27）
+# 发行导出与宿主入口遗漏修复（2026-09-27）
 
 中文 | [English](VALIDATION.en.md)
+
+发行验收仍把控制指令限制为 3～35，导致泛型与 buffer 的 36～42 被误报为非数字。现已覆盖当前指令，并在错误中显示文件、节点和实际值；发行清单中残留的 exec/快照版本 7 改为 9。新增回归分别核对编译器指令表、exec 版本和 JNI 快照读写版本，避免再次遗漏。原生缺失字段回归补入 40～42；hint 中英文说明补充无参类的原地构造辅助入口。
+
+最小 Java 宿主 `azertia.Main` 补上装载后的 `flush()`，并允许以有符号十进制或完整 uint32 位模式输入函数 ID，超范围输入明确拒绝。真实 JVM 新增 23 个独立进程用例，覆盖初始化、高位 ID 和错误参数。发行验收增加泛型上下文、buffer 深复制/嵌套、原地构造、运算符和反射样例，确认 36～42 均实际生成且源码→AST→ABD 字节一致；独立解释器、静态/共享 C++ SDK、JNI 与最小 Java 入口均执行成功。
+
+`python3 tools/build_and_test.py --offline` 退出 0，Java 单元 107 项、原生 739 项、JNI 2654 断言及现有跨语言、链接和端到端套件全部通过。随后补入清单版本回归，`python3 tests/test_export_distribution.py` 最终 16 项通过。`python3 tools/export_distribution.py build/distribution-v9-audit --offline --force` 退出 0，macOS arm64 发行包通过 21 项搬迁验收；逐一核对 171 个清单文件的大小与 SHA-256，两个预编译标准库的 ABD/JSON 版本均与清单 v9 一致。`git diff --check` 通过。
+
+本次修改发行工具、Java 示例入口、回归和文档，没有修改生产解释器或内存清理实现，因此未重跑 sanitizer。验收包位于 `build/distribution-v9-audit/`，没有覆盖现有 `dist/`。日志：`build/distribution-audit-full.log`、`build/distribution-v9-audit-export-final.log`；JNI 详细记录见 `build/native/Testing/Temporary/LastTest.log`。
+
+# 内联缓冲区、默认比较与类运算符（2026-09-27）
 
 实现拥有型 `buffer<T>`：连续直接 slots、类元素独立视图、深复制、多层值嵌套、空默认值、显式容量管理和逆序清理。泛型类型上下文新增直接 slot 数、原地构造绑定及元素上下文。新增 `value_compare<T>` 和类的 `+ - * / [] []= ()`，运算符在编译层降为普通成员调用，支持泛型、继承、extern 及类外实现。exec 和 JNI 快照升级到 v9，拒绝旧格式；源码 metadata 版本不变，未改写 AZS 容器库。
 

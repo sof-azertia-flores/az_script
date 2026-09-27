@@ -1,6 +1,16 @@
-# Inline Buffers, Default Comparison, and Class Operators (2026-09-27)
+# Distribution and Host Entry Update Audit (2026-09-27)
 
 [中文](VALIDATION.md) | English
+
+Distribution verification still limited control opcodes to 3–35, misreporting generic/buffer opcodes 36–42 as nonnumeric. It now accepts the current instructions and reports the file, node, and actual invalid value. Stale exec/snapshot versions in the manifest were corrected from 7 to 9. Regressions independently compare the compiler opcode registry, exec version, and JNI snapshot writer/reader versions. Native missing-field checks now include 40–42, and both hint guides describe the placement helper for default-constructible classes.
+
+The minimal Java host, `azertia.Main`, now calls `flush()` after loading and accepts signed decimal IDs or full uint32 bit patterns while explicitly rejecting out-of-range input. Added 23 independent JVM cases for initialization, high-bit IDs, and invalid arguments. Distribution verification now exercises generic contexts, deep/nested buffers, placement construction, operators, and reflection, confirms that every opcode from 36 to 42 is emitted, and checks source → AST → ABD byte identity. The standalone runner, static/shared C++ SDKs, JNI, and minimal Java entry all execute the probe successfully.
+
+`python3 tools/build_and_test.py --offline` exited 0: 107 Java unit tests, 739 native checks, 2654 JNI assertions, and existing cross-language, linking, and end-to-end suites passed. After adding the manifest-version regression, `python3 tests/test_export_distribution.py` passed all 16 tests. `python3 tools/export_distribution.py build/distribution-v9-audit --offline --force` exited 0 with 21 relocation checks on macOS arm64. All 171 manifest file sizes and SHA-256 digests matched, and both precompiled standard libraries use exec v9 in ABD and JSON, consistent with the manifest. `git diff --check` passed.
+
+Changes are limited to distribution tools, the Java example entry, regressions, and documentation; production interpreter and memory-cleanup implementations were unchanged, so sanitizer was not rerun. The verified package is in `build/distribution-v9-audit/`; existing `dist/` contents were preserved. Logs: `build/distribution-audit-full.log`, `build/distribution-v9-audit-export-final.log`; detailed JNI output is in `build/native/Testing/Temporary/LastTest.log`.
+
+# Inline Buffers, Default Comparison, and Class Operators (2026-09-27)
 
 Implemented owning `buffer<T>` with contiguous direct slots, independently identified class-element views, deep copies, nested values, empty defaults, explicit capacity management, and reverse cleanup. Generic contexts now carry direct slot width, placement bindings, and element contexts. Added `value_compare<T>` and class `+ - * / [] []= ()`, lowered to ordinary member calls with generics, inheritance, externs, and out-of-class implementations. Exec and JNI snapshots are v9 and reject older formats; source metadata versioning and the existing AZS container implementations are unchanged.
 

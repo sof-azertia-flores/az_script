@@ -1,16 +1,84 @@
 #!/usr/bin/env python3
-"""Filesystem safety and publication recovery tests; no build tools are needed."""
+"""Distribution format, asset and publication tests; no build tools are needed."""
 import json
 from pathlib import Path
 import re
 import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 from urllib.parse import unquote, urlsplit
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'tools'))
 import export_distribution as exporter
+import test_distribution as verifier
+
+
+class DistributionOutputTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix='azscript output checks ')
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.abd, self.ast, self.executable = [self.root / ('program' + suffix)
+                                              for suffix in ('.abd', '.ast.json', '.exec.json')]
+        self.abd.write_bytes(b'fixture')
+        self.ast.write_text('{"body":{}}', encoding='utf-8')
+
+    def check_output(self, script, version=verifier.EXEC_VERSION):
+        self.executable.write_text(json.dumps({'exec-version': version, 'f': [{'script': script}]}),
+                                   encoding='utf-8')
+        verifier._outputs(self.abd, self.ast, self.executable)
+
+    def test_generic_buffer_and_comparison_instructions_are_accepted(self):
+        # These are present in independently compiled generic/container programs.
+        # Context records are metadata, not old string-opcode expressions.
+        context = {'abi': 8, 'kind': 4, 'width': 1, 'contexts': [], 'placement-contexts': [],
+                   'element': {'ref': 0}}
+        script = [{'t': 0, 'c': opcode, 'context': context} for opcode in range(36, 43)]
+        self.check_output([{'t': 1, 'id': 0x12340002, 'param': [script], 'contexts': [context]}])
+
+    def test_invalid_controls_report_the_actual_value_and_location(self):
+        for opcode in (None, True, 'return_typed', 38.0, -1, 0, 2, 43):
+            with self.subTest(opcode=opcode):
+                with self.assertRaises(RuntimeError) as raised:
+                    self.check_output([{'t': 0, 'c': opcode}])
+                message = str(raised.exception)
+                self.assertIn(str(self.executable), message)
+                self.assertIn('script[0]', message)
+                self.assertIn(repr(opcode), message)
+        with self.assertRaisesRegex(RuntimeError, 'Expected exec v9'):
+            self.check_output([], version=8)
+
+    def test_verifier_tracks_the_compiler_format_and_opcode_registry(self):
+        source = exporter.ROOT / 'compiler/src/main/java/azertia/script'
+        registry = (source / 'ExecOpcodes.java').read_text(encoding='utf-8')
+        names = re.search(r'String\[\]\s+NAMES\s*=\s*\{([^}]+)\}', registry).group(1)
+        opcodes = re.findall(r'"([^"\\]+)"', names)
+        self.assertEqual(opcodes[:3], ['constant', 'block', 'call'])
+        self.assertEqual(verifier.CONTROL_OPCODES, set(range(3, len(opcodes))),
+                         'Update distribution verification when the compiler opcode registry changes')
+        codec = (source / 'ExecCodec.java').read_text(encoding='utf-8')
+        version = int(re.search(r'\bVERSION\s*=\s*(\d+)', codec).group(1))
+        self.assertEqual(verifier.EXEC_VERSION, version,
+                         'Update distribution verification when the executable format changes')
+
+    def test_manifest_tracks_exec_and_snapshot_versions_independently(self):
+        exporter.write_manifest(self.root, SimpleNamespace(system_java=True, cmake_arg=[]), {}, {}, {})
+        manifest = json.loads((self.root / 'manifest.json').read_text(encoding='utf-8'))
+        codec = (exporter.ROOT / 'compiler/src/main/java/azertia/script/ExecCodec.java').read_text(encoding='utf-8')
+        exec_version = int(re.search(r'\bVERSION\s*=\s*(\d+)', codec).group(1))
+        self.assertEqual(manifest['execFormatVersion'], exec_version,
+                         'Update the distribution manifest when the executable format changes')
+        native = (exporter.ROOT / 'abdjni/lib.cpp').read_text(encoding='utf-8')
+        snapshot_writer = int(re.search(r'put\("snapshot version",\s*std::make_shared<IntAbdValue>\((\d+)\)',
+                                        native).group(1))
+        snapshot_reader = int(re.search(r'field<IntAbdValue>\(result,\s*"snapshot version"\)->data\s*!=\s*(\d+)',
+                                        native).group(1))
+        self.assertEqual(manifest['jniSnapshotVersion'], snapshot_writer,
+                         'Update the distribution manifest when the snapshot format changes')
+        self.assertEqual(manifest['jniSnapshotVersion'], snapshot_reader,
+                         'Keep the snapshot reader and writer versions consistent')
 
 
 class ExportDestinationTests(unittest.TestCase):

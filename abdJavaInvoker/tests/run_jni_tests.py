@@ -97,6 +97,51 @@ def function(ident, kind, body, params=0):
     return {'id': ident + 100, 'return-type': kind, 'param-count': params, 'script': body}
 
 
+def check_main_entry(args, classes, work):
+    """Run the packaged host example in fresh JVMs, including signed ID aliases."""
+    fixture = work / 'main-entry.exec.abd'
+    write_abd(fixture, {'gvs': 1, 'f': [
+        {'id': 0, 'return-type': 5, 'param-count': 0,
+         'script': [{'t': 0, 'c': 'vs', 'v': -1, 'val': 42}]},
+        {'id': 0x0FFF0000, 'return-type': 0, 'param-count': 0, 'script': [ret(var(-1))]},
+        {'id': -0x80000000, 'return-type': 0, 'param-count': 0, 'script': [ret(43)]},
+        {'id': -1, 'return-type': 0, 'param-count': 0, 'script': [ret(44)]},
+    ]})
+    command = [args.java, '-Xcheck:jni', '-Dazertia.native.library=' + str(args.library.resolve()),
+               '-cp', str(classes), 'azertia.Main']
+    checks = 0
+
+    def invoke(arguments):
+        nonlocal checks
+        checks += 1
+        result = subprocess.run(command + arguments, capture_output=True, text=True, timeout=15)
+        assert 'WARNING in native method' not in result.stdout + result.stderr, 'JNI checker reported a warning'
+        return result
+
+    for ident, expected in [(None, ''), ('0x0fff0000', '42'), ('268369920', '42'),
+                            ('0x80000000', '43'), ('2147483648', '43'),
+                            ('-2147483648', '43'), ('-0x80000000', '43'),
+                            ('0xffffffff', '44'), ('0XFFFFFFFF', '44'),
+                            ('4294967295', '44'), ('-1', '44'), ('-0x1', '44')]:
+        arguments = [str(fixture)] + ([] if ident is None else [ident])
+        result = invoke(arguments)
+        assert result.returncode == 0, f'Main rejected function ID {ident}: {result.stderr}'
+        assert result.stdout.strip() == expected, f'Main returned the wrong function result for {ident}: {result.stdout!r}'
+
+    for ident in ('0x100000000', '4294967296', '-2147483649', '-0x80000001',
+                  '0x10000000000000000', '9223372036854775808', '-9223372036854775809',
+                  'not-a-number', '0x'):
+        result = invoke([str(fixture), ident])
+        assert result.returncode != 0, f'Main accepted invalid function ID {ident}'
+        assert 'IllegalArgumentException' in result.stderr and 'function id' in result.stderr.lower(), result.stderr
+        assert not result.stdout, f'Main executed an invalid function ID {ident}'
+    for arguments in ([], [str(fixture), '0x0fff0000', 'extra']):
+        result = invoke(arguments)
+        assert result.returncode != 0 and 'Usage: Main' in result.stderr, result.stderr
+        assert not result.stdout, 'Main executed despite an invalid argument count'
+    print(f'Java Main entry: {checks} fresh-process cases passed.')
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--library', required=True, type=Path)
@@ -434,6 +479,7 @@ def main():
     classes.mkdir(exist_ok=True)
     files = sorted(str(p) for directory in ['src/main/java', 'src/test/java'] for p in (root / directory).rglob('*.java'))
     subprocess.run([args.javac, '--release', '17', '-encoding', 'UTF-8', '-d', str(classes), *files], check=True)
+    check_main_entry(args, classes, work)
     completed = subprocess.run([args.java, '-Xcheck:jni', '-ea', '-Dazertia.native.library=' + str(args.library.resolve()),
                                '-cp', str(classes), 'azertia.JniRegression', str(work)],
                               capture_output=True, text=True, timeout=90)

@@ -15,6 +15,10 @@ from typing import Dict, List, Optional
 
 WINDOWS = sys.platform == "win32"
 EXECUTABLE_SUFFIX = ".exe" if WINDOWS else ""
+EXEC_VERSION = 9
+# Constants, blocks and calls use other JSON representations (wire opcodes 0–2).
+# The unit suite checks this set against the compiler's opcode registry.
+CONTROL_OPCODES = frozenset(range(3, 43))
 
 
 def _require(condition: bool, message: str) -> None:
@@ -53,6 +57,24 @@ def _clean_environment(package: Path) -> dict:
     return environment
 
 
+def _control_opcodes(value, location: str) -> set:
+    found = set()
+    if isinstance(value, dict):
+        if value.get("t") == 0:
+            opcode = value.get("c")
+            _require(type(opcode) is int,
+                     f"{location}: control instruction must use a numeric opcode, got {opcode!r}")
+            _require(opcode in CONTROL_OPCODES,
+                     f"{location}: unsupported control opcode {opcode!r} for exec v{EXEC_VERSION}")
+            found.add(opcode)
+        for key, child in value.items():
+            found.update(_control_opcodes(child, f"{location}.{key}"))
+    elif isinstance(value, list):
+        for index, child in enumerate(value):
+            found.update(_control_opcodes(child, f"{location}[{index}]"))
+    return found
+
+
 def _outputs(abd: Path, ast: Path, executable_json: Path) -> None:
     for path in (abd, ast, executable_json):
         _require(path.is_file() and path.stat().st_size > 0, f"Missing output: {path}")
@@ -63,18 +85,9 @@ def _outputs(abd: Path, ast: Path, executable_json: Path) -> None:
             raise RuntimeError(f"Invalid JSON output {path}: {error}") from error
         _require(isinstance(decoded, dict), f"Expected a JSON object in {path}")
         if path == executable_json:
-            _require(decoded.get("exec-version") == 9, "Expected exec v9 output")
-            def inspect(value):
-                if isinstance(value, dict):
-                    if value.get("t") == 0:
-                        _require(type(value.get("c")) is int and 3 <= value["c"] <= 35,
-                                 "Control instruction must use a numeric opcode")
-                    for child in value.values():
-                        inspect(child)
-                elif isinstance(value, list):
-                    for child in value:
-                        inspect(child)
-            inspect(decoded["f"])
+            _require(decoded.get("exec-version") == EXEC_VERSION,
+                     f"Expected exec v{EXEC_VERSION} output in {path}")
+            _control_opcodes(decoded["f"], f"{path}:f")
 
 
 def _host_executable(build: Path) -> Path:
@@ -304,6 +317,61 @@ def verify(package: Path, java: Optional[Path] = None) -> Dict[str, object]:
         _require(result.stdout.splitlines() == ["0"], f"Packaged container library regression failed: {result.stdout!r}")
         passed("precompiled container hint library, relocated rebuild and separate consumer")
 
+        # Exercise every post-literal-object opcode through the exported tools.
+        # Merely bumping the root version misses stale opcode ranges and SDKs.
+        modern_source = source_directory / "generic buffer operators.azs"
+        modern_source.write_text('''#namespace 1234
+#gvar drops
+class Item { int value = 7; ~Item() { drops = drops + 1; } }
+class Box<T> { T value; T get() { return value; } }
+class Indexed<T> {
+    buffer<T> data;
+    T operator[](int index) { return data.get(index); }
+    void operator[]=(int index, T value) { data.set(index, value); }
+    int operator()(int extra) { return data.length() + extra; }
+}
+class Number {
+    int value;
+    Number(int n) { value = n; }
+    Number operator+(Number rhs) { Number result(value + rhs.value); return result; }
+}
+<T> T invoke(int id, T value) { return reflect_invoke_function<T>(id, value); }
+int increment(int value):0042 { return value + 1; }
+int main() {
+    drops = 0;
+    {
+        buffer<Item> things; things.reserve(2); things.resize(1);
+        buffer<Item> clone = things; clone.resize(0);
+        if (things.get(0).value != 7) return -1;
+    }
+    if (drops < 3) return -2;
+    Box<int> zero; if (zero.get() != 0) return -3;
+    Indexed<int> values; values.data.reserve(2); values.data.push(7); values[0] = 40;
+    buffer<int> copy = values.data; copy.set(0, 9);
+    if (values[0] != 40 || values(3) != 4) return -4;
+    buffer<buffer<int>> nested; nested.reserve(1); nested.push(copy);
+    if (nested.get(0).get(0) != 9) return -5;
+    Number a(1); Number b(2); if ((a + b).value != 3) return -6;
+    return invoke<int>(305397826, values[0]) + value_compare<string>("b", "a");
+}
+''', encoding="utf-8")
+        modern_abd = cwd / "modern output/features.exec.abd"
+        modern_ast = modern_abd.with_name("features.ast.json")
+        modern_json = modern_abd.with_name("features.exec.json")
+        _run([compiler, modern_source, "-o", modern_abd], cwd, compiler_environment)
+        _outputs(modern_abd, modern_ast, modern_json)
+        modern_view = json.loads(modern_json.read_text(encoding="utf-8"))
+        _require(set(range(36, 43)) <= _control_opcodes(modern_view["f"], str(modern_json)),
+                 "Generic/buffer probe must exercise operation contexts and all v9 buffer instructions")
+        modern_roundtrip = modern_abd.with_name("features.roundtrip.abd")
+        _run([compiler, "compile-json", modern_ast, "-o", modern_roundtrip], cwd, compiler_environment)
+        _require(modern_abd.read_bytes() == modern_roundtrip.read_bytes(),
+                 "Generic/buffer/operator AST roundtrip changed executable bytes")
+        result = _run([runner, modern_abd], cwd, environment)
+        _require(result.stdout.splitlines() == ["42"],
+                 f"Generic/buffer/operator probe failed: {result.stdout!r}")
+        passed("generic contexts, owning buffers, class operators and reflection through relocated tools")
+
         standalone = work / "standalone runner"
         standalone_bin = standalone / "bin"
         standalone_bin.mkdir(parents=True)
@@ -344,6 +412,9 @@ def verify(package: Path, java: Optional[Path] = None) -> Dict[str, object]:
         _run([cmake, "--build", static_build, "--config", "Release", "--parallel", "2"], cwd, environment)
         result = _run([_host_executable(static_build), default_abd], cwd, environment)
         _require("Host received: 42" in result.stdout, "Static C++ consumer returned an unexpected value")
+        result = _run([_host_executable(static_build), modern_abd], cwd, environment)
+        _require(result.stdout.splitlines() == ["Host received: 42"],
+                 "Static C++ consumer could not execute generic/buffer instructions")
         passed("relocated CMake package and static C++ consumer")
 
         shared_source = work / "shared consumer source"
@@ -358,6 +429,9 @@ def verify(package: Path, java: Optional[Path] = None) -> Dict[str, object]:
         _run([cmake, "--build", shared_build, "--config", "Release", "--parallel", "2"], cwd, environment)
         result = _run([_host_executable(shared_build), default_abd], cwd, environment)
         _require("Host received: 42" in result.stdout, "Shared C++ consumer returned an unexpected value")
+        result = _run([_host_executable(shared_build), modern_abd], cwd, environment)
+        _require(result.stdout.splitlines() == ["Host received: 42"],
+                 "Shared C++ consumer could not execute generic/buffer instructions")
         passed("relocated CMake package and shared C++ consumer")
 
         result = _run([java_executable, "-Xcheck:jni", "--class-path", package / "java/abdJavaInvoker.jar",
@@ -366,6 +440,24 @@ def verify(package: Path, java: Optional[Path] = None) -> Dict[str, object]:
         _require("WARNING in native method" not in result.stdout + result.stderr,
                  "JVM reported a JNI contract warning")
         passed("real Java source-file JNI consumer with -Xcheck:jni")
+
+        result = _run([java_executable, "-Xcheck:jni", "--class-path", package / "java/abdJavaInvoker.jar",
+                       package / "examples/java/RunScript.java", package, modern_abd], cwd, environment)
+        _require(result.stdout.splitlines() == ["Host received: 42"],
+                 "Java JNI consumer could not execute generic/buffer instructions")
+        _require("WARNING in native method" not in result.stdout + result.stderr,
+                 "JVM reported a JNI contract warning for generic/buffer execution")
+        passed("real JNI execution of generic contexts, buffers and class operators")
+
+        native_name = "abdJ.dll" if WINDOWS else ("libabdJ.dylib" if sys.platform == "darwin" else "libabdJ.so")
+        native_library = package / ("bin" if WINDOWS else "lib") / native_name
+        result = _run([java_executable, "-Xcheck:jni", f"-Dazertia.native.library={native_library}",
+                       "--class-path", package / "java/abdJavaInvoker.jar", "azertia.Main",
+                       modern_abd, "0x0fff0000"], cwd, environment)
+        _require(result.stdout.splitlines() == ["42"], "Packaged minimal Java host did not flush and invoke")
+        _require("WARNING in native method" not in result.stdout + result.stderr,
+                 "JVM reported a JNI contract warning for the minimal host")
+        passed("packaged minimal Java host links and initializes before invocation")
 
     return {"passed": len(checks), "checks": checks, "bundled_java": bundled_java.is_file()}
 

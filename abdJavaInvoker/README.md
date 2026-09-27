@@ -85,3 +85,5 @@ python3 tests/run_jni_tests.py \
 ABD 字节码与快照是数据编码，没有提供加密或不可反编译保证。若脚本含敏感逻辑，需要在宿主的分发、密钥及信任边界中另行设计保护。
 
 拥有型 `buffer<T>` 保持脚本 OBJECT_VALUE，不能直接跨 JNI 传递；应提供接收受支持标量或 Address 的普通包装函数。buffer 快照仅编码一次存活元素，并保存元素上下文、直接 slot 数、原地构造绑定、容量/长度和视图 ID。恢复重建连续存储、改写已保存的地址，不执行用户析构；元素旧地址在扩容、删除或整体替换后也会失效。原始块调整接口不能修改 buffer 存储或元素视图。一次快照累计 buffer 容量乘步长不得超过 1,048,576 slots；该持久化预算在分配存储前检查，保存超限状态明确失败。
+
+JAR 还包含最小终端宿主 `azertia.Main <script.exec.abd> [function-id]`。通过 `azertia.native.library` 指定原生库路径，classpath 只放 `abdJavaInvoker.jar`。入口先装载并 flush，再按可选 ID 调用；省略 ID 时只初始化并关闭脚本。ID 接受 signed int32 或完整 unsigned 32 位模式，例如 `0x0fff0000`、`0xffffffff` 和 `-1`；超范围输入报错，不截断。这里的 `azertia.Main` 是宿主入口，与编译器中的同名入口区分。
