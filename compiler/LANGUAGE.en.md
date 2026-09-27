@@ -113,7 +113,7 @@ void main() {
 }                                   // Prints 5, 4, 3
 ```
 
-Classes are top-level only. Fields require a primitive, class (literal value), or `Class *` (pointer) type and occupy one slot each in declaration order, without a hidden header. Classes with zero total fields including inherited fields fail. Constructors share the class name and omit return types. No constructor declaration synthesizes a zero-argument constructor; declaring a parameterized constructor does not add one. Optional `~ClassName()` destructors take no arguments, return no value, and cannot be called directly. All members are public. Single inheritance is supported; multiple inheritance, virtual dispatch, overloads, static members, and nested classes are not.
+Classes are top-level only. Fields require a primitive, class (literal value), `Class *` (pointer), or `buffer<T>` type and occupy one slot each in declaration order, without a hidden header. Classes with zero total fields including inherited fields fail. Constructors share the class name and omit return types. No constructor declaration synthesizes a zero-argument constructor; declaring a parameterized constructor does not add one. Optional `~ClassName()` destructors take no arguments, return no value, and cannot be called directly. All members are public. Single inheritance is supported; multiple inheritance, virtual dispatch, ordinary function overloads, static members, and nested classes are not.
 
 | Syntax | Meaning |
 | --- | --- |
@@ -124,7 +124,7 @@ Classes are top-level only. Fields require a primitive, class (literal value), o
 
 Literal initialization, assignment, arguments, and returns copy all slots, recursively copying literal fields but only addresses for pointer fields. Each copy is independent and has its own destructor. `a = b` assigns fields in place without changing a's address. Pointer initialization `C * y = x`, assignment, and arguments copy only addresses. Reassignment does not change cleanup responsibility for previously created objects. `C * p;` is exactly `C * p = null;`: no construction or responsibility for future assigned objects.
 
-Value C and pointer C * are distinct without implicit conversion. Null assigns only to pointers/address. Literal objects cannot be compared, used in arithmetic, or stored in untyped positions: var, def, #gvar globals, untyped parameters, print, and `mem_get(p) = …` reject them. Use pointers for long-lived storage. Structurally equivalent literal values can be assigned only with matching cleanup destructors. Derived values cannot be assigned to base values (no slicing); upcasts apply only to pointers. Both use `.` for members. Only explicitly class-typed variables, parameters, fields, and results support member access: `var p = new C(); p.method();` fails because p is dynamic any; use `C * p`.
+Value C and pointer C * are distinct without implicit conversion. Null assigns only to pointers/address. Literal objects cannot be directly compared, require declared operators for arithmetic, and cannot be stored in untyped positions: var, def, #gvar globals, untyped parameters, print, and `mem_get(p) = …` reject them. Use pointers for long-lived storage. Structurally equivalent literal values can be assigned only with matching cleanup destructors. Derived values cannot be assigned to base values (no slicing); upcasts apply only to pointers. Both use `.` for members. Only explicitly class-typed variables, parameters, fields, and results support member access: `var p = new C(); p.method();` fails because p is dynamic any; use `C * p`.
 
 `C (*) p` (also `C(*) p`) accepts both C * and literal C arguments:
 
@@ -314,7 +314,7 @@ Syntax errors include line/column; symbol errors also name the function. After i
 
 ## Generics
 
-Generic classes, functions, and methods share one compiled body. Different type arguments do not allocate new public function IDs. A type parameter denotes a complete type: primitive, address, class value, class pointer, or parameterized class. `void`, `any`, and parameter-only `C(*)` are not type arguments.
+Generic classes, functions, and methods share one compiled body. Different type arguments do not allocate new public function IDs. A type parameter denotes a complete type: primitive, address, class value, class pointer, parameterized class, or `buffer<T>`. `void`, `any`, and parameter-only `C(*)` are not type arguments.
 
 ```cpp
 class Box<T> {
@@ -340,6 +340,53 @@ A local `T local = expression;` requires an initializer. T fields retain concret
 Inheritance can use `class Child<A,B> : Base<B>`. Out-of-class definitions use `T Box<T>::get()`, with the owner's declared parameter names in scope; generic methods use `<U> U Box<T>::echo(U value)`. An extern is `extern <U> U identity(U value):abcd0002;`. Declarations and definitions match parameters positionally and check bounds, allowing different parameter names. Constructors/destructors use their class parameters and cannot declare additional parameters. Hint libraries still implement members outside the class; see [generic shared libraries](../docs/HINT_LINKING.en.md).
 
 Execution carries immutable operation contexts containing an ABI tag, return category, and optional default factory with captured contexts. These contain no class names/layouts, introduce no AZS value type, and occupy no user parameter or field slots. Class contexts precede method contexts, while this remains ordinary parameter slot 0. Object records retain destructor contexts across copy, move, return, delete, error cleanup, and snapshot restoration. Returning `T=address` does not transfer object ownership; `T=C*` follows object-return rules, and `T=C` follows existing value copy/move rules.
+
+## Owning inline buffers
+
+`buffer<T>` is a compiler-built-in owning value for locals, fields, parameters, returns, and generic arguments. Its element type must be explicit and is invariant. The default is an empty buffer with length and capacity zero, without requiring a default constructor for T. Buffer pointers, inheritance from buffer, new/delete, and storage through var/def or raw mem_get are unsupported.
+
+```cpp
+buffer<int> values;
+values.reserve(4);
+values.push(7);
+values.resize(3);             // Add two zero values
+values.set(1, 9);
+int first = values.get(0);
+buffer<int> copy = values;    // Independent deep copy, preserving capacity
+copy.set(0, 11);
+```
+
+`length()` and `capacity()` return int; `reserve(int)`, `set(int,T)`, `push(T)`, and `resize(int)` return void; `get(int)` returns T by value. These operations borrow the receiver without copying the whole buffer. Receiver and arguments evaluate once each, left to right. reserve grows only when the requested capacity is larger, to exactly that capacity, without constructing spare elements or doubling. push and growing resize require sufficient existing capacity. Negative arguments, invalid indices, and insufficient capacity are runtime errors. Built-in buffers use get/set in this version; bracket syntax applies to class operators below.
+
+Copies, arguments, and returns use owning-value rules; temporaries and values owned by the returning call can transfer. Buffer fields, nested `buffer<buffer<T>>`, and class elements deep-copy; pointer elements copy addresses without owning their targets. Types without a default constructor still support reserve, push of existing values, and shrinking. A default constructor is needed only when resize actually grows.
+
+Storage is a contiguous capacity-sized slot array. Scalars, address, pointers, and buffer elements have stride 1; a class value has stride N, its direct field count including inherited fields, with element i occupying `[i*N,(i+1)*N)`. Nested value fields retain separate storage. This is not a C++ native struct byte-layout guarantee. Each class element has an independent object-view ID. Growth, removal, and whole replacement expire affected old addresses; no exposed base permits deriving all element pointers. reserve migrates storage without user constructors/destructors and does not repair old addresses retained in fields.
+
+A failed reserve preserves the old storage; failed push preserves length; failed resize growth rolls back newly added elements in reverse order. Shrinking and destruction clean in reverse order even after destructor failure, retaining the original error or first cleanup error. set has the basic exception guarantee of fieldwise assignment. Whole-buffer assignment prepares a candidate, cleans the old content, then switches; it still switches before propagating an old destructor error. If a destructor callback destroys the destination, the candidate is cleaned and no expired storage is written. Operations reject reentrant mutation, defer destruction until operation exit, and stop when invalidated. Budget exhaustion still releases underlying storage. Capacity times stride is limited to 1,048,576 slots per block; owning-value nesting is limited to 64 levels.
+
+## Default comparison and class operators
+
+`value_compare<T>(left,right)` requires one explicit type argument and returns -1, 0, or 1. Integer comparison does not subtract; float/double reject nonfinite values and treat signed zeros equally. Strings compare lexicographically by unsigned UTF-8 bytes, including embedded NUL. Boolean ordering is false < true; address and class pointers use unsigned address order. Class values and buffers have no default comparison: known uses fail compilation; a generic T is allowed but unsupported concrete types fail at execution. Custom ordering uses ordinary AZS comparator functions through `reflect_invoke_function<int>(compareId,left,right)`, retaining reflection boundaries and by-value class arguments.
+
+```cpp
+class Number {
+    int value;
+    Number(int n) { value = n; }
+    Number operator+(Number rhs) {
+        Number result(value + rhs.value);
+        return result;
+    }
+    int operator[](string key) { return value; }
+    void operator[]=(string key, int next) { value = next; }
+    int operator()(int scale) { return value * scale; }
+}
+```
+
+Supported entries are binary `+ - * /`, index getter `operator[]`, setter `operator[]=`, and invocation `operator()`, with one signature per kind per class. They support extern declarations and out-of-class implementations such as `int Number::operator()(int scale) { return value * scale; }`. They can use class type parameters but cannot declare their own method type parameters. All lower to ordinary methods with implicit this; exec contains no operator table.
+
+Arithmetic looks up only the left class value; indexing and invocation also accept class pointers. Existing inheritance and static lookup apply, without reverse lookup, implicit conversion, or ordinary function overloading. The getter takes exactly one key of any supported type. An optional setter must use the same key type, the getter's return type as its second parameter, and void return. `x[key] = value` evaluates receiver, key, and value once each in that order. Index compound assignment is unsupported.
+
+A getter returning a class value or buffer produces a copy. Writing through that copy, such as `matrix[i][j] = x`, `items[i].field = x`, or `items.get(i).field = x`, is rejected. Read into an explicitly typed local, modify it, and write back with the setter/set. Pointer results follow ordinary pointer rules. Arbitrary arithmetic and invocation remain unavailable on unbounded T; a known parameterized class or upper bound must supply the operator.
 
 ## Function-ID reflection and hint queries
 
@@ -372,7 +419,9 @@ int functionId(int ns, int position) {
 
 Readable AST retains metadata/ext/abstract/global-variable/body, plus extern-signatures. Class programs retain definitions, ordered fields, member expressions, and other compile-time data; compile-json reruns checks/lowering. Hint, assumes, extern declarations, definition names, and actual definition numbers are retained for byte-identical roundtrips. Abstract maps source names with extern priority: declaration ID when present, otherwise definition ID. Hint definitions retain placeholder 0000; self-assume call addresses are produced during lowering. Independent definition positions live in body namespaces and metadata.position/name. Signatures store return-type and param-types. Expression objects use `t: "ctrl" | "call"`, call, param; blocks are arrays. _line/_column serve diagnostics only, never ABD instructions.
 
-Generated exec/ABD uses `exec-version: 8`, independent of source version. All control c fields are numeric; readable AST keeps source names/types/operations. Below is the exec JSON inspection view; binary field order/types are in [Exec v8](../docs/EXEC_FORMAT.en.md).
+Readable class ASTs retain an `operators` mapping and each method’s `operator-kind`. Index read/write and suffix invocation use `index`, `index-set`, and `invoke` nodes; empty buffers use `buffer-new`. Type checking and lowering rerun during compile-json, preserving byte-identical ABD output.
+
+Generated exec/ABD uses `exec-version: 9`, independent of source version. All control c fields are numeric; readable AST keeps source names/types/operations. Below is the exec JSON inspection view; binary field order/types are in [Exec v9](../docs/EXEC_FORMAT.en.md).
 
 | Exec JSON instruction | Fields |
 | --- | --- |
@@ -398,9 +447,12 @@ Generated exec/ABD uses `exec-version: 8`, independent of source version. All co
 | Move object c=34 (mv) | v local/parameter slot; internal forwarding from parameter to constructor without recopying |
 | End object c=35 (drop) | v variable/mem_get target; destruct and end its owned object |
 | Context ABI c=36 (context_abi) | context; actual ABI number |
-| Default value c=37 (context_default) | context; scalar default or bound value factory |
+| Default value c=37 (context_default) | context; scalar default, empty buffer, or bound value factory |
 | Generic return c=38 (return_typed) | v, context; validate tag and return according to category |
 | Type check c=39 (check_type) | v, context; validate tag, evaluating the value once |
+| Empty buffer c=40 (buffer_new) | context: element operations |
+| Buffer operation c=41 (buffer_op) | op, v, args; operations 0–6 are length/capacity/reserve/get/set/push/resize |
+| Default comparison c=42 (value_compare) | context, v1, v2 |
 
 Root, functions, signatures, expressions, function/type/argument/statement lists use raw AbdStack. Fields retain length boundaries without names or known-type tags. Dynamic constants use single-element AbdArray preserving int/float/double/bool/string/void/address; extension metadata uses AbdMap. JSON constants and block arrays use binary opcodes 0 and 1. `Compiler.compile()` returns ExecProgram, still inspectable as AcsObject; toValue emits the wire format. Use ExecCodec.decode to recover the inspection view, not direct root AcsObject decoding.
 
@@ -408,7 +460,7 @@ Global gvs is a count; -1 names the first module global, -2 the second. Paramete
 
 Function views contain id/return-type/script/param-count/param-types/local-count/hidden-count/entry-kind. Local-count excludes parameters. Every call allocates an independent frame, including recursion/reentry. Exited blocks clean objects and clear declared slots, reinitializing on the next iteration. Total globals and per-call parameter+local counts cannot exceed 1,048,576. Invalid IDs, globals outside the owning module, undeclared or expired-scope access are rejected.
 
-Untyped script parameters and unbounded type parameters use internal any. Only functions with hidden generic contexts may return any or declare extern any parameters. Entry-kind 0 denotes ordinary entries and 1 internal entries; contexts occupy no variable slots. AST additionally retains type-parameters, bounds, parameterized type strings, and explicit type-args. Param-types/return-type enable direct C++/JNI checks; root extern-signatures hold boundary contracts. The interpreter accepts only exec v8 raw stacks, rejecting old v7/Map files. Recompile source/AST. Unknown versions/opcodes, extra/missing fields, wrong widths, and nesting beyond 128 fail on load. JNI snapshot versioning is independent, currently v8.
+Untyped script parameters and unbounded type parameters use internal any. Only functions with hidden generic contexts may return any or declare extern any parameters. Entry-kind 0 denotes ordinary entries and 1 internal entries; contexts occupy no variable slots. AST additionally retains type-parameters, bounds, parameterized type strings, and explicit type-args. Param-types/return-type enable direct C++/JNI checks; root extern-signatures hold boundary contracts. The interpreter accepts only exec v9 raw stacks, rejecting old v7/Map files. Recompile source/AST. Unknown versions/opcodes, extra/missing fields, wrong widths, and nesting beyond 128 fail on load. JNI snapshot versioning is independent, currently v9.
 
 ### Insert and module global offsets
 
@@ -418,7 +470,7 @@ Calls use the callee's offset for ordinary functions, constructors, destructors,
 
 Load/insert only assemble and never run onload. Hosts must explicitly flush before calling; successful insert sets setup=false and requires another flush. Linking fully validates before atomically rewriting calls/destructors; missing dependencies can be added before retry. Dependencies initialize first, cycles in load order. Onload failure requires close/recreate. Close runs pre-destroy in reverse successful initialization order, then cleans globals.
 
-Class pointers erase to address type 7; literals are 8, int32 is 0, any is 6. Address constants use tag 0xce200b and eight unsigned little-endian bytes; JSON is `{"address":"unsigned decimal"}`, null `{"address":"0"}`. Only object-return instructions transfer pointer-object ownership; ordinary address/int returns do not. JNI v8 snapshots store ordered module identity (bytes, namespace, hint, global layout), globals, heap including literal fields, and cleanup ownership, only when initialized and idle. Restore fully validates then atomically replaces state without relinking or old destructors. Old exec/snapshots are incompatible; recompile all modules and change int heap-address variables to address.
+Class pointers erase to address type 7; literals are 8, int32 is 0, any is 6. Address constants use tag 0xce200b and eight unsigned little-endian bytes; JSON is `{"address":"unsigned decimal"}`, null `{"address":"0"}`. Only object-return instructions transfer pointer-object ownership; ordinary address/int returns do not. JNI v9 snapshots store ordered module identity (bytes, namespace, hint, global layout), globals, heap including literal fields, and cleanup ownership, only when initialized and idle. Restore fully validates then atomically replaces state without relinking or old destructors. Old exec/snapshots are incompatible; recompile all modules and change int heap-address variables to address.
 
 ## Regression validation and archives
 

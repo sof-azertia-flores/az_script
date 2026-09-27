@@ -63,7 +63,7 @@ def _outputs(abd: Path, ast: Path, executable_json: Path) -> None:
             raise RuntimeError(f"Invalid JSON output {path}: {error}") from error
         _require(isinstance(decoded, dict), f"Expected a JSON object in {path}")
         if path == executable_json:
-            _require(decoded.get("exec-version") == 8, "Expected exec v8 output")
+            _require(decoded.get("exec-version") == 9, "Expected exec v9 output")
             def inspect(value):
                 if isinstance(value, dict):
                     if value.get("t") == 0:

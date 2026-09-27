@@ -11,11 +11,12 @@ public final class ExecOpcodes {
             GREATER=17, LESS=18, EQUAL=19, NOT_EQUAL=20, GREATER_EQUAL=21, LESS_EQUAL=22,
             AND=23, OR=24, NOT=25, NEGATE=26, IF=27, WHILE=28, BREAK=29, CONTINUE=30, CLEANUP=31,
             NEW_BLOCK=32, BLOCK_ADDRESS=33, MOVE_OUT=34, DROP=35,
-            CONTEXT_ABI=36, CONTEXT_DEFAULT=37, RETURN_TYPED=38, CHECK_TYPE=39;
+            CONTEXT_ABI=36, CONTEXT_DEFAULT=37, RETURN_TYPED=38, CHECK_TYPE=39,
+            BUFFER_NEW=40, BUFFER_OP=41, VALUE_COMPARE=42;
     private static final String[] NAMES={"constant","block","call","v","vd","vs","m","r","ro",
             "oa","ob","od","add","minus","multiply","divide","mod","gt","lt","eq","ne","ge","le",
             "and","or","not","neg","if","wi","brk","cont","cleanup","new_block","block_address","mv","drop",
-            "context_abi","context_default","return_typed","check_type"};
+            "context_abi","context_default","return_typed","check_type","buffer_new","buffer_op","value_compare"};
     private static final Map<String,Integer> CODES=new LinkedHashMap<>();
     static { for(int i=0;i<NAMES.length;i++) CODES.put(NAMES[i],i); }
     private ExecOpcodes() {}

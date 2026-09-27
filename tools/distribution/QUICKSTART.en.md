@@ -123,7 +123,7 @@ Host declarations require complete signatures, e.g. `extern int host_add(int, in
 
 Built-ins print, getDepth, alloc, mem_get, mem_free, make_free, mem_send_up, and load_extern_library need no declaration. [External libraries](EXTERN_LIBRARY.en.md) describes signed native loading. Alloc(int) returns address; mem_get/mem_free/make_free/mem_send_up accept address. For example: `address p = alloc(2); mem_get(p + 1) = 42; mem_free(p);`. Counts/offsets remain int. Addresses support address+int, int+address, address-int, unsigned equality/order, with checked overflow/underflow. Test null with p == null. No integer conversions/equality or direct if conditions exist. Class pointers retain static class/inheritance rules until runtime erasure; normally manage them with constructors/delete. Raw release runs no user destructor.
 
-This distribution uses exec v8 and JNI snapshot v8 only. Recompile all modules. Migrate `int p = alloc(...)` to address; reference-semantics `Point p(...)` to `Point * p(...)`; and `Point p = new Point(...)` to `Point * p = new Point(...)`. Addresses still represent slot positions; capacity/lifetime rules are unchanged.
+This distribution uses exec v9 and JNI snapshot v9 only. Recompile all modules. Migrate `int p = alloc(...)` to address; reference-semantics `Point p(...)` to `Point * p(...)`; and `Point p = new Point(...)` to `Point * p = new Point(...)`. Addresses still represent slot positions; capacity/lifetime rules are unchanged.
 
 See the [full language guide](LANGUAGE.en.md), [usage guide](USAGE.en.md), [math guide](../stdlib/MATH.en.md), and [container guide](../stdlib/CONTAINERS.en.md) for further preprocessing, types, lifetimes, memory limits, AST/ABD, compilation, and embedding.
 

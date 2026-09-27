@@ -43,6 +43,9 @@ class ExportDestinationTests(unittest.TestCase):
             self.assertIn(f']({chinese.name})', english.read_text(encoding='utf-8'))
         for document in package.rglob('*.md'):
             content = document.read_text(encoding='utf-8')
+            # Operator declarations such as operator[](key) inside code are not links.
+            content = re.sub(r'^```[^\n]*\n.*?^```[^\n]*$', '', content, flags=re.M | re.S)
+            content = re.sub(r'`[^`\n]*`', '', content)
             for target in re.findall(r'\]\(([^)]+)\)', content):
                 link = urlsplit(target)
                 if link.scheme or not link.path:

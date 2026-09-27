@@ -251,43 +251,59 @@ template<class T> std::shared_ptr<T> field(const std::shared_ptr<AbdMap>& map, c
 }
 // Captured operations are immutable data, not native pointers or references to
 // an expired invocation. Factories and their own contexts survive restoration.
+std::shared_ptr<AbdArray> encodeContextTree(const type_contexts& contexts);
+std::shared_ptr<AbdMap> encodeContext(const std::shared_ptr<const type_context>& context) {
+    auto entry = std::make_shared<AbdMap>();
+    entry->put("abi", std::make_shared<IntAbdValue>(context->abi));
+    entry->put("kind", std::make_shared<IntAbdValue>(context->kind));
+    entry->put("width", std::make_shared<IntAbdValue>(context->width));
+    entry->put("has factory", std::make_shared<BoolAbdValue>(context->factory_id.has_value()));
+    if (context->factory_id) entry->put("factory", std::make_shared<IntAbdValue>(*context->factory_id));
+    entry->put("contexts", encodeContextTree(context->contexts));
+    entry->put("has placement", std::make_shared<BoolAbdValue>(context->placement_id.has_value()));
+    if (context->placement_id) entry->put("placement", std::make_shared<IntAbdValue>(*context->placement_id));
+    entry->put("placement contexts", encodeContextTree(context->placement_contexts));
+    entry->put("has element", std::make_shared<BoolAbdValue>(static_cast<bool>(context->element)));
+    if (context->element) entry->put("element", encodeContext(context->element));
+    return entry;
+}
 std::shared_ptr<AbdArray> encodeContextTree(const type_contexts& contexts) {
     auto result = std::make_shared<AbdArray>();
-    for (const auto& context : contexts) {
-        auto entry = std::make_shared<AbdMap>();
-        entry->put("abi", std::make_shared<IntAbdValue>(context->abi));
-        entry->put("kind", std::make_shared<IntAbdValue>(context->kind));
-        entry->put("has factory", std::make_shared<BoolAbdValue>(context->factory_id.has_value()));
-        if (context->factory_id) entry->put("factory", std::make_shared<IntAbdValue>(*context->factory_id));
-        entry->put("contexts", encodeContextTree(context->contexts));
-        result->push_back(entry);
-    }
+    for (const auto& context : contexts) result->push_back(encodeContext(context));
     return result;
 }
 std::shared_ptr<AbdArray> encodeContexts(const type_contexts& contexts) {
     validate_type_contexts(contexts, loadedScript);
     return encodeContextTree(contexts);
 }
+type_contexts decodeContextTree(const std::shared_ptr<AbdArray>& entries, std::size_t depth, std::size_t& nodes);
+std::shared_ptr<const type_context> decodeContext(const std::shared_ptr<AbdMap>& entry, std::size_t depth, std::size_t& nodes) {
+    if (!entry || depth > 128 || ++nodes > MAX_VARIABLE_SLOTS)
+        throw std::invalid_argument("Invalid or excessive snapshot generic context");
+    for (const auto& [key, item] : entry->values)
+        if (key != "abi" && key != "kind" && key != "width" && key != "has factory" && key != "factory" && key != "contexts"
+            && key != "has placement" && key != "placement" && key != "placement contexts" && key != "has element" && key != "element")
+            throw std::invalid_argument("Unexpected snapshot generic context field: " + key);
+    auto context = std::make_shared<type_context>();
+    context->abi = field<IntAbdValue>(entry, "abi")->data;
+    context->kind = field<IntAbdValue>(entry, "kind")->data;
+    context->width = field<IntAbdValue>(entry, "width")->data;
+    if (field<BoolAbdValue>(entry, "has factory")->data) context->factory_id = field<IntAbdValue>(entry, "factory")->data;
+    else if (entry->get("factory")) throw std::invalid_argument("Unexpected snapshot default factory");
+    context->contexts = decodeContextTree(field<AbdArray>(entry, "contexts"), depth + 1, nodes);
+    if (field<BoolAbdValue>(entry, "has placement")->data) context->placement_id = field<IntAbdValue>(entry, "placement")->data;
+    else if (entry->get("placement")) throw std::invalid_argument("Unexpected snapshot placement constructor");
+    context->placement_contexts = decodeContextTree(field<AbdArray>(entry, "placement contexts"), depth + 1, nodes);
+    if (field<BoolAbdValue>(entry, "has element")->data) context->element = decodeContext(field<AbdMap>(entry, "element"), depth + 1, nodes);
+    else if (entry->get("element")) throw std::invalid_argument("Unexpected snapshot buffer element");
+    return context;
+}
 type_contexts decodeContextTree(const std::shared_ptr<AbdArray>& entries, std::size_t depth, std::size_t& nodes) {
     if (depth > 128 || entries->values.size() > MAX_VARIABLE_SLOTS)
         throw std::invalid_argument("Snapshot generic contexts exceed limits");
     type_contexts result;
     result.reserve(entries->values.size());
-    for (const auto& value : entries->values) {
-        if (++nodes > MAX_VARIABLE_SLOTS) throw std::invalid_argument("Snapshot generic contexts exceed limits");
-        auto entry = std::dynamic_pointer_cast<AbdMap>(value);
-        if (!entry) throw std::invalid_argument("Invalid snapshot generic context");
-        for (const auto& [key, item] : entry->values)
-            if (key != "abi" && key != "kind" && key != "has factory" && key != "factory" && key != "contexts")
-                throw std::invalid_argument("Unexpected snapshot generic context field: " + key);
-        auto context = std::make_shared<type_context>();
-        context->abi = field<IntAbdValue>(entry, "abi")->data;
-        context->kind = field<IntAbdValue>(entry, "kind")->data;
-        if (field<BoolAbdValue>(entry, "has factory")->data) context->factory_id = field<IntAbdValue>(entry, "factory")->data;
-        else if (entry->get("factory")) throw std::invalid_argument("Unexpected snapshot default factory");
-        context->contexts = decodeContextTree(field<AbdArray>(entry, "contexts"), depth + 1, nodes);
-        result.push_back(std::move(context));
-    }
+    for (const auto& value : entries->values) result.push_back(decodeContext(std::dynamic_pointer_cast<AbdMap>(value), depth, nodes));
     return result;
 }
 type_contexts decodeContexts(const std::shared_ptr<AbdMap>& entry) {
@@ -309,6 +325,30 @@ void validateSnapshotDestructor(std::optional<int> destructor, const type_contex
         || (function->entry_kind != 0 && function->entry_kind != 1))
         throw std::invalid_argument("Snapshot object destructor must be a script function void(address) with matching contexts");
 }
+// Spare buffer capacity has no serialized payload. Bound its total separately
+// so a small snapshot cannot request arbitrarily large slab allocations.
+void addSnapshotBufferCapacity(std::size_t capacity, int width, std::size_t& total) {
+    if (width < 1 || static_cast<std::size_t>(width) > MAX_VARIABLE_SLOTS
+        || capacity > MAX_VARIABLE_SLOTS / static_cast<std::size_t>(width))
+        throw std::invalid_argument("Snapshot buffer capacity exceeds the slot limit");
+    const auto slots = capacity * static_cast<std::size_t>(width);
+    if (slots > MAX_VARIABLE_SLOTS - total)
+        throw std::invalid_argument("Snapshot total buffer capacity exceeds the slot limit");
+    total += slots;
+}
+void checkSnapshotBufferBudget(const std::shared_ptr<variable>& value, std::size_t& total, std::size_t depth = 0) {
+    if (value->type != OBJECT_VALUE) return;
+    if (depth > blocks::max_depth) throw std::invalid_argument("Snapshot object nesting is too deep");
+    auto block = blocks::of(value);
+    if (!block || !blocks::owns(*value) || block->state != slot_block::status::live)
+        throw std::invalid_argument("Cannot snapshot a borrowed or expired object value");
+    const auto count = block->buffer ? block->buffer->length : block->slots.size();
+    if (block->buffer) {
+        if (!block->buffer->element || count > block->slots.size()) throw std::invalid_argument("Invalid snapshot buffer");
+        addSnapshotBufferCapacity(block->buffer->capacity, block->buffer->element->width, total);
+    }
+    for (std::size_t i = 0; i < count; ++i) checkSnapshotBufferBudget(block->slots[i], total, depth + 1);
+}
 std::shared_ptr<AbdMapValue> encodeValue(const std::shared_ptr<variable>& value, std::size_t depth = 0) {
     switch (value->type) {
         case OBJECT_VALUE: {
@@ -324,8 +364,19 @@ std::shared_ptr<AbdMapValue> encodeValue(const std::shared_ptr<variable>& value,
             if (block->destructor) entry->put("destructor", std::make_shared<IntAbdValue>(*block->destructor));
             validateSnapshotDestructor(block->destructor, block->destructor_contexts);
             entry->put("destructor contexts", encodeContexts(block->destructor_contexts));
+            if (block->buffer) {
+                blocks::validate_buffer(block);
+                validate_type_contexts({block->buffer->element}, loadedScript);
+                entry->put("buffer", std::make_shared<BoolAbdValue>(true));
+                entry->put("element", encodeContext(block->buffer->element));
+                entry->put("length", std::make_shared<IntAbdValue>(static_cast<int>(block->buffer->length)));
+                entry->put("capacity", std::make_shared<IntAbdValue>(static_cast<int>(block->buffer->capacity)));
+            }
             auto items = std::make_shared<AbdArray>();
-            for (const auto& slot : block->slots) items->push_back(encodeValue(slot, depth + 1));
+            const auto count = block->buffer ? block->buffer->length : block->slots.size();
+            // Logical class elements are views into the slab. Encoding only the
+            // live elements records each field once and retains every view id.
+            for (std::size_t i = 0; i < count; ++i) items->push_back(encodeValue(block->slots[i], depth + 1));
             entry->put("slots", items);
             return entry;
         }
@@ -357,17 +408,23 @@ struct SnapshotDecoder {
     std::vector<std::shared_ptr<variable>> addresses;
     static constexpr std::uint64_t offsetMask = (std::uint64_t{1} << blocks::offset_bits) - 1;
     static std::uint64_t idOf(address pointer) { return (pointer.value & ~blocks::address_tag) >> blocks::offset_bits; }
-    static void collect(const std::shared_ptr<AbdMapValue>& value, std::set<std::uint64_t>& saved, std::set<std::uint64_t>& referenced, std::size_t depth) {
+    static void collect(const std::shared_ptr<AbdMapValue>& value, std::set<std::uint64_t>& saved, std::set<std::uint64_t>& referenced, std::size_t depth, std::size_t& bufferSlots) {
         if (depth > blocks::max_depth + 1) throw std::invalid_argument("Snapshot object nesting is too deep");
         if (auto entry = std::dynamic_pointer_cast<AbdMap>(value)) {
             saved.insert(idOf(field<AddressAbdValue>(entry, "object")->data));
-            for (const auto& item : field<AbdArray>(entry, "slots")->values) collect(item, saved, referenced, depth + 1);
+            if (entry->get("buffer")) {
+                const int capacity = field<IntAbdValue>(entry, "capacity")->data;
+                if (!field<BoolAbdValue>(entry, "buffer")->data || capacity < 0) throw std::invalid_argument("Invalid snapshot buffer capacity");
+                addSnapshotBufferCapacity(static_cast<std::size_t>(capacity), field<IntAbdValue>(field<AbdMap>(entry, "element"), "width")->data, bufferSlots);
+            }
+            for (const auto& item : field<AbdArray>(entry, "slots")->values) collect(item, saved, referenced, depth + 1, bufferSlots);
         } else if (auto pointer = std::dynamic_pointer_cast<AddressAbdValue>(value); pointer && blocks::is_block_address(pointer->data))
             referenced.insert(idOf(pointer->data));
     }
     void retireDangling(const std::vector<std::shared_ptr<AbdMapValue>>& values) {
         std::set<std::uint64_t> saved, referenced;
-        for (const auto& value : values) collect(value, saved, referenced, 0);
+        std::size_t bufferSlots = 0;
+        for (const auto& value : values) collect(value, saved, referenced, 0, bufferSlots);
         for (auto id : referenced) if (!saved.contains(id)) blocks::retire_id(id);
     }
     void decodeInto(const std::shared_ptr<variable>& target, const std::shared_ptr<AbdMapValue>& value, std::size_t depth) {
@@ -382,14 +439,36 @@ struct SnapshotDecoder {
             auto contexts = decodeContexts(entry);
             validateSnapshotDestructor(destructor, contexts);
             auto items = field<AbdArray>(entry, "slots");
-            if (items->values.empty()) throw std::invalid_argument("Snapshot object has no slots");
-            auto block = blocks::create(items->values.size(), loadedScript);
+            auto block = blocks::of(target);
+            const bool view = block && block->is_view;
+            if (entry->get("buffer")) {
+                if (!field<BoolAbdValue>(entry, "buffer")->data || view || destructor || !contexts.empty())
+                    throw std::invalid_argument("Invalid snapshot buffer record");
+                const int length = field<IntAbdValue>(entry, "length")->data;
+                const int capacity = field<IntAbdValue>(entry, "capacity")->data;
+                if (length < 0 || capacity < length || capacity > static_cast<int>(MAX_VARIABLE_SLOTS)
+                    || items->values.size() != static_cast<std::size_t>(length))
+                    throw std::invalid_argument("Invalid snapshot buffer size");
+                std::size_t nodes = 0;
+                auto element = decodeContext(field<AbdMap>(entry, "element"), 0, nodes);
+                validate_type_contexts({element}, loadedScript);
+                block = blocks::restore_buffer(std::move(element), capacity, length, loadedScript);
+            } else {
+                if (entry->get("element") || entry->get("length") || entry->get("capacity") || items->values.empty())
+                    throw std::invalid_argument("Invalid snapshot object slots");
+                if (view) {
+                    if (block->slots.size() != items->values.size()) throw std::invalid_argument("Snapshot class view width differs from its element context");
+                } else block = blocks::create(items->values.size(), loadedScript);
+            }
             block->destructor = destructor; block->destructor_contexts = std::move(contexts); block->depth = depth;
             objects.emplace(idOf(saved), block);
             for (std::size_t i = 0; i < items->values.size(); ++i) decodeInto(block->slots[i], items->values[i], depth + 1);
-            target->setValue(block); block->owner = target.get();
+            if (!view) { target->setValue(block); block->owner = target.get(); }
+            if (block->buffer) blocks::validate_buffer(block);
             return;
         }
+        if (auto block = blocks::of(target); block && block->is_view)
+            throw std::invalid_argument("Snapshot class view requires an object record");
         target->copy_from(decodeValue(value));
         if (target->type == ADDRESS_VALUE && blocks::is_block_address(*static_cast<address*>(target->value))) addresses.push_back(target);
     }
@@ -412,6 +491,9 @@ std::vector<module_manifest_entry> stableManifest() {
 }
 std::shared_ptr<AbdMap> snapshot() {
     const auto modules = stableManifest();
+    std::size_t bufferSlots = 0;
+    for (const auto& value : loadedScript->baseEnv->variables) checkSnapshotBufferBudget(value, bufferSlots);
+    for (int i = 0; i < heap::lenHeap(); ++i) checkSnapshotBufferBudget(heap::getSlot(i), bufferSlots);
     std::size_t moduleBytes = 0;
     for (const auto& module : modules) {
         if (module.bytes.size() > maxFileBytes - moduleBytes)
@@ -419,7 +501,7 @@ std::shared_ptr<AbdMap> snapshot() {
         moduleBytes += module.bytes.size();
     }
     auto result = std::make_shared<AbdMap>();
-    result->put("snapshot version", std::make_shared<IntAbdValue>(8));
+    result->put("snapshot version", std::make_shared<IntAbdValue>(9));
     auto manifest = std::make_shared<AbdArray>();
     for (const auto& module : modules) {
         auto entry = std::make_shared<AbdMap>();
@@ -469,8 +551,8 @@ std::shared_ptr<AbdMap> snapshot() {
 void restoreSnapshot(const std::vector<unsigned char>& bytes) {
     const auto modules = stableManifest();
     auto result = std::make_shared<AbdMap>(std::make_shared<AbdStack>(AbdValue::fromBytes(bytes.data(), bytes.size())));
-    if (field<IntAbdValue>(result, "snapshot version")->data != 8)
-        throw std::invalid_argument("Unsupported snapshot version; expected v8");
+    if (field<IntAbdValue>(result, "snapshot version")->data != 9)
+        throw std::invalid_argument("Unsupported snapshot version; expected v9");
     auto manifest = field<AbdArray>(result, "module manifest");
     if (manifest->values.size() != modules.size()) throw std::invalid_argument("Snapshot module count differs from script");
     for (std::size_t i = 0; i < modules.size(); ++i) {

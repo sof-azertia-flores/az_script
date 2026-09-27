@@ -1,4 +1,4 @@
-# Exec v8 Binary Format
+# Exec v9 Binary Format
 
 [中文](EXEC_FORMAT.md) | English
 
@@ -7,7 +7,7 @@ This executable layout version is independent of source `metadata.version`. The 
 The file itself is one ABD frame whose payload is a root stack in this exact order:
 
 ```text
-[ magic="AZSCRIPT", exec_version=8, source_version:int, author:string,
+[ magic="AZSCRIPT", exec_version=9, source_version:int, author:string,
   global_count:int, extensions:AbdMap,
   external_signatures:Stack<Signature>, functions:Stack<Function>,
   namespace_hint:string, assumptions:Stack<Assumption> ]
@@ -67,6 +67,9 @@ Each expression is also a raw stack, beginning with an int32 opcode. `E` denotes
 | 37 | context_default | `context:Context` |
 | 38 | return_typed | `value:E, context:Context` |
 | 39 | check_type | `value:E, context:Context` |
+| 40 | buffer_new | `element:Context` |
+| 41 | buffer_op | `operation:int, receiver:E, arguments:Es` |
+| 42 | value_compare | `context:Context, left:E, right:E` |
 
 `cont` ends the current iteration of the innermost loop. Each exited block cleans its objects before the loop consumes the jump. `for` lowers to blocks and `wi`, with no separate opcode: initialize once, skip the step on the first iteration, then step before subsequent condition checks. The loop body has its own scope. Consequently `continue` runs the step; `break` and `return` do not.
 
@@ -81,7 +84,7 @@ Literal objects live in slot blocks owned by storage variables. Assignment, argu
 - `mv` reads a nonnegative local/parameter slot and converts its owned block into a temporary in the current frame, allowing factories to forward already copied arguments to constructors.
 - `drop` takes the same target as `m` (a variable or `mem_get` call), immediately runs the owned block's destructor and ends it, disposing of this class's literal fields after its destructor body.
 
-Storage rules: assigning into storage that already owns a block assigns slot by slot in place; storing a temporary block moves it; storing other blocks deep-copies them, recursively copying nested blocks up to 64 levels. For blocks returned by `r`/`ro`, this call's locals and parameters transfer directly to the caller frame; other blocks are copied first. Call results and argument values become temporaries according to the same rules. Each statement end and each `if`/`while` condition evaluation destroys unbound temporaries in the current frame.
+Storage rules: assigning into storage that already owns a class block assigns slot by slot in place; buffer assignment uses the replacement rule below; storing a temporary block moves it; storing other blocks deep-copies them, recursively copying nested blocks up to 64 levels. For blocks returned by `r`/`ro`, this call's locals and parameters transfer directly to the caller frame; other blocks are copied first. Call results and argument values become temporaries according to the same rules. Each statement end and each `if`/`while` condition evaluation destroys unbound temporaries in the current frame.
 
 ## Generic operation contexts (opcodes 36–39)
 
@@ -91,17 +94,31 @@ A context describes only ABI behavior, never a class name, layout, bound, or nat
 
 ```text
 Reference = [ 0, index:int ]
-Fixed     = [ 1, abi:int, kind:int, has_factory:bool,
-              [factory_id:int], contexts:Stack<Context> ]
+Fixed     = [ 1, abi:int, kind:int, width:int,
+              has_factory:bool, [factory_id:int], contexts:Stack<Context>,
+              has_placement:bool, [placement_id:int], placement_contexts:Stack<Context>,
+              has_element:bool, [element:Context] ]
 ```
 
-Debug JSON represents these as `{"ref":0}` or `{"abi":8,"kind":3,"factory":id,"contexts":[...]}`. References address the enclosing function's hidden contexts and must be below `hidden_count`, including references nested within fixed contexts. Kind 0 covers scalar ABI 0–5, kind 1 raw address ABI 7, kind 2 class pointer ABI 7, and kind 3 literal object ABI 8. ABI 6 is not a context. Void is used for reflection results, not a generic type argument. Only kind 3 may name a factory; a context without a factory must have an empty child list. Factories return object, take no visible parameters, and require exactly the supplied child contexts. An object context without a factory can travel through calls, but requesting its default value fails.
+Debug JSON uses `{"ref":0}` for references. Fixed contexts contain `abi`, `kind`, `width`, `contexts`, and `placement-contexts`, plus optional `factory`, `placement`, and `element`. References must be below the enclosing hidden count, including nested references. Kind 0 covers scalar ABI 0–5, kind 1 raw address ABI 7, kind 2 class pointer ABI 7, kind 3 class value ABI 8, and kind 4 buffer ABI 8. ABI 6 is invalid. Void is only for reflection results, never an element or generic argument. Width is 1 except for class values, where it is the direct slot count including inherited fields (1…1048576). Contexts store no field layout or class name.
 
-CALL binds its `contexts` against the current frame before invoking the target; their number must match the target's hidden count. `ob` captures its contexts alongside the destructor, so later destruction does not depend on the creating frame. Without a destructor the list must be empty. `context_abi` returns the bound ABI number. `context_default` produces the scalar zero/empty value, null address, or a fresh object from the bound factory. `return_typed` checks the bound ABI and applies object-value return or class-pointer ownership transfer as appropriate; raw address returns retain ordinary address semantics. `check_type` validates a value against the bound ABI and returns it. The last two debug nodes use `v` and `context`; the first two use `context`.
+Only kind 3 permits factories or placement constructors; each absent ID requires its corresponding child list to be empty. A factory is a script function returning object without visible parameters; a placement constructor is an internal `void(address)` script function. Each receives exactly its supplied hidden child contexts. Either entry may be absent; requesting an unavailable default operation fails at execution. Kind 4 requires exactly one element context, width 1, and no factory or placement entry. Creating this context or an empty buffer does not default-construct elements.
+
+CALL binds its `contexts` against the current frame before invoking the target; their number must match the target's hidden count. `ob` captures its contexts alongside the destructor, so later destruction does not depend on the creating frame. Without a destructor the list must be empty. `context_abi` returns the bound ABI number. `context_default` produces the scalar zero/empty value, null address, a fresh object from the bound factory, or an empty buffer. `return_typed` checks the bound ABI and applies object-value return or class-pointer ownership transfer as appropriate; raw address returns retain ordinary address semantics. `check_type` validates a value against the bound ABI and returns it. The last two debug nodes use `v` and `context`; the first two use `context`.
 
 Every context record and child-list stack counts toward the same 128-level physical ABD limit. Hidden counts and context lists retain the slot-count bounds. Link validation checks hidden counts and entry kinds in addition to erased signatures, and relocates only explicit factory/function references. Bound contexts are immutable runtime data.
 
-JNI snapshot v8 saves each object's bound destructor contexts recursively, including ABI, kind, optional default-factory ID, and child contexts. No frame references or native pointers are saved. Restoration validates the ordered module identity, context kinds/depth, each factory signature and hidden arity, and the destructor's `void(address)` signature and hidden arity before replacing any state. It does not run old destructors or rerun initialization. Previous snapshots, including v7, are rejected.
+JNI snapshot v9 saves each object's bound destructor contexts recursively, including ABI, kind, optional default-factory ID, and child contexts. No frame references or native pointers are saved. Restoration validates the ordered module identity, context kinds/depth, each factory signature and hidden arity, and the destructor's `void(address)` signature and hidden arity before replacing any state. It does not run old destructors or rerun initialization. Previous snapshots, including v8, are rejected.
+
+## Buffer storage and comparison (opcodes 40–42)
+
+`buffer_new` creates an empty owning OBJECT_VALUE with the bound element context; debug JSON uses `context`. `buffer_op` uses debug fields `op`, `v`, `args`: operations 0–6 are length, capacity, reserve, get, set, push, resize, requiring 0, 0, 1, 1, 2, 1, 1 arguments respectively. The receiver is borrowed and evaluated once before the arguments, which are materialized left to right. get produces a value copy. Buffers are not class blocks for raw address/resize APIs; these APIs cannot bypass their lifecycle rules.
+
+Each buffer owns a contiguous capacity × stride slab. Class elements are separately identified object views over N direct slots; other elements occupy one slot, with nested owning values separately allocated. Only successfully initialized elements count toward length. Capacity changes transfer slots without executing user code and expire old view IDs; shrink and cleanup destroy in reverse order. Copies preserve capacity and recursively copy owned values. Buffer assignment prepares a candidate before destroying and replacing the old buffer, and still installs it when old cleanup throws. If a callback ends the destination’s lifetime, it cleans the candidate and stops. Element set retains fieldwise assignment's basic guarantee. Busy operations retain storage; reentrant mutation fails and destruction is deferred until the operation leaves, with invalidation detected before continuing. Bulk work consumes execution budget; failures retain original errors and complete underlying release.
+
+`value_compare` uses debug fields `context`, `v1`, `v2`, produces exactly -1/0/1, and supports scalar non-void, address, and pointer contexts. It rejects class/buffer contexts and nonfinite floating values, compares strings as unsigned UTF-8 bytes, and treats signed zero equally. Both operands evaluate once left to right. Operators declared on classes lower to ordinary CALL nodes, with no operator-specific executable metadata.
+
+Snapshot v9 adds width, placement bindings, and recursive element contexts. Buffer object records additionally contain `buffer:true`, `element`, `length`, `capacity`; `slots` encodes only live logical elements. A class element uses its object-view ID and destructor/context/field record, so slab fields are encoded once, without serializing spare capacity. Restoration prechecks the capacity budget, validates length/capacity/stride, tags, unique IDs, nesting, and all function bindings while building temporary slabs and views with fresh IDs, and remaps saved addresses. Only fully validated temporary state replaces the old state. Busy/transitional states cannot be saved. Across all buffers, a single snapshot's cumulative capacity × stride may not exceed 1,048,576 slots: saving or restoring beyond this persistence budget fails before allocating slabs. The runtime's per-block capacity bound and the 64 MiB file limit also apply. State replacement never destroys the old state through user code.
 
 ## Type numbers and constants
 
@@ -115,7 +132,7 @@ Unary plus is eliminated at compile time and has no opcode. All old string `c` v
 
 Parameters and locals have consecutive nonnegative slot IDs; globals are -1, -2, etc. Each loaded function stores its module's global offset. The actual index is `global_offset + (-int64(slot) - 1)`; the executable cannot store this host-load-time offset. Argument, return, external-type, and block-lifetime rules are unchanged.
 
-Readers accept only v8 raw stacks, identified by the first frame's magic and following version. Old versions including v7, Map executables, and unknown versions are rejected; recompile source or readable AST. The 64 MiB file limit, 128-level ABD nesting limit, variable-slot limits, and call budgets still apply. Compact encoding cannot bypass nesting checks. JNI accepts only v8 snapshots, retaining uint64 address scalars, allocation bases, object records, and cleanup order; lengths, counts, and function IDs remain integers. Snapshots encode literal objects in heap/globals as `{object, has destructor, [destructor], destructor contexts, slots}` maps. Restoration allocates new IDs and rewrites pointers to saved objects; addresses to unsaved objects remain unchanged and their IDs are permanently retired. Script bytes are stored and validated opaquely; old snapshots are not read.
+Readers accept only v9 raw stacks, identified by the first frame's magic and following version. Old versions including v8, Map executables, and unknown versions are rejected; recompile source or readable AST. The 64 MiB file limit, 128-level ABD nesting limit, variable-slot limits, and call budgets still apply. Compact encoding cannot bypass nesting checks. JNI accepts only v9 snapshots, retaining uint64 address scalars, allocation bases, object records, and cleanup order; lengths, counts, and function IDs remain integers. Snapshots encode literal objects in heap/globals as `{object, has destructor, [destructor], destructor contexts, slots}` maps. Restoration allocates new IDs and rewrites pointers to saved objects; addresses to unsaved objects remain unchanged and their IDs are permanently retired. Script bytes are stored and validated opaquely; old snapshots are not read.
 
 Physical container depth starts at root stack level 1, function list level 2, function record level 3, and body level 4. Each nested expression adds a level; block statement lists, call argument lists, and single-element constant arrays each add another. Extension metadata counts internal Map/Array nesting from level 2. Raw stacks do not bypass the 128-level bound.
 
@@ -125,6 +142,6 @@ The root has exactly ten fields. An empty `namespace_hint` denotes a fixed-names
 
 Hint modules define functions only under placeholder namespace 0000. IDs 0/1 are per-module initialization/destruction hooks; other definitions relocate on load. Ordinary definitions in fixed-namespace modules cannot occupy their own assumed namespaces. Class names/layouts do not appear; signatures retain erased basic types.
 
-`flush()` relocates CALL function IDs, ob destructor IDs, and default-factory IDs inside contexts using the owning module's assume table, validating all hint imports and signatures. It does not relocate ordinary integers, heap addresses, or variable slots. Assumptions are removed only after complete link validation succeeds. With has_destructor=false there is no destructor-ID field; otherwise all 32 bits are retained, including `0xffffffff`, with no -1 sentinel. Destructors must still name valid `void(address)` script functions. Lifecycle, main, and built-in reserved-ID rules remain in force.
+`flush()` relocates CALL function IDs, ob destructor IDs, and default-factory/placement-constructor IDs recursively inside contexts using the owning module's assume table, validating all hint imports and signatures. It does not relocate ordinary integers, heap addresses, or variable slots. Assumptions are removed only after complete link validation succeeds. With has_destructor=false there is no destructor-ID field; otherwise all 32 bits are retained, including `0xffffffff`, with no -1 sentinel. Destructors must still name valid `void(address)` script functions. Lifecycle, main, and built-in reserved-ID rules remain in force.
 
-Exec v7 and earlier, old Map executables, and old JNI snapshots are unsupported. Update libraries and hosts together.
+Exec v8 and earlier, old Map executables, and old JNI snapshots are unsupported. Update libraries and hosts together.

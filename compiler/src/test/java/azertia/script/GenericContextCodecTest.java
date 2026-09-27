@@ -15,14 +15,14 @@ class GenericContextCodecTest {
         AcsObject value=new AcsObject();value.put("ref",index);return value;
     }
     private AcsObject fixed(int abi,int kind) {
-        AcsObject value=new AcsObject();value.put("abi",abi);value.put("kind",kind);value.put("contexts",array());return value;
+        AcsObject value=new AcsObject();value.put("abi",abi);value.put("kind",kind);value.put("width",1);value.put("contexts",array());value.put("placement-contexts",array());return value;
     }
     private AcsObject operation(int opcode,AcsElement context) {
         AcsObject result=new AcsObject();result.put("t",0);result.put("c",opcode);result.put("context",context);return result;
     }
     private ExecProgram program() {
         ExecProgram program=new ExecProgram();program.put("author","context codec");program.put("version",1);
-        program.put("exec-version",8);program.put("gvs",0);program.put("ext",new AcsObject());
+        program.put("exec-version",9);program.put("gvs",0);program.put("ext",new AcsObject());
         program.put("namespace-hint","");program.put("assume-hints",array());
         AcsObject external=new AcsObject();external.put("id",0x12340002);external.put("return-type",6);
         external.put("param-types",array(new AcsIntegerElement(6)));external.put("hidden-count",1);external.put("entry-kind",0);
@@ -54,7 +54,7 @@ class GenericContextCodecTest {
         bind.put("manual",false);bind.put("destructor",0x22220004);bind.put("contexts",array(reference(1)));body.acsa.add(bind);
         AbdValue encoded=program.toValue();AcsObject decoded=ExecCodec.decode(encoded);
         assertEquals(program.toJson(),decoded.toJson());assertArrayEquals(encoded.toAbdFormat(),decoded.toValue().toAbdFormat());
-        var root=encoded.getAsAss();assertEquals(8,AbdBasicType.abd2int(root.values.get(1)));
+        var root=encoded.getAsAss();assertEquals(9,AbdBasicType.abd2int(root.values.get(1)));
         assertEquals(5,root.values.get(6).getAsAss().values.get(0).getAsAss().values.size());
         var fields=root.values.get(7).getAsAss().values.get(0).getAsAss().values;
         assertEquals(8,fields.size());assertEquals(2,AbdBasicType.abd2int(fields.get(6)));assertEquals(1,AbdBasicType.abd2int(fields.get(7)));
@@ -77,7 +77,7 @@ class GenericContextCodecTest {
         function(program).put("script",array(bind));assertThrows(IllegalArgumentException.class,program::toValue);
     }
 
-    @Test void v8WireRequiresMetadataAndContextsEvenWhenDebugViewOmitsDefaults() {
+    @Test void v9WireRequiresMetadataAndContextsEvenWhenDebugViewOmitsDefaults() {
         ExecProgram program=program();AcsObject function=function(program);function.put("return-type",5);
         function.mmp.remove("hidden-count");function.mmp.remove("entry-kind");
         AcsObject call=new AcsObject();call.put("t",1);call.put("id",0x0abd0000);call.put("param",array());function.put("script",call);

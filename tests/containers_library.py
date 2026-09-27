@@ -98,7 +98,7 @@ def main():
         work = Path(temp)
         library_binary = work / 'containers.abd'
         library_ast, library_exec = compile_source(library, library_binary, inspect=True)
-        assert library_exec['exec-version'] == 8
+        assert library_exec['exec-version'] == 9
         assert library_exec['namespace-hint'] == HINT
         assert library_exec['assume-hints'] == [{'hint': HINT, 'namespace': ALIAS}]
         assert all(function['id'] >> 16 == 0 for function in library_exec['f'])

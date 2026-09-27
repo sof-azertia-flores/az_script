@@ -3,6 +3,12 @@
 #include "library.h"
 #include <exception>
 namespace azertian {
+struct buffer_storage {
+    std::shared_ptr<const type_context> element;
+    std::size_t length=0,capacity=0;
+    // Every direct field of every element belongs to this one fixed slab.
+    std::shared_ptr<variable[]> slab;
+};
 // A slot block is the storage of one literal (value) object. Its slots are
 // independent variables; copying the value copies every slot, and its address
 // stops resolving as soon as the owning variable's lifetime ends.
@@ -21,6 +27,10 @@ struct slot_block {
     function_frame* temp_frame=nullptr;
     std::size_t depth=0;
     status state=status::live;
+    std::shared_ptr<buffer_storage> buffer;
+    bool is_view=false;
+    unsigned active_operations=0;
+    bool pending_finalize=false,pending_destructor=false;
 };
 namespace blocks {
 // Address layout: bit 63 | id << 24 | slot offset. Ids are never reused.
@@ -31,6 +41,16 @@ bool is_block_address(address pointer) noexcept;
 // Host API. A created block is host-held: no destructor runs for it, and its
 // address expires when the last handle is released.
 std::shared_ptr<slot_block> create(std::size_t size,std::weak_ptr<script> owner={});
+std::shared_ptr<slot_block> create_buffer(std::shared_ptr<const type_context> element,std::weak_ptr<script> owner={});
+// Restore creates storage and views only, never constructors. The decoder fills
+// the first length element slots, reusing any pre-created class view.
+std::shared_ptr<slot_block> restore_buffer(std::shared_ptr<const type_context> element,std::size_t capacity,
+                                        std::size_t length,std::weak_ptr<script> owner={});
+void validate_buffer(const std::shared_ptr<slot_block>& block);
+std::shared_ptr<variable> buffer_operation(int operation,const std::shared_ptr<slot_block>& block,
+    const std::vector<std::shared_ptr<variable>>& arguments,const std::shared_ptr<environment>& env);
+int compare_value(const std::shared_ptr<const type_context>& context,const std::shared_ptr<variable>& left,
+                  const std::shared_ptr<variable>& right,const std::shared_ptr<environment>& env);
 void resize(const std::shared_ptr<slot_block>& block,std::size_t size);
 std::size_t length(const std::shared_ptr<slot_block>& block);
 address address_of(const std::shared_ptr<slot_block>& block,std::size_t offset=0);

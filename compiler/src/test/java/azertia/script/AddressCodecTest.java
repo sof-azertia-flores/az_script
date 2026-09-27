@@ -41,7 +41,7 @@ class AddressCodecTest {
 
     @Test void addressesKeepTheirDistinctTypeAndAllUnsignedBits() {
         ExecProgram program = program(); AbdValue payload = program.toValue();
-        assertEquals(8, AbdBasicType.abd2int(payload.getAsAss().values.get(1)));
+        assertEquals(9, AbdBasicType.abd2int(payload.getAsAss().values.get(1)));
         AcsObject decoded = ExecCodec.decode(payload);
         assertEquals(program.toJson(), decoded.toJson());
         assertArrayEquals(payload.toAbdFormat(), decoded.toValue().toAbdFormat());

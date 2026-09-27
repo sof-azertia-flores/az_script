@@ -12,9 +12,9 @@ public class GeneraterJson {
     private static final int DEFAULT_FUNCTION_NAMESPACE = 0xfff;
     private static final int RESERVED_RUNTIME_NAMESPACE = 0xabd;
     private static final int MAX_MACRO_EXPANSION_CHARS = 1_048_576;
-    private static final Set<String> TYPES = Set.of("int", "float", "double", "string", "boolean", "bool", "void", "address");
+    private static final Set<String> TYPES = Set.of("int", "float", "double", "string", "boolean", "bool", "void", "address", "buffer");
     /** Statement keywords; they can never name a function, parameter, variable, global or macro. */
-    private static final Set<String> KEYWORDS = Set.of("return", "if", "else", "while", "for", "break", "continue", "def", "var", "class", "new", "delete", "this", "null", "extern", "extends", "public", "private", "protected", "virtual");
+    private static final Set<String> KEYWORDS = Set.of("return", "if", "else", "while", "for", "break", "continue", "def", "var", "class", "new", "delete", "this", "null", "extern", "extends", "operator", "public", "private", "protected", "virtual");
     private static final Set<String> PREPROCESSOR_DIRECTIVES = Set.of(
             "ifdef", "ifndef", "if_equals", "else", "fi", "endif", "include", "author", "gvar",
             "namespace", "namespace_hint", "assume_hint", "setmeta", "setattr", "define", "undef");
@@ -30,7 +30,7 @@ public class GeneraterJson {
         public List<String> paramTypes = new ArrayList<>();
         public AzExpression body;
         public String returnType, name;
-        public String ownerClass, functionKind;
+        public String ownerClass, functionKind, operatorKind;
         public JsonArray typeParameters = new JsonArray();
         public int id;
         public Integer explicitPosition;
@@ -41,7 +41,7 @@ public class GeneraterJson {
     public static class ExternSignature {
         public String returnType;
         public List<String> paramTypes = new ArrayList<>();
-        public String ownerClass, functionKind;
+        public String ownerClass, functionKind, operatorKind;
         public JsonArray typeParameters = new JsonArray();
         public int id;
 
@@ -323,6 +323,7 @@ public class GeneraterJson {
                 if (signature.ownerClass != null) {
                     value.addProperty("owner-class", signature.ownerClass); value.addProperty("function-kind", signature.functionKind);
                 }
+                if (signature.operatorKind != null) value.addProperty("operator-kind", signature.operatorKind);
                 JsonArray parameterTypes = new JsonArray();
                 signature.paramTypes.forEach(parameterTypes::add);
                 value.add("param-types", parameterTypes);
@@ -344,6 +345,7 @@ public class GeneraterJson {
                     meta.addProperty("owner-class", function.ownerClass);
                     meta.addProperty("function-kind", function.functionKind);
                 }
+                if (function.operatorKind != null) meta.addProperty("operator-kind", function.operatorKind);
                 if (function.baseArguments != null) {
                     meta.add("base-args", function.baseArguments.deepCopy());
                     meta.addProperty("base-initializer", function.baseInitializer);
@@ -499,7 +501,7 @@ public class GeneraterJson {
                         take(); take(); tokens.add(new Token(two, null, l, col, false));
                     } else if (c == ':') {
                         take(); tokens.add(new Token(":", null, l, col, false));
-                    } else if ("{}(),;+-*/%=<>!.~".indexOf(c) >= 0) {
+                    } else if ("{}[](),;+-*/%=<>!.~".indexOf(c) >= 0) {
                         take(); tokens.add(new Token(String.valueOf(c), null, l, col, false));
                     } else throw error("Unexpected character: " + c, l, col);
                 }
@@ -593,17 +595,17 @@ public class GeneraterJson {
         }
         private String typeApplication(String base) {
             if (!match("<")) {
-                if (!classTypeParameters.getOrDefault(base, List.of()).isEmpty())
-                    throw error("Generic class " + base + " requires explicit type arguments");
+                if (base.equals("buffer") || !classTypeParameters.getOrDefault(base, List.of()).isEmpty())
+                    throw error("Generic type " + base + " requires explicit type arguments");
                 return base;
             }
-            if (!classNames.contains(base)) throw error("Only a class type can have type arguments: " + base);
+            if (!base.equals("buffer") && !classNames.contains(base)) throw error("Only a class or buffer type can have type arguments: " + base);
             List<String> arguments = new ArrayList<>();
             if (at(">")) throw error("Type argument list cannot be empty");
             do { arguments.add(readType(false)); } while (match(","));
             expect(">");
-            int expected = classTypeParameters.getOrDefault(base, List.of()).size();
-            if (arguments.size() != expected) throw error("Class " + base + " expects " + expected + " type arguments, got " + arguments.size());
+            int expected = base.equals("buffer") ? 1 : classTypeParameters.getOrDefault(base, List.of()).size();
+            if (arguments.size() != expected) throw error("Type " + base + " expects " + expected + " type arguments, got " + arguments.size());
             return base + "<" + String.join(",", arguments) + ">";
         }
         private String readType(boolean allowVoid) {
@@ -687,7 +689,7 @@ public class GeneraterJson {
                         String type = pointerSuffix(first);
                         if (classNames.contains(current().text()) && classOwnerEnd(index) >= 0) {
                             String ownerType = typeApplication(name().text()); requireOwnerType(ownerType); expect("::");
-                            String member = declaredName().text();
+                            String member = methodName();
                             parseFunction(rawClass(ownerType), "method", type, member, external, false, generic);
                         } else {
                             String member = declaredName().text();
@@ -912,7 +914,7 @@ public class GeneraterJson {
                 definition.addProperty("base", base);
                 if (at(",")) throw error("Multiple inheritance is not supported");
             }
-            JsonArray fields = new JsonArray(); JsonObject methods = new JsonObject();
+            JsonArray fields = new JsonArray(); JsonObject methods = new JsonObject(), operators = new JsonObject();
             definition.add("fields", fields); definition.add("methods", methods); script.classes.add(definition);
             Set<String> members = new HashSet<>(); boolean constructor = false, destructor = false;
             expect("{");
@@ -932,10 +934,12 @@ public class GeneraterJson {
                     advance();parseFunction(className,"constructor","void","<ctor>",external,true,methodGeneric);
                     definition.addProperty("constructor",className+"::<ctor>");constructor=true;
                 } else {
-                    Token start=current();String type=readType(true);String member=declaredName().text();
+                    Token start=current();String type=readType(true);String member=methodName();
                     if (!members.add(member)) throw error("Duplicate class member: " + className + "." + member);
-                    if (at("(") && !fieldConstruction()) {
-                        parseFunction(className,"method",type,member,external,true,methodGeneric);methods.addProperty(member,className+"::"+member);
+                    if (member.startsWith("<op:") || at("(") && !fieldConstruction()) {
+                        parseFunction(className,"method",type,member,external,true,methodGeneric);
+                        if (member.startsWith("<op:")) operators.addProperty(operatorKind(member), className+"::"+member);
+                        else methods.addProperty(member,className+"::"+member);
                     } else {
                         if (external) throw error("Fields cannot be extern");
                         if (!methodGeneric.isEmpty()) throw error("Fields cannot declare type parameters");
@@ -956,6 +960,7 @@ public class GeneraterJson {
                 } finally { typeParameters = classScope; }
             }
             expect("}");match(";");
+            if (!operators.isEmpty()) definition.add("operators", operators);
             if(!constructor) {
                 AzFunction function=new AzFunction();function.ownerClass=className;function.functionKind="constructor";
                 function.name=className+"::<ctor>";function.returnType="void";function.params.add("this");function.paramTypes.add(selfType(className)+"*");
@@ -968,10 +973,26 @@ public class GeneraterJson {
             if(definitions.putIfAbsent(function.name,function)!=null)throw error("Duplicate function definition: "+function.name);
             script.functions.add(function);
         }
+        private static String operatorKind(String member) { return member.substring(4, member.length() - 1); }
+        private String methodName() {
+            if (!match("operator")) return declaredName().text();
+            String kind;
+            if (match("+")) kind = "add";
+            else if (match("-")) kind = "subtract";
+            else if (match("*")) kind = "multiply";
+            else if (match("/")) kind = "divide";
+            else if (match("[")) { expect("]"); kind = match("=") ? "index-set" : "index-get"; }
+            else if (match("(")) { expect(")"); kind = "call"; }
+            else throw error("Supported operators are +, -, *, /, [], []= and ()");
+            return "<op:" + kind + ">";
+        }
         private void parseFunction(String owner,String kind,String type,String member,boolean external,boolean inClass,JsonArray generic) {
             String qualified=owner==null?member:owner+"::"+member;
             if(Compiler.isBuiltinName(qualified)||owner==null&&classNames.contains(qualified))throw error("Reserved function name: "+qualified);
             AzFunction function=new AzFunction();function.name=qualified;function.ownerClass=owner;function.functionKind=kind;function.returnType=type;
+            if (member.startsWith("<op:")) function.operatorKind = operatorKind(member);
+            if (function.operatorKind != null && !generic.isEmpty())
+                throw error("Operators cannot declare their own type parameters");
             if (!generic.isEmpty() && ("constructor".equals(kind) || "destructor".equals(kind)))
                 throw error("Constructors and destructors cannot declare their own type parameters");
             if (!generic.isEmpty() && owner == null && specialNames.containsKey(member)
@@ -997,6 +1018,17 @@ public class GeneraterJson {
                 function.params.add(parameter);function.paramTypes.add(parameterType);
             }while(match(","));
             expect(")");
+            if (function.operatorKind != null) {
+                int count = function.params.size() - 1;
+                int expected = function.operatorKind.equals("index-set") ? 2 : 1;
+                if (!function.operatorKind.equals("call") && count != expected)
+                    throw error("Operator " + function.operatorKind + " expects " + expected + " explicit parameters");
+                if (function.paramTypes.contains("any")) throw error("Operator parameters require explicit types");
+                if (function.operatorKind.equals("index-set") && !type.equals("void"))
+                    throw error("Index setter must return void");
+                if (!function.operatorKind.equals("index-set") && !function.operatorKind.equals("call") && type.equals("void"))
+                    throw error("Operator " + function.operatorKind + " requires a non-void return type");
+            }
             Integer suffix=null;
             if(match(":")) {
                 boolean initializer="constructor".equals(kind)&&current().identifier()
@@ -1020,6 +1052,7 @@ public class GeneraterJson {
                 if((suffix>>>16)==RESERVED_RUNTIME_NAMESPACE||specialNames.containsValue(suffix))throw error("Reserved external function ID");
                 expect(";");ExternSignature signature=new ExternSignature(type,function.paramTypes);signature.id=suffix;
                 signature.ownerClass=owner;signature.functionKind=kind;
+                signature.operatorKind=function.operatorKind;
                 signature.typeParameters=generic.deepCopy();
                 ExternSignature previous=script.externSignatures.putIfAbsent(qualified,signature);
                 if(previous!=null) {
@@ -1138,6 +1171,8 @@ public class GeneraterJson {
                 }
                 JsonElement initializer = match("=") ? expression()
                         : pointer && classNames.contains(spelling) ? operation("ctrl", "null", start) : null;
+                if (spelling.equals("buffer") && initializer == null)
+                    initializer = operation("ctrl", "buffer-new", start, new JsonPrimitive(declaredType.substring(7, declaredType.length() - 1)));
                 if (typeParameters.contains(spelling) && initializer == null)
                     throw error("A type parameter local requires an explicit initializer: " + variable, start);
                 endStatement();
@@ -1176,12 +1211,17 @@ public class GeneraterJson {
                         && isMemoryGet(target.get("call").getAsString());
                 boolean member = target != null && target.get("t").getAsString().equals("ctrl")
                         && target.get("call").getAsString().equals("member");
-                if (!variable && !memory && !member)
-                    throw error("Left side of assignment must be a variable or mem_get(pointer)");
+                boolean indexed = target != null && target.get("t").getAsString().equals("ctrl")
+                        && target.get("call").getAsString().equals("index");
+                if (!variable && !memory && !member && !indexed)
+                    throw error("Left side of assignment must be a variable, member, index or mem_get(pointer)");
                 if (member && !operator.text().equals("=")) throw error("Compound assignment to a member is not supported");
+                if (indexed && !operator.text().equals("=")) throw error("Compound assignment to an index is not supported");
                 if (memory && !operator.text().equals("="))
                     throw error("Compound assignment to mem_get(pointer) is not supported; save the pointer in a variable and use '='");
                 JsonElement value = assignment();
+                if (indexed) return operation("ctrl", "index-set", operator,
+                        target.getAsJsonArray("param").get(0), target.getAsJsonArray("param").get(1), value);
                 if (member) return operation("ctrl", "member-set", operator, left, value);
                 if (memory) return operation("ctrl", "mov", operator, left, value);
                 if (!operator.text().equals("=")) value = operation("ctrl", binaryName(operator.text().substring(0, 1)), operator, left, value);
@@ -1230,16 +1270,29 @@ public class GeneraterJson {
         }
         private JsonElement postfix() {
             JsonElement value = primary();
-            while (match(".")) {
-                Token member = name();
-                JsonArray typeArguments = callTypeArgumentsAhead() ? readCallTypeArguments(false) : null;
-                if (match("(")) {
-                    List<JsonElement> args = new ArrayList<>(); args.add(value); args.add(new JsonPrimitive(member.text()));
+            while (true) {
+                Token at = current();
+                if (match(".")) {
+                    Token member = name();
+                    JsonArray typeArguments = callTypeArgumentsAhead() ? readCallTypeArguments(false) : null;
+                    if (match("(")) {
+                        List<JsonElement> args = new ArrayList<>(); args.add(value); args.add(new JsonPrimitive(member.text()));
+                        if (!at(")")) do { args.add(expression()); } while (match(","));
+                        expect(")"); JsonObject call = operation("ctrl", "member-call", member, args.toArray(JsonElement[]::new));
+                        if (typeArguments != null) call.add("type-args", typeArguments);
+                        value = call;
+                    } else value = operation("ctrl", "member", member, value, new JsonPrimitive(member.text()));
+                } else if (match("[")) {
+                    JsonElement key = expression(); expect("]");
+                    value = operation("ctrl", "index", at, value, key);
+                } else if (at("(") || callTypeArgumentsAhead()) {
+                    JsonArray typeArguments = at("<") ? readCallTypeArguments(false) : null;
+                    expect("("); List<JsonElement> args = new ArrayList<>(); args.add(value);
                     if (!at(")")) do { args.add(expression()); } while (match(","));
-                    expect(")"); JsonObject call = operation("ctrl", "member-call", member, args.toArray(JsonElement[]::new));
+                    expect(")"); JsonObject call = operation("ctrl", "invoke", at, args.toArray(JsonElement[]::new));
                     if (typeArguments != null) call.add("type-args", typeArguments);
                     value = call;
-                } else value = operation("ctrl", "member", member, value, new JsonPrimitive(member.text()));
+                } else break;
             }
             return value;
         }

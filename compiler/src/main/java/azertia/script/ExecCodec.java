@@ -10,9 +10,9 @@ import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
 
-/** Strict fixed-record exec v8 encoder/decoder. Executable roots never use typed maps. */
+/** Strict fixed-record exec v9 encoder/decoder. Executable roots never use typed maps. */
 public final class ExecCodec {
-    public static final int VERSION=8, MAX_BYTES=64*1024*1024, MAX_SLOTS=1_048_576;
+    public static final int VERSION=9, MAX_BYTES=64*1024*1024, MAX_SLOTS=1_048_576;
     public static final String MAGIC="AZSCRIPT";
     private ExecCodec() {}
     private record Layout(int globals,int parameters,int locals,int hidden) {}
@@ -117,16 +117,33 @@ public final class ExecCodec {
             if(reference<0||reference>=layout.hidden())throw invalid("context reference outside function hidden-count");
             return stack(n(0),n(reference));
         }
-        keys(spec,"abi kind","factory contexts");int abi=integer(spec,"abi"),kind=integer(spec,"kind");
-        if(!(kind==0&&abi>=0&&abi<=5||kind==1&&abi==7||kind==2&&abi==7||kind==3&&abi==8))
+        keys(spec,"abi kind","width factory contexts placement placement-contexts element");int abi=integer(spec,"abi"),kind=integer(spec,"kind");
+        if(!(kind==0&&abi>=0&&abi<=5||kind==1&&abi==7||kind==2&&abi==7||(kind==3||kind==4)&&abi==8))
             throw invalid("invalid fixed context ABI/kind");
+        int width=optionalInteger(spec,"width",1);
+        if(width<1||width>MAX_SLOTS||kind!=3&&width!=1)throw invalid("invalid context slot width");
         boolean hasFactory=spec.mmp.containsKey("factory");
         if(hasFactory&&kind!=3)throw invalid("only object contexts can have a default factory");
         if(!hasFactory&&spec.mmp.containsKey("contexts")&&!array(spec.mmp.get("contexts"),"contexts").acsa.isEmpty())
             throw invalid("context without a factory cannot have child contexts");
-        List<AbdValue> fields=new ArrayList<>(List.of(n(1),n(abi),n(kind),b(hasFactory)));
+        boolean hasPlacement=spec.mmp.containsKey("placement"),hasElement=spec.mmp.containsKey("element");
+        if(hasPlacement&&kind!=3)throw invalid("only object contexts can have a placement constructor");
+        if(!hasPlacement&&spec.mmp.containsKey("placement-contexts")&&!array(spec.mmp.get("placement-contexts"),"placement-contexts").acsa.isEmpty())
+            throw invalid("context without placement cannot have placement contexts");
+        if(hasElement!=(kind==4))throw invalid("only buffer contexts require an element context");
+        List<AbdValue> fields=new ArrayList<>(List.of(n(1),n(abi),n(kind),n(width),b(hasFactory)));
         if(hasFactory) {int factory=integer(spec,"factory");externalId(factory);fields.add(n(factory));}
-        fields.add(contexts(spec.mmp.get("contexts"),layout,level+1));return stack(fields);
+        fields.add(contexts(spec.mmp.get("contexts"),layout,level+1));fields.add(b(hasPlacement));
+        if(hasPlacement) {int placement=integer(spec,"placement");externalId(placement);fields.add(n(placement));}
+        fields.add(contexts(spec.mmp.get("placement-contexts"),layout,level+1));fields.add(b(hasElement));
+        if(hasElement) {
+            rejectVoidContext(spec.mmp.get("element"));fields.add(context(spec.mmp.get("element"),layout,level+1));
+        }
+        return stack(fields);
+    }
+    private static void rejectVoidContext(AcsElement value) {
+        AcsObject spec=object(value,"context");
+        if(!spec.mmp.containsKey("ref")&&integer(spec,"abi")==5)throw invalid("void context is not a value type");
     }
     private static AbdValue extensions(AcsElement value) {
         AbdValue encoded=object(value,"ext").toValue();validateTyped(encoded,2,2);return encoded;
@@ -271,12 +288,27 @@ public final class ExecCodec {
                 keys(object,"t c v","");storageTarget(object(object.mmp.get("v"),"drop target"),"drop target");
                 fields.add(expression(object.mmp.get("v"),layout,level+1));
             }
-            case ExecOpcodes.CONTEXT_ABI,ExecOpcodes.CONTEXT_DEFAULT -> {
+            case ExecOpcodes.CONTEXT_ABI,ExecOpcodes.CONTEXT_DEFAULT,ExecOpcodes.BUFFER_NEW -> {
+                if(op==ExecOpcodes.BUFFER_NEW)rejectVoidContext(object.mmp.get("context"));
                 keys(object,"t c context","");fields.add(context(object.mmp.get("context"),layout,level+1));
             }
             case ExecOpcodes.RETURN_TYPED,ExecOpcodes.CHECK_TYPE -> {
                 keys(object,"t c v context","");fields.add(expression(object.mmp.get("v"),layout,level+1));
                 fields.add(context(object.mmp.get("context"),layout,level+1));
+            }
+            case ExecOpcodes.BUFFER_OP -> {
+                keys(object,"t c op v args","");int operation=integer(object,"op");
+                if(operation<0||operation>6)throw invalid("invalid buffer operation");
+                AcsArray args=array(object.mmp.get("args"),"buffer arguments");
+                int expected=operation<2?0:operation==4?2:1;
+                if(args.acsa.size()!=expected)throw invalid("invalid buffer argument count");
+                fields.add(n(operation));fields.add(expression(object.mmp.get("v"),layout,level+1));
+                fields.add(expressions(args,layout,level+1));
+            }
+            case ExecOpcodes.VALUE_COMPARE -> {
+                rejectVoidContext(object.mmp.get("context"));
+                keys(object,"t c context v1 v2","");fields.add(context(object.mmp.get("context"),layout,level+1));
+                fields.add(expression(object.mmp.get("v1"),layout,level+1));fields.add(expression(object.mmp.get("v2"),layout,level+1));
             }
             default -> {
                 if(op!=ExecOpcodes.MOVE&&(op<ExecOpcodes.ADD||op>ExecOpcodes.OR))throw invalid("invalid control opcode "+op);
@@ -321,9 +353,12 @@ public final class ExecCodec {
         Record record=new Record(value,level);int variant=record.integer();AcsObject result=new AcsObject();
         if(variant==0)result.put("ref",record.integer());
         else if(variant==1) {
-            result.put("abi",record.integer());result.put("kind",record.integer());
+            result.put("abi",record.integer());result.put("kind",record.integer());result.put("width",record.integer());
             if(record.bool())result.put("factory",record.integer());
             result.put("contexts",decodeContexts(record.next(),level+1));
+            if(record.bool())result.put("placement",record.integer());
+            result.put("placement-contexts",decodeContexts(record.next(),level+1));
+            if(record.bool())result.put("element",decodeContext(record.next(),level+1));
         } else throw invalid("unknown context specification kind "+variant);
         record.end();return result;
     }
@@ -354,7 +389,7 @@ public final class ExecCodec {
         if(value.getData().length>MAX_BYTES-4)throw invalid("executable exceeds 64 MiB");
         Record root=new Record(value,1);
         if(root.fields.isEmpty()||!Arrays.equals(root.fields.get(0).getData(),MAGIC.getBytes(StandardCharsets.UTF_8))) {
-            throw invalid("expected exec v8 AZSCRIPT header; legacy executable maps are unsupported");
+            throw invalid("expected exec v9 AZSCRIPT header; legacy executable maps are unsupported");
         }
         root.string();int version=root.integer();if(version!=VERSION)throw invalid("unsupported exec version "+version);
         ExecProgram result=new ExecProgram();result.put("author","");result.put("version",root.integer());result.put("exec-version",version);
@@ -442,9 +477,17 @@ public final class ExecCodec {
             case ExecOpcodes.NEW_BLOCK -> view.put("size",record.integer());
             case ExecOpcodes.MOVE_OUT -> view.put("v",record.integer());
             case ExecOpcodes.BLOCK_ADDRESS,ExecOpcodes.DROP -> view.put("v",decodeExpression(record.next(),level+1));
-            case ExecOpcodes.CONTEXT_ABI,ExecOpcodes.CONTEXT_DEFAULT -> view.put("context",decodeContext(record.next(),level+1));
+            case ExecOpcodes.CONTEXT_ABI,ExecOpcodes.CONTEXT_DEFAULT,ExecOpcodes.BUFFER_NEW -> view.put("context",decodeContext(record.next(),level+1));
             case ExecOpcodes.RETURN_TYPED,ExecOpcodes.CHECK_TYPE -> {
                 view.put("v",decodeExpression(record.next(),level+1));view.put("context",decodeContext(record.next(),level+1));
+            }
+            case ExecOpcodes.BUFFER_OP -> {
+                view.put("op",record.integer());view.put("v",decodeExpression(record.next(),level+1));
+                view.put("args",decodeExpressions(record.next(),level+1));
+            }
+            case ExecOpcodes.VALUE_COMPARE -> {
+                view.put("context",decodeContext(record.next(),level+1));view.put("v1",decodeExpression(record.next(),level+1));
+                view.put("v2",decodeExpression(record.next(),level+1));
             }
             default -> {view.put("v1",decodeExpression(record.next(),level+1));view.put("v2",decodeExpression(record.next(),level+1));}
         }

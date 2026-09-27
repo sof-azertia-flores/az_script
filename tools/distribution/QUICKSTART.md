@@ -123,7 +123,7 @@ int main() { return math_round(math_hypot(3.0, 4.0)); }
 
 内置 `print(value)`、`getDepth()`、`alloc(count)`、`mem_get(pointer)`、`mem_free(pointer)`、`make_free(pointer)`、`mem_send_up(pointer)` 和 `load_extern_library(name)` 无需声明。`load_extern_library` 加载当前系统的已签名动态库，见 [外部动态库](EXTERN_LIBRARY.md)。`alloc(int)` 返回 address，后四个内存接口接收 address。例如 `address p = alloc(2); mem_get(p + 1) = 42; mem_free(p);`，分配数量和偏移仍是 int。地址支持 `address + int`、`int + address`、`address - int`，以及地址间的无符号相等和大小比较；溢出和下溢报错，空地址使用 `p == null` 判断。地址不能与普通整数互相转换或作相等比较，也不能直接作为 if 条件。类指针仍保留静态类类型与继承规则，只在执行文件中擦除为 address；通常通过构造和 delete 管理，原始内存释放不会调用用户析构。
 
-本发行包使用 exec v8 和 JNI 快照 v8，不读取旧执行文件或快照。所有模块须重新编译；旧代码中的 `int p = alloc(...)` 须改为 `address p = alloc(...)`，依赖引用语义的 `Point p(...)` 须改为 `Point * p(...)`，`Point p = new Point(...)` 改为 `Point * p = new Point(...)`。64 位地址目前仍表示 slot 位置，既有堆容量和生命周期规则不变。
+本发行包使用 exec v9 和 JNI 快照 v9，不读取旧执行文件或快照。所有模块须重新编译；旧代码中的 `int p = alloc(...)` 须改为 `address p = alloc(...)`，依赖引用语义的 `Point p(...)` 须改为 `Point * p(...)`，`Point p = new Point(...)` 改为 `Point * p = new Point(...)`。64 位地址目前仍表示 slot 位置，既有堆容量和生命周期规则不变。
 
 更多预处理、类型、生命周期、内存边界与 AST/ABD 说明见 [完整语言文档](LANGUAGE.md)，编译与嵌入步骤见 [使用文档](USAGE.md)，数学函数见 [数学库说明](../stdlib/MATH.md)，容器见 [容器库说明](../stdlib/CONTAINERS.md)。
 

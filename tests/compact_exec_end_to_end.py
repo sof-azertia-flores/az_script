@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Independent exec-v8 wire checks, malformed inputs, source execution and JNI."""
+"""Independent exec-v9 wire checks, malformed inputs, source execution and JNI."""
 import argparse
 from dataclasses import dataclass
 import json
@@ -21,7 +21,8 @@ OP_NAMES = {3: 'v', 4: 'vd', 5: 'vs', 6: 'm', 7: 'r', 8: 'ro', 9: 'oa',
             21: 'ge', 22: 'le', 23: 'and', 24: 'or', 25: 'not', 26: 'neg',
             27: 'if', 28: 'wi', 29: 'brk', 30: 'cont', 31: 'cleanup',
             32: 'new_block', 33: 'block_address', 34: 'mv', 35: 'drop',
-            36: 'context_abi', 37: 'context_default', 38: 'return_typed', 39: 'check_type'}
+            36: 'context_abi', 37: 'context_default', 38: 'return_typed', 39: 'check_type',
+            40: 'buffer_new', 41: 'buffer_op', 42: 'value_compare'}
 
 
 def integer(value):
@@ -154,7 +155,7 @@ def function(body, ident=MAIN, return_type=0, params=(), locals_count=0, hidden_
 
 
 def module(functions, globals_count=0, signatures=()):
-    return [b'AZSCRIPT', integer(8), integer(2), b'independent wire fixture',
+    return [b'AZSCRIPT', integer(9), integer(2), b'independent wire fixture',
             integer(globals_count), typed_encode({})[1], stack(*signatures), stack(*functions), b'', b'']
 
 
@@ -162,10 +163,17 @@ def encode_context(value):
     if 'ref' in value:
         assert set(value) == {'ref'}
         return stack(integer(0), integer(value['ref']))
-    fields = [integer(1), integer(value['abi']), integer(value['kind']), bytes(['factory' in value])]
+    fields = [integer(1), integer(value['abi']), integer(value['kind']), integer(value.get('width', 1)), bytes(['factory' in value])]
     if 'factory' in value:
         fields.append(integer(value['factory']))
     fields.append(encode_contexts(value.get('contexts', [])))
+    fields.append(bytes(['placement' in value]))
+    if 'placement' in value:
+        fields.append(integer(value['placement']))
+    fields.append(encode_contexts(value.get('placement-contexts', [])))
+    fields.append(bytes(['element' in value]))
+    if 'element' in value:
+        fields.append(encode_context(value['element']))
     return stack(*fields)
 
 
@@ -223,10 +231,14 @@ def encode_compact_expression(value):
         fields = [child('v')]
     elif opcode == 34:
         fields = [integer(value['v'])]
-    elif opcode in (36, 37):
+    elif opcode in (36, 37, 40):
         fields = [encode_context(value['context'])]
     elif opcode in (38, 39):
         fields = [child('v'), encode_context(value['context'])]
+    elif opcode == 41:
+        fields = [integer(value['op']), child('v'), stack(*(encode_compact_expression(arg) for arg in value['args']))]
+    elif opcode == 42:
+        fields = [encode_context(value['context']), child('v1'), child('v2')]
     else:
         assert opcode in (29, 30)
         fields = []
@@ -234,7 +246,7 @@ def encode_compact_expression(value):
 
 
 def encode_compact_module(program):
-    """Encode fixtures expressed as readable dictionaries into only v8 wire."""
+    """Encode fixtures expressed as readable dictionaries into only v9 wire."""
     global_names = program.get('gvs', [])
     numeric = isinstance(global_names, int)
     global_count = global_names if numeric else len(global_names)
@@ -295,13 +307,20 @@ class WireReader:
         if variant == 0:
             assert len(fields) == 2
             return {'ref': int_value(fields[1])}
-        assert variant == 1 and len(fields) >= 5
-        present = bool_value(fields[3])
-        assert len(fields) == 5 + present
-        result = {'abi': int_value(fields[1]), 'kind': int_value(fields[2]),
-                  'contexts': self.contexts(fields[-1])}
+        assert variant == 1 and len(fields) >= 9
+        result = {'abi': int_value(fields[1]), 'kind': int_value(fields[2]), 'width': int_value(fields[3])}
+        position = 5
+        if bool_value(fields[4]):
+            result['factory'] = int_value(fields[position]); position += 1
+        result['contexts'] = self.contexts(fields[position]); position += 1
+        present = bool_value(fields[position]); position += 1
         if present:
-            result['factory'] = int_value(fields[4])
+            result['placement'] = int_value(fields[position]); position += 1
+        result['placement-contexts'] = self.contexts(fields[position]); position += 1
+        present = bool_value(fields[position]); position += 1
+        if present:
+            result['element'] = self.context(fields[position]); position += 1
+        assert position == len(fields)
         return result
 
     def contexts(self, payload):
@@ -311,7 +330,7 @@ class WireReader:
         fields = frames(payload)
         assert fields
         opcode = int_value(fields.pop(0))
-        assert 0 <= opcode <= 39, opcode
+        assert 0 <= opcode <= 42, opcode
         self.opcodes.add(opcode)
         if opcode == 0:
             assert len(fields) == 1
@@ -398,12 +417,18 @@ class WireReader:
             assert len(fields) == 1
             result['v'] = int_value(fields[0])
             assert result['v'] >= 0
-        elif opcode in (36, 37):
+        elif opcode in (36, 37, 40):
             assert len(fields) == 1
             result['context'] = self.context(fields[0])
         elif opcode in (38, 39):
             assert len(fields) == 2
             result.update(v=self.expression(fields[0]), context=self.context(fields[1]))
+        elif opcode == 41:
+            assert len(fields) == 3
+            result.update(op=int_value(fields[0]), v=self.expression(fields[1]), args=[self.expression(arg) for arg in frames(fields[2])])
+        elif opcode == 42:
+            assert len(fields) == 3
+            result.update(context=self.context(fields[0]), v1=self.expression(fields[1]), v2=self.expression(fields[2]))
         else:
             assert opcode in (29, 30) and not fields
         return result
@@ -413,8 +438,8 @@ class WireReader:
         assert len(file_fields) == 1, 'file must contain one root frame'
         fields = frames(file_fields[0])
         assert len(fields) == 10 and fields[0] == b'AZSCRIPT'
-        assert int_value(fields[1]) == 8
-        legacy = {'exec-version': 8, 'version': int_value(fields[2]),
+        assert int_value(fields[1]) == 9
+        legacy = {'exec-version': 9, 'version': int_value(fields[2]),
                   'author': fields[3].decode('utf-8'), 'gvs': int_value(fields[4]),
                   'ext': typed_decode(MAP, fields[5]), 'extern-signatures': [], 'f': [],
                   'namespace-hint': fields[8].decode('utf-8'), 'assume-hints': []}
@@ -505,12 +530,12 @@ def main():
             run(compiler + ['compile-json', ast, '-o', roundtrip])
             assert abd.read_bytes() == roundtrip.read_bytes(), 'readable AST roundtrip'
             debug = json.loads(executable.read_text(encoding='utf-8'))
-            assert debug['exec-version'] == 8
+            assert debug['exec-version'] == 9
 
             def inspect(value):
                 if isinstance(value, dict):
                     if value.get('t') == 0 and 'c' in value:
-                        assert type(value['c']) is int and 3 <= value['c'] <= 39, value
+                        assert type(value['c']) is int and 3 <= value['c'] <= 42, value
                     for item in value.values():
                         inspect(item)
                 elif isinstance(value, list):
@@ -572,7 +597,7 @@ def main():
         execute_wire('independent-void-return', module([function(block(returning()), return_type=5)]), expected='')
 
         mutations = [('root-missing', minimum[:-1]), ('root-extra', minimum + [b''])]
-        for index, value, label in [(0, b'AZSCRIPX', 'magic'), (1, integer(5), 'version'), (1, integer(6), 'address-only-version'), (1, integer(7), 'previous-version'),
+        for index, value, label in [(0, b'AZSCRIPX', 'magic'), (1, integer(5), 'version'), (1, integer(6), 'address-only-version'), (1, integer(7), 'literal-only-version'), (1, integer(8), 'previous-version'),
                 (1, b'\4', 'version-width'), (2, b'\2', 'source-version-width'),
                 (4, integer(-1), 'negative-globals'), (4, integer(2**31 - 1), 'huge-globals'),
                 (4, b'\0', 'global-width'), (5, b'\1', 'extension-frame'),
@@ -605,7 +630,7 @@ def main():
 
         bad_expressions = {
             'empty-expression': b'', 'opcode-width': stack(b'\0'),
-            'unknown-opcode': expression(40), 'negative-opcode': expression(-1),
+            'unknown-opcode': expression(43), 'negative-opcode': expression(-1),
             'new-block-missing': expression(32), 'new-block-empty': expression(32, integer(0)),
             'new-block-width': expression(32, b'\0'), 'block-address-extra': expression(33, constant(0), constant(0)),
             'object-move-global': expression(34, integer(-1)), 'object-move-outside': expression(34, integer(0)),
@@ -718,7 +743,7 @@ public class CompactSnapshot {
                  '-cp', os.pathsep.join((str(work), str(args.bridge))), 'CompactSnapshot', native, saved, other, *ids],
                 'Compact JNI snapshot passed\n')
             snapshot = typed_decode(MAP, frames(saved.read_bytes())[0])
-            assert snapshot['snapshot version'].value() == 8
+            assert snapshot['snapshot version'].value() == 9
             assert snapshot['module manifest'][0]['bytes'].payload == native.read_bytes()
             assert [item.value() for item in snapshot['variable global']] == [41]
             assert len(snapshot['objects']) == 1

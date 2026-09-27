@@ -2,7 +2,7 @@
 
 [中文](HINT_LINKING.md) | English
 
-AzScript libraries compile independently, receive a namespace when loaded, and link through explicit `flush()`. Classes remain compile-time structures: executables contain slot addresses, ordinary function references, and destructor IDs, but no class names, field names, or layout tables. Shared declarations define the cross-module structural contract. See [Exec v8](EXEC_FORMAT.en.md) for the binary contract.
+AzScript libraries compile independently, receive a namespace when loaded, and link through explicit `flush()`. Classes remain compile-time structures: executables contain slot addresses, ordinary function references, and destructor IDs, but no class names, field names, or layout tables. Shared declarations define the cross-module structural contract. See [Exec v9](EXEC_FORMAT.en.md) for the binary contract.
 
 ## Declarations and numbering
 
@@ -105,7 +105,7 @@ JNI exposes `insertScript(File)`, `flush()`, and `namespaceForHint(String)`. Jav
 
 ## Snapshots and validation
 
-JNI v8 snapshots require initialized stable state without active calls. Literal objects inside heap fields and their addresses are saved; restoration assigns new IDs and rewrites references. Captured generic destructor contexts, including default-factory IDs and child contexts, are saved as data and checked against the assembled functions before restoration. No context points into an expired call frame. Address scalars, allocation bases, object records, and cleanup order use independent uint64 addresses; allocation counts and IDs remain 32-bit. Identity includes ordered original module bytes, actual namespaces, hints, and global offsets/counts; differing assemblies are rejected. Restore validates fully before atomic replacement, without relinking, initialization, or old-state destructors. The 64 MiB limit remains; oversized saves fail explicitly. Old exec and snapshots are incompatible.
+JNI v9 snapshots require initialized stable state without active calls. Literal objects inside heap fields and their addresses are saved; restoration assigns new IDs and rewrites references. Captured generic destructor contexts, including default-factory IDs and child contexts, are saved as data and checked against the assembled functions before restoration. No context points into an expired call frame. Address scalars, allocation bases, object records, and cleanup order use independent uint64 addresses; allocation counts and IDs remain 32-bit. Identity includes ordered original module bytes, actual namespaces, hints, and global offsets/counts; differing assemblies are rejected. Restore validates fully before atomic replacement, without relinking, initialization, or old-state destructors. The 64 MiB limit remains; oversized saves fail explicitly. Old exec and snapshots are incompatible.
 
 Validation covers high-bit IDs, forward/recursive calls, cross-module alias reuse, retry after missing libraries, mismatched signatures and link atomicity, cyclic initialization, out-of-class constructors/destructors, structural types, cross-library returns, JNI callbacks, and multimodule snapshots. Run `python3 tools/build_and_test.py --offline`, then `--sanitize`, and export/validate a full distribution.
 
@@ -130,3 +130,11 @@ The generic example consists of a [shared header](../compiler/examples/generic-b
 ```
 
 Output is `true`, `false`, `0`, `21`, `library`, `42`, `7`, followed by four lines of `box destroyed`. It demonstrates shared generic bodies, two field types, defaults, reflection through concrete wrappers, and cleanup of four objects. The [single-file example](../compiler/examples/generics-reflection.azs) also shows a generic member method and reflection inside a generic function.
+
+## Buffers and operator entries
+
+Class operator declarations are shared like ordinary extern methods, including class type arguments. Implement them outside the class in hint libraries, for example `T Box<T>::operator[](int index):0003 { ... }`. Getter and setter use separate IDs; no runtime operator table is emitted. Concrete buffer and class arguments retain source type checks but both erase to OBJECT_VALUE. A generic comparator may dispatch an ordinary script function with reflect_invoke_function, without native callbacks or initialization dependencies.
+
+Operation contexts now carry direct slot width, an optional internal placement-constructor ID and child contexts, and a buffer element context. flush recursively validates and atomically relocates both factory and placement references; hidden context counts and `void(address)` placement signatures must match. Buffer growth can therefore initialize class elements using the implementation module’s globals and constructor prefix. Empty buffers and copies do not require a default constructor.
+
+Snapshot v9 saves buffer length/capacity, element contexts, live element/view IDs and captured destructors. It stores fields once, rebuilds continuous slabs/views, and remaps saved addresses before atomic replacement. In addition to the file/depth limits, cumulative buffer capacity times stride per snapshot is limited to 1,048,576 slots; save or restore beyond this budget fails. Host-held addresses must be reacquired after restoration or buffer growth. JNI still cannot directly pass OBJECT_VALUE; expose ordinary wrappers that consume and return supported host values.

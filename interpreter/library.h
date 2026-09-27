@@ -22,8 +22,12 @@ using type_contexts=std::vector<std::shared_ptr<const type_context>>;
 // Bound generic operations contain no frame pointers and can outlive a call.
 struct type_context {
     int abi=VOID_VALUE,kind=0;
+    int width=1;
     std::optional<int> factory_id;
     type_contexts contexts;
+    std::optional<int> placement_id;
+    type_contexts placement_contexts;
+    std::shared_ptr<const type_context> element;
 };
 struct context_spec;
 struct function_signature {
@@ -198,6 +202,7 @@ public:
 };
 class variable {
 public:
+    variable()=default;
     std::string name;
     char type=VOID_VALUE;
     void* value=nullptr;

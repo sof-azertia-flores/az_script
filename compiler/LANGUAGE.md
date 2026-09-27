@@ -113,7 +113,7 @@ void main() {
 }                                   // 依次输出 5、4、3
 ```
 
-`class` 只能在顶层声明。字段必须标注基础类型、类名（字面量对象）或 `类名 *`（指针），按声明顺序各占一个 slot；没有隐藏对象头。包含继承字段在内仍然零字段的类被拒绝。构造方法与类同名且没有返回类型；不声明构造时合成无参构造，声明带参构造后不会额外合成无参构造。析构为可选的 `~ClassName()`，无参数且不能返回值或直接调用。所有成员公开，支持单继承；不支持多继承、虚函数、动态派发、重载、静态成员或嵌套类。
+`class` 只能在顶层声明。字段必须标注基础类型、类名（字面量对象）、`类名 *`（指针）或 `buffer<T>`，按声明顺序各占一个 slot；没有隐藏对象头。包含继承字段在内仍然零字段的类被拒绝。构造方法与类同名且没有返回类型；不声明构造时合成无参构造，声明带参构造后不会额外合成无参构造。析构为可选的 `~ClassName()`，无参数且不能返回值或直接调用。所有成员公开，支持单继承；不支持多继承、虚函数、动态派发、普通函数重载、静态成员或嵌套类。
 
 对象有三种写法：
 
@@ -126,7 +126,7 @@ void main() {
 
 字面量对象按值使用：初始化、赋值、传参和返回都会复制全部 slots，字段中的字面量对象递归复制，指针字段只复制地址。每个副本都是独立对象，到期时各自运行析构。赋值 `a = b` 原地逐字段复制，`a` 的地址不变。指针 `C * y = x;`、指针赋值和传参只复制地址，对象变量重赋值不改变先前创建对象的清理责任。单写 `C * p;` 与 `C * p = null;` 完全相同，声明一个空指针，不构造对象，也不负责清理之后赋给它的对象。
 
-值类型 `C` 与指针类型 `C *` 是不同的类型，不做隐式转换；`null` 只能赋给指针或 address。字面量对象不能比较、不能参与算术，也不能放进无类型位置：`var`、`def`、`#gvar` 全局、无类型参数、`print` 以及 `mem_get(p) = …` 都会编译失败；需要长期保存的对象请使用指针。结构等价的字面量对象之间可以赋值，但两者的清理析构必须相同；派生类的值不能赋给父类的值（不做切片），上转型只用于指针。两种对象都用 `.` 访问成员。只有带显式类类型的变量、参数、字段及返回值能访问成员：`var p = new C(); p.method();` 会因 `p` 是动态 `any` 而失败，需写 `C * p = new C();`。
+值类型 `C` 与指针类型 `C *` 是不同的类型，不做隐式转换；`null` 只能赋给指针或 address。字面量对象不能直接比较，算术需声明运算符，也不能放进无类型位置：`var`、`def`、`#gvar` 全局、无类型参数、`print` 以及 `mem_get(p) = …` 都会编译失败；需要长期保存的对象请使用指针。结构等价的字面量对象之间可以赋值，但两者的清理析构必须相同；派生类的值不能赋给父类的值（不做切片），上转型只用于指针。两种对象都用 `.` 访问成员。只有带显式类类型的变量、参数、字段及返回值能访问成员：`var p = new C(); p.method();` 会因 `p` 是动态 `any` 而失败，需写 `C * p = new C();`。
 
 参数可以写成 `C (*) p`（`C(*) p` 亦可），表示这个函数同时接受 `C *` 指针和 `C` 字面量对象：
 
@@ -316,7 +316,7 @@ extern int host_add(int, int):0xccf0001;
 
 ## 泛型
 
-泛型类、函数及成员方法使用类型参数，共享一份编译后的正文；不同类型实参不分配新的公开函数 ID。类型参数代表完整类型，可传基础类型、`address`、类值、类指针和参数化类，不接受 `void`、`any` 或参数专用的 `C(*)`。
+泛型类、函数及成员方法使用类型参数，共享一份编译后的正文；不同类型实参不分配新的公开函数 ID。类型参数代表完整类型，可传基础类型、`address`、类值、类指针、参数化类和 `buffer<T>`，不接受 `void`、`any` 或参数专用的 `C(*)`。
 
 ```cpp
 class Box<T> {
@@ -342,6 +342,53 @@ void main() {
 继承写作 `class Child<A,B> : Base<B>`。类外实现写作 `T Box<T>::get()`，类参数自动进入作用域且名称须与声明一致；泛型方法写作 `<U> U Box<T>::echo(U value)`。extern 写作 `extern <U> U identity(U value):abcd0002;`；声明与定义按参数位置及上界匹配，允许类型参数名称不同。构造和析构使用所属类的类型参数，不声明额外类型参数。hint 库继续在类外实现，见 [泛型共享库](../docs/HINT_LINKING.md)。
 
 执行时仅携带不可变的类型操作上下文：ABI 标签、返回类别、可选默认工厂及其绑定上下文，不包含类名或字段布局，不是新的 AZS 值类型，也不占用户参数或字段 slots。类参数在前、方法参数在后，`this` 仍在普通参数槽 0。对象登记保留析构所需上下文，复制、移动、返回、delete、错误清理及快照恢复都保留正确绑定。`T=address` 普通返回不转移对象所有权；`T=C*` 按对象返回规则处理，`T=C` 按现有类值规则复制或移交。
+
+## 拥有型内联缓冲区
+
+`buffer<T>` 是编译器内建的拥有型值，可用于局部变量、字段、参数、返回值及泛型实参。必须明确写出元素类型；不变性要求元素类型完全相同。默认值是长度和容量均为零的空缓冲区，不要求 T 有无参构造。不能声明 `buffer<T>*`、继承 buffer，或对它使用 new/delete；也不能放进 var/def 或原始 mem_get 存储。
+
+```cpp
+buffer<int> values;
+values.reserve(4);
+values.push(7);
+values.resize(3);             // 新增两个零值
+values.set(1, 9);
+int first = values.get(0);
+buffer<int> copy = values;    // 独立的深复制，保留容量
+copy.set(0, 11);
+```
+
+成员 `length()` 和 `capacity()` 返回 int；`reserve(int)`、`set(int,T)`、`push(T)`、`resize(int)` 返回 void；`get(int)` 按值返回 T。它们借用接收者而不复制整个缓冲区，接收者和实参从左到右各求值一次。reserve 只在请求容量大于当前容量时扩容到请求值，不构造空余元素，也不倍增。push 和增长的 resize 要求容量已经足够；负数、越界和容量不足报运行错误。此版本内建 buffer 仅通过 get/set 访问元素，下标语法用于下面的类运算符。
+
+复制、传参和普通返回遵守拥有值规则，临时值和当前调用拥有的返回值可移交。类字段中的 buffer、多层 `buffer<buffer<T>>` 及 buffer 中的类值都深复制；类指针元素只复制地址，不拥有目标。无无参构造的类型仍可 reserve、push 已有值和缩短；只有 resize 实际增长时才要求默认构造能力。
+
+底层按容量分配连续 slots。标量、address、类指针和 buffer 元素的步长为 1；类值步长是含继承字段的直接字段数 N，第 i 个元素占 `[i*N,(i+1)*N)`。类字段里的嵌套值仍独立存储，不承诺 C++ 原生结构体的字节布局。每个类元素具有独立对象视图 ID；扩容、删除元素及整体替换使相关旧地址失效，不公开可用基址算出所有元素的指针。reserve 迁移不调用用户构造/析构，也不修复字段里保存的旧地址。
+
+reserve 失败保留旧存储；push 失败保留长度；resize 增长失败逆序回滚本次新增元素。缩短和整体销毁逆序清理，析构失败仍回收其余元素，保留原错误或首个清理错误。set 使用逐字段赋值的基本异常保证。整体赋值先准备候选值，再清理旧内容并切换；旧析构报错仍完成切换后传播错误；若析构回调已销毁目标对象，则清理候选并停止，不写回失效存储。操作期间禁止重入修改，销毁请求延迟到操作退出，并使外层操作停止；执行预算耗尽也会完成必要底层释放。每块容量乘步长不得超过 1,048,576 slots，拥有值嵌套最多 64 层。
+
+## 默认比较与类运算符
+
+`value_compare<T>(left,right)` 要求一个显式类型实参，返回 -1、0 或 1。int 比较不通过相减；float/double 拒绝非有限值且正负零相等；string 按无符号 UTF-8 字节字典序比较，包含内嵌零字节；bool 为 false < true；address 和类指针按无符号地址比较。具体类值和 buffer 不提供默认比较，已知类型时报编译错误；泛型 T 可以传给它，在实际类型不支持时才报运行错误。自定义顺序可用普通 AZS 比较函数和 `reflect_invoke_function<int>(compareId,left,right)`，沿用反射边界，类值实参仍按值传递。
+
+```cpp
+class Number {
+    int value;
+    Number(int n) { value = n; }
+    Number operator+(Number rhs) {
+        Number result(value + rhs.value);
+        return result;
+    }
+    int operator[](string key) { return value; }
+    void operator[]=(string key, int next) { value = next; }
+    int operator()(int scale) { return value * scale; }
+}
+```
+
+支持二元 `+ - * /`、下标 getter `operator[]`、setter `operator[]=` 和调用 `operator()`，每类每种入口只能有一个签名。声明可以是 extern，也可在类外实现，如 `int Number::operator()(int scale) { return value * scale; }`；可使用所属类的泛型参数，运算符自身不能再声明方法类型参数。它们全部降为带隐式 this 的普通成员调用，exec 不保存运算符表。
+
+算术只查找左侧类值的入口；下标和调用也接受类指针。遵守现有继承及静态成员查找，无右侧反向查找、隐式转换或普通函数重载。getter 恰好一个键参数，键类型不限；setter 可省略，否则须与 getter 使用相同键类型、第二个参数与 getter 返回类型相同且返回 void。`x[key] = value` 依次求值接收者、键、右值，各一次；下标复合赋值不支持。
+
+getter 返回类值或 buffer 时得到副本，不能通过该副本继续写入，例如 `matrix[i][j] = x`、`items[i].field = x` 或 `items.get(i).field = x`。应先读到明确类型的局部变量，修改后通过 setter/set 写回；getter 返回指针时继续按正常指针规则访问。无界 T 仍不开放任意算术或调用，只有已知参数化类或上界提供对应入口时才能解析。
 
 ## 按函数 ID 反射与 hint 查询
 
@@ -374,7 +421,9 @@ int functionId(int ns, int position) {
 
 可读 AST 保持 `metadata/ext/abstract/global-variable/body` 结构，并为带签名的宿主函数增加 `extern-signatures`。类程序额外保存类定义、字段顺序和成员表达式等编译信息；`compile-json` 会重新执行类型检查与降级。AST 还保存模块 hint、assume、外部声明、定义名称与实际定义编号；调用绑定与定义位置分开，支持完全相同的 ABD 往返。`abstract` 是 extern 优先的源码名称绑定：有 extern 时保存声明 ID，否则保存定义 ID；hint 库的本地定义仍使用 0000 占位，实际调用的 self-assume 地址在降级时生成。函数定义的独立位置由 `body` 的 namespace 和 `metadata.position/name` 保存；每个签名另保存 `return-type` 与 `param-types`。表达式对象有 `t: "ctrl" | "call"`、`call`、`param`，块是数组；`_line/_column` 仅用于诊断，不写入 ABD 指令。
 
-新生成的 exec/ABD 使用 `exec-version: 8`，与源码元数据的 `version` 分开。所有控制指令的 `c` 都为数字；可读 AST 仍保留源码名称、类型和操作名。下表是 exec JSON 检查视图，实际 ABD 的字段顺序及类型见 [Exec v8 二进制格式](../docs/EXEC_FORMAT.md)。
+可读类 AST 保存 `operators` 映射及方法的 `operator-kind`，下标读写和后缀调用使用 `index`、`index-set`、`invoke` 节点，空 buffer 使用 `buffer-new`。compile-json 重新检查类型和降级，保持 ABD 字节一致。
+
+新生成的 exec/ABD 使用 `exec-version: 9`，与源码元数据的 `version` 分开。所有控制指令的 `c` 都为数字；可读 AST 仍保留源码名称、类型和操作名。下表是 exec JSON 检查视图，实际 ABD 的字段顺序及类型见 [Exec v9 二进制格式](../docs/EXEC_FORMAT.md)。
 
 | exec JSON 指令 | 字段 |
 | --- | --- |
@@ -400,9 +449,12 @@ int functionId(int ns, int position) {
 | 移出对象 `c=34`（mv） | `v` 局部或参数槽号；编译器内部用于把参数中的对象转交构造，不再复制 |
 | 结束对象 `c=35`（drop） | `v` 变量或 `mem_get` 目标；运行该存储中对象的析构并结束它 |
 | 上下文 ABI `c=36`（context_abi） | `context`；返回实际 ABI 编号 |
-| 默认值 `c=37`（context_default） | `context`；默认标量或调用绑定的类值工厂 |
+| 默认值 `c=37`（context_default） | `context`；默认标量、空 buffer 或调用绑定的类值工厂 |
 | 泛型返回 `c=38`（return_typed） | `v`, `context`；检查实际标签并按类别返回 |
 | 类型检查 `c=39`（check_type） | `v`, `context`；检查标签，表达式只求值一次 |
+| 空 buffer `c=40`（buffer_new） | `context` 元素操作上下文 |
+| buffer 操作 `c=41`（buffer_op） | `op`, `v`, `args`；操作 0…6 为 length/capacity/reserve/get/set/push/resize |
+| 默认比较 `c=42`（value_compare） | `context`, `v1`, `v2` |
 
 根、函数、签名和表达式记录都使用裸 `AbdStack`；每个字段本身有长度边界，固定记录不保存键名和已知的类型标签。函数列表、参数类型列表、参数表达式和块内语句也都是裸 stack。常量的实际类型不固定，使用单元素 `AbdArray` 保留 int/float/double/bool/string/void/address 标签；扩展元数据仍使用 `AbdMap`。JSON 中的裸常量和块数组在二进制中分别使用 opcode 0 和 1。Java 调用 `Compiler.compile()` 得到的 `ExecProgram` 可继续作为 `AcsObject` 检查，`toValue()` 输出新 wire 格式；从执行文件恢复检查视图使用 `ExecCodec.decode()`，不再直接把根当作 `AcsObject` 解码。
 
@@ -410,7 +462,7 @@ int functionId(int ns, int position) {
 
 函数检查视图包含 `id/return-type/script/param-count/param-types/local-count/hidden-count/entry-kind`；`local-count` 只计局部和临时槽，不包含参数。每次调用创建独立槽数组，递归和宿主重入不共享局部值。块退出仍按原规则清理对象，并清空该块声明的局部槽，循环下次进入时重新初始化。全局槽总数及单次调用的参数加局部槽数量均不能超过 1,048,576；无效编号、跨越所属模块全局范围及未声明/已退出作用域的访问会被拒绝。
 
-未声明类型的脚本参数在元数据中使用内部 `any` 类型；无界类型参数也擦除为 any，但只有泛型隐藏上下文非空时才允许 any 返回和 extern any 参数。`entry-kind` 为 0 表示普通入口，1 表示内部入口；上下文不占变量槽。AST 额外保存 `type-parameters`、上界、参数化类型字符串和显式 `type-args`。`param-types` 和 `return-type` 保留供直接 C++/JNI 调用的类型检查；根的 `extern-signatures` 保存宿主边界签名。解释器仅接受 exec v8 裸 stack 文件，不再读取 v7 等旧版本或旧 Map 文件；源码或可读 AST 应重新编译。不识别的版本、opcode、额外/缺失字段、错误字段宽度或超过 128 层的结构在加载时拒绝。JNI 快照版本与 exec 版本独立，本次为 v8。
+未声明类型的脚本参数在元数据中使用内部 `any` 类型；无界类型参数也擦除为 any，但只有泛型隐藏上下文非空时才允许 any 返回和 extern any 参数。`entry-kind` 为 0 表示普通入口，1 表示内部入口；上下文不占变量槽。AST 额外保存 `type-parameters`、上界、参数化类型字符串和显式 `type-args`。`param-types` 和 `return-type` 保留供直接 C++/JNI 调用的类型检查；根的 `extern-signatures` 保存宿主边界签名。解释器仅接受 exec v9 裸 stack 文件，不再读取 v8 等旧版本或旧 Map 文件；源码或可读 AST 应重新编译。不识别的版本、opcode、额外/缺失字段、错误字段宽度或超过 128 层的结构在加载时拒绝。JNI 快照版本与 exec 版本独立，本次为 v9。
 
 ### insert 与模块全局偏移
 
@@ -420,7 +472,7 @@ int functionId(int ns, int position) {
 
 装载及 insert 只装配，不执行 onload。宿主必须在调用之前显式 `flush()`；成功 insert 会使 `setup=false`，需要再次 flush。链接先完整验证再原子修正调用和析构引用，失败可补库重试；依赖先初始化，循环依赖内按装载顺序。onload 失败后只能关闭重建。关闭按已成功初始化顺序的逆序执行 pre-destroy，再清理全局对象。
 
-类指针在 ABD 中擦除为 address，类型编号为 7；字面量对象的类型编号为 8；int32 仍为 0，动态 any 仍为 6。地址常量使用 `0xce200b` 标签、8 字节无符号小端值，exec JSON 视图为 `{"address":"无符号十进制"}`；例如 null 是 `{"address":"0"}`。只有对象返回指令按实际所有权转移对象，普通 address 或整数返回不转移。JNI v8 快照保存有序模块身份（原始字节、实际 namespace、hint、全局布局）、全局槽、堆（含字段中的字面量对象）和对象清理责任，仅可在已完成初始化且无执行中的状态保存和恢复。恢复先完整校验再原子替换，不重链接或调用旧对象析构；旧 exec 和快照不兼容，须重新编译全部模块；旧源码中用 int 保存的堆地址须改为 address。
+类指针在 ABD 中擦除为 address，类型编号为 7；字面量对象的类型编号为 8；int32 仍为 0，动态 any 仍为 6。地址常量使用 `0xce200b` 标签、8 字节无符号小端值，exec JSON 视图为 `{"address":"无符号十进制"}`；例如 null 是 `{"address":"0"}`。只有对象返回指令按实际所有权转移对象，普通 address 或整数返回不转移。JNI v9 快照保存有序模块身份（原始字节、实际 namespace、hint、全局布局）、全局槽、堆（含字段中的字面量对象）和对象清理责任，仅可在已完成初始化且无执行中的状态保存和恢复。恢复先完整校验再原子替换，不重链接或调用旧对象析构；旧 exec 和快照不兼容，须重新编译全部模块；旧源码中用 int 保存的堆地址须改为 address。
 
 ## 修复验证与打包
 

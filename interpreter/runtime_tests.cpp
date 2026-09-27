@@ -121,7 +121,7 @@ R rfn(int id,int type,R body,int locals=0,std::initializer_list<int> params={}){
     return raw({ri(id),ri(type),ri(static_cast<int>(params.size())),ri(locals),types.toAbdValue(),body,ri(0),ri(0)});
 }
 R rmodule(std::initializer_list<R> functions,int globals=0,R signatures=nullptr){
-    return raw({rs("AZSCRIPT"),ri(8),ri(1),rs("test"),ri(globals),std::make_shared<AbdMap>()->toAbdValue(),signatures?signatures:raw({}),raw(functions),rs(""),raw({})});
+    return raw({rs("AZSCRIPT"),ri(9),ri(1),rs("test"),ri(globals),std::make_shared<AbdMap>()->toAbdValue(),signatures?signatures:raw({}),raw(functions),rs(""),raw({})});
 }
 R replace_raw(R value,std::size_t field,R replacement){AbdStack fields(value);fields.vs.at(field)=std::move(replacement);return fields.toAbdValue();}
 R append_raw(R value,R extra){AbdStack fields(value);fields.vs.push_back(std::move(extra));return fields.toAbdValue();}
@@ -147,8 +147,8 @@ R rset(int slot,R value){return rx(5,{ri(slot),value});}
 R rdef(int slot,R value){return rx(4,{ri(slot),ri(ANY_VALUE),rb(true),value});}
 R cref(int index){return raw({ri(0),ri(index)});}
 R cfixed(int abi,int kind,std::optional<int> factory={},std::initializer_list<R> contexts={}) {
-    AbdStack result;result.vs={ri(1),ri(abi),ri(kind),rb(factory.has_value())};
-    if(factory)result.vs.push_back(ri(*factory));result.vs.push_back(raw(contexts));return result.toAbdValue();
+    AbdStack result;result.vs={ri(1),ri(abi),ri(kind),ri(1),rb(factory.has_value())};
+    if(factory)result.vs.push_back(ri(*factory));result.vs.push_back(raw(contexts));result.vs.push_back(rb(false));result.vs.push_back(raw({}));result.vs.push_back(rb(false));return result.toAbdValue();
 }
 R gfn(int id,int type,R body,int hidden,int locals=0,std::initializer_list<int> params={},int entry=0) {
     return replace_raw(replace_raw(rfn(id,type,body,locals,params),6,ri(hidden)),7,ri(entry));
@@ -166,7 +166,7 @@ std::shared_ptr<script> load_raw(R value,bool ready=true){
 }
 void insert_raw(const std::shared_ptr<script>& target,R value,bool ready=true){auto bytes=value->toBytes();target->insert_script(bytes.get(),value->size+4);if(ready)target->flush();}
 // Test fixture authoring retains readable names; only this test encoder resolves
-// them to slots. The interpreter is always given the public raw v8 format.
+// them to slots. The interpreter is always given the public raw v9 format.
 int fixture_int(MV value){auto p=std::dynamic_pointer_cast<IntAbdValue>(value);if(!p)throw std::invalid_argument("fixture requires int");return p->data;}
 std::string fixture_string(MV value){auto p=std::dynamic_pointer_cast<StringAbdValue>(value);if(!p)throw std::invalid_argument("fixture requires string");return p->data;}
 A fixture_array(MV value){auto p=std::dynamic_pointer_cast<AbdArray>(value);if(!p)throw std::invalid_argument("fixture requires array");return p;}
@@ -258,7 +258,7 @@ R encode_fixture(M source) {
         const int locals=numbered?fixture_int(entry->get("local-count")):encoder.next-params;
         functions.vs.push_back(raw({entry->get("id")->toAbdValue(),entry->get("return-type")->toAbdValue(),ri(params),ri(locals),types.toAbdValue(),body,ri(0),ri(0)}));
     }
-    return raw({rs("AZSCRIPT"),ri(8),ri(1),rs("fixture"),ri(global_count),std::make_shared<AbdMap>()->toAbdValue(),signatures.toAbdValue(),functions.toAbdValue(),rs(""),raw({})});
+    return raw({rs("AZSCRIPT"),ri(9),ri(1),rs("fixture"),ri(global_count),std::make_shared<AbdMap>()->toAbdValue(),signatures.toAbdValue(),functions.toAbdValue(),rs(""),raw({})});
 }
 void fixture_names(const std::shared_ptr<script>& target,M source,std::size_t offset=0) {
     if(source->get("exec-version"))return;
@@ -295,7 +295,235 @@ public:
     explicit registered_executor(std::shared_ptr<executor> value):ns(value->namespace_name()) {registerExecutor(std::move(value));}
     ~registered_executor(){unregisterExecutor(ns);}
 };
+R bnew(R context){return rx(40,{context});}
+R bop(int operation,R receiver,std::initializer_list<R> args={}){return rx(41,{ri(operation),receiver,raw(args)});}
+R class_context(int width,int placement,std::initializer_list<R> contexts={}) {
+    return raw({ri(1),ri(OBJECT_VALUE),ri(3),ri(width),rb(false),raw({}),rb(true),ri(placement),raw(contexts),rb(false)});
+}
+R buffer_context(R element){return raw({ri(1),ri(OBJECT_VALUE),ri(4),ri(1),rb(false),raw({}),rb(false),raw({}),rb(true),element});}
+void buffer_tests() {
+    auto ci=cfixed(INT_VALUE,0);auto cb=buffer_context(ci);auto cc=class_context(2,500);
+    auto slot_at=[](R base,int offset){return rcall(0x0abd0006,{rx(9,{base,ri(offset)})});};
+    auto assign=[](R left,R right){return rx(6,{left,right});};
+    auto bind=[](int dtor){return rx(10,{rvar(0),rb(true),ri(dtor),rb(false),raw({})});};
+    auto program=load_raw(rmodule({
+        rfn(0,VOID_VALUE,rblock({rset(-1,rc(n(0))),rset(-2,rc(n(0)))})),
+        gfn(500,VOID_VALUE,rblock({assign(slot_at(rvar(0),0),rc(n(7))),assign(slot_at(rvar(0),1),rc(s("field"))),bind(501)}),0,0,{ADDRESS_VALUE},1),
+        gfn(501,VOID_VALUE,rset(-1,rx(12,{rvar(-1),rc(n(1))})),0,0,{ADDRESS_VALUE},1),
+        gfn(502,VOID_VALUE,rblock({assign(slot_at(rvar(0),0),rc(n(7))),rx(15,{rc(n(1)),rc(n(0))})}),0,0,{ADDRESS_VALUE},1),
+        gfn(503,VOID_VALUE,rblock({rset(-1,rx(12,{rvar(-1),rc(n(1))})),rx(15,{rc(n(1)),rc(n(0))})}),0,0,{ADDRESS_VALUE},1),
+        gfn(504,VOID_VALUE,rblock({assign(slot_at(rvar(0),0),rc(n(7))),assign(slot_at(rvar(0),1),rc(s("field"))),bind(503)}),0,0,{ADDRESS_VALUE},1),
+        gfn(505,VOID_VALUE,rblock({assign(slot_at(rvar(0),0),rc(n(7))),assign(slot_at(rvar(0),1),bnew(ci)),bind(501)}),0,0,{ADDRESS_VALUE},1),
+        rfn(10,INT_VALUE,rblock({rdef(0,bnew(ci)),bop(2,rvar(0),{rc(n(4))}),bop(5,rvar(0),{rc(n(7))}),
+            bop(4,rvar(0),{rc(n(0)),rc(n(9))}),rreturn(bop(3,rvar(0),{rc(n(0))}))}),1),
+        rfn(11,OBJECT_VALUE,rblock({rdef(0,bnew(cc)),bop(2,rvar(0),{rc(n(2))}),bop(6,rvar(0),{rc(n(2))}),rreturn(rvar(0))}),1),
+        gfn(12,ANY_VALUE,greturn(rvar(0),cref(0)),1,0,{ANY_VALUE}),
+        rfn(13,INT_VALUE,rblock({rdef(0,bnew(ci)),bop(2,rvar(0),{rc(n(2))}),bop(5,rvar(0),{rc(n(42))}),
+            rdef(1,gcall(12,{rvar(0)},{cb})),bop(4,rvar(1),{rc(n(0)),rc(n(9))}),rreturn(bop(3,rvar(0),{rc(n(0))}))}),2),
+        rfn(14,VOID_VALUE,rblock({rdef(0,bnew(ci)),bop(2,rvar(0),{rc(n(100))})}),1),
+        rfn(17,VOID_VALUE,rblock({rdef(0,bnew(cc)),bop(2,rvar(0),{rc(n(1))}),rdef(1,rx(32,{ri(2)})),
+            rcall(500,{rx(33,{rvar(1)})}),bop(5,rvar(0),{rvar(1)})}),2),
+        rfn(18,ADDRESS_VALUE,rblock({rdef(0,bnew(ci)),rreturn(rx(33,{rvar(0)}))}),1),
+        rfn(15,INT_VALUE,rreturn(rx(42,{ci,rc(n(4)),rc(n(9))}))),
+        rfn(16,INT_VALUE,rreturn(rx(42,{cfixed(STRING_VALUE,0),rc(s(std::string("a\0b",3))),rc(s(std::string("a\0c",3)))})))
+    },2));
+    check(integer(program->invoke(10))==9,"buffer operations borrow their receiver instead of copying it");
+    check(integer(program->invoke(13))==42,"generic buffer parameters and return preserve deep value semantics");
+    check(integer(program->invoke(15))==-1&&integer(program->invoke(16))==-1,"value_compare executes via v9 wire");
+    rejects_containing([&]{program->invoke(18);},"requires a class value","block_address cannot expose a buffer address");
+    program->invoke(17);check(integer(program->baseEnv->getVariable(-1))==2,
+        "push relocates its materialized class argument without an extra copied temporary destructor");
+    auto int_context=std::make_shared<type_context>();int_context->abi=INT_VALUE;
+    auto type=std::make_shared<type_context>();type->abi=OBJECT_VALUE;type->kind=3;type->width=2;type->placement_id=500;
+    auto b=blocks::create_buffer(type,program);auto env=program->baseEnv;
+    const auto number=[](int i){return std::make_shared<variable>(i);};
+    const auto operation=[&](int op,const std::shared_ptr<slot_block>& receiver,std::initializer_list<V> values={}) {
+        return blocks::buffer_operation(op,receiver,values,env);
+    };
+    check(integer(operation(0,b))==0&&integer(operation(1,b))==0,"default buffer is empty with no slab");
+    operation(2,b,{number(3)});operation(6,b,{number(2)});blocks::validate_buffer(b);
+    auto first=blocks::of(b->slots[0]),second=blocks::of(b->slots[1]);
+    check(first->is_view&&second->is_view&&first->slots[0].get()==&b->buffer->slab[0]&&
+          second->slots[0].get()==&b->buffer->slab[2],"class fields occupy consecutive regions of one variable slab");
+    check(first->id!=second->id&&integer(first->slots[0])==7,"inline views have distinct object identities and placement construction");
+    rejects_containing([&]{heap::getAt(blocks::address_of(b));},"raw slot storage","raw access cannot expose an initialized buffer element");
+    rejects_containing([&]{heap::getAt(blocks::address_of(b,2));},"raw slot storage","raw access cannot initialize unused buffer capacity");
+    auto field=heap::getAt(blocks::address_of(first));field->setValue(21);
+    check(field==first->slots[0]&&integer(first->slots[0])==21,"raw access still reaches fields within a class element view");
+    field->setValue(7);
+    const auto expired=blocks::address_of(first);const int before=integer(env->getVariable(-1));
+    operation(2,b,{number(8)});
+    rejects([&]{blocks::resolve(expired);},"reserve invalidates old element view addresses");
+    check(integer(env->getVariable(-1))==before&&integer(blocks::of(b->slots[0])->slots[0])==7,
+          "reserve migrates initialized fields without executing constructors or destructors");
+    auto copied=blocks::copy(b);blocks::of(copied->slots[0])->slots[0]->setValue(91);
+    check(integer(blocks::of(b->slots[0])->slots[0])==7&&copied->buffer->capacity==8,"buffer copy owns a separate slab and preserves capacity");
+    auto got=operation(3,b,{number(0)});blocks::of(got)->slots[0]->setValue(88);
+    check(integer(blocks::of(b->slots[0])->slots[0])==7&&!blocks::of(got)->is_view,"buffer get exports an independent object value");
+    blocks::finalize(blocks::of(got),env,true);
+    auto holder=std::make_shared<variable>(copied);copied->owner=holder.get();
+    blocks::store(holder,std::make_shared<variable>(b),env);
+    check(copied->state==slot_block::status::dead&&blocks::of(holder)->buffer->length==2,"buffer assignment replaces ownership and finalizes old elements");
+    blocks::finalize(blocks::of(holder),env,true);blocks::finalize(b,env,true);
+    check(integer(env->getVariable(-1))==before+7,"inline buffer copies and replacements each finalize exactly once");
+    auto absent=std::make_shared<type_context>(*type);absent->placement_id.reset();
+    auto no_default=blocks::create_buffer(absent,program);operation(2,no_default,{number(1)});
+    rejects_containing([&]{operation(6,no_default,{number(1)});},"no default constructor","resize requires default construction only when growing");
+    auto existing=blocks::create(2,program);existing->slots[0]->setValue(55);existing->slots[1]->setValue("ok");existing->destructor=501;
+    operation(5,no_default,{std::make_shared<variable>(existing)});
+    check(integer(blocks::of(no_default->slots[0])->slots[0])==55,"push accepts a class without a default constructor");
+    blocks::finalize(no_default,env,true);blocks::abandon(existing);
+    auto failing_type=std::make_shared<type_context>(*type);failing_type->placement_id=502;
+    auto failing=blocks::create_buffer(failing_type,program);operation(2,failing,{number(2)});
+    const int failure_count=integer(env->getVariable(-1));
+    rejects_containing([&]{operation(6,failing,{number(2)});},"Division by zero","failed placement preserves its original error");
+    check(failing->buffer->length==0&&failing->slots[0]->type==VOID_VALUE&&integer(env->getVariable(-1))==failure_count,
+          "failed construction does not call the incomplete element destructor");
+    blocks::finalize(failing,env,true);
+    auto throwing_type=std::make_shared<type_context>(*type);throwing_type->placement_id=504;
+    auto throwing=blocks::create_buffer(throwing_type,program);operation(2,throwing,{number(3)});operation(6,throwing,{number(3)});
+    const int clear_count=integer(env->getVariable(-1));
+    rejects_containing([&]{operation(6,throwing,{number(0)});},"Division by zero","buffer clear reports the first destructor failure");
+    check(throwing->buffer->length==0&&integer(env->getVariable(-1))==clear_count+3,"buffer clear continues after every destructor failure");
+    blocks::finalize(throwing,env,true);
+    auto nested_type=std::make_shared<type_context>();nested_type->abi=OBJECT_VALUE;nested_type->kind=4;nested_type->element=int_context;
+    auto nested=blocks::create_buffer(nested_type,program);operation(2,nested,{number(2)});operation(6,nested,{number(1)});
+    auto inner=blocks::of(nested->slots[0]);operation(2,inner,{number(2)});operation(5,inner,{number(13)});
+    auto nested_copy=blocks::copy(nested);operation(4,blocks::of(nested_copy->slots[0]),{number(0),number(99)});
+    check(integer(inner->slots[0])==13,"nested owning buffers are copied recursively");
+    blocks::finalize(nested_copy,env,true);blocks::finalize(nested,env,true);
+    auto nested_class_type=std::make_shared<type_context>(*type);nested_class_type->placement_id=505;
+    auto nested_class=blocks::create_buffer(nested_class_type,program);operation(2,nested_class,{number(1)});operation(6,nested_class,{number(1)});
+    auto root=blocks::of(nested_class->slots[0]);auto child=blocks::of(root->slots[1]);operation(2,child,{number(1)});operation(5,child,{number(5)});
+    auto root_copy=blocks::copy(root);auto target=std::make_shared<variable>(root_copy);root_copy->owner=target.get();
+    blocks::store(target,std::make_shared<variable>(root),env);
+    check(integer(blocks::of(root_copy->slots[1])->slots[0])==5,"ordinary class assignment recursively assigns owning buffer fields");
+    blocks::finalize(root_copy,env,true);blocks::finalize(nested_class,env,true);
+    auto returned=program->invoke(11);check(blocks::of(returned)->buffer->length==2,"buffer return transfers the live slab before local cleanup");
+    blocks::finalize(blocks::of(returned),env,true);
+    program->max_steps=20;
+    rejects_containing([&]{program->invoke(14);},"step limit","reserve charges work before changing the live buffer");
+    program->max_steps=1000000;
+    auto floating=std::make_shared<type_context>();floating->abi=DOUBLE_VALUE;
+    rejects_containing([&]{blocks::compare_value(floating,std::make_shared<variable>(std::numeric_limits<double>::quiet_NaN()),std::make_shared<variable>(0.0),env);},"non-finite","compare rejects NaN");
+    rejects_containing([&]{blocks::compare_value(floating,std::make_shared<variable>(std::numeric_limits<double>::infinity()),std::make_shared<variable>(0.0),env);},"non-finite","compare rejects infinity");
+    check(blocks::compare_value(floating,std::make_shared<variable>(-0.0),std::make_shared<variable>(0.0),env)==0,"compare treats both finite zeros equally");
+    rejects([&]{blocks::compare_value(type,returned,returned,env);},"class and buffer require custom comparison");
+    {
+        constexpr int callback_id=0x6cde0002;
+        auto callback=std::make_shared<test_executor>(0x6cde);int mode=0;std::shared_ptr<slot_block> active;V outer_storage;
+        callback->functions[callback_id]=std::make_shared<test_function>(VOID_VALUE,[&](const std::vector<V>&) {
+            if(mode==0)rejects_containing([&]{operation(2,active,{number(10)});},"active operation","constructor cannot reenter the same buffer mutation");
+            else {
+                blocks::drop(outer_storage,env);
+                check(active->pending_finalize&&active->buffer->slab!=nullptr,"dropping an enclosing owner defers pinned slab destruction");
+            }
+            return std::make_shared<variable>(nullptr);
+        });
+        registered_executor registered(callback);
+        insert_raw(program,rmodule({gfn(706,VOID_VALUE,rblock({rcall(callback_id),assign(slot_at(rvar(0),0),rc(n(1))),
+            assign(slot_at(rvar(0),1),rc(s("pinned"))),bind(501)}),0,0,{ADDRESS_VALUE},1)}));
+        auto reentrant_type=std::make_shared<type_context>(*type);reentrant_type->placement_id=706;
+        active=blocks::create_buffer(reentrant_type,program);operation(2,active,{number(1)});operation(6,active,{number(1)});
+        check(active->buffer->length==1,"caught reentry does not corrupt successful placement");blocks::finalize(active,env,true);
+        mode=1;active=blocks::create_buffer(reentrant_type,program);operation(2,active,{number(1)});
+        auto outer=blocks::create(1,program);outer->slots[0]->setValue(active);active->owner=outer->slots[0].get();
+        outer_storage=std::make_shared<variable>(outer);outer->owner=outer_storage.get();
+        rejects_containing([&]{operation(6,active,{number(1)});},"owner ended","placement fails safely if callback destroys its owner");
+        check(active->state==slot_block::status::dead&&!active->buffer->slab&&outer_storage->type==VOID_VALUE,
+              "deferred owner destruction eventually releases the slab and every element");
+    }
+    {
+        constexpr int callback_id=0x6cdf0002;
+        auto callback=std::make_shared<test_executor>(0x6cdf);
+        V destination,source_value,enclosing_storage;std::shared_ptr<slot_block> old;
+        int mode=0,callbacks=0;bool inspect=false;address heap_parent;
+        callback->functions[callback_id]=std::make_shared<test_function>(VOID_VALUE,[&](const std::vector<V>&) {
+            ++callbacks;
+            if(inspect) {
+                inspect=false;
+                check(blocks::of(destination)==old&&old->state==slot_block::status::destroying,
+                      "buffer replacement keeps the old handle visible throughout its cleanup");
+                rejects_containing([&]{blocks::store(destination,source_value,env);},"unavailable",
+                                   "buffer assignment cannot reenter an old value being destroyed");
+                rejects_containing([&]{blocks::copy(old);},"unavailable",
+                                   "buffer assignment cleanup cannot copy a partly destroyed old value");
+                if(mode>=2) {
+                    if(mode<4)blocks::drop(enclosing_storage,env);
+                    else if(mode==5)heap::free(heap_parent);
+                    else heap::delete_object(heap_parent,env);
+                    check(old->state==slot_block::status::destroying&&old->slots.size()==2,
+                          "ending an enclosing owner leaves the active old-value cleanup intact");
+                }
+                if(mode==1||mode==3||mode==6)throw std::runtime_error("replacement destructor error");
+            }
+            return std::make_shared<variable>(nullptr);
+        });
+        registered_executor registered(callback);
+        insert_raw(program,rmodule({gfn(707,VOID_VALUE,rcall(callback_id),0,0,{ADDRESS_VALUE},1),
+            gfn(708,VOID_VALUE,rblock({assign(slot_at(rvar(0),0),rc(n(17))),
+                assign(slot_at(rvar(0),1),rc(s("replace"))),bind(707)}),0,0,{ADDRESS_VALUE},1)}));
+        auto replacement_type=std::make_shared<type_context>(*type);replacement_type->placement_id=708;
+        for(mode=0;mode<7;++mode) {
+            old=blocks::create_buffer(replacement_type,program);operation(2,old,{number(2)});operation(6,old,{number(2)});
+            auto source=blocks::create_buffer(replacement_type,program);operation(2,source,{number(1)});operation(6,source,{number(1)});
+            source_value=std::make_shared<variable>(source);
+            if(mode>=4) {
+                heap_parent=heap::alloc(1);heap::set_owner(heap_parent,env.get());env->owned_pointer.push_back(heap_parent);
+                heap::register_object(heap_parent,std::nullopt,true,env);destination=heap::getAt(heap_parent);destination->setValue(old);
+            } else if(mode>=2) {
+                auto enclosing=blocks::create(1,program);destination=enclosing->slots[0];destination->setValue(old);
+                enclosing_storage=std::make_shared<variable>(enclosing);enclosing->owner=enclosing_storage.get();
+            } else destination=std::make_shared<variable>(old);
+            old->owner=destination.get();if(mode<2)blocks::bind_local(destination,env);
+            const int before_callbacks=callbacks;inspect=true;
+            if(mode==0)blocks::store(destination,source_value,env);
+            else rejects_containing([&]{blocks::store(destination,source_value,env);},
+                                    mode==2||mode==4||mode==5?"owner ended":"replacement destructor error",
+                                    "buffer replacement preserves cleanup failures and detects a destroyed owner");
+            if(mode<2) {
+                auto installed=blocks::of(destination);
+                check(installed&&installed!=old&&installed->buffer->length==1&&old->state==slot_block::status::dead,
+                      "buffer replacement installs its candidate after all old destructors, even when one throws");
+                check(callbacks==before_callbacks+2&&installed->owner_env==env.get(),
+                      "buffer replacement retains the scope cleanup registration and finishes every old destructor");
+                blocks::drop(destination,env);
+            } else {
+                check(destination->type==VOID_VALUE&&(mode>=4||enclosing_storage->type==VOID_VALUE)&&callbacks==before_callbacks+3,
+                      "a destroyed assignment owner receives no replacement and candidate elements are finalized");
+                if(mode>=4)rejects([&]{heap::getAt(heap_parent);},"delete and raw free retire a buffer assignment's heap parent");
+            }
+            blocks::finalize(source,env,true);
+        }
+    }
+    auto exhausted=blocks::create_buffer(type,program);operation(2,exhausted,{number(3)});operation(6,exhausted,{number(3)});
+    const auto exhausted_address=blocks::address_of(blocks::of(exhausted->slots[0]));
+    program->active_calls=1;program->remaining_steps=0;
+    rejects_containing([&]{blocks::finalize(exhausted,env,true);},"step limit","destructors share an exhausted caller budget");
+    program->active_calls=0;
+    check(exhausted->state==slot_block::status::dead&&!exhausted->buffer->slab,"budget exhaustion still releases an entire buffer slab");
+    rejects([&]{blocks::resolve(exhausted_address);},"budget cleanup retires every element view address");
+    program->destroy();
+    {
+        constexpr int assumed=0xbeef0002;
+        auto consumer=load_raw(rhint("",{rfn(10,OBJECT_VALUE,rblock({rdef(0,bnew(class_context(2,assumed))),
+            bop(2,rvar(0),{rc(n(1))}),bop(6,rvar(0),{rc(n(1))}),rreturn(rvar(0))}),1)},0,raw({assume("BUFFER_PLACEMENT",0xbeef)})),false);
+        rejects_containing([&]{consumer->flush();},"Missing namespace hint","placement linking supports missing-library retries");
+        auto library=rhint("BUFFER_PLACEMENT",{
+            gfn(2,VOID_VALUE,rblock({assign(slot_at(rvar(0),0),rc(n(93))),assign(slot_at(rvar(0),1),rc(s("linked"))),
+                rx(10,{rvar(0),rb(true),ri(0xbeef0003),rb(false),raw({})})}),0,0,{ADDRESS_VALUE},1),
+            gfn(3,VOID_VALUE,rblock({}),0,0,{ADDRESS_VALUE},1)},0,raw({assume("BUFFER_PLACEMENT",0xbeef)}));
+        insert_raw(consumer,library);auto value=consumer->invoke(10);auto buffer=blocks::of(value);
+        check(integer(blocks::of(buffer->slots[0])->slots[0])==93&&buffer->buffer->element->placement_id==
+              ((consumer->namespace_for_hint("BUFFER_PLACEMENT")<<16)|2),"flush relocates placement initializers and captures their mounted IDs");
+        consumer->flush();blocks::finalize(buffer,consumer->baseEnv,true);consumer->destroy();
+    }
+    rejects([&]{load_raw(rmodule({rfn(10,OBJECT_VALUE,rreturn(bnew(cfixed(VOID_VALUE,0))))}))->invoke(10);},"void buffer elements rejected");
+    rejects([&]{load_raw(rmodule({rfn(10,VOID_VALUE,bop(5,rc(n(0)),{}))}));},"buffer wire validates operation arity");
+    rejects([&]{load_raw(rmodule({rfn(10,VOID_VALUE,bop(7,rc(n(0)),{}))}));},"buffer wire validates operation number");
+}
 int main(){try{
+    buffer_tests();
     check(getiFunction(0x0abd0006)->return_type()==ANY_VALUE,"mem_get reports its dynamic return type");
     {
         constexpr int host_id=0x6abc0002;
@@ -573,7 +801,7 @@ int main(){try{
             rhint("",{},0,raw({assume("A",1),assume("B",1)})),
             rhint("",{},0,raw({assume("A",1),assume("A",2)})),
             rhint("",{rfn(0x00010002,VOID_VALUE,rblock({}))},0,raw({assume("A",1)}))})
-            rejects([&]{load_raw(malformed,false);},"v8 malformed hint module rejected before mounting");
+            rejects([&]{load_raw(malformed,false);},"v9 malformed hint module rejected before mounting");
         rejects([&]{load_raw(rmodule({rfn(10,VOID_VALUE,rx(10,{rc(n(0)),rb(true),ri(0x0fff0000),rb(false)}))}),false);},
                 "main entry is not a valid object destructor");
     }
@@ -658,9 +886,9 @@ int main(){try{
     {
         auto twenty=rc(n(20));auto zero=rc(n(0));
         auto compact=load_raw(rmodule({rfn(10,INT_VALUE,rx(7,{rb(true),rx(12,{twenty,rc(n(22))})}))}));
-        check(integer(compact->invoke(10))==42,"raw v8 directly executes native arithmetic expressions");
+        check(integer(compact->invoke(10))==42,"raw v9 directly executes native arithmetic expressions");
         for(int opcode=0;opcode<40;++opcode)if(opcode!=29&&opcode!=30)
-            rejects([&]{load_raw(rmodule({rfn(10,VOID_VALUE,rx(opcode))}));},"v8 opcode rejects missing fields");
+            rejects([&]{load_raw(rmodule({rfn(10,VOID_VALUE,rx(opcode))}));},"v9 opcode rejects missing fields");
         auto byte=[](unsigned char value){return std::make_shared<AbdValue>(&value,1);};
         const unsigned char bad_text[]={0xed,0xa0,0x80};
         const auto invalid_utf8=std::make_shared<AbdValue>(bad_text,3);
@@ -675,7 +903,7 @@ int main(){try{
             rc(std::make_shared<DoubleAbdValue>(std::numeric_limits<double>::infinity())),
             rc(std::make_shared<FloatAbdValue>(std::numeric_limits<float>::quiet_NaN())),
             rx(0,{raw({ri(0xce2009),byte(sentinel)})}),rx(0,{raw({ri(0xce200a),byte(0)})})})
-            rejects([&]{load_raw(rmodule({rfn(10,VOID_VALUE,expression,1)},1));},"v8 malformed expression is rejected");
+            rejects([&]{load_raw(rmodule({rfn(10,VOID_VALUE,expression,1)},1));},"v9 malformed expression is rejected");
         auto good_function=rfn(10,VOID_VALUE,rblock({}));auto good_module=rmodule({good_function});
         for(auto malformed:{replace_raw(good_module,1,ri(3)),replace_raw(good_module,1,ri(4)),replace_raw(good_module,1,ri(5)),replace_raw(good_module,1,byte(4)),
             replace_raw(good_module,2,byte(1)),replace_raw(good_module,3,invalid_utf8),replace_raw(good_module,4,ri(-1)),
@@ -685,41 +913,41 @@ int main(){try{
             rmodule({replace_raw(good_function,3,ri(1048577))}),rmodule({replace_raw(good_function,4,raw({ri(INT_VALUE)}))}),
             rmodule({rfn(10,VOID_VALUE,rx(4,{ri(0),ri(0),rb(false)}),0,{INT_VALUE})}),
             rmodule({good_function,good_function}),rmodule({},0,raw({raw({ri(0x01230001),ri(0),raw({}),ri(9)})}))})
-            rejects([&]{load_raw(malformed);},"v8 malformed module or function record rejected");
+            rejects([&]{load_raw(malformed);},"v9 malformed module or function record rejected");
         // The new interpreter intentionally rejects the retired Map formats.
         rejects([&]{load_raw(module({fn(10,VOID_VALUE,block({}))})->toAbdValue());},"named Map executable is unsupported");
         rejects([&]{load_raw(slot_module({slot_fn(10,VOID_VALUE,block({}))})->toAbdValue());},"v3 Map executable is unsupported");
         auto constant_null=rx(0,{raw({ri(0xce200a),byte(sentinel)})});
         auto scalar_program=load_raw(rmodule({rfn(10,VOID_VALUE,rx(7,{rb(true),constant_null})),
             rfn(11,STRING_VALUE,rx(7,{rb(true),rc(s(std::string("中文\0",7)))}))}));
-        check(scalar_program->invoke(10)->type==VOID_VALUE,"v8 current void sentinel round-trips");
-        check(value_to_string(scalar_program->invoke(11))==std::string("中文\0",7),"v8 UTF-8 string preserves embedded zero");
+        check(scalar_program->invoke(10)->type==VOID_VALUE,"v9 current void sentinel round-trips");
+        check(value_to_string(scalar_program->invoke(11))==std::string("中文\0",7),"v9 UTF-8 string preserves embedded zero");
         auto metadata=std::make_shared<AbdMap>();auto child=std::make_shared<AbdMap>();
         child->put("flag",std::make_shared<BoolAbdValue>(true));metadata->put("nested",block({n(3),child}));
         auto metadata_program=load_raw(replace_raw(good_module,5,metadata->toAbdValue()));
-        check(metadata_program->meta->get("nested")!=nullptr,"v8 extensions preserve generic typed nested metadata");
+        check(metadata_program->meta->get("nested")!=nullptr,"v9 extensions preserve generic typed nested metadata");
         for(auto extension:{raw({rs("x"),ri(1),invalid_utf8}),raw({rs("x"),ri(3),byte(1)}),
             raw({rs("x"),ri(0x0d00),byte(2)}),raw({rs("x"),ri(0xce2009),raw({})}),
             raw({rs("x"),ri(999),raw({})}),raw({rs("x"),ri(3),ri(1),rs("x"),ri(3),ri(2)})})
-            rejects([&]{load_raw(replace_raw(good_module,5,extension));},"v8 extension metadata validates types and fields");
+            rejects([&]{load_raw(replace_raw(good_module,5,extension));},"v9 extension metadata validates types and fields");
         auto chain=rc(n(0));for(int i=0;i<100;++i)chain=rx(12,{chain,rc(n(1))});
         check(integer(load_raw(rmodule({rfn(10,INT_VALUE,rx(7,{rb(true),chain}))}))->invoke(10))==100,
-              "v8 keeps 100-level arithmetic chains executable");
+              "v9 keeps 100-level arithmetic chains executable");
         for(int i=0;i<35;++i)chain=rx(12,{chain,rc(n(1))});
-        rejects([&]{load_raw(rmodule({rfn(10,INT_VALUE,rx(7,{rb(true),chain}))}));},"v8 raw stack nesting is bounded");
+        rejects([&]{load_raw(rmodule({rfn(10,INT_VALUE,rx(7,{rb(true),chain}))}));},"v9 raw stack nesting is bounded");
         auto deep_metadata=raw({});for(int i=0;i<128;++i)deep_metadata=raw({rs("nested"),ri(2),deep_metadata});
         rejects([&]{load_raw(replace_raw(good_module,5,deep_metadata));},"metadata cannot bypass enclosing module depth");
         auto data=good_module->toBytes();const auto length=static_cast<std::size_t>(good_module->size)+4;
-        rejects([&]{load_script(data.get(),length-1);},"v8 truncated outer frame rejected");
+        rejects([&]{load_script(data.get(),length-1);},"v9 truncated outer frame rejected");
         std::vector<unsigned char> trailing(data.get(),data.get()+length);trailing.push_back(0);
-        rejects([&]{load_script(trailing.data(),trailing.size());},"v8 trailing bytes rejected");
-        rejects([&]{load_script(data.get(),64*1024*1024+1);},"v8 file size checked before reading payload");
+        rejects([&]{load_script(trailing.data(),trailing.size());},"v9 trailing bytes rejected");
+        rejects([&]{load_script(data.get(),64*1024*1024+1);},"v9 file size checked before reading payload");
         auto truncated=std::make_shared<AbdValue>(good_module->data,good_module->size-1);
-        rejects([&]{load_raw(truncated);},"v8 truncated child frame rejected");
+        rejects([&]{load_raw(truncated);},"v9 truncated child frame rejected");
         const auto function_count=compact->functions.size();
-        rejects([&]{insert_raw(compact,replace_raw(rmodule({},2),1,ri(99)));},"v8 invalid inserted header rejected");
+        rejects([&]{insert_raw(compact,replace_raw(rmodule({},2),1,ri(99)));},"v9 invalid inserted header rejected");
         check(compact->baseEnv->variables.empty()&&compact->functions.size()==function_count&&integer(compact->invoke(10))==42,
-              "invalid v8 insertion preserves the old state");
+              "invalid v9 insertion preserves the old state");
     }
     {
         auto numeric=load_module(slot_module({

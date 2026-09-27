@@ -217,7 +217,9 @@ Address tag 0xce200b has exactly eight uint64 little-endian bytes: C++ azertian:
 
 New operations, else, initialization, parameter types, and extern signatures require matching interpreters; recompile source. A runtime cannot recover intended expressions from trees misparsed by historical compilers.
 
-Class pointers/this/raw pointers use address type 7; literal values object type 8; int remains int32. Existing oa/ob/od/ro retain lifetime behavior; new_block/block_address/mv/drop implement literals. Exec v8 uses numeric variables/opcodes and raw fixed stacks, retaining typed containers only for dynamic constants/metadata. See [Exec v8](docs/EXEC_FORMAT.en.md). Only v8 is accepted; recompile older source/AST. Migrate reference-style C x(...) to C * x(...), C y = new C() to C * y = new C(), and reference parameters/fields/returns to C *. JNI accepts only v8 snapshots with address scalars, allocations, object records, cleanup order, globals, module identity, and literal fields.
+Class pointers/this/raw pointers use address type 7; literal values object type 8; int remains int32. Existing oa/ob/od/ro retain lifetime behavior; new_block/block_address/mv/drop implement literals. Exec v9 uses numeric variables/opcodes and raw fixed stacks, retaining typed containers only for dynamic constants/metadata. See [Exec v9](docs/EXEC_FORMAT.en.md). Only v9 is accepted; recompile older source/AST. Migrate reference-style C x(...) to C * x(...), C y = new C() to C * y = new C(), and reference parameters/fields/returns to C *. JNI accepts only v9 snapshots with address scalars, allocations, object records, cleanup order, globals, module identity, and literal fields.
+
+The compiler also provides owning `buffer<T>` with contiguous direct element slots, deep copies, automatic cleanup, and checked reserve/get/set/push/resize operations. `value_compare<T>` orders basic values; class `+ - * / [] []= ()` declarations lower to ordinary method calls. See the [language guide](compiler/LANGUAGE.en.md). This change provides language/runtime primitives; existing linked-list container APIs keep their implementation.
 
 ## Validation
 

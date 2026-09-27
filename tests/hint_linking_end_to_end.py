@@ -39,7 +39,7 @@ def main():
             run(compiler + ['compile-json', ast, '-o', roundtrip])
             assert abd.read_bytes() == roundtrip.read_bytes(), name
             tree = json.loads(executable.read_text())
-            assert tree['exec-version'] == 8
+            assert tree['exec-version'] == 9
             return abd, tree
 
         def execute(abd, libraries, expected):

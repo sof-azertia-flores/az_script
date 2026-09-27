@@ -1,4 +1,4 @@
-# Exec v8 二进制格式
+# Exec v9 二进制格式
 
 中文 | [English](EXEC_FORMAT.en.md)
 
@@ -7,7 +7,7 @@
 文件本身是一个 ABD frame，其 payload 为固定顺序的根 stack：
 
 ```text
-[ magic="AZSCRIPT", exec_version=8, source_version:int, author:string,
+[ magic="AZSCRIPT", exec_version=9, source_version:int, author:string,
   global_count:int, extensions:AbdMap,
   external_signatures:Stack<Signature>, functions:Stack<Function>,
   namespace_hint:string, assumptions:Stack<Assumption> ]
@@ -67,6 +67,9 @@ stack 的成员数量由其 frame 边界确定；固定记录必须恰好包含�
 | 37 | context_default | `context:Context` |
 | 38 | return_typed | `value:E, context:Context` |
 | 39 | check_type | `value:E, context:Context` |
+| 40 | buffer_new | `element:Context` |
+| 41 | buffer_op | `operation:int, receiver:E, arguments:Es` |
+| 42 | value_compare | `context:Context, left:E, right:E` |
 
 `cont` 结束当前最内层循环的本轮执行，各层块先完成对象清理，再由循环消费跳转标记。`for` 在编译期降为块与 `wi`，没有独立 opcode：初始化只执行一次，首次跳过步进，后续轮次先步进再判断条件，循环正文具有独立作用域。因此 `continue` 会执行步进，`break` 和 `return` 不执行步进。
 
@@ -81,7 +84,7 @@ stack 的成员数量由其 frame 边界确定；固定记录必须恰好包含�
 - `mv` 读取局部或参数槽（非负），把其中拥有的块转为当前帧的临时对象，供工厂向构造转交已复制的实参。
 - `drop` 的目标与 `m` 相同（变量或 `mem_get` 调用），立即运行并结束该存储所拥有块的析构，用于析构正文之后销毁本类字面量字段。
 
-运行时存储规则：写入一个已拥有块的存储时原地逐 slot 赋值；写入临时块时移动；写入其他块时深复制（嵌套块递归复制，块嵌套最多 64 层）。`r`/`ro` 返回块时，本调用的局部或参数直接移交给调用方帧，其余块复制后交出；函数调用结果与参数实参按同一规则成为调用方的临时对象。每条语句结束、`if`/`while` 条件求值后销毁本帧未绑定的临时对象。
+运行时存储规则：写入一个已拥有类块的存储时原地逐 slot 赋值，buffer 整体赋值遵守下述替换规则；写入临时块时移动；写入其他块时深复制（嵌套块递归复制，块嵌套最多 64 层）。`r`/`ro` 返回块时，本调用的局部或参数直接移交给调用方帧，其余块复制后交出；函数调用结果与参数实参按同一规则成为调用方的临时对象。每条语句结束、`if`/`while` 条件求值后销毁本帧未绑定的临时对象。
 
 ## 泛型操作上下文（opcode 36–39）
 
@@ -91,17 +94,31 @@ stack 的成员数量由其 frame 边界确定；固定记录必须恰好包含�
 
 ```text
 Reference = [ 0, index:int ]
-Fixed     = [ 1, abi:int, kind:int, has_factory:bool,
-              [factory_id:int], contexts:Stack<Context> ]
+Fixed     = [ 1, abi:int, kind:int, width:int,
+              has_factory:bool, [factory_id:int], contexts:Stack<Context>,
+              has_placement:bool, [placement_id:int], placement_contexts:Stack<Context>,
+              has_element:bool, [element:Context] ]
 ```
 
-debug JSON 分别为 `{"ref":0}` 和 `{"abi":8,"kind":3,"factory":id,"contexts":[...]}`。引用索引须小于所属函数的 `hidden_count`；固定上下文的子上下文内嵌引用也遵守此规则。kind 0 对应 scalar ABI 0–5，kind 1 对应原始 address ABI 7，kind 2 对应类指针 ABI 7，kind 3 对应字面量对象 ABI 8；ABI 6 不能作为上下文。void 用于反射返回，不是合法泛型实参。只有 kind 3 可含工厂，没有工厂时子上下文必须为空。工厂返回 object、没有显式参数，隐藏数量须与子上下文数量一致。没有工厂的对象上下文可传递，但请求默认值时报错。
+debug JSON 的引用为 `{"ref":0}`；固定上下文包含 `abi`、`kind`、`width`、`contexts`、`placement-contexts`，另有可选 `factory`、`placement`、`element`。引用索引须小于所属函数 hidden_count，内嵌引用同样检查。kind 0 对应 scalar ABI 0–5，kind 1 原始 address ABI 7，kind 2 类指针 ABI 7，kind 3 类值 ABI 8，kind 4 buffer ABI 8；ABI 6 不合法。void 仅用于反射返回，不能成为元素或泛型实参。除类值外 width 均为 1；类值为含继承字段的直接 slot 数（1…1048576），不保存字段布局或类名。
 
-CALL 根据当前帧绑定 `contexts` 后调用目标，上下文数量须与目标隐藏数量相等。`ob` 将已绑定上下文与析构一起捕获，使后续析构不依赖创建帧；没有析构时列表必须为空。`context_abi` 返回绑定的 ABI 编号；`context_default` 产生基础类型零值/空值、空地址或调用工厂创建对象。`return_typed` 检查绑定 ABI，并按对象值或类指针分别执行返回及所有权转移，原始 address 保持普通地址返回语义；`check_type` 检查实际值的 ABI 后返回该值。后两者 debug 字段为 `v`、`context`，前两者为 `context`。
+只有 kind 3 允许工厂或原地构造入口，各 ID 缺省时对应子列表必须为空。工厂是无显式参数、返回 object 的脚本函数；原地构造是内部 `void(address)` 脚本函数，各自的隐藏数量须匹配绑定的子上下文。两者都可缺省，仅请求缺失的默认构造操作时运行失败。kind 4 必须有一个 element 上下文，width 为 1，无工厂或原地构造入口。建立此上下文或空 buffer 不默认构造元素。
+
+CALL 根据当前帧绑定 `contexts` 后调用目标，上下文数量须与目标隐藏数量相等。`ob` 将已绑定上下文与析构一起捕获，使后续析构不依赖创建帧；没有析构时列表必须为空。`context_abi` 返回绑定的 ABI 编号；`context_default` 产生基础类型零值/空值、空地址、调用工厂创建对象或建立空 buffer。`return_typed` 检查绑定 ABI，并按对象值或类指针分别执行返回及所有权转移，原始 address 保持普通地址返回语义；`check_type` 检查实际值的 ABI 后返回该值。后两者 debug 字段为 `v`、`context`，前两者为 `context`。
 
 上下文记录及子列表 stack 均计入 128 层物理 ABD 限制，隐藏数量和上下文列表继续受槽数量上限约束。链接除擦除签名外还检查隐藏数量和入口种类，仅重定位明确的工厂/函数引用。绑定后的上下文是不可变运行时数据。
 
-JNI 快照 v8 递归保存对象已绑定的析构上下文，包括 ABI、kind、可选默认工厂 ID 和子上下文，不保存帧引用或原生指针。恢复在替换状态前完整检查有序模块身份、上下文种类和深度、各工厂的签名及隐藏数量、析构的 `void(address)` 签名及隐藏数量；替换不调用旧析构，也不重新初始化。包括 v7 在内的旧快照直接拒绝。
+JNI 快照 v9 递归保存对象已绑定的析构上下文，包括 ABI、kind、可选默认工厂 ID 和子上下文，不保存帧引用或原生指针。恢复在替换状态前完整检查有序模块身份、上下文种类和深度、各工厂的签名及隐藏数量、析构的 `void(address)` 签名及隐藏数量；替换不调用旧析构，也不重新初始化。包括 v8 在内的旧快照直接拒绝。
+
+## 缓冲区与比较（opcode 40–42）
+
+`buffer_new` 用已绑定的元素上下文创建空的拥有型 OBJECT_VALUE，debug JSON 字段为 `context`。`buffer_op` 的 debug 字段为 `op`、`v`、`args`；操作 0…6 分别是 length、capacity、reserve、get、set、push、resize，实参数量依次为 0、0、1、1、2、1、1。先借用并求值一次接收者，再从左到右求值并保存实参。get 产生值副本。buffer 不是可由原始地址/调整块大小接口操作的普通类块，这些接口不能绕过其生命周期规则。
+
+每个 buffer 拥有 capacity × stride 的连续 slots。类元素是覆盖 N 个直接 slots 的独立对象视图；其余元素各占一个 slot，嵌套拥有值独立分配。只有成功初始化的元素计入 length。扩容提交移动 slots，不执行用户代码，并使旧视图 ID 失效；缩短及清理逆序销毁。复制保留容量并递归复制拥有值。buffer 赋值先准备候选，再销毁并替换旧值，即使旧清理抛错也完成切换；若回调销毁目标则清理候选并停止。元素 set 保留逐字段赋值的基本异常保证。操作保活存储，拒绝重入修改；销毁请求延迟到操作退出，继续前检测失效。批量工作计入执行预算，错误路径保留已有错误并完成底层释放。
+
+`value_compare` 的 debug 字段为 `context`、`v1`、`v2`，结果恰为 -1/0/1。支持非 void 标量、address 和类指针上下文，拒绝类值/buffer 和非有限浮点数；字符串按无符号 UTF-8 字节比较，正负零相等。两个操作数从左到右各求值一次。类运算符降为普通 CALL，执行文件不保存运算符元数据。
+
+快照 v9 增加 width、原地构造绑定和递归元素上下文。buffer 对象记录另含 `buffer:true`、`element`、`length`、`capacity`，`slots` 仅编码存活的逻辑元素。类元素使用对象视图 ID 及析构/上下文/字段记录，因此底层字段只保存一次，不编码空余容量。恢复先预检容量预算，在临时状态中校验长度/容量/步长、标签、唯一 ID、嵌套和全部函数绑定，用新 ID 重建连续存储与视图并改写已保存的地址，全部通过后才替换旧状态；操作中和过渡状态不能保存。一次快照内全部 buffer 的 capacity × stride 累计不得超过 1,048,576 slots，超出此持久化预算的保存或恢复在分配存储前失败。运行时每块容量和 64 MiB 文件上限仍适用。状态替换不执行旧状态的用户析构。
 
 ## 类型编号与常量
 
@@ -115,7 +132,7 @@ JNI 快照 v8 递归保存对象已绑定的析构上下文，包括 ABI、kind�
 
 变量编号规则：参数和局部槽为连续非负数，全局为 -1、-2……。每个加载函数保存所属模块的全局偏移，实际下标为 `global_offset + (-int64(slot) - 1)`。文件不保存宿主加载时才知道的 offset。参数、返回值、外部函数类型和块级生命周期规则保持不变。
 
-读取器只接受此 v8 裸 stack 格式，通过首个 frame 的 magic 和紧随其后的版本识别。包括 v7 在内的旧执行版本、旧 Map 执行文件和未知版本直接拒绝，已有源码或可读 AST 必须重新编译。原有 64 MiB 文件上限、128 层 ABD 嵌套限制、变量槽和调用预算继续适用；紧凑格式不得绕过嵌套检查。JNI 快照仅接受 v8，地址标量、堆分配起点、对象登记和自动清理顺序均保留完整 uint64 值；长度、数量和函数 ID 仍用既有整数表示。快照把堆和全局中的字面量对象保存为 `{object, has destructor, [destructor], destructor contexts, slots}` 映射，恢复时分配新 id 并改写指向已保存对象的地址；指向未保存对象的地址保持原值，其 id 被永久停用。脚本字节作为不透明数据保存及校验，不再读取旧快照。
+读取器只接受此 v9 裸 stack 格式，通过首个 frame 的 magic 和紧随其后的版本识别。包括 v8 在内的旧执行版本、旧 Map 执行文件和未知版本直接拒绝，已有源码或可读 AST 必须重新编译。原有 64 MiB 文件上限、128 层 ABD 嵌套限制、变量槽和调用预算继续适用；紧凑格式不得绕过嵌套检查。JNI 快照仅接受 v9，地址标量、堆分配起点、对象登记和自动清理顺序均保留完整 uint64 值；长度、数量和函数 ID 仍用既有整数表示。快照把堆和全局中的字面量对象保存为 `{object, has destructor, [destructor], destructor contexts, slots}` 映射，恢复时分配新 id 并改写指向已保存对象的地址；指向未保存对象的地址保持原值，其 id 被永久停用。脚本字节作为不透明数据保存及校验，不再读取旧快照。
 
 物理容器深度从根 stack 的第 1 层开始计算，函数列表第 2 层、函数记录第 3 层、函数体第 4 层。嵌套表达式各加一层，块内语句列表、调用实参列表以及常量的单元素数组各另加一层。扩展元数据从第 2 层开始计算内部 Map/Array 嵌套；裸 stack 不会绕过 128 层上限。
 
@@ -126,6 +143,6 @@ JNI 快照 v8 递归保存对象已绑定的析构上下文，包括 ABI、kind�
 
 hint 模块只定义占位 namespace 0000 下的函数，0/1 为模块初始化/销毁钩子，其余普通函数在装载时迁移。固定 namespace 模块的普通函数不得占用自身 assume 的 namespace。类名及布局不进入本格式，签名保持擦除后的基础类型。
 
-`flush()` 按所属模块的 assume 表重定位 CALL 的函数 ID、ob 的析构 ID 及上下文中的默认工厂 ID，并校验所有 hint 导入对应的函数及签名。普通整数、堆地址和变量槽不重定位。消除 assumption 只发生在完整链接验证成功之后。has_destructor=false 时没有析构 ID 字段；true 时保留完整32位位模式，包括 `0xffffffff`，不再使用 -1 哨兵。析构仍须指向合法的 `void(address)` 脚本函数，生命周期、main 和内置保留 ID 规则继续生效。
+`flush()` 按所属模块的 assume 表重定位 CALL 的函数 ID、ob 的析构 ID 及上下文中的默认工厂和原地构造 ID（含元素上下文），并校验所有 hint 导入对应的函数及签名。普通整数、堆地址和变量槽不重定位。消除 assumption 只发生在完整链接验证成功之后。has_destructor=false 时没有析构 ID 字段；true 时保留完整32位位模式，包括 `0xffffffff`，不再使用 -1 哨兵。析构仍须指向合法的 `void(address)` 脚本函数，生命周期、main 和内置保留 ID 规则继续生效。
 
-旧 exec v7 及更早版本、旧 Map 执行文件和旧 JNI 快照不再读取。所有库和宿主应配套更新。
+旧 exec v8 及更早版本、旧 Map 执行文件和旧 JNI 快照不再读取。所有库和宿主应配套更新。

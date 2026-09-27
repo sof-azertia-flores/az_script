@@ -1,6 +1,20 @@
-# Generics and Runtime Reflection (2026-09-27)
+# Inline Buffers, Default Comparison, and Class Operators (2026-09-27)
 
 [中文](VALIDATION.md) | English
+
+Implemented owning `buffer<T>` with contiguous direct slots, independently identified class-element views, deep copies, nested values, empty defaults, explicit capacity management, and reverse cleanup. Generic contexts now carry direct slot width, placement bindings, and element contexts. Added `value_compare<T>` and class `+ - * / [] []= ()`, lowered to ordinary member calls with generics, inheritance, externs, and out-of-class implementations. Exec and JNI snapshots are v9 and reject older formats; source metadata versioning and the existing AZS container implementations are unchanged.
+
+Sequential `python3 tools/build_and_test.py --offline` and `python3 tools/build_and_test.py --offline --sanitize` both exited 0 without ASan/UBSan reports. Java unit tests passed 107/107. The new buffer/operator suite passed 79 ordinary-build checks and 77 sanitizer checks without JNI. Real-JVM validation passed 2654 assertions, 800 calls across four threads, and 1000-module linking on a small stack. Buffer snapshots cover continuous storage, view-address remapping, nested/empty values, post-restore construction/destruction, and atomic rejection of 22 corrupted states.
+
+The final native suite contains 736 checks covering actual contiguous slot segments, expired views after growth, independent copies, construction rollback, destructor failure, budget exhaustion, and reentrant destruction. Whole-buffer assignment cleans the old value before switching. If a destructor callback destroys the literal or heap parent, it cleans the candidate and retains the original error. The final raw-slot guard prevents bypassing buffer length and element-state checks while preserving class-view field access; independent ordinary and ASan/UBSan verification passed. After rebuilding the final guard, native/JNI tests and both ordinary/sanitized buffer end-to-end suites passed again.
+
+Source → AST → ABD byte identity, Java/C++ data roundtrips, 95 independent wire cases, and existing class, generics, inheritance, loop, hint, math, container, and signed-native-library regressions passed. Type queries cache within one query to prevent exponential recursion on long flat operator expressions. Existing depth/file limits remain covered. Snapshot preflight additionally bounds cumulative buffer capacity times stride, with explicit failure when saving or restoring oversized states.
+
+Updated Chinese and English language, execution-format, hint, C++/JNI integration, and distribution usage guides. After CMake installation and SDK relocation, both static and shared C++ consumers exercised the new features and returned 42. New public headers compile independently, and dynamic loading was verified against the relocated directory. All 143 local project-document links, 12 distribution-template regressions, `git diff --check`, and whitespace checks on new files passed. No commit, push, or distribution export was performed.
+
+Logs: `build/buffer-full-final.log`, `build/buffer-sanitize.log`, `build/buffer-final-guard.log`; C++ installation/relocation results are in `build/buffer-install-validation/`.
+
+# Generics and Runtime Reflection (2026-09-27)
 
 Implemented shared-body generic classes, functions, member methods, and parameterized inheritance, including explicit type arguments, argument inference, single class bounds, invariance, out-of-class definitions, and generic extern matching. Hidden operation contexts preserve concrete defaults, default factories, and return categories. Destructor bindings survive copy, move, cross-library returns, error cleanup, and snapshot restoration. Added invocation by actual function ID and two hint queries, checking actual return tags and rejecting unbound generic or internal reflection targets. Exec and JNI snapshots are now v8 and reject older versions; source metadata versioning is unchanged.
 

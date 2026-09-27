@@ -97,3 +97,9 @@ AZSCRIPT_EXTERN_ENTRY {
 Windows 使用 `compile_extern_lib.cmd` 和 `sign_extern_lib.cmd`。签名程序是 `bin/azscript-sign-extern`，shell 脚本只负责找到它。`compile_extern_lib.sh` 调用系统 C++ 编译器，包含 `include/`，并链接 `lib/` 中的共享运行库。
 
 开发树里可以设置 `AZSCRIPT_INCLUDE`、`AZSCRIPT_LIBDIR` 和 `AZSCRIPT_SIGN_EXTERN`。未设置时，脚本会尝试发行包布局，再尝试仓库的 `build/native` 或 `build/sanitize`。
+
+## 拥有型缓冲区的宿主边界
+
+exec v9 的 `buffer<T>` 使用 OBJECT_VALUE 并区分存储类别，它不是 address 或普通可调整大小的类块。C++ 集成和插件须用配套运行库重新构建。原始块调整/地址接口不能调整 buffer 或内联元素视图；通过脚本包装函数使用 get/set/push/resize，才能保留元素所有权和类型检查。JNI 不直接映射 OBJECT_VALUE。经 this 保存的元素指针会在扩容、删除或整体替换后失效。
+
+类运算符降为普通方法，不需要原生运算符 ABI。基础值顺序使用 value_compare，自定义比较器可以是由现有反射调用的普通 AZS 函数。反射仍拒绝内部及未绑定的泛型入口，需要时使用普通包装函数。

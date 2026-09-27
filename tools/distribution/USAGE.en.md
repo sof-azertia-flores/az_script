@@ -39,7 +39,7 @@ Compiler launchers prefer bundled runtime/. Without it, install Java 17+ and use
 
 AST names bind with extern priority; independent definition IDs live in body namespaces and metadata.position/name. Name-based host calls need matching AST output; hint definitions also require the actual mounted namespace. Fixed-main execution needs no debug JSON deployment. ABD is a binary instruction tree, not encryption.
 
-Exec v8 uses numeric opcodes and raw ordered ABD stacks. Exec JSON retains field names for inspection with numeric c; it is not the binary Map layout. Only v8 is accepted; recompile older ABD from source/readable AST. See [binary format](EXEC_FORMAT.en.md).
+Exec v9 uses numeric opcodes and raw ordered ABD stacks. Exec JSON retains field names for inspection with numeric c; it is not the binary Map layout. Only v9 is accepted; recompile older ABD from source/readable AST. See [binary format](EXEC_FORMAT.en.md).
 
 Launchers also accept full CLI commands: `./compile.sh compile-json hello.ast.json -o restored.abd` rebuilds ABD and defaults restored.exec.json without overwriting the input AST. Use `./compile.sh --help`; pack/unpack archive/extract files.
 
@@ -170,7 +170,7 @@ The script declares `extern int host_add(int, int):0x12340001;`. Built-ins need 
 
 Java calls loadScript(mainFile), insertScript for each library, flush, then invoke. namespaceForHint("POINT_LIB") supplies the actual namespace; public IDs are `(namespace << 16) | localId`. Identical assumed namespaces in different modules may identify different libraries. Missing libraries/signature errors fail flush atomically and permit retry after dependencies are added. Onload failure requires close/recreation. Insert, flush, and snapshot replacement are forbidden during execution/callbacks.
 
-JNI v8 snapshots require initialized idle scripts, including literals in heap fields, and identical ordered module bytes, actual namespaces, and global layouts. Restore does not rerun onload. Old executables/snapshots are unsupported. See [hint linking](HINT_LINKING.en.md) for syntax, out-of-class implementations, and lifetimes.
+JNI v9 snapshots require initialized idle scripts, including literals in heap fields, and identical ordered module bytes, actual namespaces, and global layouts. Restore does not rerun onload. Old executables/snapshots are unsupported. See [hint linking](HINT_LINKING.en.md) for syntax, out-of-class implementations, and lifetimes.
 
 ## Signed external libraries
 

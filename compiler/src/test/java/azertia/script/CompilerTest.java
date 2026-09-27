@@ -84,7 +84,7 @@ class CompilerTest {
                 + "int main(){return helper(3,\"__func_param0\");}");
         tree.getAsJsonObject("metadata").addProperty("version", 29);
         JsonObject compiled = Compiler.compile(tree).toJson().getAsJsonObject();
-        assertEquals(8, compiled.get("exec-version").getAsInt());
+        assertEquals(9, compiled.get("exec-version").getAsInt());
         assertEquals(29, compiled.get("version").getAsInt(), "source version is not the executable format version");
         assertTrue(compiled.get("gvs").getAsJsonPrimitive().isNumber());
         assertEquals(2, compiled.get("gvs").getAsInt());
@@ -739,6 +739,12 @@ class CompilerTest {
             JsonArray statements = function.getAsJsonArray("script");
             if (statements.asList().stream().noneMatch(statement -> statement.isJsonObject()
                     && statement.getAsJsonObject().has("c") && ExecOpcodes.name(statement.getAsJsonObject().get("c").getAsInt()).equals("ob"))) continue;
+            if (function.get("local-count").getAsInt() == 0) {
+                // Placement initialization borrows existing storage and must not allocate.
+                assertEquals(1, function.get("param-count").getAsInt());
+                assertEquals(1, statements.get(0).getAsJsonObject().get("t").getAsInt());
+                continue;
+            }
             generatedFactories++;
             JsonObject allocation = statements.get(0).getAsJsonObject().getAsJsonObject("val");
             int parameterCount = function.get("param-count").getAsInt();
@@ -777,7 +783,7 @@ class CompilerTest {
         assertThrows(IllegalArgumentException.class, compiled::typeValue);
         AbdValue payload = compiled.toValue(); var root = payload.getAsAss().values;
         assertEquals(10, root.size()); assertEquals("AZSCRIPT", AbdBasicType.abd2str(root.get(0)));
-        assertEquals(8, AbdBasicType.abd2int(root.get(1)));
+        assertEquals(9, AbdBasicType.abd2int(root.get(1)));
         var functionList = root.get(7).getAsAss().values;
         assertEquals(1, functionList.size()); var function = functionList.get(0).getAsAss().values;
         assertEquals(8, function.size()); assertEquals(0x0fff0000, AbdBasicType.abd2int(function.get(0)));
@@ -799,7 +805,7 @@ class CompilerTest {
         AcsObject decoded = ExecCodec.decode(payload);
         assertEquals(compiled.toJson(), decoded.toJson());
         assertArrayEquals(payload.toAbdFormat(), decoded.toValue().toAbdFormat());
-        for(int opcode = 0; opcode <= ExecOpcodes.CHECK_TYPE; opcode++)
+        for(int opcode = 0; opcode <= ExecOpcodes.VALUE_COMPARE; opcode++)
             assertEquals(opcode, ExecOpcodes.code(ExecOpcodes.name(opcode)));
     }
     @Test void compactExecPreservesScalarTypesAndDynamicExtensionMetadata() throws Exception {

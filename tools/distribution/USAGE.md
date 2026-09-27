@@ -41,7 +41,7 @@ run.cmd examples\hello.exec.abd
 
 AST 包含 extern 优先的名称绑定；普通定义的独立 ID 由 body namespace 与 metadata.position/name 保存。宿主按名称调用时应使用同次编译的 AST，hint 库的定义 ID 还须结合实际挂载 namespace。仅按固定 `main` ID 运行时无需部署这两份 JSON。ABD 是二进制指令树，不是加密格式。
 
-新编译器输出 exec v8：控制指令使用数字 opcode，固定记录按顺序写入裸 ABD stack。`exec.json` 保留字段名便于检查，其 `c` 为数字；它不是二进制文件的 Map 布局。解释器仅接受 v8；旧 ABD 必须从源码或可读 AST 重新编译。完整字段顺序和 opcode 见 [二进制格式](EXEC_FORMAT.md)。
+新编译器输出 exec v9：控制指令使用数字 opcode，固定记录按顺序写入裸 ABD stack。`exec.json` 保留字段名便于检查，其 `c` 为数字；它不是二进制文件的 Map 布局。解释器仅接受 v9；旧 ABD 必须从源码或可读 AST 重新编译。完整字段顺序和 opcode 见 [二进制格式](EXEC_FORMAT.md)。
 
 编译脚本也接受完整 CLI 命令：`./compile.sh compile-json hello.ast.json -o restored.abd` 从 AST 重建 ABD，并默认生成 `restored.exec.json`，不覆盖输入 AST。`./compile.sh --help` 查看参数；`pack` 和 `unpack` 分别打包与解包文件。
 
@@ -172,7 +172,7 @@ AbdInvoker.registerJfunction(0x12340001,
 
 Java 对应流程是 `loadScript(mainFile)`、依次 `insertScript(libraryFile)`、`flush()`，随后 invoke。`namespaceForHint("POINT_LIB")` 返回实际 namespace；公开函数的完整 ID 是 `(namespace << 16) | localId`。相同假定 namespace 在不同模块可以引用不同库。缺库或签名错误使 flush 原子失败，补齐依赖可重试；onload 运行失败则必须关闭重建。执行或回调期间不能 insert、flush 或替换快照。
 
-JNI v8 快照仅保存和恢复初始化完成的空闲脚本（含堆对象字段中的字面量对象）；必须有相同的有序模块字节、实际 namespace 与全局布局。恢复不重新执行 onload。旧执行文件和快照不再支持。语法、类外实现和生命周期细节见 [多文件库与 hint 链接](HINT_LINKING.md)。
+JNI v9 快照仅保存和恢复初始化完成的空闲脚本（含堆对象字段中的字面量对象）；必须有相同的有序模块字节、实际 namespace 与全局布局。恢复不重新执行 onload。旧执行文件和快照不再支持。语法、类外实现和生命周期细节见 [多文件库与 hint 链接](HINT_LINKING.md)。
 
 ## 已签名的外部动态库
 
