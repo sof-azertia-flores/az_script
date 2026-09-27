@@ -122,6 +122,8 @@ def main():
                '--runner',native/'interpreter/azscript-run']
     if jni:math_test += ['--bridge',bridge,'--library',native/'abdjni'/libname]
     run(math_test)
+    run([sys.executable, ROOT/'tests/containers_library.py', '--classpath', classpath,
+         '--runner', native/'interpreter/azscript-run'])
     e2e=[sys.executable,ROOT/'tests/end_to_end.py','--classpath',classpath,'--runner',native/'interpreter/azscript-run','--bridge',bridge]
     if jni:e2e += ['--library',native/'abdjni'/libname]
     run(e2e)

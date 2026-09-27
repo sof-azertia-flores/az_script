@@ -61,6 +61,18 @@ AST 包含 extern 优先的名称绑定；普通定义的独立 ID 由 body name
 
 C++ 使用 `insert_script`，Java 使用 `insertScript(new File("stdlib/math.exec.abd"))` 装配，然后 `flush()`。`namespace_for_hint("AZSCRIPT_MATH")` / `namespaceForHint("AZSCRIPT_MATH")` 返回实际 namespace。公开低位编号在共享头文件中固定，例如 `math_pi` 为 `0002`；宿主调用 ID 应使用 `(namespace << 16) | 0x0002`，不能硬编码头文件的假定 namespace `4d41`。
 
+## 使用容器库
+
+调用方包含 `stdlib/containers.include.azs`，例如 `examples/` 中写 `#include "../stdlib/containers.include.azs"`。实现 `stdlib/containers.azs` 以 `AZSCRIPT_CONTAINERS` 独立编译。发行包附带 `stdlib/containers.exec.abd` 及配套 JSON：
+
+```sh
+./compile.sh stdlib/containers.azs
+./compile.sh examples/containers-regressions.azs
+./run.sh examples/containers-regressions.exec.abd --insert stdlib/containers.exec.abd
+```
+
+回归示例成功返回 `0`。`List<T>` 是双向链表，`Stack<T>` 和 `Queue<T>` 持有一份链表。用 `new` 创建并用 `delete` 销毁。假定 namespace `c071` 不是运行时地址。操作、默认构造和编号见 [容器库文档](../stdlib/CONTAINERS.md)。
+
 ## 嵌入 C++
 
 头文件位于 `include/`，静态库和动态库位于 `lib/`；Windows 动态库的 DLL 位于 `bin/`，导入库位于 `lib/`。导出的 CMake 包自动处理头文件、C++20 与传递链接依赖：
@@ -178,6 +190,6 @@ JNI v8 快照仅保存和恢复初始化完成的空闲脚本（含堆对象字�
 - `java/abdJavaInvoker.jar`：JNI 高层及兼容低层 Java API。
 - `runtime/`：默认包含的 Java 运行环境；无运行环境导出时省略。
 - `examples/`：基础脚本、类脚本及 C++ / Java 嵌入示例。
-- `stdlib/`：数学库共享声明、实现源码、预编译 ABD、配套 AST / exec JSON 与 API 说明。
+- `stdlib/`：数学库与容器库的共享声明、实现源码、预编译 ABD、配套 AST / exec JSON 与 API 说明。
 
-初次写脚本见 [基本语法](QUICKSTART.md)，完整语义见 [语言文档](LANGUAGE.md)，数学函数及精度边界见 [数学库说明](../stdlib/MATH.md)。
+初次写脚本见 [基本语法](QUICKSTART.md)，完整语义见 [语言文档](LANGUAGE.md)，数学函数及精度边界见 [数学库说明](../stdlib/MATH.md)，链表、栈和队列见 [容器库说明](../stdlib/CONTAINERS.md)。

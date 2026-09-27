@@ -125,6 +125,10 @@ def verify(package: Path, java: Optional[Path] = None) -> Dict[str, object]:
                 package / "examples/multifile/point.include.azs",
                 package / "stdlib/math.azs", package / "stdlib/math.include.azs", package / "stdlib/MATH.md",
                 package / "stdlib/math.exec.abd", package / "stdlib/math.ast.json", package / "stdlib/math.exec.json",
+                package / "stdlib/containers.azs", package / "stdlib/containers.include.azs",
+                package / "stdlib/CONTAINERS.md", package / "stdlib/CONTAINERS.en.md",
+                package / "stdlib/containers.exec.abd", package / "stdlib/containers.ast.json",
+                package / "stdlib/containers.exec.json",
                 package / "examples/hello.azs", package / "examples/classes.azs",
                 package / "examples/loops-regressions.azs", package / "examples/inheritance-regressions.azs",
                 package / "examples/address-regressions.azs", package / "include/azscript/detail/abdC/address.h",
@@ -142,7 +146,7 @@ def verify(package: Path, java: Optional[Path] = None) -> Dict[str, object]:
         _require(path.is_file(), f"Missing distribution component: {path}")
     for relative in ("README", "THIRD_PARTY", "docs/USAGE", "docs/QUICKSTART",
                      "docs/LANGUAGE", "docs/EXEC_FORMAT", "docs/HINT_LINKING",
-                     "docs/EXTERN_LIBRARY", "stdlib/MATH"):
+                     "docs/EXTERN_LIBRARY", "stdlib/MATH", "stdlib/CONTAINERS"):
         for suffix in (".md", ".en.md"):
             path = package / (relative + suffix)
             _require(path.is_file(), f"Missing distribution documentation: {path}")
@@ -272,6 +276,33 @@ def verify(package: Path, java: Optional[Path] = None) -> Dict[str, object]:
         result = _run([runner, math_client, "--insert", package / "stdlib/math.exec.abd"], cwd, environment)
         _require(result.stdout.splitlines() == ["0"], f"Packaged math library regression failed: {result.stdout!r}")
         passed("precompiled math hint library, relocated rebuild and separate consumer")
+
+        containers_output = cwd / "containers output"
+        containers_abd = containers_output / "containers.exec.abd"
+        _run([compiler, package / "stdlib/containers.azs", "-o", containers_abd], cwd, compiler_environment)
+        _outputs(containers_abd, containers_output / "containers.ast.json", containers_output / "containers.exec.json")
+        _require(containers_abd.read_bytes() == (package / "stdlib/containers.exec.abd").read_bytes(),
+                 "Rebuilding relocated container library changed its executable bytes")
+        containers_view = json.loads((containers_output / "containers.exec.json").read_text(encoding="utf-8"))
+        _require(containers_view["namespace-hint"] == "AZSCRIPT_CONTAINERS", "Container library lost its hint")
+        containers_client = containers_output / "client.exec.abd"
+        _run([compiler, package / "examples/containers-regressions.azs", "-o", containers_client],
+             cwd, compiler_environment)
+        containers_client_view = json.loads((containers_output / "client.exec.json").read_text(encoding="utf-8"))
+        containers_client_ast = json.loads((containers_output / "client.ast.json").read_text(encoding="utf-8"))
+        client_names = {
+            function["metadata"]["name"]
+            for group in containers_client_ast["body"].values() for function in group.values()
+        }
+        _require(client_names == {"main", "containers_check", "Point::<ctor>"},
+                 "Container header copied implementation into the consumer")
+        _require(containers_client_view["assume-hints"] == [{"hint": "AZSCRIPT_CONTAINERS", "namespace": 0xc071}],
+                 "Container client lost its assumed namespace")
+        missing = _run([runner, containers_client], cwd, environment, succeeds=False)
+        _require("AZSCRIPT_CONTAINERS" in missing.stderr, "Missing container library did not identify its hint")
+        result = _run([runner, containers_client, "--insert", package / "stdlib/containers.exec.abd"], cwd, environment)
+        _require(result.stdout.splitlines() == ["0"], f"Packaged container library regression failed: {result.stdout!r}")
+        passed("precompiled container hint library, relocated rebuild and separate consumer")
 
         standalone = work / "standalone runner"
         standalone_bin = standalone / "bin"

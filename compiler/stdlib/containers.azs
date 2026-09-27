@@ -1,0 +1,370 @@
+#namespace_hint AZSCRIPT_CONTAINERS
+#include "containers.include.azs"
+
+// Doubly linked containers. containers__ names are private to this file.
+// A bounds failure divides by zero so the runtime reports "Division by zero".
+
+void containers__bounds() {
+    int broken = 1 / 0;
+}
+
+<T> void containers__link_back(List<T> * xs, Node<T> * node) {
+    node.prev = xs.tail;
+    node.next = null;
+    if (xs.tail == null) { xs.head = node; }
+    else { xs.tail.next = node; }
+    xs.tail = node;
+    xs.count = xs.count + 1;
+}
+
+<T> void containers__link_front(List<T> * xs, Node<T> * node) {
+    node.next = xs.head;
+    node.prev = null;
+    if (xs.head == null) { xs.tail = node; }
+    else { xs.head.prev = node; }
+    xs.head = node;
+    xs.count = xs.count + 1;
+}
+
+<T> void containers__unlink(List<T> * xs, Node<T> * node) {
+    if (node.prev == null) { xs.head = node.next; }
+    else { node.prev.next = node.next; }
+    if (node.next == null) { xs.tail = node.prev; }
+    else { node.next.prev = node.prev; }
+    xs.count = xs.count - 1;
+    delete node;
+}
+
+<T> Node<T> * containers__node(List<T> * xs, int index) {
+    if (index < 0 || index >= xs.count) { containers__bounds(); }
+    int from_tail = xs.count - 1 - index;
+    if (index <= from_tail) {
+        Node<T> * cursor = xs.head;
+        int step = 0;
+        while (step < index) {
+            cursor = cursor.next;
+            step++;
+        }
+        return cursor;
+    }
+    Node<T> * cursor = xs.tail;
+    int step = 0;
+    while (step < from_tail) {
+        cursor = cursor.prev;
+        step++;
+    }
+    return cursor;
+}
+
+Node<T>::Node():0002 {}
+Node<T>::~Node():0003 {}
+
+List<T>::List():0004 {}
+List<T>::~List():0005 {
+    Node<T> * cursor = head;
+    while (cursor != null) {
+        Node<T> * next = cursor.next;
+        delete cursor;
+        cursor = next;
+    }
+}
+
+int List<T>::size():0006 { return count; }
+boolean List<T>::empty():0007 { return count == 0; }
+
+void List<T>::push_back(T value):0008 {
+    Node<T> * node = new Node<T>();
+    node.value = value;
+    containers__link_back(this, node);
+}
+
+void List<T>::push_front(T value):0009 {
+    Node<T> * node = new Node<T>();
+    node.value = value;
+    containers__link_front(this, node);
+}
+
+void List<T>::pop_back():000a {
+    if (count == 0) { containers__bounds(); }
+    containers__unlink(this, tail);
+}
+
+void List<T>::pop_front():000b {
+    if (count == 0) { containers__bounds(); }
+    containers__unlink(this, head);
+}
+
+T List<T>::front():000c {
+    if (count == 0) { containers__bounds(); }
+    return head.value;
+}
+
+T List<T>::back():000d {
+    if (count == 0) { containers__bounds(); }
+    return tail.value;
+}
+
+T List<T>::at(int index):000e { return containers__node(this, index).value; }
+
+void List<T>::set(int index, T value):000f {
+    Node<T> * node = containers__node(this, index);
+    node.value = value;
+}
+
+void List<T>::insert(int index, T value):0010 {
+    if (index < 0 || index > count) { containers__bounds(); }
+    if (index == count) { push_back(value); return; }
+    if (index == 0) { push_front(value); return; }
+    Node<T> * after = containers__node(this, index);
+    Node<T> * node = new Node<T>();
+    node.value = value;
+    node.prev = after.prev;
+    node.next = after;
+    after.prev.next = node;
+    after.prev = node;
+    count = count + 1;
+}
+
+void List<T>::erase(int index):0011 {
+    if (index < 0 || index >= count) { containers__bounds(); }
+    containers__unlink(this, containers__node(this, index));
+}
+
+void List<T>::clear():0012 {
+    while (count > 0) { pop_back(); }
+}
+
+void List<T>::resize(int n):0013 {
+    if (n < 0) { containers__bounds(); }
+    while (count > n) { pop_back(); }
+    while (count < n) {
+        Node<T> * node = new Node<T>();
+        containers__link_back(this, node);
+    }
+}
+
+void List<T>::reverse():0014 {
+    Node<T> * cursor = head;
+    while (cursor != null) {
+        Node<T> * next = cursor.next;
+        cursor.next = cursor.prev;
+        cursor.prev = next;
+        cursor = next;
+    }
+    Node<T> * saved = head;
+    head = tail;
+    tail = saved;
+}
+
+List<T> * List<T>::clone():0015 {
+    List<T> * copy = new List<T>();
+    Node<T> * cursor = head;
+    while (cursor != null) {
+        copy.push_back(cursor.value);
+        cursor = cursor.next;
+    }
+    return copy;
+}
+
+void List<T>::swap(List<T> * other):0016 {
+    if (other == null) { containers__bounds(); }
+    Node<T> * saved_head = head;
+    head = other.head;
+    other.head = saved_head;
+    Node<T> * saved_tail = tail;
+    tail = other.tail;
+    other.tail = saved_tail;
+    int saved_count = count;
+    count = other.count;
+    other.count = saved_count;
+}
+
+Stack<T>::Stack():0017 { items = new List<T>(); }
+Stack<T>::~Stack():0018 { delete items; }
+void Stack<T>::push(T value):0019 { items.push_back(value); }
+T Stack<T>::pop():001a {
+    T value = items.back();
+    items.pop_back();
+    return value;
+}
+T Stack<T>::top():001b { return items.back(); }
+int Stack<T>::size():001c { return items.size(); }
+boolean Stack<T>::empty():001d { return items.empty(); }
+
+Queue<T>::Queue():001e { items = new List<T>(); }
+Queue<T>::~Queue():001f { delete items; }
+void Queue<T>::push(T value):0020 { items.push_back(value); }
+T Queue<T>::pop():0021 {
+    T value = items.front();
+    items.pop_front();
+    return value;
+}
+T Queue<T>::front():0022 { return items.front(); }
+int Queue<T>::size():0023 { return items.size(); }
+boolean Queue<T>::empty():0024 { return items.empty(); }
+
+void list_sort_int(List<int> * xs):0025 {
+    if (xs == null) { containers__bounds(); }
+    Node<int> * i = xs.head;
+    if (i == null) { return; }
+    i = i.next;
+    while (i != null) {
+        int saved = i.value;
+        Node<int> * j = i;
+        while (j.prev != null && j.prev.value > saved) {
+            j.value = j.prev.value;
+            j = j.prev;
+        }
+        j.value = saved;
+        i = i.next;
+    }
+}
+
+void list_sort_double(List<double> * xs):0026 {
+    if (xs == null) { containers__bounds(); }
+    Node<double> * i = xs.head;
+    if (i == null) { return; }
+    i = i.next;
+    while (i != null) {
+        double saved = i.value;
+        Node<double> * j = i;
+        while (j.prev != null && j.prev.value > saved) {
+            j.value = j.prev.value;
+            j = j.prev;
+        }
+        j.value = saved;
+        i = i.next;
+    }
+}
+
+void list_sort_address(List<address> * xs):0027 {
+    if (xs == null) { containers__bounds(); }
+    Node<address> * i = xs.head;
+    if (i == null) { return; }
+    i = i.next;
+    while (i != null) {
+        address saved = i.value;
+        Node<address> * j = i;
+        while (j.prev != null && j.prev.value > saved) {
+            j.value = j.prev.value;
+            j = j.prev;
+        }
+        j.value = saved;
+        i = i.next;
+    }
+}
+
+int list_find_int(List<int> * xs, int value):0028 {
+    if (xs == null) { containers__bounds(); }
+    Node<int> * cursor = xs.head;
+    int index = 0;
+    while (cursor != null) {
+        if (cursor.value == value) { return index; }
+        cursor = cursor.next;
+        index++;
+    }
+    return -1;
+}
+
+int list_find_double(List<double> * xs, double value):0029 {
+    if (xs == null) { containers__bounds(); }
+    Node<double> * cursor = xs.head;
+    int index = 0;
+    while (cursor != null) {
+        if (cursor.value == value) { return index; }
+        cursor = cursor.next;
+        index++;
+    }
+    return -1;
+}
+
+int list_find_string(List<string> * xs, string value):002a {
+    if (xs == null) { containers__bounds(); }
+    Node<string> * cursor = xs.head;
+    int index = 0;
+    while (cursor != null) {
+        if (cursor.value == value) { return index; }
+        cursor = cursor.next;
+        index++;
+    }
+    return -1;
+}
+
+int list_find_bool(List<boolean> * xs, boolean value):002b {
+    if (xs == null) { containers__bounds(); }
+    Node<boolean> * cursor = xs.head;
+    int index = 0;
+    while (cursor != null) {
+        if (cursor.value == value) { return index; }
+        cursor = cursor.next;
+        index++;
+    }
+    return -1;
+}
+
+int list_find_address(List<address> * xs, address value):002c {
+    if (xs == null) { containers__bounds(); }
+    Node<address> * cursor = xs.head;
+    int index = 0;
+    while (cursor != null) {
+        if (cursor.value == value) { return index; }
+        cursor = cursor.next;
+        index++;
+    }
+    return -1;
+}
+
+int list_count_int(List<int> * xs, int value):002d {
+    if (xs == null) { containers__bounds(); }
+    Node<int> * cursor = xs.head;
+    int found = 0;
+    while (cursor != null) {
+        if (cursor.value == value) { found++; }
+        cursor = cursor.next;
+    }
+    return found;
+}
+
+int list_count_double(List<double> * xs, double value):002e {
+    if (xs == null) { containers__bounds(); }
+    Node<double> * cursor = xs.head;
+    int found = 0;
+    while (cursor != null) {
+        if (cursor.value == value) { found++; }
+        cursor = cursor.next;
+    }
+    return found;
+}
+
+int list_count_string(List<string> * xs, string value):002f {
+    if (xs == null) { containers__bounds(); }
+    Node<string> * cursor = xs.head;
+    int found = 0;
+    while (cursor != null) {
+        if (cursor.value == value) { found++; }
+        cursor = cursor.next;
+    }
+    return found;
+}
+
+int list_count_bool(List<boolean> * xs, boolean value):0030 {
+    if (xs == null) { containers__bounds(); }
+    Node<boolean> * cursor = xs.head;
+    int found = 0;
+    while (cursor != null) {
+        if (cursor.value == value) { found++; }
+        cursor = cursor.next;
+    }
+    return found;
+}
+
+int list_count_address(List<address> * xs, address value):0031 {
+    if (xs == null) { containers__bounds(); }
+    Node<address> * cursor = xs.head;
+    int found = 0;
+    while (cursor != null) {
+        if (cursor.value == value) { found++; }
+        cursor = cursor.next;
+    }
+    return found;
+}

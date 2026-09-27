@@ -116,6 +116,32 @@ int main() {
 
 完整 API、定义域、错误和精度约定见 [`compiler/stdlib/MATH.md`](compiler/stdlib/MATH.md)。可执行回归样例是 [`compiler/examples/math-regressions.azs`](compiler/examples/math-regressions.azs)，成功时返回 `0`。超越函数是脚本级迭代近似；需要系统数学库的全范围精度时，仍应通过 `extern` 接入宿主实现。
 
+## 脚本容器库
+
+[`compiler/stdlib/containers.azs`](compiler/stdlib/containers.azs) 提供泛型双向链表 `List<T>`，以及建立在它上面的 `Stack<T>` 和 `Queue<T>`。调用方只包含共享声明。排序和查找是具体类型的普通函数，因为无界类型参数不能比较：
+
+```c
+#include "../stdlib/containers.include.azs"
+
+int main() {
+    List<int> * xs = new List<int>();
+    xs.push_back(3);
+    xs.push_back(1);
+    list_sort_int(xs);
+    int first = xs.front();
+    delete xs;
+    return first;
+}
+```
+
+```sh
+./azscript compile compiler/stdlib/containers.azs -o build/containers.exec.abd
+./azscript compile compiler/examples/containers-regressions.azs -o build/containers-regressions.exec.abd
+./build/native/interpreter/azscript-run build/containers-regressions.exec.abd --insert build/containers.exec.abd
+```
+
+回归示例成功返回 `0`。元素放在节点字段里，按下标访问要沿链表行走。类值元素需要无参构造。说明见 [`compiler/stdlib/CONTAINERS.md`](compiler/stdlib/CONTAINERS.md)。
+
 ## 主要修复
 
 | 层 | 修复内容 |

@@ -59,6 +59,18 @@ The regression returns 0; running the client alone fails linking. Floating APIs 
 
 C++ insert_script or Java insertScript(new File("stdlib/math.exec.abd")) assembles the library, followed by flush. namespace_for_hint("AZSCRIPT_MATH") / namespaceForHint("AZSCRIPT_MATH") returns the actual namespace. Public low numbers are fixed in the header (math_pi is 0002); host IDs are `(namespace << 16) | 0x0002`, never hardcoded assumed 4d41.
 
+## Container library
+
+Clients include stdlib/containers.include.azs, for example `#include "../stdlib/containers.include.azs"` under examples/. Implementation stdlib/containers.azs compiles independently as AZSCRIPT_CONTAINERS. The package ships stdlib/containers.exec.abd and both JSON views:
+
+```sh
+./compile.sh stdlib/containers.azs
+./compile.sh examples/containers-regressions.azs
+./run.sh examples/containers-regressions.exec.abd --insert stdlib/containers.exec.abd
+```
+
+The regression returns 0. `List<T>` is a doubly linked list; `Stack<T>` and `Queue<T>` each own one list. Create them with new and destroy them with delete. Assumed namespace c071 is not the runtime address. See [the container guide](../stdlib/CONTAINERS.en.md) for operations, default construction, and IDs.
+
 ## C++ embedding
 
 Headers are in include/, static/shared libraries in lib/. Windows DLLs are in bin/, import libraries in lib/. The exported CMake package supplies includes, C++20, and transitive dependencies:
@@ -176,6 +188,6 @@ Root compile_extern_lib.sh and sign_extern_lib.sh (or .cmd) wrap platform compil
 - java/abdJavaInvoker.jar: high-level JNI and compatible low-level Java APIs.
 - runtime/: default Java runtime, omitted by runtime-free exports.
 - examples/: basic/class scripts and C++/Java embedding examples.
-- stdlib/: math declarations, source, precompiled ABD, matching JSONs, API guide.
+- stdlib/: math and container declarations, source, precompiled ABD, matching JSONs, API guides.
 
-Start with [basic syntax](QUICKSTART.en.md), then the [language guide](LANGUAGE.en.md) and [math guide](../stdlib/MATH.en.md) for full semantics and accuracy limits.
+Start with [basic syntax](QUICKSTART.en.md), then the [language guide](LANGUAGE.en.md), the [math guide](../stdlib/MATH.en.md), and the [container guide](../stdlib/CONTAINERS.en.md).

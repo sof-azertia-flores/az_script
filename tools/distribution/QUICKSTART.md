@@ -108,6 +108,15 @@ int main() { return math_round(math_hypot(3.0, 4.0)); }
 
 浮点 API 的实参必须为 `double`，如 `3.0`；整数 API 必须传 `int`。整数表达式可乘 `1.0` 后传给浮点 API。动态变量须先绑定到显式类型的局部变量。库以 `AZSCRIPT_MATH` hint 链接，头文件中的假定 namespace `4d41` 不代表实际运行地址。
 
+容器库同样只 include 声明。`List<int> * xs = new List<int>();` 创建链表，`delete xs;` 释放节点。发行包附带 `stdlib/containers.exec.abd`：
+
+```sh
+./compile.sh examples/containers-regressions.azs
+./run.sh examples/containers-regressions.exec.abd --insert stdlib/containers.exec.abd
+```
+
+该示例成功返回 `0`。假定 namespace `c071` 不是实际地址。说明见 [容器库](../stdlib/CONTAINERS.md)。
+
 全局变量由 `#gvar name` 声明，通常在 `void __script_onload()` 中赋值；`void __script_pre_destroy()` 在显式关闭脚本时执行。非 hint 程序的 `main` 固定为 `0x0fff0000`，这两个生命周期钩子分别为 `0` 和 `1`，均不能带参数。普通定义可用 `int function():0003 {return 1;}` 固定低16位编号；自动编号随源码改变；宿主需要按名字调用时，应保存与 ABD 同次生成的 `--ast`，读取其中的 `abstract` 映射。
 
 宿主函数写完整签名，例如 `extern int host_add(int, int):0x12340001;`；宿主必须注册相同 ID 与对应参数和返回值。独立解释器没有应用专属的宿主回调，使用此类脚本时应嵌入 C++ 或 Java 宿主。
@@ -116,7 +125,7 @@ int main() { return math_round(math_hypot(3.0, 4.0)); }
 
 本发行包使用 exec v8 和 JNI 快照 v8，不读取旧执行文件或快照。所有模块须重新编译；旧代码中的 `int p = alloc(...)` 须改为 `address p = alloc(...)`，依赖引用语义的 `Point p(...)` 须改为 `Point * p(...)`，`Point p = new Point(...)` 改为 `Point * p = new Point(...)`。64 位地址目前仍表示 slot 位置，既有堆容量和生命周期规则不变。
 
-更多预处理、类型、生命周期、内存边界与 AST/ABD 说明见 [完整语言文档](LANGUAGE.md)，编译与嵌入步骤见 [使用文档](USAGE.md)，数学函数见 [数学库说明](../stdlib/MATH.md)。
+更多预处理、类型、生命周期、内存边界与 AST/ABD 说明见 [完整语言文档](LANGUAGE.md)，编译与嵌入步骤见 [使用文档](USAGE.md)，数学函数见 [数学库说明](../stdlib/MATH.md)，容器见 [容器库说明](../stdlib/CONTAINERS.md)。
 
 ## 多文件库
 
