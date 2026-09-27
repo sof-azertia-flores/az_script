@@ -1,0 +1,31 @@
+#include "generic-box.include.azs"
+
+// Form all 32 function-ID bits without overflowing signed int32 arithmetic.
+int mountedFunctionId(int functionNamespace, int position) {
+    if (functionNamespace >= 32768) functionNamespace = functionNamespace - 65536;
+    return functionNamespace * 65536 + position;
+}
+
+void main() {
+    print(reflect_hint_loaded("GENERIC_BOX_LIB"));
+    print(reflect_hint_loaded("generic_box_lib"));
+
+    Box<int> number;
+    print(number.get());
+    number.set(21);
+    print(echo(number.get()));
+
+    Box<string> * text = new Box<string>();
+    text.set("library");
+    print(text.get());
+
+    int mounted = reflect_get_hint_namespace("GENERIC_BOX_LIB");
+    Box<int> fromId = reflect_invoke_function<Box<int>>(mountedFunctionId(mounted, 7), 42);
+    print(fromId.get());
+
+    Box<int> * manual = new Box<int>();
+    manual.set(7);
+    print(reflect_invoke_function<int>(mountedFunctionId(mounted, 8), manual));
+    delete manual;
+    delete text;
+}

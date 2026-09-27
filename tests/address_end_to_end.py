@@ -49,7 +49,7 @@ def main():
             assert again.returncode == 0, (name, again.stdout, again.stderr)
             assert abd.read_bytes() == roundtrip.read_bytes(), (name, 'AST roundtrip differs')
             tree = json.loads(executable.read_text(encoding='utf-8'))
-            assert tree['exec-version'] == 7, (name, tree)
+            assert tree['exec-version'] == 8, (name, tree)
             return abd, tree
 
         def run_case(name, abd, output='', error=None, libraries=()):

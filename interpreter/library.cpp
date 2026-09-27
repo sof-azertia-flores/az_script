@@ -14,10 +14,17 @@
 #include <utility>
 
 namespace azertian {
+struct context_spec {
+    int ref=-1,abi=VOID_VALUE,kind=0;
+    std::optional<int> factory_id;
+    std::vector<std::shared_ptr<context_spec>> contexts;
+};
 struct function_reference {
     int original_id;
     int* target;
     bool destructor=false;
+    int hidden_count=0;
+    bool factory=false;
 };
 struct loaded_module {
     module_manifest_entry manifest;
@@ -36,6 +43,26 @@ using V=std::shared_ptr<variable>;
 using E=std::shared_ptr<environment>;
 using M=std::shared_ptr<AbdMap>;
 V nil() { return std::make_shared<variable>(nullptr); }
+bool valid_context_kind(int abi,int kind) {
+    return (kind==0&&abi>=INT_VALUE&&abi<=VOID_VALUE)||((kind==1||kind==2)&&abi==ADDRESS_VALUE)
+        ||(kind==3&&abi==OBJECT_VALUE);
+}
+std::shared_ptr<const type_context> bind_context(const std::shared_ptr<context_spec>& spec,const E& env,std::size_t depth=0) {
+    if(!spec||depth>=128)throw std::runtime_error("Generic context nesting exceeds 128 levels");
+    if(spec->ref>=0) {
+        if(!env||!env->frame||static_cast<std::size_t>(spec->ref)>=env->frame->hidden_contexts.size())
+            throw std::runtime_error("Generic context reference is unavailable");
+        return env->frame->hidden_contexts[static_cast<std::size_t>(spec->ref)];
+    }
+    auto result=std::make_shared<type_context>();result->abi=spec->abi;result->kind=spec->kind;result->factory_id=spec->factory_id;
+    for(auto& child:spec->contexts)result->contexts.push_back(bind_context(child,env,depth+1));
+    return result;
+}
+type_contexts bind_contexts(const std::vector<std::shared_ptr<context_spec>>& specs,const E& env) {
+    type_contexts result;result.reserve(specs.size());
+    for(auto& spec:specs)result.push_back(bind_context(spec,env));
+    return result;
+}
 const char* type_name(int type) {
     switch(type) {
     case INT_VALUE:return "int";
@@ -234,13 +261,14 @@ public:
         auto script=script_owner.lock();
         if(!script||!env||env->script.lock()!=script)throw std::runtime_error("Function belongs to another or unavailable script");
         script->require_execution();
+        if(typed&&signature.hidden_count)throw std::runtime_error("Generic external function requires a script implementation and bound contexts");
         call_guard guard(env);
-        if(typed)validate_arguments("External function",id,signature.param_types,args,false);
+        if(typed)validate_arguments("External function",id,signature.param_types,args,signature.hidden_count>0);
         auto result=target->invoke(std::move(env),std::move(args));
         if(!result)
             throw std::runtime_error("External function "+std::to_string(id)+" returned a null pointer");
         const int got=static_cast<int>(result->type);
-        if(typed&&got!=signature.return_type)
+        if(typed&&signature.return_type!=ANY_VALUE&&got!=signature.return_type)
             throw std::runtime_error("External function "+std::to_string(id)+
                 " return type mismatch: expected "+type_name(signature.return_type)+", got "+type_name(got));
         return result;
@@ -302,6 +330,7 @@ class object_expression final:public expression {
     std::optional<int> destructor;
     bool manual=false;
 public:
+    std::vector<std::shared_ptr<context_spec>> contexts;
     object_expression(std::string operation,std::shared_ptr<expression> value,int number=0,bool manual=false)
         :op(std::move(operation)),value(std::move(value)),manual(manual) {
         if(op=="oa")offset=number;
@@ -314,7 +343,7 @@ public:
         if(pointer->type!=ADDRESS_VALUE)throw std::runtime_error("Object pointer requires address type");
         const auto object_pointer=*static_cast<address*>(pointer->value);
         if(op=="oa")return std::make_shared<variable>(heap::object_address(object_pointer,offset));
-        if(op=="ob")heap::register_object(object_pointer,destructor,manual,env);
+        if(op=="ob")heap::register_object(object_pointer,destructor,manual,env,bind_contexts(contexts,env));
         else heap::delete_object(object_pointer,env);
         return nil();
     }
@@ -354,7 +383,47 @@ public:
     explicit drop_expression(std::shared_ptr<expression> target):target(std::move(target)) {}
     V execute(E env) override {tick(env);blocks::drop(target->execute(env),env);return nil();}
 };
+class context_expression final:public expression {
+    int opcode;
+    std::shared_ptr<context_spec> context;
+    std::shared_ptr<expression> value;
+public:
+    context_expression(int opcode,std::shared_ptr<context_spec> context,std::shared_ptr<expression> value={})
+        :opcode(opcode),context(std::move(context)),value(std::move(value)) {}
+    V execute(E env) override {
+        tick(env);auto bound=bind_context(context,env);
+        if(opcode==36)return std::make_shared<variable>(bound->abi);
+        if(opcode==37) {
+            if(bound->kind==3) {
+                if(!bound->factory_id)throw std::runtime_error("Generic type has no default constructor");
+                auto result=invoke_bound_function(owner(env),*bound->factory_id,env,{},bound->contexts);
+                if(!result||result->type!=OBJECT_VALUE)throw std::runtime_error("Generic default factory must return an object");
+                blocks::adopt_result(result,env);return result;
+            }
+            switch(bound->abi) {
+            case INT_VALUE:return std::make_shared<variable>(0);
+            case STRING_VALUE:return std::make_shared<variable>(std::string());
+            case FLOAT_VALUE:return std::make_shared<variable>(0.0f);
+            case DOUBLE_VALUE:return std::make_shared<variable>(0.0);
+            case BOOLEAN_VALUE:return std::make_shared<variable>(false);
+            case ADDRESS_VALUE:return std::make_shared<variable>(address{});
+            default:throw std::runtime_error("Generic type cannot be default initialized");
+            }
+        }
+        auto result=value->execute(env);
+        if(!result||result->type!=bound->abi)throw std::runtime_error("Generic value type mismatch");
+        if(opcode==39)return result;
+        if(!env->frame)throw std::runtime_error("Return outside function");
+        if(result->type==OBJECT_VALUE)result=blocks::export_result(result,env);
+        else {
+            result=result->deepCopy();
+            if(bound->kind==2)heap::return_object(*static_cast<address*>(result->value),env);
+        }
+        env->frame->result=std::move(result);env->frame->returned=true;return nil();
+    }
+};
 V convert_return(V v,int type) {
+    if(type==ANY_VALUE)return v->deepCopy();
     if(type==VOID_VALUE) {
         if(v->type!=VOID_VALUE) throw std::runtime_error("Void function returned a value");
         return v;
@@ -375,7 +444,7 @@ V convert_return(V v,int type) {
     }
     throw std::runtime_error("Function return type mismatch or missing return");
 }
-// v7 records are raw ABD stacks. Views borrow the caller's input only while
+// v8 records are raw ABD stacks. Views borrow the caller's input only while
 // decoding; the resulting native expression tree owns all retained data.
 struct raw_view {
     const unsigned char* data;
@@ -485,6 +554,7 @@ std::shared_ptr<expression> parse_raw_constant(raw_view envelope) {
 struct raw_function_layout {
     std::size_t parameters,slots,globals;
     std::vector<function_reference>* references;
+    std::size_t hidden_count=0;
     void check_slot(int id,bool declaration=false) const {
         if(id<0) {
             if(declaration)throw std::invalid_argument("Cannot declare a negative variable slot");
@@ -496,6 +566,34 @@ struct raw_function_layout {
         }
     }
 };
+std::shared_ptr<context_spec> parse_context(raw_view view,const raw_function_layout& layout,std::size_t depth);
+std::vector<std::shared_ptr<context_spec>> parse_contexts(raw_view view,const raw_function_layout& layout,std::size_t depth) {
+    if(depth>128)throw std::invalid_argument("ABD nesting exceeds 128 levels");
+    raw_cursor cursor(view);std::vector<std::shared_ptr<context_spec>> result;
+    while(!cursor.empty()) {
+        if(result.size()>=MAX_VARIABLE_SLOTS)throw std::invalid_argument("Too many generic contexts");
+        result.push_back(parse_context(cursor.take(),layout,depth+1));
+    }
+    return result;
+}
+std::shared_ptr<context_spec> parse_context(raw_view view,const raw_function_layout& layout,std::size_t depth) {
+    if(depth>128)throw std::invalid_argument("ABD nesting exceeds 128 levels");
+    raw_cursor fields(view);auto spec=std::make_shared<context_spec>();const int kind=fields.integer();
+    if(kind==0) {
+        spec->ref=fields.integer();
+        if(spec->ref<0||static_cast<std::size_t>(spec->ref)>=layout.hidden_count)throw std::invalid_argument("Invalid generic context reference");
+    } else if(kind==1) {
+        spec->abi=fields.integer();spec->kind=fields.integer();
+        if(!valid_context_kind(spec->abi,spec->kind))throw std::invalid_argument("Invalid generic type context");
+        if(fields.boolean())spec->factory_id=fields.integer();
+        spec->contexts=parse_contexts(fields.take(),layout,depth+1);
+        if((spec->factory_id||!spec->contexts.empty())&&spec->kind!=3)
+            throw std::invalid_argument("Only object type contexts have default factories");
+        if(!spec->factory_id&&!spec->contexts.empty())throw std::invalid_argument("Factory contexts require a factory");
+        if(spec->factory_id)layout.references->push_back({*spec->factory_id,&*spec->factory_id,false,static_cast<int>(spec->contexts.size()),true});
+    } else throw std::invalid_argument("Unknown generic context kind");
+    fields.finish();return spec;
+}
 using X=std::shared_ptr<expression>;
 X parse_raw_expression(raw_view view,const raw_function_layout& layout,std::size_t logical_depth);
 std::vector<X> parse_raw_expressions(raw_view view,const raw_function_layout& layout,std::size_t logical_depth) {
@@ -521,8 +619,10 @@ X parse_raw_expression(raw_view view,const raw_function_layout& layout,std::size
     }
     case 2: {
         auto node=std::make_shared<functionInvocationExpression>();node->function_id=fields.integer();
-        layout.references->push_back({node->function_id,&node->function_id,false});
-        node->params=parse_raw_expressions(fields.take(),layout,logical_depth+2);result=std::move(node);break;
+        node->params=parse_raw_expressions(fields.take(),layout,logical_depth+2);
+        node->contexts=parse_contexts(fields.take(),layout,logical_depth+1);
+        layout.references->push_back({node->function_id,&node->function_id,false,static_cast<int>(node->contexts.size())});
+        result=std::move(node);break;
     }
     case 3: {
         const int slot=fields.integer();layout.check_slot(slot);
@@ -562,6 +662,11 @@ X parse_raw_expression(raw_view view,const raw_function_layout& layout,std::size
             throw std::invalid_argument("Object drop target must be a variable or mem_get(pointer)");
         result=std::make_shared<drop_expression>(std::move(target));break;
     }
+    case 36:case 37:result=std::make_shared<context_expression>(opcode,parse_context(fields.take(),layout,logical_depth+1));break;
+    case 38:case 39: {
+        auto value=child();auto context=parse_context(fields.take(),layout,logical_depth+1);
+        result=std::make_shared<context_expression>(opcode,std::move(context),std::move(value));break;
+    }
     case 7:case 8: {
         auto node=std::make_shared<returnExpression>();node->object_return=opcode==8;
         if(opcode==8||fields.boolean())node->returnType=child();result=std::move(node);break;
@@ -578,7 +683,9 @@ X parse_raw_expression(raw_view view,const raw_function_layout& layout,std::size
         if(destructor&&(*destructor==0||*destructor==1||*destructor==0x0fff0000||namespace_of(*destructor)==0x0abd))
             throw std::invalid_argument("Invalid object destructor id");
         auto node=std::make_shared<object_expression>(std::move(address),destructor,manual);
-        if(destructor)layout.references->push_back({*destructor,node->destructor_address(),true});
+        node->contexts=parse_contexts(fields.take(),layout,logical_depth+1);
+        if(!destructor&&!node->contexts.empty())throw std::invalid_argument("Destructor contexts require a destructor");
+        if(destructor)layout.references->push_back({*destructor,node->destructor_address(),true,static_cast<int>(node->contexts.size())});
         result=std::move(node);break;
     }
     case 11:result=std::make_shared<object_expression>("od",child());break;
@@ -620,7 +727,7 @@ std::vector<int> parse_raw_types(raw_view view,bool script_parameters) {
     while(!fields.empty()) {
         if(result.size()>=MAX_VARIABLE_SLOTS)throw std::invalid_argument("Too many parameter types");
         const int type=fields.integer();
-        if(type<INT_VALUE||(type>BOOLEAN_VALUE&&type!=ADDRESS_VALUE&&type!=OBJECT_VALUE&&!(script_parameters&&type==ANY_VALUE)))
+        if(type<INT_VALUE||(type>BOOLEAN_VALUE&&type!=ADDRESS_VALUE&&type!=OBJECT_VALUE&&type!=ANY_VALUE))
             throw std::invalid_argument("Invalid parameter type");
         result.push_back(type);
     }
@@ -629,7 +736,7 @@ std::vector<int> parse_raw_types(raw_view view,bool script_parameters) {
 parsed_module parse_raw_module(raw_view root,std::size_t offset) {
     raw_cursor fields(root);parsed_module module;
     if(fields.string()!="AZSCRIPT")throw std::invalid_argument("Invalid exec magic");
-    if(fields.integer()!=7)throw std::invalid_argument("Unsupported exec version");
+    if(fields.integer()!=8)throw std::invalid_argument("Unsupported exec version");
     fields.integer();fields.string(); // Source version/author are non-executable metadata.
     const int globals=fields.integer();
     if(globals<0||static_cast<std::size_t>(globals)>MAX_VARIABLE_SLOTS||offset>MAX_VARIABLE_SLOTS-static_cast<std::size_t>(globals))
@@ -642,8 +749,13 @@ parsed_module parse_raw_module(raw_view root,std::size_t offset) {
         raw_cursor entry(signatures.take());const int id=entry.integer();function_signature signature;
         if(id==0||id==1||id==0x0fff0000||namespace_of(id)==0x0abd)throw std::invalid_argument("Invalid external function id");
         signature.return_type=entry.integer();
-        if(signature.return_type<INT_VALUE||(signature.return_type>VOID_VALUE&&signature.return_type!=ADDRESS_VALUE&&signature.return_type!=OBJECT_VALUE))throw std::invalid_argument("Invalid external return type");
-        signature.param_types=parse_raw_types(entry.take(),false);entry.finish();
+        if(signature.return_type<INT_VALUE||signature.return_type>OBJECT_VALUE)throw std::invalid_argument("Invalid external return type");
+        signature.param_types=parse_raw_types(entry.take(),false);
+        signature.hidden_count=entry.integer();signature.entry_kind=entry.integer();entry.finish();
+        if(signature.hidden_count<0||static_cast<std::size_t>(signature.hidden_count)>MAX_VARIABLE_SLOTS||signature.entry_kind<0||signature.entry_kind>1)
+            throw std::invalid_argument("Invalid external generic ABI");
+        if(!signature.hidden_count&&(signature.return_type==ANY_VALUE||std::find(signature.param_types.begin(),signature.param_types.end(),ANY_VALUE)!=signature.param_types.end()))
+            throw std::invalid_argument("External any types require generic contexts");
         if(!module.extern_signatures.emplace(id,std::move(signature)).second)throw std::invalid_argument("Duplicate external signature id: "+std::to_string(id));
     }
     raw_cursor functions(fields.take());
@@ -666,17 +778,21 @@ parsed_module parse_raw_module(raw_view root,std::size_t offset) {
         if(!module.hint.empty()&&namespace_of(fn->function_id)!=0)throw std::invalid_argument("Hint module definitions require namespace zero");
         if(module.hint.empty()&&fn->function_id!=0&&fn->function_id!=1&&module.assumptions.contains(namespace_of(fn->function_id)))
             throw std::invalid_argument("Namespace assumption overlaps module definitions");
-        if(fn->rett<INT_VALUE||(fn->rett>VOID_VALUE&&fn->rett!=ADDRESS_VALUE&&fn->rett!=OBJECT_VALUE))throw std::invalid_argument("Unknown return type");
+        if(fn->rett<INT_VALUE||fn->rett>OBJECT_VALUE)throw std::invalid_argument("Unknown return type");
         if(fn->param_count<0||fn->local_count<0||static_cast<std::size_t>(fn->param_count)>MAX_VARIABLE_SLOTS||
            static_cast<std::size_t>(fn->local_count)>MAX_VARIABLE_SLOTS-static_cast<std::size_t>(fn->param_count))
             throw std::invalid_argument("Invalid function variable count");
         fn->param_types=parse_raw_types(entry.take(),true);
+        auto body=entry.take();fn->hidden_count=entry.integer();fn->entry_kind=entry.integer();entry.finish();
+        if(fn->hidden_count<0||static_cast<std::size_t>(fn->hidden_count)>MAX_VARIABLE_SLOTS||fn->entry_kind<0||fn->entry_kind>1)
+            throw std::invalid_argument("Invalid function generic ABI");
+        if(fn->rett==ANY_VALUE&&!fn->hidden_count)throw std::invalid_argument("Any return requires generic contexts");
         if(fn->param_types.size()!=static_cast<std::size_t>(fn->param_count))throw std::invalid_argument("param-count and param-types disagree");
-        if((fn->function_id==0||fn->function_id==1)&&(fn->rett!=VOID_VALUE||fn->param_count!=0))
+        if((fn->function_id==0||fn->function_id==1)&&(fn->rett!=VOID_VALUE||fn->param_count!=0||fn->hidden_count!=0))
             throw std::invalid_argument("Lifecycle function must return void and take no parameters");
         const raw_function_layout layout{static_cast<std::size_t>(fn->param_count),
-            static_cast<std::size_t>(fn->param_count)+static_cast<std::size_t>(fn->local_count),module.global_count,&module.references};
-        fn->code=parse_raw_expression(entry.take(),layout,3);entry.finish();
+            static_cast<std::size_t>(fn->param_count)+static_cast<std::size_t>(fn->local_count),module.global_count,&module.references,static_cast<std::size_t>(fn->hidden_count)};
+        fn->code=parse_raw_expression(body,layout,3);
         const int id=fn->function_id;
         if(!module.functions.emplace(id,std::move(fn)).second)throw std::invalid_argument("Duplicate function id: "+std::to_string(id));
         module.namespaces.insert(namespace_of(id));
@@ -692,7 +808,7 @@ parsed_module decode_module(const unsigned char* bytes,std::size_t length,std::s
         const auto first=fields.take();
         if(first.size==8&&std::memcmp(first.data,"AZSCRIPT",8)==0)return parse_raw_module(root,offset);
     }
-    throw std::invalid_argument("Unsupported script format: expected raw exec v7");
+    throw std::invalid_argument("Unsupported script format: expected raw exec v8");
 }
 }
 std::recursive_mutex& runtime_mutex(){static std::recursive_mutex m;return m;}
@@ -702,6 +818,31 @@ bool script_namespace_in_use(int ns) {
     registry.erase(std::remove_if(registry.begin(),registry.end(),[](auto& value){return value.expired();}),registry.end());
     for(auto& weak:registry)if(auto value=weak.lock();value&&!value->closed&&value->script_namespaces.contains(ns))return true;
     return false;
+}
+void validate_type_contexts(const type_contexts& contexts,const std::shared_ptr<script>& script) {
+    std::size_t visited=0;
+    const auto check=[&](auto&& self,const std::shared_ptr<const type_context>& context,std::size_t depth)->void {
+        if(!context||depth>128||++visited>MAX_VARIABLE_SLOTS)throw std::invalid_argument("Invalid or excessive generic contexts");
+        if(!valid_context_kind(context->abi,context->kind))throw std::invalid_argument("Invalid generic type context");
+        if((context->factory_id||!context->contexts.empty())&&context->kind!=3)
+            throw std::invalid_argument("Only object type contexts have default factories");
+        if(!context->factory_id&&!context->contexts.empty())throw std::invalid_argument("Factory contexts require a factory");
+        if(context->factory_id) {
+            if(!script||script->closed)throw std::invalid_argument("Generic context script is unavailable");
+            auto found=script->functions.find(*context->factory_id);
+            auto fn=found==script->functions.end()?nullptr:std::dynamic_pointer_cast<ofunction>(found->second);
+            if(!fn||fn->rett!=OBJECT_VALUE||!fn->param_types.empty()||fn->hidden_count<0||static_cast<std::size_t>(fn->hidden_count)!=context->contexts.size())
+                throw std::invalid_argument("Invalid generic default factory signature");
+        }
+        for(auto& child:context->contexts)self(self,child,depth+1);
+    };
+    for(auto& context:contexts)check(check,context,1);
+}
+V invoke_bound_function(const std::shared_ptr<script>& script,int id,const E& env,std::vector<V> args,type_contexts contexts) {
+    auto target=script->getFunction(id);
+    if(auto fn=std::dynamic_pointer_cast<ofunction>(target))return fn->invoke_bound(env,std::move(args),std::move(contexts));
+    if(!contexts.empty())throw std::runtime_error("Generic contexts require a script function implementation");
+    return target->invoke(env,std::move(args));
 }
 std::shared_ptr<script> load_script(const unsigned char* bytes,std::size_t length) {
     std::lock_guard<std::recursive_mutex> lock(runtime_mutex());
@@ -753,6 +894,12 @@ int script::namespace_for_hint(const std::string& hint) const {
     if(closed)throw std::runtime_error("Script is closed");
     for(auto& module:modules)if(module->manifest.hint==hint&&!hint.empty())return *module->manifest.actual_namespace;
     throw std::runtime_error("Unknown namespace hint: "+hint);
+}
+bool script::hint_loaded(const std::string& hint) const {
+    std::lock_guard<std::recursive_mutex> lock(runtime_mutex());
+    if(closed)throw std::runtime_error("Script is closed");
+    for(auto& module:modules)if(!hint.empty()&&module->manifest.hint==hint)return true;
+    return false;
 }
 std::vector<module_manifest_entry> script::module_manifest() const {
     std::lock_guard<std::recursive_mutex> lock(runtime_mutex());std::vector<module_manifest_entry> result;
@@ -845,7 +992,8 @@ void script::flush() {
             if(target!=functions.end()) {
                 if(auto defining=function_modules.find(id);defining!=function_modules.end()&&defining->second!=index)dependencies[index].insert(defining->second);
                 auto fn=std::dynamic_pointer_cast<ofunction>(target->second);
-                if(!fn||fn->rett!=signature.return_type||fn->param_types!=signature.param_types)
+                if(!fn||fn->rett!=signature.return_type||fn->param_types!=signature.param_types||
+                   fn->hidden_count!=signature.hidden_count||fn->entry_kind!=signature.entry_kind)
                     throw std::runtime_error("External signature does not match script function: "+std::to_string(id));
             } else if(mapping.contains(namespace_of(original_id))||script_namespaces.contains(namespace_of(id))||namespace_of(id)==0x0fff)
                 throw std::runtime_error("Imported script function is missing: "+std::to_string(id));
@@ -856,7 +1004,7 @@ void script::flush() {
         for(auto& reference:module.references) {
             const int id=resolve(reference.original_id);
             if(auto defining=function_modules.find(id);defining!=function_modules.end()&&defining->second!=index)dependencies[index].insert(defining->second);
-            if(mapping.contains(namespace_of(reference.original_id))||reference.destructor) {
+            if(mapping.contains(namespace_of(reference.original_id))||reference.destructor||reference.factory) {
                 auto target=functions.find(id);
                 if(target==functions.end())throw std::runtime_error("Referenced script function is missing: "+std::to_string(id));
                 if(reference.destructor) {
@@ -864,6 +1012,21 @@ void script::flush() {
                     if(!fn||fn->rett!=VOID_VALUE||fn->param_types!=std::vector<int>{ADDRESS_VALUE})
                         throw std::runtime_error("Object destructor must be a script function void(address)");
                 }
+                if(reference.factory) {
+                    auto fn=std::dynamic_pointer_cast<ofunction>(target->second);
+                    if(!fn||fn->rett!=OBJECT_VALUE||!fn->param_types.empty())
+                        throw std::runtime_error("Generic default factory must be a script function object()");
+                }
+            }
+            if(auto target=functions.find(id);target!=functions.end()) {
+                auto fn=std::dynamic_pointer_cast<ofunction>(target->second);
+                if(!fn||fn->hidden_count!=reference.hidden_count)throw std::runtime_error("Generic context count does not match function: "+std::to_string(id));
+            } else {
+                auto imported=resolved_externs[index].find(id);
+                if(imported!=resolved_externs[index].end()&&imported->second.hidden_count!=reference.hidden_count)
+                    throw std::runtime_error("Generic context count does not match external function: "+std::to_string(id));
+                if(reference.hidden_count&&imported==resolved_externs[index].end())
+                    throw std::runtime_error("Generic context call requires a matching script import");
             }
             patches.emplace_back(&reference,id);
         }
@@ -949,16 +1112,23 @@ void script::destroy() {
 }
 int ofunction::return_type(){return rett;}
 V ofunction::invoke(E ev,std::vector<V> args) {
+    if(hidden_count)throw std::runtime_error("Generic function requires a non-generic wrapper for public invocation");
+    return invoke_bound(std::move(ev),std::move(args),{});
+}
+V ofunction::invoke_bound(E ev,std::vector<V> args,type_contexts contexts) {
     std::lock_guard<std::recursive_mutex> lock(runtime_mutex());
     auto bound=script_owner.lock();
     if(!bound||!ev||ev->script.lock()!=bound)throw std::runtime_error("Function belongs to another or unavailable script");
     bound->require_execution();
     if(!linked)throw std::runtime_error("Function module has not been linked");
+    if(contexts.size()!=static_cast<std::size_t>(hidden_count))throw std::runtime_error("Generic context count mismatch");
+    validate_type_contexts(contexts,bound);
     call_guard guard(ev);
     validate_arguments("Script function",function_id,param_types,args,true);
     auto env=std::make_shared<environment>();
     env->script=guard.s;env->parent=guard.s->baseEnv;env->caller=ev;env->frame_root=true;
     env->frame=std::make_shared<function_frame>();
+    env->frame->hidden_contexts=std::move(contexts);
     env->frame->global_offset=global_offset;env->frame->global_count=global_count;
     env->frame->param_count=args.size();
     env->frame->slots.resize(static_cast<std::size_t>(param_count)+static_cast<std::size_t>(local_count));
@@ -991,7 +1161,7 @@ V functionInvocationExpression::execute(E env) {
     tick(env);std::vector<V> args;
     // Snapshot each argument before evaluating the next one (left-to-right).
     for(auto& p:params) args.push_back(blocks::materialize(p->execute(env),env));
-    auto result=owner(env)->getFunction(function_id)->invoke(env,std::move(args));
+    auto result=invoke_bound_function(owner(env),function_id,env,std::move(args),bind_contexts(contexts,env));
     if(!result) throw std::runtime_error("Host function returned a null pointer");
     blocks::adopt_result(result,env);
     return result;

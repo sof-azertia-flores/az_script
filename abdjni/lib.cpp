@@ -244,6 +244,71 @@ public:
     std::shared_ptr<function> getiFunction(int id) override { return std::make_shared<JavaFunction>(context, id); }
 };
 
+template<class T> std::shared_ptr<T> field(const std::shared_ptr<AbdMap>& map, const std::string& key) {
+    auto value = std::dynamic_pointer_cast<T>(map->get(key));
+    if (!value) throw std::invalid_argument("Missing or invalid snapshot field: " + key);
+    return value;
+}
+// Captured operations are immutable data, not native pointers or references to
+// an expired invocation. Factories and their own contexts survive restoration.
+std::shared_ptr<AbdArray> encodeContextTree(const type_contexts& contexts) {
+    auto result = std::make_shared<AbdArray>();
+    for (const auto& context : contexts) {
+        auto entry = std::make_shared<AbdMap>();
+        entry->put("abi", std::make_shared<IntAbdValue>(context->abi));
+        entry->put("kind", std::make_shared<IntAbdValue>(context->kind));
+        entry->put("has factory", std::make_shared<BoolAbdValue>(context->factory_id.has_value()));
+        if (context->factory_id) entry->put("factory", std::make_shared<IntAbdValue>(*context->factory_id));
+        entry->put("contexts", encodeContextTree(context->contexts));
+        result->push_back(entry);
+    }
+    return result;
+}
+std::shared_ptr<AbdArray> encodeContexts(const type_contexts& contexts) {
+    validate_type_contexts(contexts, loadedScript);
+    return encodeContextTree(contexts);
+}
+type_contexts decodeContextTree(const std::shared_ptr<AbdArray>& entries, std::size_t depth, std::size_t& nodes) {
+    if (depth > 128 || entries->values.size() > MAX_VARIABLE_SLOTS)
+        throw std::invalid_argument("Snapshot generic contexts exceed limits");
+    type_contexts result;
+    result.reserve(entries->values.size());
+    for (const auto& value : entries->values) {
+        if (++nodes > MAX_VARIABLE_SLOTS) throw std::invalid_argument("Snapshot generic contexts exceed limits");
+        auto entry = std::dynamic_pointer_cast<AbdMap>(value);
+        if (!entry) throw std::invalid_argument("Invalid snapshot generic context");
+        for (const auto& [key, item] : entry->values)
+            if (key != "abi" && key != "kind" && key != "has factory" && key != "factory" && key != "contexts")
+                throw std::invalid_argument("Unexpected snapshot generic context field: " + key);
+        auto context = std::make_shared<type_context>();
+        context->abi = field<IntAbdValue>(entry, "abi")->data;
+        context->kind = field<IntAbdValue>(entry, "kind")->data;
+        if (field<BoolAbdValue>(entry, "has factory")->data) context->factory_id = field<IntAbdValue>(entry, "factory")->data;
+        else if (entry->get("factory")) throw std::invalid_argument("Unexpected snapshot default factory");
+        context->contexts = decodeContextTree(field<AbdArray>(entry, "contexts"), depth + 1, nodes);
+        result.push_back(std::move(context));
+    }
+    return result;
+}
+type_contexts decodeContexts(const std::shared_ptr<AbdMap>& entry) {
+    std::size_t nodes = 0;
+    auto result = decodeContextTree(field<AbdArray>(entry, "destructor contexts"), 0, nodes);
+    validate_type_contexts(result, loadedScript);
+    return result;
+}
+void validateSnapshotDestructor(std::optional<int> destructor, const type_contexts& contexts) {
+    validate_type_contexts(contexts, loadedScript);
+    if (!destructor) {
+        if (!contexts.empty()) throw std::invalid_argument("Snapshot destructor contexts require a destructor");
+        return;
+    }
+    auto found = loadedScript->functions.find(*destructor);
+    auto function = found == loadedScript->functions.end() ? nullptr : std::dynamic_pointer_cast<ofunction>(found->second);
+    if (!function || function->rett != VOID_VALUE || function->param_types != std::vector<int>{ADDRESS_VALUE}
+        || function->hidden_count < 0 || static_cast<std::size_t>(function->hidden_count) != contexts.size()
+        || (function->entry_kind != 0 && function->entry_kind != 1))
+        throw std::invalid_argument("Snapshot object destructor must be a script function void(address) with matching contexts");
+}
 std::shared_ptr<AbdMapValue> encodeValue(const std::shared_ptr<variable>& value, std::size_t depth = 0) {
     switch (value->type) {
         case OBJECT_VALUE: {
@@ -257,6 +322,8 @@ std::shared_ptr<AbdMapValue> encodeValue(const std::shared_ptr<variable>& value,
             entry->put("object", std::make_shared<AddressAbdValue>(blocks::address_of(block)));
             entry->put("has destructor", std::make_shared<BoolAbdValue>(block->destructor.has_value()));
             if (block->destructor) entry->put("destructor", std::make_shared<IntAbdValue>(*block->destructor));
+            validateSnapshotDestructor(block->destructor, block->destructor_contexts);
+            entry->put("destructor contexts", encodeContexts(block->destructor_contexts));
             auto items = std::make_shared<AbdArray>();
             for (const auto& slot : block->slots) items->push_back(encodeValue(slot, depth + 1));
             entry->put("slots", items);
@@ -281,11 +348,6 @@ std::shared_ptr<variable> decodeValue(const std::shared_ptr<AbdMapValue>& value)
     if (auto v = std::dynamic_pointer_cast<StringAbdValue>(value)) return std::make_shared<variable>(v->data);
     if (auto v = std::dynamic_pointer_cast<ByteArrayValue>(value); v && v->length == 1 && v->data[0] == 0xff) return std::make_shared<variable>(nullptr);
     throw std::invalid_argument("Invalid snapshot value");
-}
-template<class T> std::shared_ptr<T> field(const std::shared_ptr<AbdMap>& map, const std::string& key) {
-    auto value = std::dynamic_pointer_cast<T>(map->get(key));
-    if (!value) throw std::invalid_argument("Missing or invalid snapshot field: " + key);
-    return value;
 }
 // Restored literal objects get fresh ids, and saved addresses into them are
 // renumbered. Any other tagged address keeps its bits; its id is retired first,
@@ -317,16 +379,12 @@ struct SnapshotDecoder {
             std::optional<int> destructor;
             if (field<BoolAbdValue>(entry, "has destructor")->data) destructor = field<IntAbdValue>(entry, "destructor")->data;
             else if (entry->get("destructor")) throw std::invalid_argument("Unexpected snapshot object destructor");
-            if (destructor) {
-                auto found = loadedScript->functions.find(*destructor);
-                auto function = found == loadedScript->functions.end() ? nullptr : std::dynamic_pointer_cast<ofunction>(found->second);
-                if (!function || function->rett != VOID_VALUE || function->param_types != std::vector<int>{ADDRESS_VALUE})
-                    throw std::invalid_argument("Snapshot object destructor must be a script function void(address)");
-            }
+            auto contexts = decodeContexts(entry);
+            validateSnapshotDestructor(destructor, contexts);
             auto items = field<AbdArray>(entry, "slots");
             if (items->values.empty()) throw std::invalid_argument("Snapshot object has no slots");
             auto block = blocks::create(items->values.size(), loadedScript);
-            block->destructor = destructor; block->depth = depth;
+            block->destructor = destructor; block->destructor_contexts = std::move(contexts); block->depth = depth;
             objects.emplace(idOf(saved), block);
             for (std::size_t i = 0; i < items->values.size(); ++i) decodeInto(block->slots[i], items->values[i], depth + 1);
             target->setValue(block); block->owner = target.get();
@@ -361,7 +419,7 @@ std::shared_ptr<AbdMap> snapshot() {
         moduleBytes += module.bytes.size();
     }
     auto result = std::make_shared<AbdMap>();
-    result->put("snapshot version", std::make_shared<IntAbdValue>(7));
+    result->put("snapshot version", std::make_shared<IntAbdValue>(8));
     auto manifest = std::make_shared<AbdArray>();
     for (const auto& module : modules) {
         auto entry = std::make_shared<AbdMap>();
@@ -400,6 +458,8 @@ std::shared_ptr<AbdMap> snapshot() {
         entry->put("begin position", std::make_shared<AddressAbdValue>(object.startpos));
         entry->put("has destructor", std::make_shared<BoolAbdValue>(object.destructor_id.has_value()));
         if (object.destructor_id) entry->put("destructor", std::make_shared<IntAbdValue>(*object.destructor_id));
+        validateSnapshotDestructor(object.destructor_id, object.destructor_contexts);
+        entry->put("destructor contexts", encodeContexts(object.destructor_contexts));
         entry->put("manual", std::make_shared<BoolAbdValue>(object.manual));
         objects->push_back(entry);
     }
@@ -409,8 +469,8 @@ std::shared_ptr<AbdMap> snapshot() {
 void restoreSnapshot(const std::vector<unsigned char>& bytes) {
     const auto modules = stableManifest();
     auto result = std::make_shared<AbdMap>(std::make_shared<AbdStack>(AbdValue::fromBytes(bytes.data(), bytes.size())));
-    if (field<IntAbdValue>(result, "snapshot version")->data != 7)
-        throw std::invalid_argument("Unsupported snapshot version; expected v7");
+    if (field<IntAbdValue>(result, "snapshot version")->data != 8)
+        throw std::invalid_argument("Unsupported snapshot version; expected v8");
     auto manifest = field<AbdArray>(result, "module manifest");
     if (manifest->values.size() != modules.size()) throw std::invalid_argument("Snapshot module count differs from script");
     for (std::size_t i = 0; i < modules.size(); ++i) {
@@ -478,9 +538,11 @@ void restoreSnapshot(const std::vector<unsigned char>& bytes) {
         std::optional<int> destructor;
         if (field<BoolAbdValue>(map, "has destructor")->data) destructor = field<IntAbdValue>(map, "destructor")->data;
         else if (map->get("destructor")) throw std::invalid_argument("Unexpected snapshot destructor id");
+        auto contexts = decodeContexts(map);
+        validateSnapshotDestructor(destructor, contexts);
         objects.push_back({field<AddressAbdValue>(map, "begin position")->data,
                            destructor,
-                           field<BoolAbdValue>(map, "manual")->data, loadedScript});
+                           field<BoolAbdValue>(map, "manual")->data, loadedScript, std::move(contexts)});
     }
     // The heap validates all ranges, objects, destructor signatures and owners
     // before atomically replacing state. The final globals swap cannot throw.

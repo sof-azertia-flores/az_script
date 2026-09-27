@@ -71,11 +71,16 @@ std::vector<std::shared_ptr<variable>> allocation_slots(address pointer) {
 void validate_object(const object_record& record) {
     auto script=record.script_owner.lock();
     if(!script||script->closed)throw std::invalid_argument("Object belongs to an unavailable script");
-    if(!record.destructor_id)return;
+    validate_type_contexts(record.destructor_contexts,script);
+    if(!record.destructor_id) {
+        if(!record.destructor_contexts.empty())throw std::invalid_argument("Destructor contexts require a destructor");
+        return;
+    }
     auto it=script->functions.find(*record.destructor_id);
     auto destructor=it==script->functions.end()?nullptr:std::dynamic_pointer_cast<ofunction>(it->second);
     if(!destructor||destructor->rett!=VOID_VALUE||destructor->param_count!=1||
-       destructor->param_types!=std::vector<int>{ADDRESS_VALUE})
+       destructor->param_types!=std::vector<int>{ADDRESS_VALUE}||
+       static_cast<std::size_t>(destructor->hidden_count)!=record.destructor_contexts.size())
         throw std::invalid_argument("Object destructor must be a script function void(address)");
 }
 }
@@ -216,12 +221,12 @@ address object_address(address pointer,int offset) {
     }
     throw std::out_of_range("Invalid or freed object address: "+std::to_string(pointer.value));
 }
-void register_object(address pointer,std::optional<int> destructor_id,bool manual,const std::shared_ptr<environment>& env) {
+void register_object(address pointer,std::optional<int> destructor_id,bool manual,const std::shared_ptr<environment>& env,type_contexts contexts) {
     std::lock_guard<std::recursive_mutex> lock(runtime_mutex());
-    if(blocks::is_block_address(pointer)){blocks::set_destructor(pointer,destructor_id,manual,env);return;}
+    if(blocks::is_block_address(pointer)){blocks::set_destructor(pointer,destructor_id,manual,env,std::move(contexts));return;}
     if(!env||env->closing||owner_of(pointer)!=env.get()||!is_allocation_start(pointer))
         throw std::runtime_error("Object construction must finish in its allocation scope");
-    object_record record{pointer,destructor_id,manual,env->script};validate_object(record);
+    object_record record{pointer,destructor_id,manual,env->script,std::move(contexts)};validate_object(record);
     if(!objects.emplace(pointer,registered_object{record}).second)throw std::runtime_error("Object is already registered");
 }
 namespace {
@@ -247,7 +252,7 @@ void destroy_registered(address pointer,const std::shared_ptr<environment>& env)
                 context=std::make_shared<environment>();context->script=script;
                 context->parent=script->baseEnv;context->caller=env;
             }
-            script->getFunction(*record.destructor_id)->invoke(context,{std::make_shared<variable>(pointer)});
+            invoke_bound_function(script,*record.destructor_id,context,{std::make_shared<variable>(pointer)},record.destructor_contexts);
         }
     } catch(...) {failure=std::current_exception();}
     // Value members end after the destructor body, while the object is still

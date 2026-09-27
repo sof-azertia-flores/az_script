@@ -10,6 +10,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import java.io.*;
 import java.nio.file.*;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.List;
 import static org.junit.jupiter.api.Assertions.*;
@@ -83,7 +84,7 @@ class CompilerTest {
                 + "int main(){return helper(3,\"__func_param0\");}");
         tree.getAsJsonObject("metadata").addProperty("version", 29);
         JsonObject compiled = Compiler.compile(tree).toJson().getAsJsonObject();
-        assertEquals(7, compiled.get("exec-version").getAsInt());
+        assertEquals(8, compiled.get("exec-version").getAsInt());
         assertEquals(29, compiled.get("version").getAsInt(), "source version is not the executable format version");
         assertTrue(compiled.get("gvs").getAsJsonPrimitive().isNumber());
         assertEquals(2, compiled.get("gvs").getAsInt());
@@ -776,10 +777,12 @@ class CompilerTest {
         assertThrows(IllegalArgumentException.class, compiled::typeValue);
         AbdValue payload = compiled.toValue(); var root = payload.getAsAss().values;
         assertEquals(10, root.size()); assertEquals("AZSCRIPT", AbdBasicType.abd2str(root.get(0)));
-        assertEquals(7, AbdBasicType.abd2int(root.get(1)));
+        assertEquals(8, AbdBasicType.abd2int(root.get(1)));
         var functionList = root.get(7).getAsAss().values;
         assertEquals(1, functionList.size()); var function = functionList.get(0).getAsAss().values;
-        assertEquals(6, function.size()); assertEquals(0x0fff0000, AbdBasicType.abd2int(function.get(0)));
+        assertEquals(8, function.size()); assertEquals(0x0fff0000, AbdBasicType.abd2int(function.get(0)));
+        assertEquals(0, AbdBasicType.abd2int(function.get(6)));
+        assertEquals(0, AbdBasicType.abd2int(function.get(7)));
         var block = function.get(5).getAsAss().values;
         assertEquals(2, block.size()); assertEquals(ExecOpcodes.BLOCK, AbdBasicType.abd2int(block.get(0)));
         var returned = block.get(1).getAsAss().values.get(0).getAsAss().values;
@@ -791,12 +794,12 @@ class CompilerTest {
         assertEquals(ExecOpcodes.CONSTANT, AbdBasicType.abd2int(literal.get(0)));
         assertEquals(1, new AcsArray(literal.get(1)).acsa.size());
         String wire = new String(payload.getData(), java.nio.charset.StandardCharsets.ISO_8859_1);
-        for(String key : List.of("return-type", "param-count", "param-types", "local-count", "script", "exec-version"))
+        for(String key : List.of("return-type", "param-count", "param-types", "local-count", "script", "exec-version", "hidden-count", "entry-kind"))
             assertFalse(wire.contains(key), key);
         AcsObject decoded = ExecCodec.decode(payload);
         assertEquals(compiled.toJson(), decoded.toJson());
         assertArrayEquals(payload.toAbdFormat(), decoded.toValue().toAbdFormat());
-        for(int opcode = 0; opcode <= ExecOpcodes.BREAK; opcode++)
+        for(int opcode = 0; opcode <= ExecOpcodes.CHECK_TYPE; opcode++)
             assertEquals(opcode, ExecOpcodes.code(ExecOpcodes.name(opcode)));
     }
     @Test void compactExecPreservesScalarTypesAndDynamicExtensionMetadata() throws Exception {
@@ -1174,6 +1177,69 @@ class CompilerTest {
             assertThrows(IllegalArgumentException.class, () -> compile(invalid), invalid);
         var field = assertThrows(IllegalArgumentException.class, () -> compile(point + "class Box{\n  P inner;\n}\nvoid main(){}"));
         assertTrue(field.getMessage().contains("Box initialization:2:"), field::getMessage);
+    }
+
+    @Test void flexibleParametersTakePointersAndLiteralObjectsByAddress() throws Exception {
+        String point = "class P{int x;P(int v){x=v;}}";
+        String source = point + "class L{P * at;L(P (*) p){at=p;}}int f(P (*) p){P * q=p;return q.x;}"
+                + "void main(){P a(1);P * b=new P(2);print(f(a)+f(b)+f(null));L * l(a);delete b;}";
+        JsonObject tree = newTree(source);
+        assertArrayEquals(Compiler.compile(tree).toValue().toAbdFormat(),
+                Compiler.compile(JsonParser.parseString(tree.toString()).getAsJsonObject()).toValue().toAbdFormat());
+        JsonObject metadata = null;
+        for (var namespace : tree.getAsJsonObject("body").entrySet())
+            for (var function : namespace.getValue().getAsJsonObject().entrySet()) {
+                JsonObject candidate = function.getValue().getAsJsonObject().getAsJsonObject("metadata");
+                if (candidate.get("name").getAsString().equals("f")) metadata = candidate;
+            }
+        assertNotNull(metadata);
+        assertEquals("P(*)", metadata.getAsJsonArray("param-types").get(0).getAsString());
+        // The ABI erases "P (*)" to an address, exactly like "P *".
+        int id = Integer.parseUnsignedInt(tree.getAsJsonObject("abstract").get("f").getAsString(), 16);
+        JsonObject compiled = Compiler.compile(tree).toJson().getAsJsonObject(), function = null;
+        for (JsonElement item : compiled.getAsJsonArray("f"))
+            if (item.getAsJsonObject().get("id").getAsInt() == id) function = item.getAsJsonObject();
+        assertNotNull(function);
+        assertEquals(List.of(7), function.getAsJsonArray("param-types").asList().stream().map(JsonElement::getAsInt).toList());
+        // Only the literal argument is lent by address; pointers and null pass unchanged.
+        List<JsonObject> calls = new ArrayList<>();
+        ArrayDeque<JsonElement> pending = new ArrayDeque<>(); pending.add(main(source).get("script"));
+        while (!pending.isEmpty()) {
+            JsonElement next = pending.pop();
+            if (next.isJsonArray()) next.getAsJsonArray().forEach(pending::add);
+            else if (next.isJsonObject()) {
+                JsonObject object = next.getAsJsonObject();
+                if (object.has("t") && object.get("t").getAsInt() == 1 && object.get("id").getAsInt() == id) calls.add(object);
+                object.entrySet().forEach(entry -> pending.add(entry.getValue()));
+            }
+        }
+        assertEquals(3, calls.size());
+        assertEquals(1, calls.stream().filter(call -> {
+            JsonElement argument = call.getAsJsonArray("param").get(0);
+            return argument.isJsonObject() && argument.getAsJsonObject().has("c")
+                    && argument.getAsJsonObject().get("c").getAsInt() == ExecOpcodes.BLOCK_ADDRESS;
+        }).count());
+        // Unspaced spelling, extern members defined out of class, and structurally equivalent (*) externs.
+        assertDoesNotThrow(() -> compile(point + "int f(P(*)p){return p.x;}void main(){P a(1);print(f(a));}"));
+        assertDoesNotThrow(() -> compile(point + "class H{int n;extern int plus(P (*) o):0fff0005;}"
+                + "int H::plus(P (*) o):0005{return o.x+n;}void main(){H h;P a(1);print(h.plus(a));}"));
+        assertDoesNotThrow(() -> compile(point + "class Q{int x;Q(int v){x=v;}}"
+                + "extern int f(P (*)):12340002;extern int f(Q (*)):12340002;void main(){Q q(1);print(f(q));}"));
+        for (String invalid : List.of(point + "int f(int (*) p){return 1;}", point + "int f(P * (*) p){return 1;}",
+                point + "class H{int n;extern int plus(P (*) o):0fff0005;}int H::plus(P * o):0005{return o.x;}",
+                point + "void main(){P (*) p=null;}", point + "P (*) f(){return null;}", point + "class B{P (*) p;}",
+                point + "void main(){for(P (*) p=null;false;){}}",
+                point + "class D{double d;}int f(P (*) p){return 1;}void main(){D d;f(d);}",
+                point + "class T:P{string tag;T():P(1){}}int f(T (*) p){return 1;}void main(){P a(1);f(a);}",
+                point + "int f(P (*) p){return 1;}void main(){f(3);}",
+                point + "extern int f(P (*)):12340002;int f(P * p){return 1;}",
+                point + "extern int f(P (*)):12340002;extern int f(P *):12340002;"))
+            assertThrows(IllegalArgumentException.class, () -> compile(invalid), invalid);
+        var local = assertThrows(IllegalArgumentException.class, () -> compile(point + "void main(){\n  P (*) p=null;\n}"));
+        assertTrue(local.getMessage().contains(":2:") && local.getMessage().contains("only allowed as a function parameter"),
+                local::getMessage);
+        var wrong = assertThrows(IllegalArgumentException.class, () -> compile(point + "int f(P (*) p){return 1;}void main(){f(3);}"));
+        assertTrue(wrong.getMessage().contains("expected P (*), got int"), wrong::getMessage);
     }
 
     @Test void addressArithmeticKeepsIntegerAndObjectTypesSeparate() throws Exception {

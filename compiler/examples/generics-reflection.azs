@@ -1,0 +1,51 @@
+#namespace 1234
+
+<T> T identity(T value) { return value; }
+
+<T> T invokeWithoutArguments(int functionId) {
+    return reflect_invoke_function<T>(functionId);
+}
+
+class Box<T> {
+    T value;
+
+    void set(T next) { value = next; }
+    T get() { return value; }
+    <U> U echo(U input) { return input; }
+}
+
+class Point {
+    int x;
+
+    Point(int initial) { x = initial; }
+    ~Point() { print("point:" + x); }
+}
+
+int multiply(int first, int second):0042 { return first * second; }
+
+Point createPoint():0043 {
+    Point result(9);
+    return result;
+}
+
+void main() {
+    Box<int> number;
+    print(number.get());
+    number.set(identity(6));
+    print(number.get());
+
+    Box<string> text;
+    print(text.get() == "");
+    text.set(identity<string>("generic"));
+    print(text.get());
+    print(number.echo<bool>(true));
+
+    int functionNamespace = 4660; // 0x1234; expressions use decimal int32 values.
+    print(reflect_invoke_function<int>(functionNamespace * 65536 + 66, 6, 7));
+    Point point = invokeWithoutArguments<Point>(functionNamespace * 65536 + 67);
+    print(point.x);
+
+    Point * empty = identity<Point *>(null);
+    print(empty == null);
+    print(reflect_hint_loaded("OPTIONAL_LIBRARY"));
+}

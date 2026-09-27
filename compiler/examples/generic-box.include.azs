@@ -1,0 +1,19 @@
+#ifndef GENERIC_BOX_INCLUDED
+#define GENERIC_BOX_INCLUDED 1
+#assume_hint GENERIC_BOX_LIB beef
+
+class Box<T> {
+    T value;
+
+    extern Box():beef0002;
+    extern void set(T next):beef0003;
+    extern T get():beef0004;
+    extern ~Box():beef0005;
+}
+
+extern <T> T echo(T value):beef0006;
+
+// Concrete wrappers are ordinary functions and may be invoked by runtime ID.
+extern Box<int> makeIntBox(int value):beef0007;
+extern int readIntBox(Box<int> (*) box):beef0008;
+#fi

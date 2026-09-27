@@ -2,10 +2,12 @@
 """Filesystem safety and publication recovery tests; no build tools are needed."""
 import json
 from pathlib import Path
+import re
 import sys
 import tempfile
 import unittest
 from unittest.mock import patch
+from urllib.parse import unquote, urlsplit
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'tools'))
 import export_distribution as exporter
@@ -27,6 +29,34 @@ class ExportDestinationTests(unittest.TestCase):
 
     def backups(self):
         return list(self.root.glob('.azscript-previous-*'))
+
+    def test_bilingual_assets_have_relocatable_links_and_package_commands(self):
+        package = self.root / 'relocated documentation'
+        package.mkdir()
+        exporter.copy_assets(package)
+        for relative in ('README', 'THIRD_PARTY', 'docs/USAGE', 'docs/QUICKSTART',
+                         'docs/LANGUAGE', 'docs/EXEC_FORMAT', 'docs/HINT_LINKING',
+                         'docs/EXTERN_LIBRARY', 'stdlib/MATH'):
+            chinese = package / (relative + '.md')
+            english = package / (relative + '.en.md')
+            self.assertIn(f']({english.name})', chinese.read_text(encoding='utf-8'))
+            self.assertIn(f']({chinese.name})', english.read_text(encoding='utf-8'))
+        for document in package.rglob('*.md'):
+            content = document.read_text(encoding='utf-8')
+            for target in re.findall(r'\]\(([^)]+)\)', content):
+                link = urlsplit(target)
+                if link.scheme or not link.path:
+                    continue
+                with self.subTest(document=document.relative_to(package), target=target):
+                    self.assertTrue((document.parent / unquote(link.path)).exists())
+        language = (package / 'docs/LANGUAGE.en.md').read_text(encoding='utf-8')
+        self.assertIn('./compile.sh examples/parser-regressions.azs', language)
+        self.assertNotIn('python3 tools/build_and_test.py', language)
+        self.assertNotIn('](../docs/', language)
+        for name in ('HINT_LINKING.md', 'HINT_LINKING.en.md'):
+            hint = (package / 'docs' / name).read_text(encoding='utf-8')
+            self.assertIn('](../examples/', hint)
+            self.assertNotIn('](../compiler/examples/', hint)
 
     def test_nonempty_output_requires_force_even_for_a_previous_export(self):
         destination = self.package('existing', 'original')

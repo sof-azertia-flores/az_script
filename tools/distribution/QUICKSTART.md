@@ -1,5 +1,7 @@
 # AzScript 基本语法
 
+中文 | [English](QUICKSTART.en.md)
+
 源文件使用 UTF-8 和 `.azs` 后缀。下面的程序可以保存为 `hello.azs`，在发行包根目录运行 `./compile.sh hello.azs`，默认得到 `hello.exec.abd`、`hello.ast.json` 和 `hello.exec.json`，再运行 `./run.sh hello.exec.abd`。Windows 使用 `compile.cmd` 和 `run.cmd`。
 
 ```c
@@ -70,7 +72,7 @@ void main() {
 
 字段须显式标注类型，每个字段占一个 slot。数字默认是零、布尔是 `false`、字符串为空串、address 和指针字段是 `null`；字面量对象字段（如 `Point pos(1);`）内嵌一个完整对象，未写实参时调用无参构造。构造方法与类同名、无返回类型；未声明构造时有默认无参构造，声明带参构造后不会另加无参构造。析构写作 `~Point()`，不能直接调用。类连同继承字段至少有一个字段，成员均公开，支持单继承，不支持多继承、虚函数、重载、静态成员或嵌套类。
 
-`Point a(3);`（或 `Point a;`、`Point a();`）创建字面量对象：它是一个值，赋值、传参和返回都会复制全部字段，每个副本到期时各自析构；返回局部字面量对象直接交给调用方，不额外复制。`Point * p(3);` 创建离块自动销毁的指针对象，无参也要写 `Point * p();`。`Point * b = new Point(5);` 创建需要显式 `delete b;` 的手动对象；单写 `Point * q;` 是空指针，等同 `Point * q = null;`。指针赋值、别名与传参只复制地址；指针字段不拥有目标对象。同一块中的对象按创建逆序析构，未绑定变量的临时对象在语句结束时析构。`delete` 只接受指针，`delete null;` 无操作，删除自动指针对象或使用失效地址会报错。脚本只能在方法中通过 `this`（类型 `Point *`）拿到字面量对象的地址，对象到期后再经它访问会报错。字面量对象不能与 `null` 比较、不能存进 `var` 或全局变量。
+`Point a(3);`（或 `Point a;`、`Point a();`）创建字面量对象：它是一个值，赋值、传参和返回都会复制全部字段，每个副本到期时各自析构；返回局部字面量对象直接交给调用方，不额外复制。`Point * p(3);` 创建离块自动销毁的指针对象，无参也要写 `Point * p();`。`Point * b = new Point(5);` 创建需要显式 `delete b;` 的手动对象；单写 `Point * q;` 是空指针，等同 `Point * q = null;`。参数写成 `Point (*) p` 时函数同时接受 `Point *` 和字面量 `Point`：字面量对象按地址借入，不复制，函数内 `p` 就是 `Point *`。指针赋值、别名与传参只复制地址；指针字段不拥有目标对象。同一块中的对象按创建逆序析构，未绑定变量的临时对象在语句结束时析构。`delete` 只接受指针，`delete null;` 无操作，删除自动指针对象或使用失效地址会报错。脚本只能通过方法中的 `this` 或 `Point (*)` 参数（类型均为 `Point *`）拿到字面量对象的地址，对象到期后再经它访问会报错。字面量对象不能与 `null` 比较、不能存进 `var` 或全局变量。
 
 访问成员使用 `object.field`、`object.method()`、`this.field`。接收对象和实参从左到右各求值一次。类内先找局部变量和参数，再找成员，最后找全局变量。成员赋值支持 `=`，暂不支持成员 `+=`。指针支持结构等价的赋值及相等比较，也能与 `null` 比较；整数 `0` 不能代替 `null`。对象须写显式类类型，`var object = new Point(1); object.get();` 不能编译，应写 `Point * object = new Point(1);`。
 
@@ -112,7 +114,7 @@ int main() { return math_round(math_hypot(3.0, 4.0)); }
 
 内置 `print(value)`、`getDepth()`、`alloc(count)`、`mem_get(pointer)`、`mem_free(pointer)`、`make_free(pointer)`、`mem_send_up(pointer)` 和 `load_extern_library(name)` 无需声明。`load_extern_library` 加载当前系统的已签名动态库，见 [外部动态库](EXTERN_LIBRARY.md)。`alloc(int)` 返回 address，后四个内存接口接收 address。例如 `address p = alloc(2); mem_get(p + 1) = 42; mem_free(p);`，分配数量和偏移仍是 int。地址支持 `address + int`、`int + address`、`address - int`，以及地址间的无符号相等和大小比较；溢出和下溢报错，空地址使用 `p == null` 判断。地址不能与普通整数互相转换或作相等比较，也不能直接作为 if 条件。类指针仍保留静态类类型与继承规则，只在执行文件中擦除为 address；通常通过构造和 delete 管理，原始内存释放不会调用用户析构。
 
-本发行包使用 exec v7 和 JNI 快照 v7，不读取旧执行文件或快照。所有模块须重新编译；旧代码中的 `int p = alloc(...)` 须改为 `address p = alloc(...)`，依赖引用语义的 `Point p(...)` 须改为 `Point * p(...)`，`Point p = new Point(...)` 改为 `Point * p = new Point(...)`。64 位地址目前仍表示 slot 位置，既有堆容量和生命周期规则不变。
+本发行包使用 exec v8 和 JNI 快照 v8，不读取旧执行文件或快照。所有模块须重新编译；旧代码中的 `int p = alloc(...)` 须改为 `address p = alloc(...)`，依赖引用语义的 `Point p(...)` 须改为 `Point * p(...)`，`Point p = new Point(...)` 改为 `Point * p = new Point(...)`。64 位地址目前仍表示 slot 位置，既有堆容量和生命周期规则不变。
 
 更多预处理、类型、生命周期、内存边界与 AST/ABD 说明见 [完整语言文档](LANGUAGE.md)，编译与嵌入步骤见 [使用文档](USAGE.md)，数学函数见 [数学库说明](../stdlib/MATH.md)。
 

@@ -11,6 +11,7 @@ struct slot_block {
     std::uint64_t id=0;
     std::vector<std::shared_ptr<variable>> slots;
     std::optional<int> destructor;
+    type_contexts destructor_contexts;
     std::weak_ptr<azertian::script> script_owner;
     // Exactly one storage variable owns a live block, unless it is an unbound
     // temporary of a frame or is held by a host. owner_env orders the cleanup
@@ -39,7 +40,7 @@ bool owns(const variable& storage) noexcept;
 std::shared_ptr<slot_block> resolve(address pointer);
 std::shared_ptr<variable> slot(address pointer);
 address member_address(address pointer,int offset);
-void set_destructor(address pointer,std::optional<int> destructor,bool manual,const std::shared_ptr<environment>& env);
+void set_destructor(address pointer,std::optional<int> destructor,bool manual,const std::shared_ptr<environment>& env,type_contexts contexts={});
 // Execution support used by the interpreter and heap.
 std::shared_ptr<slot_block> copy(const std::shared_ptr<slot_block>& source);
 void store(const std::shared_ptr<variable>& target,const std::shared_ptr<variable>& value,const std::shared_ptr<environment>& env);

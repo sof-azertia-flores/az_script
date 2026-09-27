@@ -14,7 +14,7 @@ public class GeneraterJson {
     private static final int MAX_MACRO_EXPANSION_CHARS = 1_048_576;
     private static final Set<String> TYPES = Set.of("int", "float", "double", "string", "boolean", "bool", "void", "address");
     /** Statement keywords; they can never name a function, parameter, variable, global or macro. */
-    private static final Set<String> KEYWORDS = Set.of("return", "if", "else", "while", "for", "break", "continue", "def", "var", "class", "new", "delete", "this", "null", "extern", "public", "private", "protected", "virtual");
+    private static final Set<String> KEYWORDS = Set.of("return", "if", "else", "while", "for", "break", "continue", "def", "var", "class", "new", "delete", "this", "null", "extern", "extends", "public", "private", "protected", "virtual");
     private static final Set<String> PREPROCESSOR_DIRECTIVES = Set.of(
             "ifdef", "ifndef", "if_equals", "else", "fi", "endif", "include", "author", "gvar",
             "namespace", "namespace_hint", "assume_hint", "setmeta", "setattr", "define", "undef");
@@ -31,6 +31,7 @@ public class GeneraterJson {
         public AzExpression body;
         public String returnType, name;
         public String ownerClass, functionKind;
+        public JsonArray typeParameters = new JsonArray();
         public int id;
         public Integer explicitPosition;
         public JsonArray baseArguments;
@@ -41,6 +42,7 @@ public class GeneraterJson {
         public String returnType;
         public List<String> paramTypes = new ArrayList<>();
         public String ownerClass, functionKind;
+        public JsonArray typeParameters = new JsonArray();
         public int id;
 
         ExternSignature(String returnType, List<String> paramTypes) {
@@ -317,6 +319,7 @@ public class GeneraterJson {
                 JsonObject value = new JsonObject();
                 value.addProperty("return-type", signature.returnType);
                 value.addProperty("id", Integer.toHexString(signature.id));
+                if (!signature.typeParameters.isEmpty()) value.add("type-parameters", signature.typeParameters.deepCopy());
                 if (signature.ownerClass != null) {
                     value.addProperty("owner-class", signature.ownerClass); value.addProperty("function-kind", signature.functionKind);
                 }
@@ -336,6 +339,7 @@ public class GeneraterJson {
                 meta.addProperty("name", function.name);
                 meta.addProperty("position", function.id & 0xffff);
                 meta.addProperty("return-type", function.returnType);
+                if (!function.typeParameters.isEmpty()) meta.add("type-parameters", function.typeParameters.deepCopy());
                 if (function.ownerClass != null) {
                     meta.addProperty("owner-class", function.ownerClass);
                     meta.addProperty("function-kind", function.functionKind);
@@ -518,23 +522,106 @@ public class GeneraterJson {
         private int loopDepth;
         private int nextFunctionPosition = 1;
         private final Set<String> classNames = new LinkedHashSet<>();
+        private final Map<String,List<String>> classTypeParameters = new LinkedHashMap<>();
+        private Set<String> typeParameters = new LinkedHashSet<>();
         Parser(String source, AzScript script) {
             this.tokens = new Lexer(source).scan(); this.script = script;
-            for (JsonElement item : script.classes) classNames.add(item.getAsJsonObject().get("name").getAsString());
-            for (int i = 0; i + 1 < tokens.size(); i++)
-                if (tokens.get(i).text().equals("class") && tokens.get(i + 1).identifier()) classNames.add(tokens.get(i + 1).text());
+            for (JsonElement item : script.classes) {
+                JsonObject declaration = item.getAsJsonObject(); String name = declaration.get("name").getAsString();
+                classNames.add(name); classTypeParameters.put(name, parameterNames(declaration.getAsJsonArray("type-parameters")));
+            }
+            for (int i = 0; i + 1 < tokens.size(); i++) {
+                if (tokens.get(i).text().equals("class") && tokens.get(i + 1).identifier()) {
+                    String name = tokens.get(i + 1).text(); classNames.add(name);
+                    classTypeParameters.putIfAbsent(name, typeParameterNamesAhead(i + 2));
+                }
+            }
         }
-        private boolean knownType(String name) { return TYPES.contains(name) || classNames.contains(name); }
+        private static List<String> parameterNames(JsonArray declarations) {
+            List<String> result = new ArrayList<>();
+            if (declarations != null) for (JsonElement item : declarations) result.add(item.getAsJsonObject().get("name").getAsString());
+            return result;
+        }
+        /** Collect names before parsing bounds, so forward and recursive bounds have a scope. */
+        private List<String> typeParameterNamesAhead(int start) {
+            List<String> names = new ArrayList<>();
+            if (start >= tokens.size() || !tokens.get(start).text().equals("<")) return names;
+            int depth = 1; boolean parameter = true;
+            for (int i = start + 1; i < tokens.size() && depth > 0; i++) {
+                Token token = tokens.get(i); String text = token.text();
+                if (parameter && depth == 1) { if (token.identifier()) names.add(text); parameter = false; }
+                if (text.equals("<")) depth++;
+                else if (text.equals(">")) depth--;
+                else if (text.equals(",") && depth == 1) parameter = true;
+                else if (text.equals("{") || text.equals(";") || text.equals("<eof>")) break;
+            }
+            return names;
+        }
+        private JsonArray readTypeParameters() {
+            JsonArray declarations = new JsonArray();
+            if (!at("<")) return declarations;
+            List<String> names = typeParameterNamesAhead(index); Set<String> own = new HashSet<>();
+            for (String parameter : names) {
+                try { identifier(parameter); } catch (IllegalArgumentException e) { throw error(e.getMessage()); }
+                if (!own.add(parameter) || knownType(parameter) || Compiler.isBuiltinName(parameter))
+                    throw error("Duplicate or reserved type parameter: " + parameter);
+            }
+            typeParameters.addAll(names); expect("<");
+            if (at(">")) throw error("Type parameter list cannot be empty");
+            do {
+                JsonObject declaration = new JsonObject(); declaration.addProperty("name", name().text());
+                if (match("extends")) declaration.addProperty("bound", readType(false));
+                declarations.add(declaration);
+            } while (match(","));
+            expect(">"); return declarations;
+        }
+        private boolean knownType(String name) { return TYPES.contains(name) || classNames.contains(name) || typeParameters.contains(name); }
         private String sourceType(String value, boolean allowVoid) {
-            if (classNames.contains(value)) return value;
+            if (classNames.contains(value) || typeParameters.contains(value)) return value;
             try { return normalizeType(value, allowVoid, "type"); }
             catch (IllegalArgumentException e) { throw error(e.getMessage(), tokens.get(index - 1)); }
         }
+        private static String rawClass(String type) {
+            int arguments = type.indexOf('<');
+            if (arguments >= 0) return type.substring(0, arguments);
+            return type.substring(0, type.length() - classSuffix(type).length());
+        }
+        private boolean classType(String type) { return classNames.contains(rawClass(type)); }
+        private String selfType(String owner) {
+            List<String> parameters = classTypeParameters.getOrDefault(owner, List.of());
+            return parameters.isEmpty() ? owner : owner + "<" + String.join(",", parameters) + ">";
+        }
+        private String typeApplication(String base) {
+            if (!match("<")) {
+                if (!classTypeParameters.getOrDefault(base, List.of()).isEmpty())
+                    throw error("Generic class " + base + " requires explicit type arguments");
+                return base;
+            }
+            if (!classNames.contains(base)) throw error("Only a class type can have type arguments: " + base);
+            List<String> arguments = new ArrayList<>();
+            if (at(">")) throw error("Type argument list cannot be empty");
+            do { arguments.add(readType(false)); } while (match(","));
+            expect(">");
+            int expected = classTypeParameters.getOrDefault(base, List.of()).size();
+            if (arguments.size() != expected) throw error("Class " + base + " expects " + expected + " type arguments, got " + arguments.size());
+            return base + "<" + String.join(",", arguments) + ">";
+        }
+        private String readType(boolean allowVoid) {
+            enterRecursion();
+            try { return pointerSuffix(typeApplication(sourceType(name().text(), allowVoid))); }
+            finally { recursionDepth--; }
+        }
         /** "C *" names a pointer to C; a bare class name is a literal (value) object. */
         private String pointerSuffix(String type) {
+            if (flexibleAhead()) throw error("C (*) is only allowed as a function parameter type");
             if (!at("*")) return type;
-            if (!classNames.contains(type)) throw error("Only class types can be pointers");
-            advance(); return type + "*";
+            if (!classType(type)) throw error("Only class types can be pointers; a type parameter denotes a complete type");
+            advance();
+            if (flexibleAhead()) throw error("A type is either C * or C (*), not both");
+            return type + "*";
+        }
+        private boolean flexibleAhead() {
+            return at("(") && index + 2 < tokens.size() && tokens.get(index + 1).text().equals("*") && tokens.get(index + 2).text().equals(")");
         }
         /** In a class body, "Type name(...)" is a field with constructor arguments when ';' follows ')'. */
         private boolean fieldConstruction() {
@@ -583,29 +670,63 @@ public class GeneraterJson {
             while (!at("<eof>")) {
                 if (match(";")) continue;
                 if (match("class")) { classDeclaration(); continue; }
-                boolean external = match("extern");
-                String first = name().text();
-                if (classNames.contains(first) && match("::")) {
-                    boolean destructor = match("~"); String member = name().text();
-                    if (!member.equals(first)) throw error("A method needs an explicit return type");
-                    parseFunction(first, destructor ? "destructor" : "constructor", "void",
-                            destructor ? "<dtor>" : "<ctor>", external, false);
-                } else {
-                    String type = pointerSuffix(sourceType(first, true)), name = declaredNameOrOwner();
+                Set<String> outer = typeParameters; typeParameters = new LinkedHashSet<>(outer);
+                try {
+                    String owner = qualifiedOwnerAhead();
+                    if (owner != null) typeParameters.addAll(classTypeParameters.getOrDefault(owner, List.of()));
+                    boolean external = match("extern"); JsonArray generic = readTypeParameters();
+                    if (!external) external = match("extern");
+                    String first = typeApplication(sourceType(name().text(), true));
                     if (match("::")) {
-                        if (!classNames.contains(name)) throw error("Unknown owner class: " + name);
-                        String member = declaredName().text();
-                        parseFunction(name, "method", type, member, external, false);
-                    } else parseFunction(null, null, type, name, external, false);
-                }
+                        String className = rawClass(first); requireOwnerType(first);
+                        boolean destructor = match("~"); String member = name().text();
+                        if (!member.equals(className)) throw error("A method needs an explicit return type");
+                        parseFunction(className, destructor ? "destructor" : "constructor", "void",
+                                destructor ? "<dtor>" : "<ctor>", external, false, generic);
+                    } else {
+                        String type = pointerSuffix(first);
+                        if (classNames.contains(current().text()) && classOwnerEnd(index) >= 0) {
+                            String ownerType = typeApplication(name().text()); requireOwnerType(ownerType); expect("::");
+                            String member = declaredName().text();
+                            parseFunction(rawClass(ownerType), "method", type, member, external, false, generic);
+                        } else {
+                            String member = declaredName().text();
+                            parseFunction(null, null, type, member, external, false, generic);
+                        }
+                    }
+                } finally { typeParameters = outer; }
             }
             Map<String,JsonArray> layouts = validateClassLayouts();
             validateDuplicateExterns(layouts); assignFunctionIds();
             for (AzFunction function : script.functions) TreeLimits.validate(function.body.generate());
         }
-        private String declaredNameOrOwner() {
-            if (classNames.contains(current().text()) && tokens.get(index + 1).text().equals("::")) return advance().text();
-            return declaredName().text();
+        /** Index of the :: after a complete owner type, or -1 for an ordinary identifier. */
+        private int classOwnerEnd(int start) {
+            if (start >= tokens.size() || !classNames.contains(tokens.get(start).text())) return -1;
+            int cursor = start + 1;
+            if (tokens.get(cursor).text().equals("<")) {
+                int depth = 0;
+                do {
+                    String token = tokens.get(cursor++).text();
+                    if (token.equals("<")) depth++;
+                    else if (token.equals(">")) depth--;
+                    else if (token.equals(";") || token.equals("{") || token.equals("<eof>")) return -1;
+                } while (cursor < tokens.size() && depth > 0);
+            }
+            return cursor < tokens.size() && tokens.get(cursor).text().equals("::") ? cursor : -1;
+        }
+        private String qualifiedOwnerAhead() {
+            for (int cursor = index; cursor < tokens.size(); cursor++) {
+                String token = tokens.get(cursor).text();
+                if (token.equals("(") || token.equals("{") || token.equals(";") || token.equals("<eof>")) break;
+                if (classOwnerEnd(cursor) >= 0) return token;
+            }
+            return null;
+        }
+        private void requireOwnerType(String type) {
+            if (!classType(type)) throw error("Unknown owner class: " + type);
+            if (!selfType(rawClass(type)).equals(type))
+                throw error("An out-of-class definition must use its class type parameters: " + selfType(rawClass(type)));
         }
         private Token classLocation(JsonObject definition) {
             return new Token(definition.get("name").getAsString(), null,
@@ -626,14 +747,14 @@ public class GeneraterJson {
                     if (!chain.add(name)) throw error("Cyclic class inheritance involving " + name, classLocation(next));
                     pending.push(next);
                     if (next.has("base")) {
-                        String base = next.get("base").getAsString(); JsonObject parent = declarations.get(base);
+                        String base = next.get("base").getAsString(); JsonObject parent = declarations.get(rawClass(base));
                         if (parent == null) throw error("Unknown base class: " + base, classLocation(next));
                         next = parent;
                     } else next = null;
                 }
                 while (!pending.isEmpty()) {
                     JsonObject value = pending.pop(); JsonArray fields = new JsonArray();
-                    if (value.has("base")) fields.addAll(layouts.get(value.get("base").getAsString()));
+                    if (value.has("base")) fields.addAll(layouts.get(rawClass(value.get("base").getAsString())));
                     fields.addAll(value.getAsJsonArray("fields"));
                     String name = value.get("name").getAsString();
                     if (fields.isEmpty()) throw error("Class " + name + " must contain at least one field", classLocation(value));
@@ -668,21 +789,44 @@ public class GeneraterJson {
         private void validateDuplicateExterns(Map<String,JsonArray> layouts) {
             for (DuplicateExtern duplicate : duplicateExterns) {
                 ExternSignature first = duplicate.first(), second = duplicate.second();
-                if (first.paramTypes.size() != second.paramTypes.size() || !sameSourceType(first.returnType, second.returnType, layouts))
+                if (first.typeParameters.size() != second.typeParameters.size()) throw error("Conflicting extern declaration: " + duplicate.name());
+                Map<String,String> renames = new HashMap<>();
+                for (int i = 0; i < first.typeParameters.size(); i++)
+                    renames.put(second.typeParameters.get(i).getAsJsonObject().get("name").getAsString(), first.typeParameters.get(i).getAsJsonObject().get("name").getAsString());
+                for (int i = 0; i < first.typeParameters.size(); i++) {
+                    JsonObject left = first.typeParameters.get(i).getAsJsonObject(), right = second.typeParameters.get(i).getAsJsonObject();
+                    if (left.has("bound") != right.has("bound") || left.has("bound") && !sameSourceType(left.get("bound").getAsString(),
+                            renameType(right.get("bound").getAsString(), renames), layouts)) throw error("Conflicting extern declaration: " + duplicate.name());
+                }
+                if (first.paramTypes.size() != second.paramTypes.size() || !sameSourceType(first.returnType, renameType(second.returnType, renames), layouts))
                     throw error("Conflicting extern declaration: " + duplicate.name());
                 for (int i = 0; i < first.paramTypes.size(); i++)
-                    if (!sameSourceType(first.paramTypes.get(i), second.paramTypes.get(i), layouts))
+                    if (!sameSourceType(first.paramTypes.get(i), renameType(second.paramTypes.get(i), renames), layouts))
                         throw error("Conflicting extern declaration: " + duplicate.name());
             }
         }
+        private static String renameType(String type, Map<String,String> renames) {
+            StringBuilder result = new StringBuilder();
+            for (int i = 0; i < type.length();) {
+                int end = i + 1;
+                if (Character.isJavaIdentifierStart(type.charAt(i))) {
+                    while (end < type.length() && Character.isJavaIdentifierPart(type.charAt(end))) end++;
+                    String name = type.substring(i, end); result.append(renames.getOrDefault(name, name));
+                } else result.append(type.charAt(i));
+                i = end;
+            }
+            return result.toString();
+        }
+        /** "(*)" for a flexible parameter, "*" for a pointer, "" for a literal object or scalar. */
+        private static String classSuffix(String type) { return type.endsWith("(*)") ? "(*)" : type.endsWith("*") ? "*" : ""; }
         private boolean sameSourceType(String first, String second, Map<String,JsonArray> layouts) {
             ArrayDeque<List<String>> pending = new ArrayDeque<>();Set<List<String>> compared = new HashSet<>();pending.add(List.of(first, second));
             while (!pending.isEmpty()) {
                 List<String> pair = pending.removeLast();if (pair.get(0).equals(pair.get(1))) continue;
-                boolean pointer = pair.get(0).endsWith("*");
-                if (pointer != pair.get(1).endsWith("*")) return false;
-                JsonArray left = layouts.get(pointer ? pair.get(0).substring(0, pair.get(0).length() - 1) : pair.get(0)),
-                        right = layouts.get(pointer ? pair.get(1).substring(0, pair.get(1).length() - 1) : pair.get(1));
+                String kind = classSuffix(pair.get(0));
+                if (!kind.equals(classSuffix(pair.get(1)))) return false;
+                JsonArray left = layouts.get(pair.get(0).substring(0, pair.get(0).length() - kind.length())),
+                        right = layouts.get(pair.get(1).substring(0, pair.get(1).length() - kind.length()));
                 if (left == null || right == null || left.size() != right.size()) return false;
                 if (!compared.add(pair)) continue;
                 for (int i = 0; i < left.size(); i++)
@@ -753,12 +897,19 @@ public class GeneraterJson {
                 throw error("Duplicate or reserved class name: " + className);
             for (JsonElement item : script.classes)
                 if (item.getAsJsonObject().get("name").getAsString().equals(className)) throw error("Duplicate class: " + className);
+            Set<String> outer = typeParameters; typeParameters = new LinkedHashSet<>(outer);
+            try {
             JsonObject definition = new JsonObject(); definition.addProperty("name", className);
             definition.addProperty("_line", classToken.line()); definition.addProperty("_column", classToken.column());
+            JsonArray generic = readTypeParameters();
+            if (!generic.isEmpty()) definition.add("type-parameters", generic);
+            classTypeParameters.put(className, parameterNames(generic));
             if (match(":")) {
                 match("public");
                 if (at("private") || at("protected") || at("virtual")) throw error("Only public single inheritance is supported");
-                definition.addProperty("base", name().text());
+                String base = readType(false);
+                if (!classType(base) || !classSuffix(base).isEmpty()) throw error("A base must be a class value type");
+                definition.addProperty("base", base);
                 if (at(",")) throw error("Multiple inheritance is not supported");
             }
             JsonArray fields = new JsonArray(); JsonObject methods = new JsonObject();
@@ -768,29 +919,33 @@ public class GeneraterJson {
             while (!at("}")) {
                 if (at("<eof>")) throw error("Unterminated class " + className);
                 if (match(";")) continue;
-                boolean external = match("extern");
+                Set<String> classScope = typeParameters; typeParameters = new LinkedHashSet<>(classScope);
+                try {
+                boolean external = match("extern"); JsonArray methodGeneric = readTypeParameters();
+                if (!external) external = match("extern");
                 if (match("~")) {
                     if (destructor) throw error("Duplicate destructor for " + className);
-                    expect(className);parseFunction(className,"destructor","void","<dtor>",external,true);
+                    expect(className);parseFunction(className,"destructor","void","<dtor>",external,true,methodGeneric);
                     definition.addProperty("destructor",className+"::<dtor>");destructor=true;
                 } else if (at(className) && tokens.get(index + 1).text().equals("(")) {
                     if (constructor) throw error("Constructor overloading is not supported for " + className);
-                    advance();parseFunction(className,"constructor","void","<ctor>",external,true);
+                    advance();parseFunction(className,"constructor","void","<ctor>",external,true,methodGeneric);
                     definition.addProperty("constructor",className+"::<ctor>");constructor=true;
                 } else {
-                    Token start=current();String type=pointerSuffix(sourceType(name().text(),true));String member=declaredName().text();
+                    Token start=current();String type=readType(true);String member=declaredName().text();
                     if (!members.add(member)) throw error("Duplicate class member: " + className + "." + member);
                     if (at("(") && !fieldConstruction()) {
-                        parseFunction(className,"method",type,member,external,true);methods.addProperty(member,className+"::"+member);
+                        parseFunction(className,"method",type,member,external,true,methodGeneric);methods.addProperty(member,className+"::"+member);
                     } else {
                         if (external) throw error("Fields cannot be extern");
+                        if (!methodGeneric.isEmpty()) throw error("Fields cannot declare type parameters");
                         if (type.equals("void")) throw error("Field cannot have type void");
                         JsonObject field=new JsonObject();field.addProperty("name",member);field.addProperty("type",type);
                         field.addProperty("_line",start.line());field.addProperty("_column",start.column());
                         if (at("(")) {
                             // Only an embedded literal object takes constructor arguments.
                             if (type.endsWith("*")) throw error("A pointer field cannot own an automatic object; initialize it with = new " + type.substring(0, type.length() - 1) + "(...)");
-                            if (!classNames.contains(type)) throw error("Only literal-object fields take constructor arguments");
+                            if (!classType(type)) throw error("Only literal-object fields take constructor arguments");
                             advance();List<JsonElement> arguments=new ArrayList<>();arguments.add(new JsonPrimitive(type));
                             if(!at(")"))do{arguments.add(expression());}while(match(","));
                             expect(")");field.add("initializer",operation("ctrl","object-value",start,arguments.toArray(JsonElement[]::new)));
@@ -798,31 +953,44 @@ public class GeneraterJson {
                         endStatement();fields.add(field);
                     }
                 }
+                } finally { typeParameters = classScope; }
             }
             expect("}");match(";");
             if(!constructor) {
                 AzFunction function=new AzFunction();function.ownerClass=className;function.functionKind="constructor";
-                function.name=className+"::<ctor>";function.returnType="void";function.params.add("this");function.paramTypes.add(className+"*");
+                function.name=className+"::<ctor>";function.returnType="void";function.params.add("this");function.paramTypes.add(selfType(className)+"*");
                 function.line=classToken.line();function.column=classToken.column();
                 function.body=JsonArray::new;addDefinition(function);definition.addProperty("constructor",function.name);
             }
+            } finally { typeParameters = outer; }
         }
         private void addDefinition(AzFunction function) {
             if(definitions.putIfAbsent(function.name,function)!=null)throw error("Duplicate function definition: "+function.name);
             script.functions.add(function);
         }
-        private void parseFunction(String owner,String kind,String type,String member,boolean external,boolean inClass) {
+        private void parseFunction(String owner,String kind,String type,String member,boolean external,boolean inClass,JsonArray generic) {
             String qualified=owner==null?member:owner+"::"+member;
             if(Compiler.isBuiltinName(qualified)||owner==null&&classNames.contains(qualified))throw error("Reserved function name: "+qualified);
             AzFunction function=new AzFunction();function.name=qualified;function.ownerClass=owner;function.functionKind=kind;function.returnType=type;
+            if (!generic.isEmpty() && ("constructor".equals(kind) || "destructor".equals(kind)))
+                throw error("Constructors and destructors cannot declare their own type parameters");
+            if (!generic.isEmpty() && owner == null && specialNames.containsKey(member)
+                    && !(member.equals("main") && !script.namespaceHint.isEmpty()))
+                throw error("Entry and lifecycle functions cannot declare type parameters");
+            function.typeParameters = generic.deepCopy();
             function.line=current().line();function.column=current().column();
-            if(owner!=null){function.params.add("this");function.paramTypes.add(owner+"*");}
+            if(owner!=null){function.params.add("this");function.paramTypes.add(selfType(owner)+"*");}
             expect("(");
             if(!at(")"))do {
                 String parameter=name().text(),parameterType="any";
                 if(parameter.equals("void"))throw error("void cannot be a parameter type");
                 if(knownType(parameter)) {
-                    parameterType=pointerSuffix(sourceType(parameter,false));
+                    parameterType=typeApplication(sourceType(parameter,false));
+                    // "C (*) p" accepts a C pointer or a C literal object, which is passed by address.
+                    if(flexibleAhead()) {
+                        if(!classType(parameterType))throw error("Only class parameters can use (*)");
+                        advance();advance();advance();parameterType+="(*)";
+                    } else parameterType=pointerSuffix(parameterType);
                     parameter=external&&(at(",")||at(")"))?"<argument:"+function.params.size()+">":declaredName().text();
                 } else if(external)throw error("External parameters require explicit types");
                 if(function.params.contains(parameter))throw error("Duplicate parameter: "+parameter);
@@ -831,7 +999,8 @@ public class GeneraterJson {
             expect(")");
             Integer suffix=null;
             if(match(":")) {
-                boolean initializer="constructor".equals(kind)&&current().identifier()&&tokens.get(index+1).text().equals("(");
+                boolean initializer="constructor".equals(kind)&&current().identifier()
+                        && (tokens.get(index+1).text().equals("(") || tokens.get(index+1).text().equals("<"));
                 if(!initializer) {
                     Token token=advance();
                     try{suffix=hexadecimal(token.text(),external?8:4,"function ID");}catch(IllegalArgumentException e){throw error(e.getMessage(),token);}
@@ -839,7 +1008,7 @@ public class GeneraterJson {
                 }
                 if(initializer) {
                     if(external||!"constructor".equals(kind))throw error("Only a constructor definition may initialize a base class");
-                    function.baseInitializer=name().text();function.baseArguments=new JsonArray();expect("(");
+                    function.baseInitializer=typeApplication(sourceType(name().text(),false));function.baseArguments=new JsonArray();expect("(");
                     if(!at(")"))do{function.baseArguments.add(expression());}while(match(","));
                     expect(")");
                     if(at(","))throw error("Only one direct base initializer is supported");
@@ -851,6 +1020,7 @@ public class GeneraterJson {
                 if((suffix>>>16)==RESERVED_RUNTIME_NAMESPACE||specialNames.containsValue(suffix))throw error("Reserved external function ID");
                 expect(";");ExternSignature signature=new ExternSignature(type,function.paramTypes);signature.id=suffix;
                 signature.ownerClass=owner;signature.functionKind=kind;
+                signature.typeParameters=generic.deepCopy();
                 ExternSignature previous=script.externSignatures.putIfAbsent(qualified,signature);
                 if(previous!=null) {
                     if(previous.id!=signature.id || !Objects.equals(previous.ownerClass,owner) || !Objects.equals(previous.functionKind,kind))
@@ -946,14 +1116,15 @@ public class GeneraterJson {
             }
             if (at("var") || (knownType(current().text()) && !at("void"))) {
                 String spelling = advance().text();
-                String declaredType = spelling.equals("var") ? null : pointerSuffix(sourceType(spelling, false));
+                String declaredType = spelling.equals("var") ? null : pointerSuffix(typeApplication(sourceType(spelling, false)));
                 String variable = declaredName().text();
                 boolean pointer = declaredType != null && declaredType.endsWith("*");
+                String valueClass = pointer ? declaredType.substring(0, declaredType.length() - 1) : declaredType;
                 // "C * p(args)" is an automatic pointer object; a bare "C * p;" is an empty (null) pointer.
                 if (classNames.contains(spelling) && !at("=") && (!pointer || at("("))) {
                     List<JsonElement> arguments = new ArrayList<>();
                     if (pointer) arguments.add(new JsonPrimitive(variable));
-                    arguments.add(new JsonPrimitive(spelling));
+                    arguments.add(new JsonPrimitive(valueClass));
                     if (match("(")) {
                         if (!at(")")) do { arguments.add(expression()); } while (match(","));
                         expect(")");
@@ -962,11 +1133,13 @@ public class GeneraterJson {
                     if (pointer) return operation("ctrl", "object-def", start, arguments.toArray(JsonElement[]::new));
                     JsonObject definition = operation("ctrl", "vardef", start, new JsonPrimitive(variable),
                             operation("ctrl", "object-value", start, arguments.toArray(JsonElement[]::new)));
-                    definition.addProperty("declared-type", spelling);
+                    definition.addProperty("declared-type", declaredType);
                     return definition;
                 }
                 JsonElement initializer = match("=") ? expression()
                         : pointer && classNames.contains(spelling) ? operation("ctrl", "null", start) : null;
+                if (typeParameters.contains(spelling) && initializer == null)
+                    throw error("A type parameter local requires an explicit initializer: " + variable, start);
                 endStatement();
                 JsonObject definition = initializer == null
                         ? operation("ctrl", "vardef", start, new JsonPrimitive(variable))
@@ -1059,13 +1232,35 @@ public class GeneraterJson {
             JsonElement value = primary();
             while (match(".")) {
                 Token member = name();
+                JsonArray typeArguments = callTypeArgumentsAhead() ? readCallTypeArguments(false) : null;
                 if (match("(")) {
                     List<JsonElement> args = new ArrayList<>(); args.add(value); args.add(new JsonPrimitive(member.text()));
                     if (!at(")")) do { args.add(expression()); } while (match(","));
-                    expect(")"); value = operation("ctrl", "member-call", member, args.toArray(JsonElement[]::new));
+                    expect(")"); JsonObject call = operation("ctrl", "member-call", member, args.toArray(JsonElement[]::new));
+                    if (typeArguments != null) call.add("type-args", typeArguments);
+                    value = call;
                 } else value = operation("ctrl", "member", member, value, new JsonPrimitive(member.text()));
             }
             return value;
+        }
+        /** Type names cannot also be variables, which disambiguates f<Type>(...) from comparisons. */
+        private boolean callTypeArgumentsAhead() {
+            if (!at("<") || index + 1 >= tokens.size() || !knownType(tokens.get(index + 1).text())) return false;
+            int depth = 0;
+            for (int cursor = index; cursor < tokens.size(); cursor++) {
+                String token = tokens.get(cursor).text();
+                if (token.equals("<")) depth++;
+                else if (token.equals(">") && --depth == 0)
+                    return cursor + 1 < tokens.size() && tokens.get(cursor + 1).text().equals("(");
+                else if (token.equals(";") || token.equals("{") || token.equals("}") || token.equals("<eof>")) return false;
+            }
+            return false;
+        }
+        private JsonArray readCallTypeArguments(boolean allowVoid) {
+            JsonArray arguments = new JsonArray(); expect("<");
+            if (at(">")) throw error("Type argument list cannot be empty");
+            do { arguments.add(readType(allowVoid)); } while (match(","));
+            expect(">"); return arguments;
         }
         private JsonElement primary() {
             Token token = current();
@@ -1074,6 +1269,7 @@ public class GeneraterJson {
             if (match("new")) {
                 String type = name().text();
                 if (!classNames.contains(type)) throw error("Unknown class: " + type);
+                type = typeApplication(type);
                 expect("("); List<JsonElement> args = new ArrayList<>(); args.add(new JsonPrimitive(type));
                 if (!at(")")) do { args.add(expression()); } while (match(","));
                 expect(")"); return operation("ctrl", "object-new", token, args.toArray(JsonElement[]::new));
@@ -1085,11 +1281,16 @@ public class GeneraterJson {
                 String name = advance().text();
                 if (KEYWORDS.contains(name))
                     throw error("'" + name + "' is a statement and cannot be used in an expression");
+                boolean reflection = name.equals("reflect_invoke_function");
+                JsonArray typeArguments = (reflection && at("<")) || callTypeArgumentsAhead()
+                        ? readCallTypeArguments(reflection) : null;
                 if (match("(")) {
                     List<JsonElement> arguments = new ArrayList<>();
                     if (!at(")")) do { arguments.add(expression()); } while (match(","));
                     expect(")");
-                    return operation("call", name, token, arguments.toArray(JsonElement[]::new));
+                    JsonObject call = operation("call", name, token, arguments.toArray(JsonElement[]::new));
+                    if (typeArguments != null) call.add("type-args", typeArguments);
+                    return call;
                 }
                 return operation("ctrl", "var", token, new JsonPrimitive(name));
             }

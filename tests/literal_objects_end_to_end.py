@@ -114,6 +114,32 @@ def main():
                 'before\n', error=True)
         execute('pointer-manual-object', POINT + '''void main(){Point * m=new Point(3);Point * alias=m;delete alias;print("done");}''',
                 '~3\ndone\n')
+        # "C (*)" parameters take a pointer or a literal object; a literal is lent by address.
+        _, flex_ast, flex_exec = execute('flexible-parameter', POINT + '''class Line{Point * at;Line(Point (*) p){at=p;}}
+            Point make(int v){Point p(v);return p;}
+            int read(Point (*) p){return p.get();}
+            void bump(Point (*) p){p.x=p.x+100;}
+            void main(){Point lit(1);Point * m=new Point(2);Point * a(3);
+            print(read(lit)+read(m)+read(a));bump(lit);print(lit.get());print(read(make(4)));
+            Line l(lit);Line * h=new Line(m);print(l.at.get()+h.at.get());delete h;delete m;}''',
+                '6\n101\n4\n~4\n103\n~2\n~3\n~101\n')
+        read_id = int(flex_ast['abstract']['read'], 16)
+        assert [f['param-types'] for f in flex_exec['f'] if f['id'] == read_id] == [[7]], flex_exec
+        checks += 1
+        execute('flexible-derived-and-null', POINT + '''class Tagged:Point{int t;Tagged():Point(9){}}
+            int read(Point (*) p){if(p==null){return -1;}return p.get();}
+            void main(){Tagged t;Tagged * u=new Tagged();print(read(t)+read(u));print(read(null));delete u;}''',
+                '18\n-1\n~9\n~9\n')
+        execute('flexible-member-methods', POINT + '''class Holder{int base;
+            int sum(Point (*) a,Point (*) b){a.x=a.x+base;return a.x+b.x;}
+            int twice(Point (*) p){return sum(p,p);}}
+            void main(){Holder h;h.base=10;Point lit(1);Point * m=new Point(2);
+            print(h.sum(lit,m));print(h.twice(lit));print(lit.x);delete m;}''', '13\n42\n21\n~2\n~21\n')
+        execute('flexible-escape-expires', POINT + '''Point * keep(Point (*) p){return p;}
+            void main(){Point * k=null;{Point q(7);k=keep(q);}print(k.get());}''', '~7\n', error='expired')
+        execute('flexible-delete-literal', POINT + '''void release(Point (*) p){delete p;}
+            void main(){Point * m=new Point(2);release(m);Point q(5);release(q);print("unreachable");}''',
+                '~2\n~5\n', error='manual object')
         execute('documented-example', (ROOT / 'compiler/examples/classes-regressions.azs').read_text(encoding='utf-8'), '0\n')
         _, _, shape = execute('abi-types', POINT + '''Point echo(Point p){return p;}Point * where(Point * p){return p;}
             void main(){Point a(1);Point b=echo(a);Point * c=where(b.self());}''', '~1\n~1\n')
@@ -143,6 +169,15 @@ def main():
             'value-to-pointer': POINT + 'void main(){Point v(1);Point * p=v;}',
             'missing-default-member': POINT + 'class Box{Point inner;}void main(){}',
             'object-arithmetic': POINT + 'void main(){Point a(1);print(a+1);}',
+            'flexible-primitive': 'void f(int (*) x){}void main(){}',
+            'flexible-and-pointer': POINT + 'void f(Point * (*) p){}void main(){}',
+            'flexible-local': POINT + 'void main(){Point (*) p=null;}',
+            'flexible-return': POINT + 'Point (*) f(){return null;}void main(){}',
+            'flexible-field': POINT + 'class Box{Point (*) p;}void main(){}',
+            'flexible-wrong-class': POINT + 'class Other{double d;}void f(Point (*) p){}void main(){Other o;f(o);}',
+            'flexible-scalar-argument': POINT + 'void f(Point (*) p){}void main(){f(1);}',
+            'flexible-base-to-derived': POINT + 'class Tagged:Point{string tag;Tagged():Point(1){}}'
+                                        'void f(Tagged (*) p){}void main(){Point q(1);f(q);}',
         }
         for name, source in bad_sources.items():
             compile_case(source, 'invalid-' + name, valid=False)

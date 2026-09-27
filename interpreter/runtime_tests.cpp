@@ -118,10 +118,10 @@ R rc(MV value){return rx(0,{block({value})->toAbdValue()});}
 R rblock(std::initializer_list<R> values){return rx(1,{raw(values)});}
 R rfn(int id,int type,R body,int locals=0,std::initializer_list<int> params={}){
     AbdStack types;for(int type:params)types.vs.push_back(ri(type));
-    return raw({ri(id),ri(type),ri(static_cast<int>(params.size())),ri(locals),types.toAbdValue(),body});
+    return raw({ri(id),ri(type),ri(static_cast<int>(params.size())),ri(locals),types.toAbdValue(),body,ri(0),ri(0)});
 }
 R rmodule(std::initializer_list<R> functions,int globals=0,R signatures=nullptr){
-    return raw({rs("AZSCRIPT"),ri(7),ri(1),rs("test"),ri(globals),std::make_shared<AbdMap>()->toAbdValue(),signatures?signatures:raw({}),raw(functions),rs(""),raw({})});
+    return raw({rs("AZSCRIPT"),ri(8),ri(1),rs("test"),ri(globals),std::make_shared<AbdMap>()->toAbdValue(),signatures?signatures:raw({}),raw(functions),rs(""),raw({})});
 }
 R replace_raw(R value,std::size_t field,R replacement){AbdStack fields(value);fields.vs.at(field)=std::move(replacement);return fields.toAbdValue();}
 R append_raw(R value,R extra){AbdStack fields(value);fields.vs.push_back(std::move(extra));return fields.toAbdValue();}
@@ -139,12 +139,26 @@ R rhint(std::string hint,std::initializer_list<R> functions,int globals=0,R assu
     return replace_raw(replace_raw(rmodule(functions,globals,signatures),8,rs(hint)),9,entries.toAbdValue());
 }
 R assume(std::string hint,int ns){return raw({rs(hint),ri(ns)});}
-R rsignature(int id,int type,std::initializer_list<int> params={}){AbdStack types;for(int value:params)types.vs.push_back(ri(value));return raw({ri(id),ri(type),types.toAbdValue()});}
-R rcall(int id,std::initializer_list<R> args={}){return rx(2,{ri(id),raw(args)});}
+R rsignature(int id,int type,std::initializer_list<int> params={}){AbdStack types;for(int value:params)types.vs.push_back(ri(value));return raw({ri(id),ri(type),types.toAbdValue(),ri(0),ri(0)});}
+R rcall(int id,std::initializer_list<R> args={}){return rx(2,{ri(id),raw(args),raw({})});}
 R rvar(int slot){return rx(3,{ri(slot)});}
 R rreturn(R value){return rx(7,{rb(true),value});}
 R rset(int slot,R value){return rx(5,{ri(slot),value});}
 R rdef(int slot,R value){return rx(4,{ri(slot),ri(ANY_VALUE),rb(true),value});}
+R cref(int index){return raw({ri(0),ri(index)});}
+R cfixed(int abi,int kind,std::optional<int> factory={},std::initializer_list<R> contexts={}) {
+    AbdStack result;result.vs={ri(1),ri(abi),ri(kind),rb(factory.has_value())};
+    if(factory)result.vs.push_back(ri(*factory));result.vs.push_back(raw(contexts));return result.toAbdValue();
+}
+R gfn(int id,int type,R body,int hidden,int locals=0,std::initializer_list<int> params={},int entry=0) {
+    return replace_raw(replace_raw(rfn(id,type,body,locals,params),6,ri(hidden)),7,ri(entry));
+}
+R gcall(int id,std::initializer_list<R> args,std::initializer_list<R> contexts){return rx(2,{ri(id),raw(args),raw(contexts)});}
+R greturn(R value,R context){return rx(38,{value,context});}
+R reflect(int expected,int id,std::initializer_list<R> args={}) {
+    AbdStack arguments;arguments.vs={rc(n(expected)),rc(n(id))};arguments.vs.insert(arguments.vs.end(),args);
+    return rx(2,{ri(0x0abd0008),arguments.toAbdValue(),raw({})});
+}
 std::shared_ptr<script> load_raw(R value,bool ready=true){
     auto bytes=value->toBytes();auto result=load_script(bytes.get(),value->size+4);
     if(ready)try{result->flush();}catch(...){auto failure=std::current_exception();try{result->destroy();}catch(...){}std::rethrow_exception(failure);}
@@ -152,7 +166,7 @@ std::shared_ptr<script> load_raw(R value,bool ready=true){
 }
 void insert_raw(const std::shared_ptr<script>& target,R value,bool ready=true){auto bytes=value->toBytes();target->insert_script(bytes.get(),value->size+4);if(ready)target->flush();}
 // Test fixture authoring retains readable names; only this test encoder resolves
-// them to slots. The interpreter is always given the public raw v7 format.
+// them to slots. The interpreter is always given the public raw v8 format.
 int fixture_int(MV value){auto p=std::dynamic_pointer_cast<IntAbdValue>(value);if(!p)throw std::invalid_argument("fixture requires int");return p->data;}
 std::string fixture_string(MV value){auto p=std::dynamic_pointer_cast<StringAbdValue>(value);if(!p)throw std::invalid_argument("fixture requires string");return p->data;}
 A fixture_array(MV value){auto p=std::dynamic_pointer_cast<AbdArray>(value);if(!p)throw std::invalid_argument("fixture requires array");return p;}
@@ -184,7 +198,7 @@ struct fixture_encoder {
         auto map=std::dynamic_pointer_cast<AbdMap>(value);if(!map)return rc(value);
         if(fixture_int(map->get("t"))==1) {
             AbdStack args;for(auto& arg:fixture_array(map->get("param"))->values)args.vs.push_back(node(arg));
-            return rx(2,{map->get("id")->toAbdValue(),args.toAbdValue()});
+            return rx(2,{map->get("id")->toAbdValue(),args.toAbdValue(),raw({})});
         }
         const auto code=fixture_string(map->get("c"));
         if(code=="v")return rx(3,{ri(slot(map->get("v")))});
@@ -199,7 +213,7 @@ struct fixture_encoder {
         if(code=="oa")return rx(9,{node(map->get("v")),map->get("offset")->toAbdValue()});
         if(code=="ob") {
             auto address=node(map->get("v"));const int destructor=fixture_int(map->get("destructor"));
-            return destructor==-1?rx(10,{address,rb(false),map->get("manual")->toAbdValue()}):rx(10,{address,rb(true),ri(destructor),map->get("manual")->toAbdValue()});
+            return destructor==-1?rx(10,{address,rb(false),map->get("manual")->toAbdValue(),raw({})}):rx(10,{address,rb(true),ri(destructor),map->get("manual")->toAbdValue(),raw({})});
         }
         if(code=="od")return rx(11,{node(map->get("v"))});
         if(code=="brk")return rx(29);
@@ -231,7 +245,7 @@ R encode_fixture(M source) {
     if(auto value=source->get("extern-signatures"))for(auto& item:fixture_array(value)->values) {
         auto entry=std::dynamic_pointer_cast<AbdMap>(item);AbdStack types;
         for(auto& type:fixture_array(entry->get("param-types"))->values)types.vs.push_back(type->toAbdValue());
-        signatures.vs.push_back(raw({entry->get("id")->toAbdValue(),entry->get("return-type")->toAbdValue(),types.toAbdValue()}));
+        signatures.vs.push_back(raw({entry->get("id")->toAbdValue(),entry->get("return-type")->toAbdValue(),types.toAbdValue(),ri(0),ri(0)}));
     }
     AbdStack functions;
     for(auto& value:fixture_array(source->get("f"))->values) {
@@ -242,9 +256,9 @@ R encode_fixture(M source) {
         if(auto values=entry->get("param-types"))for(auto& type:fixture_array(values)->values)types.vs.push_back(type->toAbdValue());
         else for(int i=0;i<params;++i)types.vs.push_back(ri(ANY_VALUE));
         const int locals=numbered?fixture_int(entry->get("local-count")):encoder.next-params;
-        functions.vs.push_back(raw({entry->get("id")->toAbdValue(),entry->get("return-type")->toAbdValue(),ri(params),ri(locals),types.toAbdValue(),body}));
+        functions.vs.push_back(raw({entry->get("id")->toAbdValue(),entry->get("return-type")->toAbdValue(),ri(params),ri(locals),types.toAbdValue(),body,ri(0),ri(0)}));
     }
-    return raw({rs("AZSCRIPT"),ri(7),ri(1),rs("fixture"),ri(global_count),std::make_shared<AbdMap>()->toAbdValue(),signatures.toAbdValue(),functions.toAbdValue(),rs(""),raw({})});
+    return raw({rs("AZSCRIPT"),ri(8),ri(1),rs("fixture"),ri(global_count),std::make_shared<AbdMap>()->toAbdValue(),signatures.toAbdValue(),functions.toAbdValue(),rs(""),raw({})});
 }
 void fixture_names(const std::shared_ptr<script>& target,M source,std::size_t offset=0) {
     if(source->get("exec-version"))return;
@@ -283,6 +297,138 @@ public:
 };
 int main(){try{
     check(getiFunction(0x0abd0006)->return_type()==ANY_VALUE,"mem_get reports its dynamic return type");
+    {
+        constexpr int host_id=0x6abc0002;
+        auto host=std::make_shared<test_executor>(0x6abc);
+        host->functions[host_id]=std::make_shared<test_function>(VOID_VALUE,[](const std::vector<V>& args) {
+            if(args.size()!=1||args[0]->type!=INT_VALUE)throw std::invalid_argument("host expects int");
+            return std::make_shared<variable>(*static_cast<int*>(args[0]->value)+2);
+        });
+        registered_executor registered(host);
+        auto ci=cfixed(INT_VALUE,0),cs=cfixed(STRING_VALUE,0),ca=cfixed(ADDRESS_VALUE,1);
+        auto co=cfixed(OBJECT_VALUE,3,200,{ci});
+        auto generic=load_raw(rmodule({
+            rfn(0,VOID_VALUE,rblock({rset(-1,rc(n(0))),rset(-2,rc(n(0)))})),
+            gfn(100,ANY_VALUE,greturn(rvar(0),cref(0)),1,0,{ANY_VALUE}),
+            gfn(101,ANY_VALUE,greturn(rx(37,{cref(0)}),cref(0)),1),
+            gfn(102,ANY_VALUE,greturn(gcall(100,{rvar(0)},{cref(0)}),cref(0)),1,0,{ANY_VALUE}),
+            gfn(103,ANY_VALUE,greturn(rcall(0x0abd0008,{rx(36,{cref(0)}),rc(n(30)),rc(n(41))}),cref(0)),1),
+            rfn(20,INT_VALUE,rreturn(gcall(101,{}, {ci}))),
+            rfn(21,STRING_VALUE,rreturn(gcall(101,{}, {cs}))),
+            rfn(22,ADDRESS_VALUE,rreturn(gcall(101,{}, {ca}))),
+            rfn(23,DOUBLE_VALUE,rreturn(gcall(101,{}, {cfixed(DOUBLE_VALUE,0)}))),
+            rfn(24,BOOLEAN_VALUE,rreturn(gcall(101,{}, {cfixed(BOOLEAN_VALUE,0)}))),
+            rfn(25,INT_VALUE,rreturn(gcall(102,{rc(n(42))},{ci}))),
+            rfn(26,INT_VALUE,rreturn(gcall(100,{rc(s("wrong"))},{ci}))),
+            rfn(27,INT_VALUE,rreturn(gcall(103,{}, {ci}))),
+            rfn(30,INT_VALUE,rreturn(rx(12,{rvar(0),rc(n(1))})),0,{INT_VALUE}),
+            gfn(31,INT_VALUE,rreturn(rc(n(99))),0,0,{},1),
+            rfn(32,INT_VALUE,rreturn(reflect(INT_VALUE,30,{rc(n(42))}))),
+            rfn(33,INT_VALUE,rreturn(reflect(INT_VALUE,31))),
+            rfn(34,INT_VALUE,rreturn(reflect(INT_VALUE,100,{rc(n(1))}))),
+            rfn(35,INT_VALUE,rreturn(reflect(INT_VALUE,host_id,{rc(n(40))}))),
+            rfn(36,STRING_VALUE,rreturn(reflect(STRING_VALUE,host_id,{rc(n(40))}))),
+            rfn(37,INT_VALUE,rreturn(reflect(INT_VALUE,30,{rc(s("wrong"))}))),
+            rfn(38,VOID_VALUE,gcall(101,{}, {cfixed(OBJECT_VALUE,3)})),
+            gfn(200,OBJECT_VALUE,rblock({rdef(0,rx(32,{ri(1)})),
+                rx(6,{rcall(0x0abd0006,{rx(33,{rvar(0)})}),rx(37,{cref(0)})}),
+                rx(10,{rx(33,{rvar(0)}),rb(true),ri(201),rb(false),raw({cref(0)})}),rreturn(rvar(0))}),1,1,{},1),
+            gfn(201,VOID_VALUE,rblock({rset(-1,rx(12,{rvar(-1),rc(n(1))})),rset(-2,rx(36,{cref(0)}))}),1,0,{ADDRESS_VALUE},1),
+            rfn(202,OBJECT_VALUE,rreturn(gcall(200,{}, {ci}))),
+            rfn(210,VOID_VALUE,rblock({rdef(0,gcall(101,{}, {co})),rdef(1,rvar(0))}),2),
+            rfn(211,VOID_VALUE,gcall(101,{}, {cfixed(OBJECT_VALUE,3,200,{cs})})),
+            rfn(212,INT_VALUE,rreturn(reflect(INT_VALUE,200))),
+            rfn(213,VOID_VALUE,rblock({rdef(0,gcall(101,{}, {co})),rx(15,{rc(n(1)),rc(n(0))})}),1),
+            rfn(214,INT_VALUE,rreturn(reflect(INT_VALUE,202))),
+            gfn(400,ANY_VALUE,rblock({rdef(0,rcall(0x0abd0003,{rc(n(1))})),
+                rx(6,{rcall(0x0abd0006,{rvar(0)}),rc(n(42))}),
+                rx(10,{rvar(0),rb(true),ri(201),rb(false),raw({cref(0)})}),greturn(rvar(0),cref(0))}),1,1),
+            rfn(500,INT_VALUE,rreturn(rcall(0x0abd0006,{gcall(400,{}, {cfixed(ADDRESS_VALUE,2)})}))),
+            rfn(501,INT_VALUE,rreturn(rcall(0x0abd0006,{gcall(400,{}, {ca})}))),
+            gfn(600,ANY_VALUE,greturn(gcall(600,{}, {cref(0)}),cref(0)),1),
+            rfn(601,INT_VALUE,rreturn(gcall(600,{}, {ci})))
+        },2));
+        check(integer(generic->invoke(20))==0,"generic int defaults to zero");
+        check(value_to_string(generic->invoke(21)).empty(),"generic string defaults to empty");
+        check(pointer(generic->invoke(22))==address{},"generic address defaults to null");
+        check(*static_cast<double*>(generic->invoke(23)->value)==0.0,"generic double defaults to zero");
+        check(!*static_cast<bool*>(generic->invoke(24)->value),"generic boolean defaults to false");
+        check(integer(generic->invoke(25))==42,"shared generic calls forward immutable contexts");
+        rejects_containing([&]{generic->invoke(26);},"Generic value type mismatch","typed generic return checks the actual value");
+        check(integer(generic->invoke(27))==42,"generic reflection gets its expected ABI from the current context");
+        check(integer(generic->invoke(32))==43,"reflection invokes a script function by runtime ID");
+        rejects_containing([&]{generic->invoke(33);},"ordinary non-generic","reflection rejects internal lifecycle entries");
+        rejects_containing([&]{generic->invoke(34);},"ordinary non-generic","reflection rejects generic targets");
+        check(integer(generic->invoke(35))==42,"reflection calls an undeclared host and checks actual return instead of advertised type");
+        rejects_containing([&]{generic->invoke(36);},"Reflection return type mismatch","reflection checks exact result type");
+        rejects_containing([&]{generic->invoke(37);},"argument 1 type mismatch","reflection retains target argument checks");
+        rejects_containing([&]{generic->invoke(38);},"no default constructor","object generic default requires a constructor");
+        rejects_containing([&]{generic->invoke(100,{std::make_shared<variable>(1)});},"wrapper","public host calls cannot omit generic contexts");
+        generic->invoke(210);check(integer(generic->baseEnv->getVariable(-1))==2,"copied generic objects preserve both destructors");
+        generic->invoke(211);check(integer(generic->baseEnv->getVariable(-1))==3&&integer(generic->baseEnv->getVariable(-2))==STRING_VALUE,
+            "returned generic object captures its actual destructor context");
+        rejects_containing([&]{generic->invoke(212);},"ordinary non-generic","reflection cannot bypass an internal generic factory");
+        rejects_containing([&]{generic->invoke(213);},"Division by zero","generic object error retains the original failure");
+        check(integer(generic->baseEnv->getVariable(-1))==4,"generic object cleans up on error");
+        rejects_containing([&]{generic->invoke(214);},"Reflection return type mismatch","failed reflection still owns its returned object temporary");
+        check(integer(generic->baseEnv->getVariable(-1))==5,"wrong reflective result is destroyed exactly once");
+        check(integer(generic->invoke(500))==42&&heap::lenAlloc()==0,"generic class pointer return transfers cleanup to the actual caller");
+        rejects([&]{generic->invoke(501);},"generic raw address return does not transfer object ownership");
+        check(heap::lenAlloc()==0,"raw-address generic return still releases the object");
+        generic->max_call_depth=12;
+        rejects_containing([&]{generic->invoke(601);},"call depth","generic recursion retains the execution depth budget");
+        check(generic->active_calls==0,"generic recursion unwinds active call guards");
+        generic->destroy();
+        rejects([&]{load_raw(rmodule({rfn(10,INT_VALUE,rreturn(rx(36,{cref(0)})))}));},"unbound context references rejected at decode");
+        rejects([&]{load_raw(rmodule({gfn(10,INT_VALUE,rreturn(rx(36,{cfixed(INT_VALUE,2)})),1)}));},"mismatched ABI and context kind rejected");
+        rejects([&]{load_raw(rmodule({gfn(10,ANY_VALUE,greturn(rc(n(1)),cref(0)),1),rfn(11,INT_VALUE,rreturn(rcall(10)))}));},
+            "flush rejects omitted generic context arguments");
+    }
+    {
+        const auto hint=rc(s("ReflectionLibrary"));
+        auto queries=load_raw(rmodule({
+            rfn(0,VOID_VALUE,rset(-1,rcall(0x0abd000a,{hint}))),
+            rfn(10,INT_VALUE,rreturn(rcall(0x0abd0009,{hint}))),
+            rfn(11,BOOLEAN_VALUE,rreturn(rcall(0x0abd000a,{rc(s("missing"))}))),
+            rfn(12,BOOLEAN_VALUE,rreturn(rcall(0x0abd000a,{rc(s("reflectionlibrary"))}))),
+            rfn(13,INT_VALUE,rreturn(rcall(0x0abd0009,{rc(s("missing"))}))),
+            rfn(14,INT_VALUE,rreturn(rcall(0x0abd0008,{rc(n(INT_VALUE)),rx(12,{rx(14,{rcall(0x0abd0009,{hint}),rc(n(65536))}),rc(n(2))})})))
+        },1),false);
+        insert_raw(queries,rhint("ReflectionLibrary",{rfn(2,INT_VALUE,rreturn(rc(n(42))))}),false);
+        check(queries->hint_loaded("ReflectionLibrary"),"hint presence means mounted before initialization");
+        queries->flush();
+        check(*static_cast<bool*>(queries->baseEnv->getVariable(-1)->value),"onload can query already mounted hints");
+        check(integer(queries->invoke(10))==queries->namespace_for_hint("ReflectionLibrary"),"script and host report the same mounted namespace");
+        check(!*static_cast<bool*>(queries->invoke(11)->value)&&!*static_cast<bool*>(queries->invoke(12)->value),"hint presence is case-sensitive and missing hints return false");
+        rejects_containing([&]{queries->invoke(13);},"Unknown namespace hint","namespace query rejects absent hints");
+        check(integer(queries->invoke(14))==42,"reflection uses the queried runtime mount namespace");
+        queries->destroy();
+    }
+    {
+        constexpr int alias=0x22440002;
+        auto consumer=load_raw(rhint("",{
+            gfn(100,ANY_VALUE,greturn(rx(37,{cref(0)}),cref(0)),1),
+            rfn(10,VOID_VALUE,gcall(100,{}, {cfixed(OBJECT_VALUE,3,alias,{cfixed(STRING_VALUE,0)})})),
+            rfn(-1,INT_VALUE,rreturn(rc(n(42)))),rfn(11,INT_VALUE,rreturn(reflect(INT_VALUE,-1)))
+        },0,raw({assume("GenericFactory",0x2244)})),false);
+        rejects_containing([&]{consumer->flush();},"Missing namespace hint","generic factory link waits for its hint without partial relocation");
+        auto provider=rhint("GenericFactory",{
+            rfn(0,VOID_VALUE,rset(-1,rc(n(0)))),
+            gfn(2,OBJECT_VALUE,rblock({rdef(0,rx(32,{ri(1)})),
+                rx(6,{rcall(0x0abd0006,{rx(33,{rvar(0)})}),rx(37,{cref(0)})}),
+                rx(10,{rx(33,{rvar(0)}),rb(true),ri(alias+1),rb(false),raw({cref(0)})}),rreturn(rvar(0))}),1,1,{},1),
+            gfn(3,VOID_VALUE,rset(-1,rx(12,{rx(36,{cref(0)}),rc(n(1))})),1,0,{ADDRESS_VALUE},1),
+            rfn(4,INT_VALUE,rreturn(rvar(-1)))
+        },1,raw({assume("GenericFactory",0x2244)}));
+        insert_raw(consumer,provider);
+        consumer->invoke(10);
+        const int count=(consumer->namespace_for_hint("GenericFactory")<<16)|4;
+        check(integer(consumer->invoke(count))==2,"generic default factories and captured destructor IDs relocate across hint modules");
+        consumer->flush();consumer->invoke(10);
+        check(integer(consumer->invoke(count))==2,"repeated flush retains bound factory and destructor contexts");
+        check(integer(consumer->invoke(11))==42,"reflection preserves the complete negative function ID bit pattern");
+        consumer->destroy();
+    }
     {
         constexpr auto maximum=std::numeric_limits<std::uint64_t>::max();
         constexpr std::uint64_t high=0x8000000000000001ull;
@@ -427,7 +573,7 @@ int main(){try{
             rhint("",{},0,raw({assume("A",1),assume("B",1)})),
             rhint("",{},0,raw({assume("A",1),assume("A",2)})),
             rhint("",{rfn(0x00010002,VOID_VALUE,rblock({}))},0,raw({assume("A",1)}))})
-            rejects([&]{load_raw(malformed,false);},"v7 malformed hint module rejected before mounting");
+            rejects([&]{load_raw(malformed,false);},"v8 malformed hint module rejected before mounting");
         rejects([&]{load_raw(rmodule({rfn(10,VOID_VALUE,rx(10,{rc(n(0)),rb(true),ri(0x0fff0000),rb(false)}))}),false);},
                 "main entry is not a valid object destructor");
     }
@@ -460,10 +606,10 @@ int main(){try{
         initializing_script=load_raw(rhint("Future",{rfn(0,VOID_VALUE,log(30)),rfn(1,VOID_VALUE,log(-30))},
             0,raw({assume("Bad",0x4001)}),signatures),false);
         insert_raw(initializing_script,rhint("Bad",{rfn(0,VOID_VALUE,rblock({log(20),rdef(0,rcall(0x0abd0003,{rc(n(1))})),
-            rx(10,{rvar(0),rb(false),rb(false)}),rx(15,{rc(n(1)),rc(n(0))})}),1),rfn(1,VOID_VALUE,log(-20))},
+            rx(10,{rvar(0),rb(false),rb(false),raw({})}),rx(15,{rc(n(1)),rc(n(0))})}),1),rfn(1,VOID_VALUE,log(-20))},
             0,raw({assume("Good",0x4001)}),signatures),false);
         insert_raw(initializing_script,rhint("Good",{rfn(0,VOID_VALUE,rblock({log(10),rcall(reentry_id),
-            rdef(0,rcall(0x0abd0003,{rc(n(1))})),rx(10,{rvar(0),rb(false),rb(false)}),rcall(0x0abd0005,{rvar(0)})}),1),
+            rdef(0,rcall(0x0abd0003,{rc(n(1))})),rx(10,{rvar(0),rb(false),rb(false),raw({})}),rcall(0x0abd0005,{rvar(0)})}),1),
             rfn(1,VOID_VALUE,log(-10)),rfn(2,INT_VALUE,rreturn(rc(n(8))))},0,nullptr,signatures),false);
         rejects_containing([&]{initializing_script->flush();},"Division by zero","onload preserves its runtime failure");
         check(initializing_script->faulted&&!initializing_script->setup&&events==std::vector<int>({10,20})&&heap::lenAlloc()==1,
@@ -504,7 +650,7 @@ int main(){try{
         auto high=load_raw(rmodule({rfn(0,VOID_VALUE,rset(-1,rc(n(0)))),
             rfn(-1,VOID_VALUE,rset(-1,rx(12,{rvar(-1),rc(n(1))})),0,{ADDRESS_VALUE}),
             rfn(maker,VOID_VALUE,rblock({rdef(0,rcall(0x0abd0003,{rc(n(1))})),
-                rx(10,{rvar(0),rb(true),ri(-1),rb(true)}),rcall(0x0abd0004,{rvar(0)}),rx(11,{rvar(0)})}),1)
+                rx(10,{rvar(0),rb(true),ri(-1),rb(true),raw({})}),rcall(0x0abd0004,{rvar(0)}),rx(11,{rvar(0)})}),1)
         },1));
         high->invoke(maker);check(integer(high->baseEnv->getVariable(-1))==1&&heap::lenAlloc()==0,
               "optional destructor supports the full 0xffffffff function address");high->destroy();
@@ -512,9 +658,9 @@ int main(){try{
     {
         auto twenty=rc(n(20));auto zero=rc(n(0));
         auto compact=load_raw(rmodule({rfn(10,INT_VALUE,rx(7,{rb(true),rx(12,{twenty,rc(n(22))})}))}));
-        check(integer(compact->invoke(10))==42,"raw v7 directly executes native arithmetic expressions");
-        for(int opcode=0;opcode<36;++opcode)if(opcode!=29&&opcode!=30)
-            rejects([&]{load_raw(rmodule({rfn(10,VOID_VALUE,rx(opcode))}));},"v7 opcode rejects missing fields");
+        check(integer(compact->invoke(10))==42,"raw v8 directly executes native arithmetic expressions");
+        for(int opcode=0;opcode<40;++opcode)if(opcode!=29&&opcode!=30)
+            rejects([&]{load_raw(rmodule({rfn(10,VOID_VALUE,rx(opcode))}));},"v8 opcode rejects missing fields");
         auto byte=[](unsigned char value){return std::make_shared<AbdValue>(&value,1);};
         const unsigned char bad_text[]={0xed,0xa0,0x80};
         const auto invalid_utf8=std::make_shared<AbdValue>(bad_text,3);
@@ -529,7 +675,7 @@ int main(){try{
             rc(std::make_shared<DoubleAbdValue>(std::numeric_limits<double>::infinity())),
             rc(std::make_shared<FloatAbdValue>(std::numeric_limits<float>::quiet_NaN())),
             rx(0,{raw({ri(0xce2009),byte(sentinel)})}),rx(0,{raw({ri(0xce200a),byte(0)})})})
-            rejects([&]{load_raw(rmodule({rfn(10,VOID_VALUE,expression,1)},1));},"v7 malformed expression is rejected");
+            rejects([&]{load_raw(rmodule({rfn(10,VOID_VALUE,expression,1)},1));},"v8 malformed expression is rejected");
         auto good_function=rfn(10,VOID_VALUE,rblock({}));auto good_module=rmodule({good_function});
         for(auto malformed:{replace_raw(good_module,1,ri(3)),replace_raw(good_module,1,ri(4)),replace_raw(good_module,1,ri(5)),replace_raw(good_module,1,byte(4)),
             replace_raw(good_module,2,byte(1)),replace_raw(good_module,3,invalid_utf8),replace_raw(good_module,4,ri(-1)),
@@ -539,41 +685,41 @@ int main(){try{
             rmodule({replace_raw(good_function,3,ri(1048577))}),rmodule({replace_raw(good_function,4,raw({ri(INT_VALUE)}))}),
             rmodule({rfn(10,VOID_VALUE,rx(4,{ri(0),ri(0),rb(false)}),0,{INT_VALUE})}),
             rmodule({good_function,good_function}),rmodule({},0,raw({raw({ri(0x01230001),ri(0),raw({}),ri(9)})}))})
-            rejects([&]{load_raw(malformed);},"v7 malformed module or function record rejected");
+            rejects([&]{load_raw(malformed);},"v8 malformed module or function record rejected");
         // The new interpreter intentionally rejects the retired Map formats.
         rejects([&]{load_raw(module({fn(10,VOID_VALUE,block({}))})->toAbdValue());},"named Map executable is unsupported");
         rejects([&]{load_raw(slot_module({slot_fn(10,VOID_VALUE,block({}))})->toAbdValue());},"v3 Map executable is unsupported");
         auto constant_null=rx(0,{raw({ri(0xce200a),byte(sentinel)})});
         auto scalar_program=load_raw(rmodule({rfn(10,VOID_VALUE,rx(7,{rb(true),constant_null})),
             rfn(11,STRING_VALUE,rx(7,{rb(true),rc(s(std::string("中文\0",7)))}))}));
-        check(scalar_program->invoke(10)->type==VOID_VALUE,"v7 current void sentinel round-trips");
-        check(value_to_string(scalar_program->invoke(11))==std::string("中文\0",7),"v7 UTF-8 string preserves embedded zero");
+        check(scalar_program->invoke(10)->type==VOID_VALUE,"v8 current void sentinel round-trips");
+        check(value_to_string(scalar_program->invoke(11))==std::string("中文\0",7),"v8 UTF-8 string preserves embedded zero");
         auto metadata=std::make_shared<AbdMap>();auto child=std::make_shared<AbdMap>();
         child->put("flag",std::make_shared<BoolAbdValue>(true));metadata->put("nested",block({n(3),child}));
         auto metadata_program=load_raw(replace_raw(good_module,5,metadata->toAbdValue()));
-        check(metadata_program->meta->get("nested")!=nullptr,"v7 extensions preserve generic typed nested metadata");
+        check(metadata_program->meta->get("nested")!=nullptr,"v8 extensions preserve generic typed nested metadata");
         for(auto extension:{raw({rs("x"),ri(1),invalid_utf8}),raw({rs("x"),ri(3),byte(1)}),
             raw({rs("x"),ri(0x0d00),byte(2)}),raw({rs("x"),ri(0xce2009),raw({})}),
             raw({rs("x"),ri(999),raw({})}),raw({rs("x"),ri(3),ri(1),rs("x"),ri(3),ri(2)})})
-            rejects([&]{load_raw(replace_raw(good_module,5,extension));},"v7 extension metadata validates types and fields");
+            rejects([&]{load_raw(replace_raw(good_module,5,extension));},"v8 extension metadata validates types and fields");
         auto chain=rc(n(0));for(int i=0;i<100;++i)chain=rx(12,{chain,rc(n(1))});
         check(integer(load_raw(rmodule({rfn(10,INT_VALUE,rx(7,{rb(true),chain}))}))->invoke(10))==100,
-              "v7 keeps 100-level arithmetic chains executable");
+              "v8 keeps 100-level arithmetic chains executable");
         for(int i=0;i<35;++i)chain=rx(12,{chain,rc(n(1))});
-        rejects([&]{load_raw(rmodule({rfn(10,INT_VALUE,rx(7,{rb(true),chain}))}));},"v7 raw stack nesting is bounded");
+        rejects([&]{load_raw(rmodule({rfn(10,INT_VALUE,rx(7,{rb(true),chain}))}));},"v8 raw stack nesting is bounded");
         auto deep_metadata=raw({});for(int i=0;i<128;++i)deep_metadata=raw({rs("nested"),ri(2),deep_metadata});
         rejects([&]{load_raw(replace_raw(good_module,5,deep_metadata));},"metadata cannot bypass enclosing module depth");
         auto data=good_module->toBytes();const auto length=static_cast<std::size_t>(good_module->size)+4;
-        rejects([&]{load_script(data.get(),length-1);},"v7 truncated outer frame rejected");
+        rejects([&]{load_script(data.get(),length-1);},"v8 truncated outer frame rejected");
         std::vector<unsigned char> trailing(data.get(),data.get()+length);trailing.push_back(0);
-        rejects([&]{load_script(trailing.data(),trailing.size());},"v7 trailing bytes rejected");
-        rejects([&]{load_script(data.get(),64*1024*1024+1);},"v7 file size checked before reading payload");
+        rejects([&]{load_script(trailing.data(),trailing.size());},"v8 trailing bytes rejected");
+        rejects([&]{load_script(data.get(),64*1024*1024+1);},"v8 file size checked before reading payload");
         auto truncated=std::make_shared<AbdValue>(good_module->data,good_module->size-1);
-        rejects([&]{load_raw(truncated);},"v7 truncated child frame rejected");
+        rejects([&]{load_raw(truncated);},"v8 truncated child frame rejected");
         const auto function_count=compact->functions.size();
-        rejects([&]{insert_raw(compact,replace_raw(rmodule({},2),1,ri(99)));},"v7 invalid inserted header rejected");
+        rejects([&]{insert_raw(compact,replace_raw(rmodule({},2),1,ri(99)));},"v8 invalid inserted header rejected");
         check(compact->baseEnv->variables.empty()&&compact->functions.size()==function_count&&integer(compact->invoke(10))==42,
-              "invalid v7 insertion preserves the old state");
+              "invalid v8 insertion preserves the old state");
     }
     {
         auto numeric=load_module(slot_module({
@@ -1123,7 +1269,14 @@ int main(){try{
         auto dir=std::filesystem::temp_directory_path()/"azscript-extern-runtime-test";
         std::filesystem::remove_all(dir);std::filesystem::create_directories(dir);
         std::vector<std::uint8_t> image{'n','o','t','-','a','-','l','i','b','r','a','r','y'};
-        auto library=dir/"demo.so";auto signature=dir/"demo.signature";
+#if defined(_WIN32)
+        const std::string library_suffix=".dll";
+#elif defined(__APPLE__)
+        const std::string library_suffix=".dylib";
+#else
+        const std::string library_suffix=".so";
+#endif
+        auto library=dir/("demo"+library_suffix);auto signature=dir/"demo.signature";
         {std::ofstream out(library,std::ios::binary);out.write(reinterpret_cast<const char*>(image.data()),static_cast<std::streamsize>(image.size()));}
         p256_keypair key;check(p256_generate(key),"extern test key");
         std::uint8_t hash[32];p256_sha256(image.data(),image.size(),hash);
@@ -1139,7 +1292,7 @@ int main(){try{
             auto sig=path;sig.replace_filename(path.stem().string()+".signature");
             {std::ofstream out(sig,std::ios::binary);out.write(reinterpret_cast<const char*>(image_der.data()),static_cast<std::streamsize>(image_der.size()));}
         };
-        publish(dir/"evil.so",elf64_with_needed({"libevil.so"}));
+        publish(dir/("evil"+library_suffix),elf64_with_needed({"libevil.so"}));
         rejects_containing([&]{load_named_extern_library((dir/"evil").string());},"untrusted","a signed plugin cannot import an unlisted dependency");
         image[0]^=0x01;{std::ofstream out(library,std::ios::binary);out.write(reinterpret_cast<const char*>(image.data()),static_cast<std::streamsize>(image.size()));}
         rejects_containing([&]{load_named_extern_library((dir/"demo.so").string());},"signature","a changed library no longer matches its signature");

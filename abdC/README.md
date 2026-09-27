@@ -1,5 +1,7 @@
 # ABD C++ 数据模型
 
+中文 | [English](README.en.md)
+
 本目录与 `../abdJava` 使用同一份 ABD 线格式。`library.h` 和
 `azertianBinaryDataValues.h` 是解释器与 JNI 应共同包含的权威头文件；
 请同时重新编译这些组件，不要链接旧对象文件或旧版拷贝头。

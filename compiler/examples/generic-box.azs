@@ -1,0 +1,17 @@
+#namespace_hint GENERIC_BOX_LIB
+#include "generic-box.include.azs"
+
+Box<T>::Box():0002 {}
+void Box<T>::set(T next):0003 { value = next; }
+T Box<T>::get():0004 { return value; }
+Box<T>::~Box():0005 { print("box destroyed"); }
+
+<T> T echo(T value):0006 { return value; }
+
+Box<int> makeIntBox(int value):0007 {
+    Box<int> result;
+    result.set(value);
+    return result;
+}
+
+int readIntBox(Box<int> (*) box):0008 { return box.get(); }

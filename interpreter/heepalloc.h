@@ -16,6 +16,7 @@ struct object_record {
     std::optional<int> destructor_id;
     bool manual;
     std::weak_ptr<azertian::script> script_owner;
+    type_contexts destructor_contexts;
 };
 inline constexpr int max_slots=1048576;
 int resize_heap();
@@ -38,7 +39,7 @@ void restore(std::vector<std::shared_ptr<variable>> slots,std::vector<heap_alloc
              std::vector<address> owned);
 std::vector<object_record> object_records();
 address object_address(address pointer,int offset);
-void register_object(address pointer,std::optional<int> destructor_id,bool manual,const std::shared_ptr<environment>& env);
+void register_object(address pointer,std::optional<int> destructor_id,bool manual,const std::shared_ptr<environment>& env,type_contexts contexts={});
 void delete_object(address pointer,const std::shared_ptr<environment>& env);
 void release_owned(address pointer,const std::shared_ptr<environment>& env);
 void return_object(address pointer,const std::shared_ptr<environment>& env);

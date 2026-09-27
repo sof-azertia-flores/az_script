@@ -1,5 +1,7 @@
 # ABD Java 数据模型
 
+中文 | [English](README.en.md)
+
 本模块以 Java 17 编译，依赖 Gson 2.11.0。跨语言帧格式、标签和 C++
 集成方式见 `../abdC/README.md`。Gradle 的 `check` 会运行不依赖 JUnit 的
 `azertia.binary.AbdRegression`，亦可由根脚本离线编译和运行。

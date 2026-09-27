@@ -17,9 +17,11 @@ class AddressCodecTest {
         AcsArray types = new AcsArray(); types.acsa.add(new AcsIntegerElement(7));
         AcsObject signature = new AcsObject(); signature.put("id", 0x12340002);
         signature.put("return-type", 7); signature.put("param-types", types);
+        signature.put("hidden-count", 0); signature.put("entry-kind", 0);
         AcsArray signatures = new AcsArray(); signatures.acsa.add(signature); program.put("extern-signatures", signatures);
         AcsObject function = new AcsObject(); function.put("id", 0x00020002); function.put("return-type", 7);
         function.put("param-count", 1); function.put("local-count", 1); function.put("param-types", types);
+        function.put("hidden-count", 0); function.put("entry-kind", 0);
         AcsArray body = new AcsArray();
         AcsObject local = new AcsObject(); local.put("t", 0); local.put("c", ExecOpcodes.DEFINE);
         local.put("v", 1); local.put("declared-type", 7); local.put("val", new AcsAddress(0L)); body.acsa.add(local);
@@ -39,7 +41,7 @@ class AddressCodecTest {
 
     @Test void addressesKeepTheirDistinctTypeAndAllUnsignedBits() {
         ExecProgram program = program(); AbdValue payload = program.toValue();
-        assertEquals(7, AbdBasicType.abd2int(payload.getAsAss().values.get(1)));
+        assertEquals(8, AbdBasicType.abd2int(payload.getAsAss().values.get(1)));
         AcsObject decoded = ExecCodec.decode(payload);
         assertEquals(program.toJson(), decoded.toJson());
         assertArrayEquals(payload.toAbdFormat(), decoded.toValue().toAbdFormat());
@@ -55,7 +57,7 @@ class AddressCodecTest {
         assertArrayEquals(new byte[]{-1,-1,-1,-1,-1,-1,-1,-1}, maximum.toValue().getData());
     }
 
-    @Test void addressesHaveAnExactEightBytePayloadAndRequireVersionSix() {
+    @Test void addressesHaveAnExactEightBytePayloadAndRejectOldVersions() {
         AbdValue valid = program().toValue();
         for (int width = 0; width <= 9; ++width) {
             if (width == 8) continue;

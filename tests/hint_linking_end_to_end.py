@@ -39,7 +39,7 @@ def main():
             run(compiler + ['compile-json', ast, '-o', roundtrip])
             assert abd.read_bytes() == roundtrip.read_bytes(), name
             tree = json.loads(executable.read_text())
-            assert tree['exec-version'] == 7
+            assert tree['exec-version'] == 8
             return abd, tree
 
         def execute(abd, libraries, expected):
@@ -69,13 +69,19 @@ def main():
 
         returns, _ = compile_module('return_library', (work / 'point.azs').read_text() + '''
             Point* produce():0006{Point * p(3);return p;}
-            Point* manual():0007{return new Point(4);}''')
+            Point* manual():0007{return new Point(4);}
+            int measure(Point (*) p):0008{return p.get();}''')
         returning, _ = compile_module('return_client', '''#include "point.include.azs"
             extern Point* produce():addd0006;
             extern Point* manual():addd0007;
             Point* forward(){return produce();}
             int main(){Point* p=forward();print(p.get());Point* m=manual();print(m.get());delete m;return 0;}''')
         execute(returning, [returns], ['library-load', '44', '46', 'point:42', 'point:41', '0'])
+        # A "Point (*)" extern erases to an address: callers lend literal objects across modules.
+        flexible, _ = compile_module('flexible_client', '''#include "point.include.azs"
+            extern int measure(Point (*)):addd0008;
+            int main(){Point lit(1);print(measure(lit));Point* q=new Point(2);print(measure(q));delete q;return 0;}''')
+        execute(flexible, [returns], ['library-load', '42', '44', 'point:42', 'point:41', '0'])
 
         # Alias 2222 has different meanings in root and Y; linking is module-local.
         root, _ = compile_module('aliases', '''#assume_hint X 2222

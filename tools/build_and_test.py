@@ -133,6 +133,10 @@ def main():
              '--runner',native/'interpreter/azscript-run','--host',native/'interpreter/numeric-module-host']
     if jni:literal += ['--bridge',bridge,'--library',native/'abdjni'/libname]
     run(literal)
+    generics=[sys.executable,ROOT/'tests/generics_end_to_end.py','--classpath',classpath,
+              '--runner',native/'interpreter/azscript-run','--host',native/'interpreter/numeric-module-host']
+    if jni:generics += ['--bridge',bridge,'--library',native/'abdjni'/libname]
+    run(generics)
     run([sys.executable, ROOT/'tests/loops_end_to_end.py', '--classpath', classpath,
          '--runner', native/'interpreter/azscript-run'])
     inheritance=[sys.executable,ROOT/'tests/inheritance_end_to_end.py','--classpath',classpath,

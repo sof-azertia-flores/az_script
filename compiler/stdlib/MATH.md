@@ -1,5 +1,7 @@
 # AzScript 基础数学库
 
+中文 | [English](MATH.en.md)
+
 [`math.azs`](math.azs) 是独立编译的纯 AzScript 库，声明 `#namespace_hint AZSCRIPT_MATH`，不依赖其他脚本库、JNI 或宿主回调。调用方只包含 [`math.include.azs`](math.include.azs)；该头文件使用 `#assume_hint AZSCRIPT_MATH 4d41` 和完整类型的 `extern` 声明，不把实现复制到调用方。公开函数使用 `math_` 前缀，`math__` 前缀保留给内部实现。
 
 相对于 `examples/` 中的调用脚本包含头文件：

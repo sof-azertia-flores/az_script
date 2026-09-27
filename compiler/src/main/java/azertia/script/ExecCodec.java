@@ -10,12 +10,12 @@ import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
 
-/** Strict fixed-record exec v7 encoder/decoder. Executable roots never use typed maps. */
+/** Strict fixed-record exec v8 encoder/decoder. Executable roots never use typed maps. */
 public final class ExecCodec {
-    public static final int VERSION=7, MAX_BYTES=64*1024*1024, MAX_SLOTS=1_048_576;
+    public static final int VERSION=8, MAX_BYTES=64*1024*1024, MAX_SLOTS=1_048_576;
     public static final String MAGIC="AZSCRIPT";
     private ExecCodec() {}
-    private record Layout(int globals,int parameters,int locals) {}
+    private record Layout(int globals,int parameters,int locals,int hidden) {}
     private static void depth(int depth) {
         if(depth>128)throw new IllegalArgumentException("Exec ABD nesting exceeds 128 levels");
     }
@@ -35,6 +35,14 @@ public final class ExecCodec {
         return integer.s;
     }
     private static int integer(AcsObject object,String key) {return integer(object.mmp.get(key),key);}
+    private static int optionalInteger(AcsObject object,String key,int fallback) {
+        return object.mmp.containsKey(key)?integer(object,key):fallback;
+    }
+    private static int entryKind(AcsObject value) {
+        int kind=optionalInteger(value,"entry-kind",0);
+        if(kind!=0&&kind!=1)throw invalid("entry-kind must be ordinary (0) or internal (1)");
+        return kind;
+    }
     private static String string(AcsElement value,String label) {
         if(!(value instanceof AcsStringElement string))throw invalid(label+" must be a string");
         return string.s;
@@ -68,7 +76,7 @@ public final class ExecCodec {
         return value;
     }
     private static void type(int value,boolean parameter,boolean external) {
-        if(value<0||value>8||value==5&&parameter||value==6&&(!parameter||external))
+        if(value<0||value>8||value==5&&parameter)
             throw invalid("invalid "+(parameter?"parameter":"return")+" type "+value);
     }
     private static void scriptId(int id) {
@@ -83,12 +91,42 @@ public final class ExecCodec {
         } else if(slot>=layout.parameters()+layout.locals()||declaration&&slot<layout.parameters())
             throw invalid("local variable slot outside its declaration range: "+slot);
     }
-    private static AbdValue types(AcsElement value,int expected,boolean external) {
+    private static AbdValue types(AcsElement value,int expected,boolean external,int hidden) {
         AcsArray types=array(value,"param-types");count(types.acsa.size(),"parameter type count");
         if(expected>=0&&types.acsa.size()!=expected)throw invalid("param-count and param-types disagree");
         List<AbdValue> encoded=new ArrayList<>();
-        for(AcsElement item:types.acsa) {int type=integer(item,"parameter type");type(type,true,external);encoded.add(n(type));}
+        for(AcsElement item:types.acsa) {
+            int type=integer(item,"parameter type");type(type,true,external);
+            if(external&&type==6&&hidden==0)throw invalid("external any parameter requires generic contexts");
+            encoded.add(n(type));
+        }
         return stack(encoded);
+    }
+    private static AbdValue contexts(AcsElement value,Layout layout,int level) {
+        depth(level);
+        if(value==null)return stack();
+        AcsArray specs=array(value,"contexts");count(specs.acsa.size(),"context count");
+        List<AbdValue> result=new ArrayList<>();
+        for(AcsElement spec:specs.acsa)result.add(context(spec,layout,level+1));
+        return stack(result);
+    }
+    private static AbdValue context(AcsElement value,Layout layout,int level) {
+        depth(level);AcsObject spec=object(value,"context");
+        if(spec.mmp.containsKey("ref")) {
+            keys(spec,"ref","");int reference=integer(spec,"ref");
+            if(reference<0||reference>=layout.hidden())throw invalid("context reference outside function hidden-count");
+            return stack(n(0),n(reference));
+        }
+        keys(spec,"abi kind","factory contexts");int abi=integer(spec,"abi"),kind=integer(spec,"kind");
+        if(!(kind==0&&abi>=0&&abi<=5||kind==1&&abi==7||kind==2&&abi==7||kind==3&&abi==8))
+            throw invalid("invalid fixed context ABI/kind");
+        boolean hasFactory=spec.mmp.containsKey("factory");
+        if(hasFactory&&kind!=3)throw invalid("only object contexts can have a default factory");
+        if(!hasFactory&&spec.mmp.containsKey("contexts")&&!array(spec.mmp.get("contexts"),"contexts").acsa.isEmpty())
+            throw invalid("context without a factory cannot have child contexts");
+        List<AbdValue> fields=new ArrayList<>(List.of(n(1),n(abi),n(kind),b(hasFactory)));
+        if(hasFactory) {int factory=integer(spec,"factory");externalId(factory);fields.add(n(factory));}
+        fields.add(contexts(spec.mmp.get("contexts"),layout,level+1));return stack(fields);
     }
     private static AbdValue extensions(AcsElement value) {
         AbdValue encoded=object(value,"ext").toValue();validateTyped(encoded,2,2);return encoded;
@@ -102,22 +140,26 @@ public final class ExecCodec {
         List<AbdValue> signatures=new ArrayList<>(),functions=new ArrayList<>();
         Set<Integer> externalIds=new HashSet<>(),functionIds=new HashSet<>(),namespaces=new HashSet<>(Set.of(0));
         for(AcsElement item:array(program.mmp.get("extern-signatures"),"extern-signatures").acsa) {
-            AcsObject signature=object(item,"signature");keys(signature,"id return-type param-types","");
+            AcsObject signature=object(item,"signature");keys(signature,"id return-type param-types","hidden-count entry-kind");
             int id=integer(signature,"id"),type=integer(signature,"return-type");externalId(id);type(type,false,true);
             if(!externalIds.add(id))throw invalid("duplicate external function id");
-            signatures.add(stack(n(id),n(type),types(signature.mmp.get("param-types"),-1,true)));
+            int hidden=count(optionalInteger(signature,"hidden-count",0),"hidden context count"),entry=entryKind(signature);
+            if(type==6&&hidden==0)throw invalid("any return type requires generic contexts");
+            signatures.add(stack(n(id),n(type),types(signature.mmp.get("param-types"),-1,true,hidden),n(hidden),n(entry)));
         }
         for(AcsElement item:array(program.mmp.get("f"),"f").acsa) {
-            AcsObject function=object(item,"function");keys(function,"id return-type param-count local-count param-types script","");
+            AcsObject function=object(item,"function");keys(function,"id return-type param-count local-count param-types script","hidden-count entry-kind");
             int id=integer(function,"id"),type=integer(function,"return-type");scriptId(id);type(type,false,false);
             if(!functionIds.add(id))throw invalid("duplicate script function id");
             if(!hint.isEmpty()&&(id>>>16)!=0)throw invalid("hint module definitions must use namespace zero");
             namespaces.add(id>>>16);
             int params=count(integer(function,"param-count"),"parameter count"),locals=count(integer(function,"local-count"),"local count");
+            int hidden=count(optionalInteger(function,"hidden-count",0),"hidden context count"),entry=entryKind(function);
+            if(type==6&&hidden==0)throw invalid("any return type requires generic contexts");
             if((long)params+locals>MAX_SLOTS)throw invalid("function frame exceeds slot limit");
-            if((id==0||id==1)&&(type!=5||params!=0))throw invalid("invalid lifecycle function signature");
-            functions.add(stack(n(id),n(type),n(params),n(locals),types(function.mmp.get("param-types"),params,false),
-                    expression(function.mmp.get("script"),new Layout(globals,params,locals),4)));
+            if((id==0||id==1)&&(type!=5||params!=0||hidden!=0))throw invalid("invalid lifecycle function signature");
+            functions.add(stack(n(id),n(type),n(params),n(locals),types(function.mmp.get("param-types"),params,false,hidden),
+                    expression(function.mmp.get("script"),new Layout(globals,params,locals,hidden),4),n(hidden),n(entry)));
         }
         List<AbdValue> assumptions=new ArrayList<>();Set<String> hints=new HashSet<>();Set<Integer> aliases=new HashSet<>();
         for(AcsElement item:array(program.mmp.get("assume-hints"),"assume-hints").acsa) {
@@ -156,8 +198,9 @@ public final class ExecCodec {
         }
         int kind=integer(object,"t");
         if(kind==1) {
-            keys(object,"t id param","");
-            return stack(n(ExecOpcodes.CALL),n(integer(object,"id")),expressions(array(object.mmp.get("param"),"param"),layout,level+1));
+            keys(object,"t id param","contexts");
+            return stack(n(ExecOpcodes.CALL),n(integer(object,"id")),expressions(array(object.mmp.get("param"),"param"),layout,level+1),
+                    contexts(object.mmp.get("contexts"),layout,level+1));
         }
         if(kind!=0)throw invalid("unknown expression kind "+kind);
         int op=integer(object,"c");ExecOpcodes.name(op);
@@ -188,10 +231,13 @@ public final class ExecCodec {
                 fields.add(expression(object.mmp.get("v"),layout,level+1));fields.add(n(offset));
             }
             case ExecOpcodes.OBJECT_BIND -> {
-                keys(object,"t c v manual","destructor");boolean hasDestructor=object.mmp.containsKey("destructor");
+                keys(object,"t c v manual","destructor contexts");boolean hasDestructor=object.mmp.containsKey("destructor");
                 fields.add(expression(object.mmp.get("v"),layout,level+1));fields.add(b(hasDestructor));
                 if(hasDestructor) {int destructor=integer(object,"destructor");externalId(destructor);fields.add(n(destructor));}
                 fields.add(b(bool(object.mmp.get("manual"),"manual")));
+                if(!hasDestructor&&object.mmp.containsKey("contexts")&&!array(object.mmp.get("contexts"),"contexts").acsa.isEmpty())
+                    throw invalid("object without a destructor cannot bind destructor contexts");
+                fields.add(contexts(object.mmp.get("contexts"),layout,level+1));
             }
             case ExecOpcodes.OBJECT_DELETE,ExecOpcodes.NOT,ExecOpcodes.NEGATE -> {
                 keys(object,"t c v","");fields.add(expression(object.mmp.get("v"),layout,level+1));
@@ -224,6 +270,13 @@ public final class ExecCodec {
             case ExecOpcodes.DROP -> {
                 keys(object,"t c v","");storageTarget(object(object.mmp.get("v"),"drop target"),"drop target");
                 fields.add(expression(object.mmp.get("v"),layout,level+1));
+            }
+            case ExecOpcodes.CONTEXT_ABI,ExecOpcodes.CONTEXT_DEFAULT -> {
+                keys(object,"t c context","");fields.add(context(object.mmp.get("context"),layout,level+1));
+            }
+            case ExecOpcodes.RETURN_TYPED,ExecOpcodes.CHECK_TYPE -> {
+                keys(object,"t c v context","");fields.add(expression(object.mmp.get("v"),layout,level+1));
+                fields.add(context(object.mmp.get("context"),layout,level+1));
             }
             default -> {
                 if(op!=ExecOpcodes.MOVE&&(op<ExecOpcodes.ADD||op>ExecOpcodes.OR))throw invalid("invalid control opcode "+op);
@@ -259,6 +312,21 @@ public final class ExecCodec {
         while(record.position<record.fields.size())result.acsa.add(new AcsIntegerElement(record.integer()));
         return result;
     }
+    private static AcsArray decodeContexts(AbdValue value,int level) {
+        Record record=new Record(value,level);count(record.fields.size(),"context count");AcsArray result=new AcsArray();
+        for(AbdValue item:record.fields)result.acsa.add(decodeContext(item,level+1));
+        return result;
+    }
+    private static AcsObject decodeContext(AbdValue value,int level) {
+        Record record=new Record(value,level);int variant=record.integer();AcsObject result=new AcsObject();
+        if(variant==0)result.put("ref",record.integer());
+        else if(variant==1) {
+            result.put("abi",record.integer());result.put("kind",record.integer());
+            if(record.bool())result.put("factory",record.integer());
+            result.put("contexts",decodeContexts(record.next(),level+1));
+        } else throw invalid("unknown context specification kind "+variant);
+        record.end();return result;
+    }
     private static AcsObject decodeExtensions(AbdValue value) {
         validateTyped(value,2,2);
         try {return new AcsObject(value);}
@@ -286,7 +354,7 @@ public final class ExecCodec {
         if(value.getData().length>MAX_BYTES-4)throw invalid("executable exceeds 64 MiB");
         Record root=new Record(value,1);
         if(root.fields.isEmpty()||!Arrays.equals(root.fields.get(0).getData(),MAGIC.getBytes(StandardCharsets.UTF_8))) {
-            throw invalid("expected exec v7 AZSCRIPT header; legacy executable maps are unsupported");
+            throw invalid("expected exec v8 AZSCRIPT header; legacy executable maps are unsupported");
         }
         root.string();int version=root.integer();if(version!=VERSION)throw invalid("unsupported exec version "+version);
         ExecProgram result=new ExecProgram();result.put("author","");result.put("version",root.integer());result.put("exec-version",version);
@@ -295,14 +363,16 @@ public final class ExecCodec {
         Record signatures=new Record(root.next(),2);AcsArray signatureView=new AcsArray();
         for(AbdValue item:signatures.fields) {
             Record signature=new Record(item,3);AcsObject view=new AcsObject();view.put("id",signature.integer());view.put("return-type",signature.integer());
-            view.put("param-types",decodeTypes(signature.next(),4));signature.end();signatureView.acsa.add(view);
+            view.put("param-types",decodeTypes(signature.next(),4));view.put("hidden-count",signature.integer());
+            view.put("entry-kind",signature.integer());signature.end();signatureView.acsa.add(view);
         }
         result.put("extern-signatures",signatureView);
         Record functions=new Record(root.next(),2);AcsArray functionView=new AcsArray();
         for(AbdValue item:functions.fields) {
             Record function=new Record(item,3);AcsObject view=new AcsObject();view.put("id",function.integer());view.put("return-type",function.integer());
             view.put("param-count",function.integer());view.put("local-count",function.integer());view.put("param-types",decodeTypes(function.next(),4));
-            view.put("script",decodeExpression(function.next(),4));function.end();functionView.acsa.add(view);
+            view.put("script",decodeExpression(function.next(),4));view.put("hidden-count",function.integer());
+            view.put("entry-kind",function.integer());function.end();functionView.acsa.add(view);
         }
         result.put("namespace-hint",root.string());AcsArray assumptions=new AcsArray();
         Record assumptionRecords=new Record(root.next(),2);
@@ -343,6 +413,7 @@ public final class ExecCodec {
             case ExecOpcodes.BLOCK -> {AcsArray block=decodeExpressions(record.next(),level+1);record.end();return block;}
             case ExecOpcodes.CALL -> {
                 view=new AcsObject();view.put("t",1);view.put("id",record.integer());view.put("param",decodeExpressions(record.next(),level+1));
+                view.put("contexts",decodeContexts(record.next(),level+1));
             }
             case ExecOpcodes.VARIABLE -> view.put("v",record.integer());
             case ExecOpcodes.DEFINE -> {
@@ -359,6 +430,7 @@ public final class ExecCodec {
             case ExecOpcodes.OBJECT_ADDRESS -> {view.put("v",decodeExpression(record.next(),level+1));view.put("offset",record.integer());}
             case ExecOpcodes.OBJECT_BIND -> {
                 view.put("v",decodeExpression(record.next(),level+1));if(record.bool())view.put("destructor",record.integer());view.put("manual",record.bool());
+                view.put("contexts",decodeContexts(record.next(),level+1));
             }
             case ExecOpcodes.OBJECT_DELETE,ExecOpcodes.NOT,ExecOpcodes.NEGATE -> view.put("v",decodeExpression(record.next(),level+1));
             case ExecOpcodes.IF -> {
@@ -370,6 +442,10 @@ public final class ExecCodec {
             case ExecOpcodes.NEW_BLOCK -> view.put("size",record.integer());
             case ExecOpcodes.MOVE_OUT -> view.put("v",record.integer());
             case ExecOpcodes.BLOCK_ADDRESS,ExecOpcodes.DROP -> view.put("v",decodeExpression(record.next(),level+1));
+            case ExecOpcodes.CONTEXT_ABI,ExecOpcodes.CONTEXT_DEFAULT -> view.put("context",decodeContext(record.next(),level+1));
+            case ExecOpcodes.RETURN_TYPED,ExecOpcodes.CHECK_TYPE -> {
+                view.put("v",decodeExpression(record.next(),level+1));view.put("context",decodeContext(record.next(),level+1));
+            }
             default -> {view.put("v1",decodeExpression(record.next(),level+1));view.put("v2",decodeExpression(record.next(),level+1));}
         }
         record.end();return view;

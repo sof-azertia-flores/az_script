@@ -1,3 +1,52 @@
+# 泛型与运行时反射（2026-09-27）
+
+中文 | [English](VALIDATION.en.md)
+
+实现共享正文的泛型类、函数、成员方法及参数化继承，包含显式类型实参、实参推断、单个类上界、不变性、类外实现和泛型 extern 匹配。隐藏类型上下文保留具体默认值、默认工厂和返回类别；对象的析构绑定在复制、移动、跨库返回、错误清理及快照恢复后仍然有效。新增按实际函数 ID 调用与两个 hint 查询接口，检查真实返回标签并拒绝未绑定的泛型入口及内部入口。exec 与 JNI 快照均升级到 v8，旧版本直接拒绝；源码 metadata 版本保持不变。
+
+顺序执行 `python3 tools/build_and_test.py --offline` 和 `python3 tools/build_and_test.py --offline --sanitize`，两者均退出 0，未发现 ASan/UBSan 报告。Java 单元测试 95/95、原生运行时 625 项检查通过。新增泛型与反射端到端套件在普通构建通过 71 项，在不含 JNI 的 sanitizer 构建通过 62 项。普通构建中的真实 JVM 验证通过 2648 项断言、4 个工作线程的 800 次调用及小栈下 1000 个模块的链接测试；新增 JNI 用例还覆盖泛型对象快照和 8 种损坏上下文的原子拒绝。
+
+源码→可读 AST→ABD 字节一致、Java/C++ ABD 样本往返和 94 项独立执行格式检查通过。回归覆盖共享函数 ID、标量及对象默认值、递归及跨库泛型调用、原始地址与对象返回的所有权区别、构造回滚、析构错误、预算限制、宿主回调与反射边界、链接失败后的重试。补入前向声明上界缓存校验、手写 AST 类型字符串的 64 层限制和小栈下长继承链回归；已有类、循环、继承、地址、数学库、hint 和签名动态库套件继续通过。
+
+同步更新中英文语言、执行格式、hint、JNI 接入及发行使用文档，增加单文件泛型反射与独立泛型库示例。仓库 123 个本地 Markdown 文件链接有效；发行导出工具 12 项回归验证包内链接与命令，`git diff --check` 和新增文件空白检查通过。未提交、推送或重新导出发行包。日志：`build/generics-validation.log`、`build/generics-sanitize.log`。
+
+# 中英文文档与发行导出（2026-09-27）
+
+为仓库全部 15 份项目 Markdown 文档增加同目录的 `.en.md` 英文版和双向语言链接，保留第三方英文许可证原文。英文版覆盖当前接口、格式契约、语言与数学库说明、宿主接入、开发指南、发行使用及历史验证记录。逐份检查章节与代码块数量，示例代码除注释翻译外保持一致；检查源文档链接、英文表格、未跟踪文件空白及 `git diff --check`。
+
+发行导出同步提供 9 对中英文文档，英文语言手册使用发行包命令并重写相对链接。新增导出回归验证语言切换、包内链接及发行命令；`python3 tests/test_export_distribution.py` 的 12 项检查通过。`python3 tools/build_and_test.py --offline` 全套退出 0，包含真实 JNI 和 AST/ABD 往返。本次只修改文档及文档导出/验收逻辑，未重复运行 sanitizer。
+
+通过 `python3 tools/export_distribution.py build/bilingual-distribution --offline --force` 生成 macOS arm64 双语验收包，17 项搬迁检查通过，159 个清单文件的长度与 SHA-256 匹配，82 个包内本地链接及其使用的章节锚点有效。既有 `dist/` 未覆盖。日志：`build/bilingual-validation.log`、`build/bilingual-export-unit.log`、`build/bilingual-export-final.log`；检查结果：`build/bilingual-docs-check.json`。
+
+# 远程签名动态库更新合并（2026-09-27）
+
+本地 `main` 从 `7ff1d0a` 快进到远程 `4508642`，纳入签名原生动态库加载、可信公钥接口和插件编译/签名工具。exec 与 JNI 快照仍为 v7。合并前的 `C (*)` 参数实现、测试、文档、`compiler/std.azs` 删除及未跟踪的 `AGENTS.md` 均保留；逐项核对原有补丁增删内容一致，没有文本冲突。
+
+实际构建发现并修复三个集成问题：macOS 路径查询重复声明导致 Clang 编译失败；原生测试固定使用 `.so`，与 macOS 的后缀归一化不一致；发行验收仍假设解释器是静态链接。独立解释器现须随带共享运行库，插件与宿主共享同一注册表；验收改为搬迁最小 `bin/lib` 布局，并在没有 Java 和编译器的环境执行。
+
+`python3 tools/build_and_test.py --offline` 与随后顺序执行的 `python3 tools/build_and_test.py --offline --sanitize` 均退出 0，未发现 ASan/UBSan 报告。Java 72/72、原生运行时 563 项及普通构建中的真实 JNI 验证通过；Java/C++ ABD 样本逐字节一致，源码→AST→ABD 往返、既有生命周期与 hint 链接回归通过。签名动态库端到端测试普通构建 16 项、sanitizer 构建 14 项通过；sanitizer 不包含 JNI。
+
+通过 `python3 tools/export_distribution.py build/remote-merge-distribution --offline` 生成独立验收包，17 项搬迁检查及 150 个清单文件的长度/SHA-256 校验通过，包含 C++ 静态/共享消费者和真实 JNI 消费者。另分别使用开发构建与发行包重编签名插件，验证 `C (*)` 接收字面量、手动指针、自动指针和临时对象：修改可见、实参各求值一次、重复加载仅初始化一次、析构完整，AST 往返 ABD 字节一致；临时私钥已删除。实机验证平台为 macOS arm64，既有 `dist/` 未覆盖。
+
+日志：`build/remote-merge-validation.log`、`build/remote-merge-sanitize.log`、`build/remote-merge-export.log`。组合验证结果：`build/flexible-signed-plugin-qhtn77la/report.json`、`build/flexible-signed-package-1uh1orfx/report.json`。合并前备份位于 `build/remote-merge-backup-20260927-082819/`。
+
+# `C (*)` 参数（2026-09-25）
+
+函数参数可以写成 `C (*) p`（`C(*) p` 亦可），表示同时接受 `C *` 指针和 `C` 字面量对象。函数内 `p` 的类型是 `C *`。实参为字面量对象时，编译器在调用处用 `block_address` 取地址后传入，不复制，函数的修改对调用方可见；临时对象在调用期间有效，语句结束时销毁。实参规则与指针参数相同：接受派生类、结构等价的类和 `null`。`(*)` 可用于普通函数、构造方法、成员方法和 `extern` 声明，其 ABI 与 `C *` 相同（address，类型编号 7）；局部变量、字段、返回类型、for 初始化和 `C * (*)` 都会被拒绝。编译器内部的类类型编号改为每类三个（值、指针、`(*)`）。exec 与 JNI 快照格式不变，仍为 v7。
+
+`python3 tools/build_and_test.py --offline` 与随后顺序执行的 `--offline --sanitize` 均退出 0，未发现 ASan/UBSan 报告。Java 测试 72/72，原生运行时 551 项，ctest 三项通过。字面量对象套件增至 61 项（sanitizer 构建不含 JNI，为 60 项），新增用例覆盖：
+- 字面量、手动指针、自动指针、临时对象、派生类和 `null` 实参
+- 构造方法与成员方法，包括经隐式 `this` 的调用
+- 函数保存借来的地址、原对象到期后再访问时报错
+- `delete` 借来的字面量对象时报错
+- 八种编译期拒绝
+
+hint 链接套件新增跨模块 `extern int measure(Point (*))` 用例。编译器单元测试确认：AST 保留 `P(*)`，exec 参数类型为 7，只有字面量实参被包上 `block_address`；同时覆盖无空格写法、类外定义的 extern 成员、结构等价的 `(*)` extern 声明，以及 `*`/`(*)` 写法不一致的拒绝。
+
+提交前做了一轮多视角对抗评审，分解析、类型系统、运行时生命周期、测试与文档四个方向，每个方向都用实际编译和运行复现。未发现代码缺陷。据此修正了三处文档：示例中 `read(null)` 会解引用空指针；多处仍称 `this` 是取得字面量地址的唯一途径；HINT_LINKING 的擦除列表漏了 `(*)`。并补充了上面列出的测试。
+
+本次未重新导出 `dist/`。日志：`build/flexible-params-validation.log`、`build/flexible-params-sanitize.log`。
+
 # 字面量对象与 slot 块（2026-09-25）
 
 新增运行时值类型 `object`（类型编号 8）。它是一个 slot 块：内部的 slot 各自独立，可以通过 C++ API 延伸或缩短，复制时整块深复制。块地址编码为 `bit63 | id<<24 | offset`，脚本里与公共堆地址无法区分；id 永不复用，块的生命周期一结束，地址随即报废，之后解引用报 `Invalid or expired object address`。`Point a(1,2);`、`Point a;` 和 `Point a();` 现在都声明字面量对象，赋值时原地逐字段复制，每个副本到期都各自运行析构。自动指针对象改写为 `Point * a(1,2);`，无参时也必须写 `()`；手动对象改写为 `Point * m = new Point(1,2);`；单写 `Point * p;` 声明空指针，与 `Point * p = null;` 生成完全相同的代码，不构造对象，也不负责清理之后赋给它的对象。值与指针完全按 C++ 区分：参数、返回值和字段都可以按值传递；`this` 的类型是 `C*`，也是脚本唯一能拿到块地址的地方。`null` 与 `delete` 只用于指针，值对象不能放进无类型位置，也不能比较或切片。

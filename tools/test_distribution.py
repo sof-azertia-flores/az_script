@@ -63,7 +63,7 @@ def _outputs(abd: Path, ast: Path, executable_json: Path) -> None:
             raise RuntimeError(f"Invalid JSON output {path}: {error}") from error
         _require(isinstance(decoded, dict), f"Expected a JSON object in {path}")
         if path == executable_json:
-            _require(decoded.get("exec-version") == 7, "Expected exec v7 output")
+            _require(decoded.get("exec-version") == 8, "Expected exec v8 output")
             def inspect(value):
                 if isinstance(value, dict):
                     if value.get("t") == 0:
@@ -140,6 +140,12 @@ def verify(package: Path, java: Optional[Path] = None) -> Dict[str, object]:
                 package / "examples/java/RunScript.java"]
     for path in required:
         _require(path.is_file(), f"Missing distribution component: {path}")
+    for relative in ("README", "THIRD_PARTY", "docs/USAGE", "docs/QUICKSTART",
+                     "docs/LANGUAGE", "docs/EXEC_FORMAT", "docs/HINT_LINKING",
+                     "docs/EXTERN_LIBRARY", "stdlib/MATH"):
+        for suffix in (".md", ".en.md"):
+            path = package / (relative + suffix)
+            _require(path.is_file(), f"Missing distribution documentation: {path}")
     passed("required compiler, runtime, SDK, JNI, documentation and examples")
 
     with tempfile.TemporaryDirectory(prefix="azscript distribution verification ") as temporary:
@@ -268,21 +274,37 @@ def verify(package: Path, java: Optional[Path] = None) -> Dict[str, object]:
         passed("precompiled math hint library, relocated rebuild and separate consumer")
 
         standalone = work / "standalone runner"
-        standalone.mkdir()
-        standalone_runner = standalone / ("azscript-run" + EXECUTABLE_SUFFIX)
+        standalone_bin = standalone / "bin"
+        standalone_bin.mkdir(parents=True)
+        standalone_runner = standalone_bin / ("azscript-run" + EXECUTABLE_SUFFIX)
         shutil.copy2(package / "bin" / standalone_runner.name, standalone_runner)
-        standalone_environment = environment.copy()
+        # The runner and native plugins now share abdInvoker's registry. Copy
+        # that runtime and its platform runtime dependencies, without the JARs,
+        # Java runtime, JNI bridge, headers or compiler from the distribution.
         if WINDOWS:
+            runtime_names = {"abdinvoker.dll", "libabdinvoker.dll"}
+            runtime_libraries = [library for library in (package / "bin").glob("*.dll")
+                                 if library.name.lower() in runtime_names]
+            standalone_lib = standalone_bin
             for library in (package / "bin").glob("*.dll"):
-                if not library.name.lower().startswith("abd") and "azertian" not in library.name.lower():
-                    shutil.copy2(library, standalone / library.name)
-            standalone_environment["PATH"] = os.pathsep.join(
-                entry for entry in environment.get("PATH", "").split(os.pathsep)
-                if entry and not Path(entry).resolve().is_relative_to(package))
+                name = library.name.lower()
+                if not name.startswith(("abd", "libabd")) and "azertian" not in name:
+                    shutil.copy2(library, standalone_bin / library.name)
+        else:
+            standalone_lib = standalone / "lib"
+            standalone_lib.mkdir()
+            pattern = "libabdInvoker*.dylib" if sys.platform == "darwin" else "libabdInvoker.so*"
+            runtime_libraries = list((package / "lib").glob(pattern))
+        _require(bool(runtime_libraries), "Missing shared AzScript runtime for standalone runner")
+        for library in runtime_libraries:
+            shutil.copy2(library, standalone_lib / library.name)
+        standalone_environment = environment.copy()
+        standalone_environment["JAVA_HOME"] = str(work / "missing standalone JDK")
+        standalone_environment["PATH"] = str(standalone_bin)
         result = _run([standalone_runner, default_abd], cwd, standalone_environment)
         _require(result.stdout.splitlines() == ["Hello, AzScript!", "42"],
-                 "Runner copied without AzScript libraries could not execute main")
-        passed("standalone runner works without separate AzScript shared libraries")
+                 "Runner with its shared runtime could not execute main without Java")
+        passed("standalone bin/lib runtime works without Java or compiler artifacts")
 
         common_cmake = [f"-DCMAKE_PREFIX_PATH={package}", "-DCMAKE_BUILD_TYPE=Release",
                         "-DCMAKE_FIND_USE_PACKAGE_REGISTRY=OFF", "-DCMAKE_FIND_PACKAGE_NO_PACKAGE_REGISTRY=ON"]

@@ -79,10 +79,14 @@ def check_destination(raw, force):
 
 def copy_assets(package):
     (package / 'docs').mkdir()
-    for name in ('USAGE.md', 'QUICKSTART.md'):
+    for name in ('USAGE.md', 'QUICKSTART.md', 'USAGE.en.md', 'QUICKSTART.en.md'):
         shutil.copy2(TEMPLATES / name, package / 'docs' / name)
-    for name in ('EXEC_FORMAT.md', 'HINT_LINKING.md', 'EXTERN_LIBRARY.md'):
-        shutil.copy2(ROOT / 'docs' / name, package / 'docs' / name)
+    for name in ('EXEC_FORMAT.md', 'HINT_LINKING.md', 'EXTERN_LIBRARY.md',
+                 'EXEC_FORMAT.en.md', 'HINT_LINKING.en.md', 'EXTERN_LIBRARY.en.md'):
+        destination = package / 'docs' / name
+        shutil.copy2(ROOT / 'docs' / name, destination)
+        content = destination.read_text(encoding='utf-8')
+        destination.write_text(content.replace('](../compiler/examples/', '](../examples/'), encoding='utf-8')
     for name in ('compile.sh', 'compile.cmd', 'run.sh', 'run.cmd',
                  'compile_extern_lib.sh', 'compile_extern_lib.cmd',
                  'sign_extern_lib.sh', 'sign_extern_lib.cmd'):
@@ -108,16 +112,41 @@ def copy_assets(package):
     language = language.replace('](stdlib/', '](../stdlib/').replace('](examples/', '](../examples/')
     language = language.replace('](../docs/EXEC_FORMAT.md)', '](EXEC_FORMAT.md)').replace('](../docs/HINT_LINKING.md)', '](HINT_LINKING.md)').replace('](../docs/EXTERN_LIBRARY.md)', '](EXTERN_LIBRARY.md)')
     (package / 'docs/LANGUAGE.md').write_text(language, encoding='utf-8')
+    language = (ROOT / 'compiler/LANGUAGE.en.md').read_text(encoding='utf-8')
+    start = language.index('From the repository root')
+    end = language.index("The CLI's `compile-json`", start)
+    language = language[:start] + (
+        'From the distribution root (Windows: `compile.cmd` / `run.cmd`):\n\n'
+        '```sh\n./compile.sh examples/parser-regressions.azs -o example.exec.abd\n'
+        './run.sh example.exec.abd\n```\n\n'
+        '`example.ast.json` and `example.exec.json` are also produced by default. '
+        'See [Usage](USAGE.en.md) for options and C++ / JNI integration.\n\n') + language[end:]
+    language = language.replace('](stdlib/', '](../stdlib/').replace('](examples/', '](../examples/')
+    for name in ('EXEC_FORMAT.en.md', 'HINT_LINKING.en.md', 'EXTERN_LIBRARY.en.md'):
+        language = language.replace(f'](../docs/{name})', f']({name})')
+    (package / 'docs/LANGUAGE.en.md').write_text(language, encoding='utf-8')
     shutil.copytree(TEMPLATES / 'licenses', package / 'licenses')
     shutil.copy2(TEMPLATES / 'THIRD_PARTY.md', package / 'THIRD_PARTY.md')
+    shutil.copy2(TEMPLATES / 'THIRD_PARTY.en.md', package / 'THIRD_PARTY.en.md')
     (package / 'README.md').write_text(
-        '# AzScript\n\n在此目录执行 `./compile.sh examples/hello.azs`，'
+        '# AzScript\n\n中文 | [English](README.en.md)\n\n'
+        '在此目录执行 `./compile.sh examples/hello.azs`，'
         '然后执行 `./run.sh examples/hello.exec.abd`。Windows 使用 `compile.cmd` / `run.cmd`。'
         '编译默认生成 ABD、AST JSON 和执行 JSON。\n\n'
         '[使用与 C++ / JNI 接入](docs/USAGE.md) · [基本语法](docs/QUICKSTART.md) · '
         '[完整语言说明](docs/LANGUAGE.md)\n\n'
         '本包针对当前构建系统、架构和原生工具链。构建信息、Java 要求、文件校验值及验收结果见 '
         '`manifest.json`；Java 运行环境存在时优先使用包内 `runtime/`。\n', encoding='utf-8')
+    (package / 'README.en.md').write_text(
+        '# AzScript\n\n[中文](README.md) | English\n\n'
+        'Run `./compile.sh examples/hello.azs` in this directory, then '
+        '`./run.sh examples/hello.exec.abd`. On Windows use `compile.cmd` / `run.cmd`. '
+        'Compilation produces ABD, AST JSON, and exec JSON by default.\n\n'
+        '[Usage and C++ / JNI integration](docs/USAGE.en.md) · '
+        '[Basic syntax](docs/QUICKSTART.en.md) · [Full language guide](docs/LANGUAGE.en.md)\n\n'
+        'This package targets the build system, architecture, and native toolchain. '
+        'See `manifest.json` for build information, Java requirements, file digests, and '
+        'acceptance results. The bundled `runtime/` is preferred when present.\n', encoding='utf-8')
 
 
 def build_package(package, work, args, jdk):

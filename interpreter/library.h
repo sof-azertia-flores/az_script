@@ -17,9 +17,19 @@ inline constexpr int INT_VALUE=0, STRING_VALUE=1, FLOAT_VALUE=2, DOUBLE_VALUE=3,
 inline constexpr std::size_t MAX_VARIABLE_SLOTS=1048576;
 class expression; class function; class environment; class variable; class script; struct loaded_module;
 struct slot_block; struct function_frame;
+struct type_context;
+using type_contexts=std::vector<std::shared_ptr<const type_context>>;
+// Bound generic operations contain no frame pointers and can outlive a call.
+struct type_context {
+    int abi=VOID_VALUE,kind=0;
+    std::optional<int> factory_id;
+    type_contexts contexts;
+};
+struct context_spec;
 struct function_signature {
     int return_type=VOID_VALUE;
     std::vector<int> param_types;
+    int hidden_count=0,entry_kind=0;
     bool operator==(const function_signature&) const=default;
 };
 // The compatibility heap/executor registry is shared. All entry points use this
@@ -62,6 +72,7 @@ public:
     std::shared_ptr<variable> invoke(int id, std::vector<std::shared_ptr<variable>> args={});
     void flush();
     int namespace_for_hint(const std::string& hint) const;
+    bool hint_loaded(const std::string& hint) const;
     std::vector<module_manifest_entry> module_manifest() const;
 
     void insert_script(const unsigned char* bytes, std::size_t length);
@@ -86,6 +97,7 @@ public:
     int rett=VOID_VALUE;
     int param_count=0;
     int local_count=0;
+    int hidden_count=0,entry_kind=0;
     bool linked=false;
     std::weak_ptr<script> script_owner;
     // Negative variable ids are relative to the module that defined this
@@ -97,6 +109,8 @@ public:
     ofunction()=default;
     std::shared_ptr<variable> invoke(std::shared_ptr<environment> env,
         std::vector<std::shared_ptr<variable>> arguments={}) override;
+    std::shared_ptr<variable> invoke_bound(std::shared_ptr<environment> env,
+        std::vector<std::shared_ptr<variable>> arguments,type_contexts contexts);
     std::shared_ptr<expression> code;
 };
 class expression {
@@ -115,6 +129,7 @@ public:
 class functionInvocationExpression : public expression {
 public:
     std::vector<std::shared_ptr<expression>> params;
+    std::vector<std::shared_ptr<context_spec>> contexts;
     int function_id=0;
     functionInvocationExpression()=default;
     std::shared_ptr<variable> execute(std::shared_ptr<environment> env) override;
@@ -225,6 +240,7 @@ struct function_frame {
     std::size_t global_offset=0,global_count=0,param_count=0;
     // nullptr means not declared in the currently active lexical scope.
     std::vector<std::shared_ptr<variable>> slots;
+    type_contexts hidden_contexts;
     std::shared_ptr<variable> result=std::make_shared<variable>(nullptr);
     // Unbound object temporaries; each statement destroys the ones it created.
     std::vector<std::shared_ptr<slot_block>> temporaries;
@@ -256,5 +272,8 @@ public:
 std::string value_to_string(const std::shared_ptr<variable>& value);
 // Used by the process-wide executor registry to reject namespace collisions.
 bool script_namespace_in_use(int namespace_id);
+std::shared_ptr<variable> invoke_bound_function(const std::shared_ptr<script>& script,int id,
+    const std::shared_ptr<environment>& env,std::vector<std::shared_ptr<variable>> arguments,type_contexts contexts);
+void validate_type_contexts(const type_contexts& contexts,const std::shared_ptr<script>& script);
 }
 #endif

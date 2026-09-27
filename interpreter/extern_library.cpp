@@ -68,7 +68,6 @@ std::filesystem::path executable_directory() {
     if(length>0&&length<MAX_PATH)return std::filesystem::path(buffer).parent_path();
 #elif defined(__APPLE__)
     // _NSGetExecutablePath is available without an extra framework.
-    extern "C" int _NSGetExecutablePath(char*,std::uint32_t*);
     std::uint32_t size=0;_NSGetExecutablePath(nullptr,&size);
     std::string buffer(size,'\0');
     if(_NSGetExecutablePath(buffer.data(),&size)==0)return std::filesystem::path(buffer.c_str()).parent_path();

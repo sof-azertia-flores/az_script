@@ -1,5 +1,7 @@
 # 外部动态库
 
+中文 | [English](EXTERN_LIBRARY.en.md)
+
 `load_extern_library(name)` 是内置函数，签名为 `void(string)`，编号 `0x0abd0007`。它按当前操作系统打开一个已经签名的动态库，并调用其中的 `azscript_load_extern`。动态库里用 C++ 宿主原本的注册接口挂上外部函数，不另设一套插件 ABI，也不把库当成 hint 模块装进脚本。
 
 ```c

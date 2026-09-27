@@ -172,7 +172,7 @@ def main():
 
         math_binary = work / 'math.abd'
         math_ast, math_exec = compile_source(library, math_binary, inspect=True)
-        assert math_exec['exec-version'] == 7
+        assert math_exec['exec-version'] == 8
         assert math_exec['namespace-hint'] == HINT
         assert math_exec['assume-hints'] == [{'hint': HINT, 'namespace': ALIAS}]
         assert all(function['id'] >> 16 == 0 for function in math_exec['f'])

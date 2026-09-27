@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Independent exec-v7 wire checks, malformed inputs, source execution and JNI."""
+"""Independent exec-v8 wire checks, malformed inputs, source execution and JNI."""
 import argparse
 from dataclasses import dataclass
 import json
@@ -20,7 +20,8 @@ OP_NAMES = {3: 'v', 4: 'vd', 5: 'vs', 6: 'm', 7: 'r', 8: 'ro', 9: 'oa',
             15: 'divide', 16: 'mod', 17: 'gt', 18: 'lt', 19: 'eq', 20: 'ne',
             21: 'ge', 22: 'le', 23: 'and', 24: 'or', 25: 'not', 26: 'neg',
             27: 'if', 28: 'wi', 29: 'brk', 30: 'cont', 31: 'cleanup',
-            32: 'new_block', 33: 'block_address', 34: 'mv', 35: 'drop'}
+            32: 'new_block', 33: 'block_address', 34: 'mv', 35: 'drop',
+            36: 'context_abi', 37: 'context_default', 38: 'return_typed', 39: 'check_type'}
 
 
 def integer(value):
@@ -147,14 +148,29 @@ def returning(value=None):
     return expression(7, b'\0') if value is None else expression(7, b'\1', value)
 
 
-def function(body, ident=MAIN, return_type=0, params=(), locals_count=0):
+def function(body, ident=MAIN, return_type=0, params=(), locals_count=0, hidden_count=0, entry_kind=0):
     return stack(integer(ident), integer(return_type), integer(len(params)),
-                 integer(locals_count), stack(*(integer(kind) for kind in params)), body)
+                 integer(locals_count), stack(*(integer(kind) for kind in params)), body, integer(hidden_count), integer(entry_kind))
 
 
 def module(functions, globals_count=0, signatures=()):
-    return [b'AZSCRIPT', integer(7), integer(2), b'independent wire fixture',
+    return [b'AZSCRIPT', integer(8), integer(2), b'independent wire fixture',
             integer(globals_count), typed_encode({})[1], stack(*signatures), stack(*functions), b'', b'']
+
+
+def encode_context(value):
+    if 'ref' in value:
+        assert set(value) == {'ref'}
+        return stack(integer(0), integer(value['ref']))
+    fields = [integer(1), integer(value['abi']), integer(value['kind']), bytes(['factory' in value])]
+    if 'factory' in value:
+        fields.append(integer(value['factory']))
+    fields.append(encode_contexts(value.get('contexts', [])))
+    return stack(*fields)
+
+
+def encode_contexts(values):
+    return stack(*(encode_context(item) for item in values))
 
 
 def encode_compact_expression(value):
@@ -166,7 +182,8 @@ def encode_compact_expression(value):
     if set(value) == {'address'}:
         return constant(Address(int(value['address'])))
     if value.get('t') == 1:
-        return expression(2, integer(value['id']), stack(*(encode_compact_expression(item) for item in value['param'])))
+        return expression(2, integer(value['id']), stack(*(encode_compact_expression(item) for item in value['param'])),
+                          encode_contexts(value.get('contexts', [])))
     name = value['c']
     opcode = name if isinstance(name, int) else {name: opcode for opcode, name in OP_NAMES.items()}[name]
     child = lambda key: encode_compact_expression(value[key])
@@ -191,6 +208,7 @@ def encode_compact_expression(value):
         if 'destructor' in value:
             fields.append(integer(value['destructor']))
         fields.append(bytes([value['manual']]))
+        fields.append(encode_contexts(value.get('contexts', [])))
     elif opcode == 27:
         fields = [child('v'), child('val'), bytes(['else' in value])]
         if 'else' in value:
@@ -205,6 +223,10 @@ def encode_compact_expression(value):
         fields = [child('v')]
     elif opcode == 34:
         fields = [integer(value['v'])]
+    elif opcode in (36, 37):
+        fields = [encode_context(value['context'])]
+    elif opcode in (38, 39):
+        fields = [child('v'), encode_context(value['context'])]
     else:
         assert opcode in (29, 30)
         fields = []
@@ -212,7 +234,7 @@ def encode_compact_expression(value):
 
 
 def encode_compact_module(program):
-    """Encode fixtures expressed as readable dictionaries into only v7 wire."""
+    """Encode fixtures expressed as readable dictionaries into only v8 wire."""
     global_names = program.get('gvs', [])
     numeric = isinstance(global_names, int)
     global_count = global_names if numeric else len(global_names)
@@ -244,9 +266,11 @@ def encode_compact_module(program):
 
         body = lower(entry['script'])
         functions.append(function(encode_compact_expression(body), entry['id'], entry['return-type'], params,
-                                  entry.get('local-count', len(local_names))))
+                                  entry.get('local-count', len(local_names)),
+                                  entry.get('hidden-count', 0), entry.get('entry-kind', 0)))
     signatures = [stack(integer(entry['id']), integer(entry['return-type']),
-                        stack(*(integer(kind) for kind in entry['param-types'])))
+                        stack(*(integer(kind) for kind in entry['param-types'])),
+                        integer(entry.get('hidden-count', 0)), integer(entry.get('entry-kind', 0)))
                   for entry in program.get('extern-signatures', [])]
     fields = module(functions, global_count, signatures)
     fields[2] = integer(program.get('version', 2))
@@ -265,11 +289,29 @@ class WireReader:
         self.scalars = []
         self.optional = {'initializer': set(), 'return': set(), 'else': set()}
 
+    def context(self, payload):
+        fields = frames(payload)
+        variant = int_value(fields[0])
+        if variant == 0:
+            assert len(fields) == 2
+            return {'ref': int_value(fields[1])}
+        assert variant == 1 and len(fields) >= 5
+        present = bool_value(fields[3])
+        assert len(fields) == 5 + present
+        result = {'abi': int_value(fields[1]), 'kind': int_value(fields[2]),
+                  'contexts': self.contexts(fields[-1])}
+        if present:
+            result['factory'] = int_value(fields[4])
+        return result
+
+    def contexts(self, payload):
+        return [self.context(item) for item in frames(payload)]
+
     def expression(self, payload):
         fields = frames(payload)
         assert fields
         opcode = int_value(fields.pop(0))
-        assert 0 <= opcode <= 35, opcode
+        assert 0 <= opcode <= 39, opcode
         self.opcodes.add(opcode)
         if opcode == 0:
             assert len(fields) == 1
@@ -283,9 +325,10 @@ class WireReader:
             assert len(fields) == 1
             return [self.expression(item) for item in frames(fields[0])]
         if opcode == 2:
-            assert len(fields) == 2
+            assert len(fields) == 3
             return {'t': 1, 'id': int_value(fields[0]),
-                    'param': [self.expression(item) for item in frames(fields[1])]}
+                    'param': [self.expression(item) for item in frames(fields[1])],
+                    'contexts': self.contexts(fields[2])}
         result = {'t': 0, 'c': OP_NAMES[opcode]}
         if opcode == 3:
             assert len(fields) == 1
@@ -324,8 +367,9 @@ class WireReader:
         elif opcode == 10:
             assert len(fields) >= 3
             present = bool_value(fields[1])
-            assert len(fields) == 3 + present
-            result.update(v=self.expression(fields[0]), manual=bool_value(fields[-1]))
+            assert len(fields) == 4 + present
+            result.update(v=self.expression(fields[0]), manual=bool_value(fields[-2]),
+                          contexts=self.contexts(fields[-1]))
             if present:
                 result['destructor'] = int_value(fields[2])
         elif opcode == 27:
@@ -354,6 +398,12 @@ class WireReader:
             assert len(fields) == 1
             result['v'] = int_value(fields[0])
             assert result['v'] >= 0
+        elif opcode in (36, 37):
+            assert len(fields) == 1
+            result['context'] = self.context(fields[0])
+        elif opcode in (38, 39):
+            assert len(fields) == 2
+            result.update(v=self.expression(fields[0]), context=self.context(fields[1]))
         else:
             assert opcode in (29, 30) and not fields
         return result
@@ -363,8 +413,8 @@ class WireReader:
         assert len(file_fields) == 1, 'file must contain one root frame'
         fields = frames(file_fields[0])
         assert len(fields) == 10 and fields[0] == b'AZSCRIPT'
-        assert int_value(fields[1]) == 7
-        legacy = {'exec-version': 7, 'version': int_value(fields[2]),
+        assert int_value(fields[1]) == 8
+        legacy = {'exec-version': 8, 'version': int_value(fields[2]),
                   'author': fields[3].decode('utf-8'), 'gvs': int_value(fields[4]),
                   'ext': typed_decode(MAP, fields[5]), 'extern-signatures': [], 'f': [],
                   'namespace-hint': fields[8].decode('utf-8'), 'assume-hints': []}
@@ -374,17 +424,19 @@ class WireReader:
             legacy['assume-hints'].append({'hint': assume[0].decode('utf-8'), 'namespace': int_value(assume[1])})
         for payload in frames(fields[6]):
             signature = frames(payload)
-            assert len(signature) == 3
+            assert len(signature) == 5
             legacy['extern-signatures'].append({'id': int_value(signature[0]), 'return-type': int_value(signature[1]),
-                'param-types': [int_value(item) for item in frames(signature[2])]})
+                'param-types': [int_value(item) for item in frames(signature[2])],
+                'hidden-count': int_value(signature[3]), 'entry-kind': int_value(signature[4])})
         for payload in frames(fields[7]):
             entry = frames(payload)
-            assert len(entry) == 6
+            assert len(entry) == 8
             parameters = [int_value(item) for item in frames(entry[4])]
             assert int_value(entry[2]) == len(parameters)
             legacy['f'].append({'id': int_value(entry[0]), 'return-type': int_value(entry[1]),
                 'param-count': int_value(entry[2]), 'local-count': int_value(entry[3]),
-                'param-types': parameters, 'script': self.expression(entry[5])})
+                'param-types': parameters, 'script': self.expression(entry[5]),
+                'hidden-count': int_value(entry[6]), 'entry-kind': int_value(entry[7])})
         return legacy
 
 
@@ -453,12 +505,12 @@ def main():
             run(compiler + ['compile-json', ast, '-o', roundtrip])
             assert abd.read_bytes() == roundtrip.read_bytes(), 'readable AST roundtrip'
             debug = json.loads(executable.read_text(encoding='utf-8'))
-            assert debug['exec-version'] == 7
+            assert debug['exec-version'] == 8
 
             def inspect(value):
                 if isinstance(value, dict):
                     if value.get('t') == 0 and 'c' in value:
-                        assert type(value['c']) is int and 3 <= value['c'] <= 35, value
+                        assert type(value['c']) is int and 3 <= value['c'] <= 39, value
                     for item in value.values():
                         inspect(item)
                 elif isinstance(value, list):
@@ -480,7 +532,8 @@ def main():
         assert legacy['gvs'] == debug['gvs'] == 1
         assert legacy['author'] == 'Compact wire source'
         assert legacy['version'] == ast['metadata']['version']
-        assert legacy['extern-signatures'] == [{'id': 0x12340001, 'return-type': 0, 'param-types': [0, 1, 2, 3, 4]}]
+        assert legacy['extern-signatures'] == [{'id': 0x12340001, 'return-type': 0, 'param-types': [0, 1, 2, 3, 4],
+                                                   'hidden-count': 0, 'entry-kind': 0}]
         assert [(f['id'], f['param-count'], f['local-count']) for f in legacy['f']] == [
             (f['id'], f['param-count'], f['local-count']) for f in debug['f']]
         # Parsing every instruction as a fixed record proves keys/tags are not
@@ -519,7 +572,7 @@ def main():
         execute_wire('independent-void-return', module([function(block(returning()), return_type=5)]), expected='')
 
         mutations = [('root-missing', minimum[:-1]), ('root-extra', minimum + [b''])]
-        for index, value, label in [(0, b'AZSCRIPX', 'magic'), (1, integer(5), 'version'), (1, integer(6), 'previous-version'),
+        for index, value, label in [(0, b'AZSCRIPX', 'magic'), (1, integer(5), 'version'), (1, integer(6), 'address-only-version'), (1, integer(7), 'previous-version'),
                 (1, b'\4', 'version-width'), (2, b'\2', 'source-version-width'),
                 (4, integer(-1), 'negative-globals'), (4, integer(2**31 - 1), 'huge-globals'),
                 (4, b'\0', 'global-width'), (5, b'\1', 'extension-frame'),
@@ -541,9 +594,9 @@ def main():
             changed[7] = stack(stack(*entry))
             mutations.append((label, changed))
         for label, signature in [('signature-missing', stack(integer(0x12340001), integer(0))),
-                ('signature-extra', stack(integer(0x12340001), integer(0), b'', b'')),
-                ('signature-bad-type', stack(integer(0x12340001), integer(0), stack(integer(5)))),
-                ('signature-width', stack(b'\1', integer(0), b''))]:
+                ('signature-extra', stack(integer(0x12340001), integer(0), b'', integer(0), integer(0), b'')),
+                ('signature-bad-type', stack(integer(0x12340001), integer(0), stack(integer(5)), integer(0), integer(0))),
+                ('signature-width', stack(b'\1', integer(0), b'', integer(0), integer(0)))]:
             changed = minimum.copy()
             changed[6] = stack(signature)
             mutations.append((label, changed))
@@ -552,7 +605,7 @@ def main():
 
         bad_expressions = {
             'empty-expression': b'', 'opcode-width': stack(b'\0'),
-            'unknown-opcode': expression(36), 'negative-opcode': expression(-1),
+            'unknown-opcode': expression(40), 'negative-opcode': expression(-1),
             'new-block-missing': expression(32), 'new-block-empty': expression(32, integer(0)),
             'new-block-width': expression(32, b'\0'), 'block-address-extra': expression(33, constant(0), constant(0)),
             'object-move-global': expression(34, integer(-1)), 'object-move-outside': expression(34, integer(0)),
@@ -584,7 +637,7 @@ def main():
             'return-missing-value': expression(7, b'\1'),
             'object-return-extra': expression(8, constant(0), constant(0)),
             'address-offset-width': expression(9, constant(0), b'\0'),
-            'bind-manual-flag': expression(10, constant(0), b'\0', b'\2'),
+            'bind-manual-flag': expression(10, constant(0), b'\0', b'\2', b''),
             'delete-extra': expression(11, constant(0), constant(0)),
             'binary-missing': expression(12, constant(1)),
             'binary-extra': expression(24, constant(True), constant(False), constant(True)),
@@ -665,7 +718,7 @@ public class CompactSnapshot {
                  '-cp', os.pathsep.join((str(work), str(args.bridge))), 'CompactSnapshot', native, saved, other, *ids],
                 'Compact JNI snapshot passed\n')
             snapshot = typed_decode(MAP, frames(saved.read_bytes())[0])
-            assert snapshot['snapshot version'].value() == 7
+            assert snapshot['snapshot version'].value() == 8
             assert snapshot['module manifest'][0]['bytes'].payload == native.read_bytes()
             assert [item.value() for item in snapshot['variable global']] == [41]
             assert len(snapshot['objects']) == 1
@@ -673,7 +726,7 @@ public class CompactSnapshot {
             assert any(isinstance(item, dict) and 'object' in item and len(item['slots']) == 1 for item in snapshot['heap'])
 
         compact_size = len(abd.read_bytes())
-        print(f'Compact exec: all 36 opcodes, typed constants, source/AST roundtrip, legacy-format rejection; '
+        print(f'Compact exec: all 36 baseline opcodes, typed constants, source/AST roundtrip, legacy-format rejection; '
               f'{checks} independent wire cases passed. Same source: compact={compact_size} bytes, '
               f'legacy-map={len(old_wire)} bytes ({compact_size / len(old_wire):.1%}).' +
               (' JNI opaque-byte snapshot passed.' if args.library else ''))

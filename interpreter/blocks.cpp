@@ -103,7 +103,7 @@ void detach_owner_env(slot_block& block) noexcept {
 B copy_block(const B& source,std::size_t depth) {
     require_usable(source);depth_limit(depth);
     auto result=make_block(source->slots.size(),source->script_owner);
-    result->destructor=source->destructor;result->depth=depth;
+    result->destructor=source->destructor;result->destructor_contexts=source->destructor_contexts;result->depth=depth;
     for(std::size_t i=0;i<source->slots.size();++i) {
         auto& from=source->slots[i];auto& to=result->slots[i];
         if(from&&owns(*from)) {
@@ -137,7 +137,7 @@ void call_destructor(const slot_block& block,const E& env) {
         context=std::make_shared<environment>();context->script=script;
         context->parent=script->baseEnv;context->caller=env;
     }
-    script->getFunction(*block.destructor)->invoke(context,{std::make_shared<variable>(raw_address(block))});
+    invoke_bound_function(script,*block.destructor,context,{std::make_shared<variable>(raw_address(block))},block.destructor_contexts);
 }
 // The destructor sees every member; members are destroyed afterwards, last first.
 void finalize_into(const B& block,const E& env,bool run_destructor,std::exception_ptr& failure) {
@@ -208,7 +208,7 @@ address member_address(address pointer,int offset) {
     if(offset<0||static_cast<std::size_t>(offset)>=block->slots.size())throw std::out_of_range("Object member offset out of range");
     return raw_address(*block,static_cast<std::uint64_t>(offset));
 }
-void set_destructor(address pointer,std::optional<int> destructor,bool manual,const std::shared_ptr<environment>& env) {
+void set_destructor(address pointer,std::optional<int> destructor,bool manual,const std::shared_ptr<environment>& env,type_contexts contexts) {
     std::lock_guard<std::recursive_mutex> lock(runtime_mutex());
     auto block=resolve(pointer);
     if((pointer.value&offset_mask)!=0||block->state!=slot_block::status::live)
@@ -216,13 +216,16 @@ void set_destructor(address pointer,std::optional<int> destructor,bool manual,co
     if(manual)throw std::runtime_error("A literal object cannot be manually managed");
     auto script=env?env->script.lock():nullptr;
     if(!script||script->closed)throw std::runtime_error("Object belongs to an unavailable script");
+    validate_type_contexts(contexts,script);
+    if(!destructor&&!contexts.empty())throw std::invalid_argument("Destructor contexts require a destructor");
     if(destructor) {
         auto found=script->functions.find(*destructor);
         auto function=found==script->functions.end()?nullptr:std::dynamic_pointer_cast<ofunction>(found->second);
-        if(!function||function->rett!=VOID_VALUE||function->param_count!=1||function->param_types!=std::vector<int>{ADDRESS_VALUE})
+        if(!function||function->rett!=VOID_VALUE||function->param_count!=1||function->param_types!=std::vector<int>{ADDRESS_VALUE}||
+           static_cast<std::size_t>(function->hidden_count)!=contexts.size())
             throw std::invalid_argument("Object destructor must be a script function void(address)");
     }
-    block->destructor=destructor;block->script_owner=script;
+    block->destructor=destructor;block->destructor_contexts=std::move(contexts);block->script_owner=script;
 }
 std::shared_ptr<slot_block> copy(const std::shared_ptr<slot_block>& source) {
     std::lock_guard<std::recursive_mutex> lock(runtime_mutex());
