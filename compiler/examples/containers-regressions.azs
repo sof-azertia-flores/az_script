@@ -1,0 +1,144 @@
+#include ../stdlib/containers.include.azs
+
+class Point {
+    int x;
+}
+
+int containers_check(boolean condition) {
+    if (condition) { return 0; }
+    return 1;
+}
+
+int main() {
+    int failures = 0;
+
+    List<int> * xs = new List<int>();
+    failures += containers_check(xs.empty() && xs.size() == 0);
+    xs.push_back(1);
+    xs.push_back(2);
+    xs.push_front(0);
+    failures += containers_check(xs.size() == 3 && xs.front() == 0 && xs.back() == 2 && xs.at(1) == 1);
+    xs.set(1, 9);
+    failures += containers_check(xs.at(1) == 9);
+    xs.insert(1, 4);
+    failures += containers_check(xs.size() == 4 && xs.at(0) == 0 && xs.at(1) == 4 && xs.at(2) == 9 && xs.at(3) == 2);
+    xs.insert(0, 7);
+    xs.insert(xs.size(), 8);
+    failures += containers_check(xs.front() == 7 && xs.back() == 8 && xs.size() == 6);
+    xs.erase(0);
+    xs.erase(xs.size() - 1);
+    xs.erase(1);
+    failures += containers_check(xs.size() == 3 && xs.at(0) == 0 && xs.at(1) == 9 && xs.at(2) == 2);
+    xs.pop_front();
+    xs.pop_back();
+    failures += containers_check(xs.size() == 1 && xs.front() == 9 && xs.back() == 9);
+    xs.resize(4);
+    failures += containers_check(xs.size() == 4 && xs.at(0) == 9 && xs.at(1) == 0 && xs.at(2) == 0 && xs.at(3) == 0);
+    xs.resize(1);
+    failures += containers_check(xs.size() == 1 && xs.front() == 9);
+
+    List<int> * copy = xs.clone();
+    copy.push_back(5);
+    failures += containers_check(xs.size() == 1 && copy.size() == 2 && copy.at(0) == 9 && copy.at(1) == 5);
+    xs.swap(copy);
+    failures += containers_check(xs.size() == 2 && xs.front() == 9 && xs.back() == 5 && copy.size() == 1 && copy.front() == 9);
+    xs.reverse();
+    failures += containers_check(xs.front() == 5 && xs.back() == 9 && xs.at(0) == 5 && xs.at(1) == 9);
+    xs.clear();
+    failures += containers_check(xs.empty() && xs.size() == 0);
+    delete copy;
+    delete xs;
+
+    List<int> * sorted = new List<int>();
+    sorted.push_back(3);
+    sorted.push_back(1);
+    sorted.push_back(2);
+    sorted.push_back(2);
+    sorted.push_back(0);
+    list_sort_int(sorted);
+    failures += containers_check(sorted.at(0) == 0 && sorted.at(1) == 1 && sorted.at(2) == 2 && sorted.at(3) == 2 && sorted.at(4) == 3);
+    failures += containers_check(list_find_int(sorted, 2) == 2 && list_count_int(sorted, 2) == 2 && list_find_int(sorted, 8) == -1 && list_count_int(sorted, 8) == 0);
+    delete sorted;
+
+    List<string> * words = new List<string>();
+    words.resize(1);
+    failures += containers_check(words.size() == 1 && words.front() == "");
+    words.clear();
+    words.push_back("b");
+    words.push_front("a");
+    words.push_back("b");
+    failures += containers_check(words.front() == "a" && words.back() == "b" && words.at(1) == "b");
+    failures += containers_check(list_find_string(words, "b") == 1 && list_count_string(words, "b") == 2 && list_find_string(words, "z") == -1);
+    List<string> * word_copy = words.clone();
+    word_copy.set(0, "z");
+    failures += containers_check(words.front() == "a" && word_copy.front() == "z");
+    words.reverse();
+    failures += containers_check(words.front() == "b" && words.back() == "a");
+    delete word_copy;
+    delete words;
+
+    Point * point = new Point();
+    point.x = 4;
+    List<Point *> * points = new List<Point *>();
+    points.push_back(point);
+    points.resize(2);
+    failures += containers_check(points.size() == 2 && points.front().x == 4 && points.at(1) == null);
+    points.front().x = 6;
+    failures += containers_check(point.x == 6);
+    delete points;
+    failures += containers_check(point.x == 6);
+    delete point;
+
+    Stack<int> * stack = new Stack<int>();
+    failures += containers_check(stack.empty() && stack.size() == 0);
+    stack.push(1);
+    stack.push(2);
+    failures += containers_check(!stack.empty() && stack.size() == 2 && stack.top() == 2);
+    failures += containers_check(stack.pop() == 2 && stack.pop() == 1 && stack.empty());
+    delete stack;
+
+    Queue<string> * queue = new Queue<string>();
+    queue.push("one");
+    queue.push("two");
+    failures += containers_check(queue.size() == 2 && queue.front() == "one" && !queue.empty());
+    failures += containers_check(queue.pop() == "one" && queue.pop() == "two" && queue.empty());
+    delete queue;
+
+    List<double> * numbers = new List<double>();
+    numbers.push_back(2.5);
+    numbers.push_back(-1.0);
+    numbers.push_back(2.5);
+    list_sort_double(numbers);
+    failures += containers_check(numbers.front() == -1.0 && numbers.at(1) == 2.5 && numbers.back() == 2.5);
+    failures += containers_check(list_find_double(numbers, -1.0) == 0 && list_count_double(numbers, 2.5) == 2);
+    numbers.resize(1);
+    failures += containers_check(numbers.size() == 1 && numbers.front() == -1.0);
+    delete numbers;
+
+    address first = alloc(1);
+    address second = alloc(1);
+    address low = first;
+    address high = second;
+    if (second < first) { low = second; high = first; }
+    List<address> * addresses = new List<address>();
+    addresses.push_back(high);
+    addresses.push_back(low);
+    addresses.push_back(high);
+    list_sort_address(addresses);
+    failures += containers_check(addresses.front() == low && addresses.at(1) == high && addresses.back() == high);
+    failures += containers_check(list_find_address(addresses, low) == 0 && list_count_address(addresses, high) == 2 && list_find_address(addresses, null) == -1);
+    mem_free(first);
+    mem_free(second);
+    delete addresses;
+
+    List<boolean> * flags = new List<boolean>();
+    flags.resize(1);
+    failures += containers_check(flags.front() == false);
+    flags.push_back(true);
+    flags.push_back(false);
+    flags.push_back(true);
+    failures += containers_check(list_find_bool(flags, false) == 0 && list_count_bool(flags, true) == 2 && list_find_bool(flags, true) == 1);
+    delete flags;
+
+    return failures;
+}

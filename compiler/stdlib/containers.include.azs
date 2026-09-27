@@ -1,0 +1,82 @@
+#ifndef AZSCRIPT_CONTAINERS_INCLUDED
+#define AZSCRIPT_CONTAINERS_INCLUDED 1
+
+// Public declarations for the AzScript container library.
+// Keep these low 16-bit IDs stable. Every type argument shares one body.
+#assume_hint AZSCRIPT_CONTAINERS c071
+
+// Link cell. List, Stack and Queue own these nodes; callers should not.
+class Node<T> {
+    T value;
+    Node<T> * prev;
+    Node<T> * next;
+
+    extern Node():c0710002;
+    extern ~Node():c0710003;
+}
+
+class List<T> {
+    Node<T> * head;
+    Node<T> * tail;
+    int count;
+
+    extern List():c0710004;
+    extern ~List():c0710005;
+    extern int size():c0710006;
+    extern boolean empty():c0710007;
+    extern void push_back(T value):c0710008;
+    extern void push_front(T value):c0710009;
+    extern void pop_back():c071000a;
+    extern void pop_front():c071000b;
+    extern T front():c071000c;
+    extern T back():c071000d;
+    extern T at(int index):c071000e;
+    extern void set(int index, T value):c071000f;
+    extern void insert(int index, T value):c0710010;
+    extern void erase(int index):c0710011;
+    extern void clear():c0710012;
+    extern void resize(int n):c0710013;
+    extern void reverse():c0710014;
+    extern List<T> * clone():c0710015;
+    extern void swap(List<T> * other):c0710016;
+}
+
+class Stack<T> {
+    List<T> * items;
+
+    extern Stack():c0710017;
+    extern ~Stack():c0710018;
+    extern void push(T value):c0710019;
+    extern T pop():c071001a;
+    extern T top():c071001b;
+    extern int size():c071001c;
+    extern boolean empty():c071001d;
+}
+
+class Queue<T> {
+    List<T> * items;
+
+    extern Queue():c071001e;
+    extern ~Queue():c071001f;
+    extern void push(T value):c0710020;
+    extern T pop():c0710021;
+    extern T front():c0710022;
+    extern int size():c0710023;
+    extern boolean empty():c0710024;
+}
+
+extern void list_sort_int(List<int> * xs):c0710025;
+extern void list_sort_double(List<double> * xs):c0710026;
+extern void list_sort_address(List<address> * xs):c0710027;
+extern int list_find_int(List<int> * xs, int value):c0710028;
+extern int list_find_double(List<double> * xs, double value):c0710029;
+extern int list_find_string(List<string> * xs, string value):c071002a;
+extern int list_find_bool(List<boolean> * xs, boolean value):c071002b;
+extern int list_find_address(List<address> * xs, address value):c071002c;
+extern int list_count_int(List<int> * xs, int value):c071002d;
+extern int list_count_double(List<double> * xs, double value):c071002e;
+extern int list_count_string(List<string> * xs, string value):c071002f;
+extern int list_count_bool(List<boolean> * xs, boolean value):c0710030;
+extern int list_count_address(List<address> * xs, address value):c0710031;
+
+#fi

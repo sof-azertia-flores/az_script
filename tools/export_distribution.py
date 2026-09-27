@@ -188,6 +188,10 @@ def build_package(package, work, args, jdk):
     run([jdk / 'bin' / ('java' + EXE), '-cp', compiler_cp, 'azertia.Main',
          'compile', math.with_suffix('.azs'), '-o', math.with_suffix('.exec.abd'),
          '--ast', math.with_suffix('.ast.json'), '--exec-json', math.with_suffix('.exec.json')])
+    containers = package / 'stdlib/containers'
+    run([jdk / 'bin' / ('java' + EXE), '-cp', compiler_cp, 'azertia.Main',
+         'compile', containers.with_suffix('.azs'), '-o', containers.with_suffix('.exec.abd'),
+         '--ast', containers.with_suffix('.ast.json'), '--exec-json', containers.with_suffix('.exec.json')])
     cache = (native / 'CMakeCache.txt').read_text(encoding='utf-8')
     details = {}
     for key in ('CMAKE_CXX_COMPILER', 'CMAKE_CXX_COMPILER_TARGET', 'CMAKE_OSX_DEPLOYMENT_TARGET',
@@ -229,8 +233,12 @@ def write_manifest(package, args, java_version, native_details, tests):
         'platform': {'system': platform.system(), 'architecture': platform.machine(),
                      'buildOsVersion': platform.platform(), 'nativeToolchain': native_details},
         'entryFunction': '0x0fff0000', 'execFormatVersion': 7, 'jniSnapshotVersion': 7,
-        'standardLibraries': {'AZSCRIPT_MATH': {
-            'executable': 'stdlib/math.exec.abd', 'declarations': 'stdlib/math.include.azs'}},
+        'standardLibraries': {
+            'AZSCRIPT_MATH': {
+                'executable': 'stdlib/math.exec.abd', 'declarations': 'stdlib/math.include.azs'},
+            'AZSCRIPT_CONTAINERS': {
+                'executable': 'stdlib/containers.exec.abd',
+                'declarations': 'stdlib/containers.include.azs'}},
         'java': {'bundled': not args.system_java, 'minimumSystemVersion': 17,
                  'buildVersion': java_version,
                  'bundledModules': [] if args.system_java else

@@ -36,7 +36,7 @@ class ExportDestinationTests(unittest.TestCase):
         exporter.copy_assets(package)
         for relative in ('README', 'THIRD_PARTY', 'docs/USAGE', 'docs/QUICKSTART',
                          'docs/LANGUAGE', 'docs/EXEC_FORMAT', 'docs/HINT_LINKING',
-                         'docs/EXTERN_LIBRARY', 'stdlib/MATH'):
+                         'docs/EXTERN_LIBRARY', 'stdlib/MATH', 'stdlib/CONTAINERS'):
             chinese = package / (relative + '.md')
             english = package / (relative + '.en.md')
             self.assertIn(f']({english.name})', chinese.read_text(encoding='utf-8'))

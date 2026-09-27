@@ -108,6 +108,15 @@ Clients include declarations only. The independently assembled math ABD is bundl
 
 Floating APIs require double, e.g. 3.0; integer APIs require int. Multiply integer expressions by 1.0 for floating APIs. Bind dynamic variables to explicitly typed locals first. The library links through AZSCRIPT_MATH; assumed namespace 4d41 is not its actual runtime address.
 
+The container library is also declarations-only. `List<int> * xs = new List<int>();` creates a list, and `delete xs;` releases its nodes. The package includes stdlib/containers.exec.abd:
+
+```sh
+./compile.sh examples/containers-regressions.azs
+./run.sh examples/containers-regressions.exec.abd --insert stdlib/containers.exec.abd
+```
+
+That example returns 0. Assumed namespace c071 is not the runtime address. See [containers](../stdlib/CONTAINERS.en.md).
+
 Declare globals with #gvar name, usually assigning in parameterless `void __script_onload()`. `void __script_pre_destroy()` runs on explicit close. Non-hint main is fixed at 0x0fff0000 and hooks at 0/1. Ordinary definitions can fix low numbers with `int function():0003 {return 1;}`. Automatic numbers change with source; name-based host calls need the matching --ast abstract map.
 
 Host declarations require complete signatures, e.g. `extern int host_add(int, int):0x12340001;`, matching host IDs, arguments, and results. The standalone interpreter has no application-specific callbacks; embed C++ or Java for these scripts.
@@ -116,7 +125,7 @@ Built-ins print, getDepth, alloc, mem_get, mem_free, make_free, mem_send_up, and
 
 This distribution uses exec v8 and JNI snapshot v8 only. Recompile all modules. Migrate `int p = alloc(...)` to address; reference-semantics `Point p(...)` to `Point * p(...)`; and `Point p = new Point(...)` to `Point * p = new Point(...)`. Addresses still represent slot positions; capacity/lifetime rules are unchanged.
 
-See the [full language guide](LANGUAGE.en.md), [usage guide](USAGE.en.md), and [math guide](../stdlib/MATH.en.md) for further preprocessing, types, lifetimes, memory limits, AST/ABD, compilation, and embedding.
+See the [full language guide](LANGUAGE.en.md), [usage guide](USAGE.en.md), [math guide](../stdlib/MATH.en.md), and [container guide](../stdlib/CONTAINERS.en.md) for further preprocessing, types, lifetimes, memory limits, AST/ABD, compilation, and embedding.
 
 ## Multi-file libraries
 

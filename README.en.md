@@ -112,6 +112,32 @@ Distributions include stdlib/math.exec.abd and both JSONs. Floating APIs require
 
 See [math API/domains/accuracy](compiler/stdlib/MATH.en.md). [Math regressions](compiler/examples/math-regressions.azs) return 0. Transcendentals are script-level iterative approximations; use extern host implementations when full-range system-library accuracy is required.
 
+## Script containers
+
+[`compiler/stdlib/containers.azs`](compiler/stdlib/containers.azs) provides a generic doubly linked `List<T>`, plus `Stack<T>` and `Queue<T>` built on it. Clients include the shared declarations only. Sort and find are ordinary functions of concrete types, because an unbounded type parameter cannot be compared:
+
+```c
+#include "../stdlib/containers.include.azs"
+
+int main() {
+    List<int> * xs = new List<int>();
+    xs.push_back(3);
+    xs.push_back(1);
+    list_sort_int(xs);
+    int first = xs.front();
+    delete xs;
+    return first;
+}
+```
+
+```sh
+./azscript compile compiler/stdlib/containers.azs -o build/containers.exec.abd
+./azscript compile compiler/examples/containers-regressions.azs -o build/containers-regressions.exec.abd
+./build/native/interpreter/azscript-run build/containers-regressions.exec.abd --insert build/containers.exec.abd
+```
+
+The regression returns `0`. Elements live in node fields, so indexing walks the list. Class-value elements need a zero-argument constructor. See [`compiler/stdlib/CONTAINERS.en.md`](compiler/stdlib/CONTAINERS.en.md).
+
 ## Principal fixes
 
 | Layer | Fixes |
