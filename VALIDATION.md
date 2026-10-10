@@ -1,6 +1,18 @@
-# 发行导出与宿主入口遗漏修复（2026-09-27）
+# 原生栈保护与 Java 执行限制（2026-10-10）
 
 中文 | [English](VALIDATION.en.md)
+
+解释器在原生栈上递归执行调用、代码块和表达式，而步数、调用深度和 128 层 ABD 嵌套限制都不约束栈用量。默认 1 MiB Java 线程上，每层含 20 层嵌套加法的函数递归 254 次（`AbdInvoker.invoke(0x12340001, 254)`）会使 JVM 以 SIGSEGV（退出码 139）终止；C++ 小栈线程同样崩溃。现在每个线程记录最外层脚本调用开始的位置，`call_guard`（脚本与宿主函数调用）和 `tick`（每个代码块和表达式）检查当前帧：接近线程实际栈底，或超过新增的 `script::max_stack_bytes` 预算时，抛出 `std::runtime_error("Script native stack limit exceeded")`。栈范围通过 `pthread_getattr_np`、`pthread_get_stackaddr_np` 或 `GetCurrentThreadStackLimits`（Windows 8+）获取并按线程缓存，栈底前保留栈大小的四分之一（至少 64 KiB、至多 1 MiB）；无法检测时使用 256 KiB 预算。宿主回调重入沿用同一线程的最外层位置。已有清理和首错保留语义不变：已进入的调用正常展开，作用域分配被释放，栈不足时析构的处理与步数或深度耗尽相同。
+
+Java 新增 `AbdInvoker.setMaxSteps`、`setMaxCallDepth`、`setMaxStackBytes` 及对应 getter，经 `Caller.setLimits`/`limits` 进入 JNI。限制为进程级设置，作用于已加载和之后加载的脚本；运行或回调期间修改会被拒绝。`abdjni/azertia_jni_Caller.h` 由 `javac -h` 重新生成，其余 JNI 头文件生成结果不变。
+
+原生回归在 256 KiB 和 512 KiB POSIX 线程上运行深表达式、深代码块和宿主重入递归，要求得到上述错误，并检查调用计数归零、作用域分配释放且线程可继续执行；4 MiB 线程与主线程要求完成或干净失败，另覆盖显式预算。JNI 回归覆盖原报告用例、256 KiB/512 KiB Java 线程、限制的读写、校验、持久性和运行期间拒绝修改。去掉守卫后，两项新回归均以 SIGSEGV 失败。另在 64 KiB～8 MiB 的 C++ 线程（Debug、Release、ASan）和 160 KiB～2 MiB 的 Java 线程上扫描三种深脚本（含析构对象），均无崩溃。Release 微基准中检查开销在噪声范围内。
+
+`python3 tools/build_and_test.py --offline` 退出 0：Java 单元 107 项、原生 767 项、JNI 2685 断言、小栈 1000 模块链接及全部跨语言和端到端套件通过，Java/C++ ABD 样本逐字节一致。随后顺序执行 `python3 tools/build_and_test.py --offline --sanitize`，退出 1：`runtime-tests` 在测试夹具编码器 `fixture_encoder::node` 中报告 GCC 13.3 ASan stack-use-after-scope（异常清理路径上的 `{a,b}` 初始化列表临时对象）。未修改的 HEAD 用同一工具链得到相同报告，与本次修改无关。删除 `build/sanitize` 后以 `CXXFLAGS=-fno-sanitize-address-use-after-scope` 重跑，退出 0：其余 ASan/UBSan 检查全部开启，无报告，原生 767 项和不含 JNI 的端到端套件通过。本机没有 clang 的 ASan 运行时。macOS 与 Windows 的栈范围分支未在本机编译验证。
+
+日志：`build/native-stack-validation.log`、`build/native-stack-sanitize.log`、`build/native-stack-sanitize-no-scope.log`。
+
+# 发行导出与宿主入口遗漏修复（2026-09-27）
 
 发行验收仍把控制指令限制为 3～35，导致泛型与 buffer 的 36～42 被误报为非数字。现已覆盖当前指令，并在错误中显示文件、节点和实际值；发行清单中残留的 exec/快照版本 7 改为 9。新增回归分别核对编译器指令表、exec 版本和 JNI 快照读写版本，避免再次遗漏。原生缺失字段回归补入 40～42；hint 中英文说明补充无参类的原地构造辅助入口。
 
