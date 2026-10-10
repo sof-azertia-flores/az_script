@@ -57,6 +57,22 @@ JNIEXPORT jlong JNICALL Java_azertia_jni_Caller_call
 
 /*
  * Class:     azertia_jni_Caller
+ * Method:    setLimits
+ * Signature: (JIJ)V
+ */
+JNIEXPORT void JNICALL Java_azertia_jni_Caller_setLimits
+  (JNIEnv *, jclass, jlong, jint, jlong);
+
+/*
+ * Class:     azertia_jni_Caller
+ * Method:    limits
+ * Signature: ()[J
+ */
+JNIEXPORT jlongArray JNICALL Java_azertia_jni_Caller_limits
+  (JNIEnv *, jclass);
+
+/*
+ * Class:     azertia_jni_Caller
  * Method:    getMemType
  * Signature: (J)I
  */

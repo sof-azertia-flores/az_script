@@ -65,6 +65,10 @@ public:
     std::vector<std::shared_ptr<function>> on_destory;
     std::uint64_t max_steps=1000000;
     std::size_t max_call_depth=256;
+    // Native stack bytes execution may use below the outermost script call on
+    // the calling thread. 0 relies on the thread's detected stack bounds; those
+    // bounds, less a reserve, always apply as well.
+    std::size_t max_stack_bytes=0;
     std::uint64_t remaining_steps=0;
     std::size_t active_calls=0;
     bool closed=false;

@@ -27,6 +27,17 @@ namespace {
 std::shared_ptr<script> loadedScript;
 int activeCalls = 0;
 constexpr std::size_t maxFileBytes = 64 * 1024 * 1024;
+// Host limits outlive scripts: they apply to the loaded script and every later one.
+struct Limits { std::uint64_t steps; std::size_t depth, stack; };
+Limits hostLimits = [] {
+    const script defaults;
+    return Limits{defaults.max_steps, defaults.max_call_depth, defaults.max_stack_bytes};
+}();
+void applyLimits(script& target) {
+    target.max_steps = hostLimits.steps;
+    target.max_call_depth = hostLimits.depth;
+    target.max_stack_bytes = hostLimits.stack;
+}
 
 struct VmEnvironment {
     JavaVM* vm;
@@ -657,7 +668,9 @@ JNIEXPORT void JNICALL Java_azertia_jni_Caller_loadScript(JNIEnv* env, jclass, j
         if (loadedScript) throw std::logic_error("A script is already loaded");
         auto bytes = readFile(fromJava(env, file));
         CallScope loading;
-        loadedScript = load_script(bytes.data(), bytes.size());
+        auto loaded = load_script(bytes.data(), bytes.size());
+        applyLimits(*loaded);
+        loadedScript = std::move(loaded);
     });
 }
 JNIEXPORT void JNICALL Java_azertia_jni_Caller_insertScript(JNIEnv* env, jclass, jstring file) {
@@ -673,6 +686,25 @@ JNIEXPORT void JNICALL Java_azertia_jni_Caller_flush(JNIEnv* env, jclass) {
         requireScript(); requireIdle();
         CallScope flushing;
         loadedScript->flush();
+    });
+}
+JNIEXPORT void JNICALL Java_azertia_jni_Caller_setLimits(JNIEnv* env, jclass, jlong maxSteps, jint maxCallDepth, jlong maxStackBytes) {
+    boundary(env, [&] {
+        requireIdle();
+        if (maxSteps < 1) throw std::invalid_argument("maxSteps must be positive");
+        if (maxCallDepth < 1) throw std::invalid_argument("maxCallDepth must be positive");
+        if (maxStackBytes < 0 || static_cast<std::uint64_t>(maxStackBytes) > std::numeric_limits<std::size_t>::max())
+            throw std::invalid_argument("maxStackBytes must be zero (automatic) or a positive byte count");
+        hostLimits = {static_cast<std::uint64_t>(maxSteps), static_cast<std::size_t>(maxCallDepth), static_cast<std::size_t>(maxStackBytes)};
+        if (loadedScript) applyLimits(*loadedScript);
+    });
+}
+JNIEXPORT jlongArray JNICALL Java_azertia_jni_Caller_limits(JNIEnv* env, jclass) {
+    return boundary<jlongArray>(env, nullptr, [&] {
+        const jlong values[] = {static_cast<jlong>(hostLimits.steps), static_cast<jlong>(hostLimits.depth), static_cast<jlong>(hostLimits.stack)};
+        auto result = env->NewLongArray(3); checked(env);
+        env->SetLongArrayRegion(result, 0, 3, values); checked(env);
+        return result;
     });
 }
 JNIEXPORT jint JNICALL Java_azertia_jni_Caller_namespaceForHint(JNIEnv* env, jclass, jstring hint) {
