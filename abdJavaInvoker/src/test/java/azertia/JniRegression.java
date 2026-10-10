@@ -227,6 +227,81 @@ public final class JniRegression {
         equal(List.of(11), destructed);
         AbdInvoker.unregisterJfunction(0x34560004);
     }
+    private static final String STACK_EXHAUSTED = "Script native stack limit exceeded";
+    private static void stackExhausted(Throwable failure) {
+        checks++;
+        if (!(failure instanceof IllegalStateException) || !STACK_EXHAUSTED.equals(failure.getMessage()))
+            throw new AssertionError("Expected a native stack limit error, got " + failure, failure);
+    }
+    private static Throwable attempt(Runnable operation) {
+        try { operation.run(); return null; }
+        catch (Throwable error) { return error; }
+    }
+    private static Throwable onThread(long stackBytes, Runnable operation) throws InterruptedException {
+        Throwable[] failure = new Throwable[1];
+        Thread thread = new Thread(null, () -> failure[0] = attempt(operation), "stack-" + stackBytes, stackBytes);
+        thread.start();
+        thread.join();
+        return failure[0];
+    }
+    private static void limited(String message, Runnable operation) {
+        checks++;
+        Throwable failure = attempt(operation);
+        if (!(failure instanceof IllegalStateException) || !message.equals(failure.getMessage()))
+            throw new AssertionError("Expected '" + message + "', got " + failure, failure);
+    }
+    /** Deep native recursion and host limits; leaves the default limits in place. */
+    private static void nativeStack(File work) throws InterruptedException {
+        final int deep = 0x7a010001;
+        equal(1_000_000L, AbdInvoker.getMaxSteps());
+        equal(256, AbdInvoker.getMaxCallDepth());
+        equal(0L, AbdInvoker.getMaxStackBytes());
+        File script = new File(work, "deep.exec.abd");
+        loadAndFlush(script);
+        equal(60, AbdInvoker.invoke(deep, 3));
+        // The reported case: this call on a default thread used to kill the JVM.
+        Throwable reported = attempt(() -> equal(5080, AbdInvoker.invoke(deep, 254)));
+        if (reported != null) stackExhausted(reported);
+        for (long stackBytes : new long[] {256 * 1024, 512 * 1024}) {
+            stackExhausted(onThread(stackBytes, () -> AbdInvoker.invoke(deep, 254)));
+            equal(null, onThread(stackBytes, () -> equal(60, AbdInvoker.invoke(deep, 3))));
+        }
+        equal(true, AbdInvoker.saveStatus(new File(work, "deep.after-failure.snapshot.abd")));
+
+        AbdInvoker.setMaxStackBytes(64 * 1024);
+        equal(64L * 1024, AbdInvoker.getMaxStackBytes());
+        stackExhausted(attempt(() -> AbdInvoker.invoke(deep, 254)));
+        equal(20, AbdInvoker.invoke(deep, 1));
+        AbdInvoker.setMaxStackBytes(0);
+        AbdInvoker.setMaxCallDepth(8);
+        equal(8, AbdInvoker.getMaxCallDepth());
+        equal(140, AbdInvoker.invoke(deep, 7));
+        limited("Script call depth limit exceeded", () -> AbdInvoker.invoke(deep, 8));
+        AbdInvoker.setMaxCallDepth(256);
+        AbdInvoker.setMaxSteps(50);
+        limited("Script execution step limit exceeded", () -> AbdInvoker.invoke(deep, 20));
+        // Limits are process-wide and apply to scripts loaded later, onload included.
+        AbdInvoker.destroyScript();
+        loadAndFlush(script);
+        equal(50L, AbdInvoker.getMaxSteps());
+        limited("Script execution step limit exceeded", () -> AbdInvoker.invoke(deep, 20));
+        fails(IllegalArgumentException.class, () -> AbdInvoker.setMaxSteps(0));
+        fails(IllegalArgumentException.class, () -> AbdInvoker.setMaxCallDepth(0));
+        fails(IllegalArgumentException.class, () -> AbdInvoker.setMaxStackBytes(-1));
+        fails(IllegalArgumentException.class, () -> Caller.setLimits(0, 256, 0));
+        fails(IllegalArgumentException.class, () -> Caller.setLimits(1, 0, 0));
+        fails(IllegalArgumentException.class, () -> Caller.setLimits(1, 256, -1));
+        // Limits cannot change while functions run, through either API.
+        AbdInvoker.registerJfunction(0x7a020001, values -> { AbdInvoker.setMaxSteps(10); return null; });
+        fails(IllegalStateException.class, () -> AbdInvoker.invoke(0x7a010002));
+        AbdInvoker.registerJfunction(0x7a020001, values -> { Caller.setLimits(10, 256, 0); return null; });
+        fails(IllegalStateException.class, () -> AbdInvoker.invoke(0x7a010002));
+        equal(50L, AbdInvoker.getMaxSteps());
+        AbdInvoker.unregisterJfunction(0x7a020001);
+        AbdInvoker.setMaxSteps(1_000_000);
+        equal(60, AbdInvoker.invoke(deep, 3));
+        AbdInvoker.destroyScript();
+    }
     public static void main(String[] args) throws Exception {
         File work = new File(args[0]);
         File script = new File(work, "fixture.exec.abd");
@@ -410,6 +485,7 @@ public final class JniRegression {
             objectSnapshots(work);
             numericSnapshots(work);
             checks += JniHintRegression.run(work);
+            nativeStack(work);
             loadAndFlush(script);
             equal(42, AbdInvoker.invoke(110));
             System.out.println("JNI regression passed: " + checks + " assertions, 800 calls from 4 worker threads");

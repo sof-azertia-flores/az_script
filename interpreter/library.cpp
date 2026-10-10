@@ -12,6 +12,20 @@
 #include <stdexcept>
 #include <system_error>
 #include <utility>
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#if defined(_MSC_VER)
+#include <intrin.h>
+#endif
+#else
+#include <pthread.h>
+#endif
 
 namespace azertian {
 struct context_spec {
@@ -123,8 +137,75 @@ std::shared_ptr<script> owner(E env) {
     if(!s || s->closed) throw std::runtime_error("Script is closed");
     return s;
 }
+// Calls, blocks and expressions recurse natively, so call depth and nesting
+// limits alone do not bound stack use. Each thread records where its outermost
+// script call began; execution stops at the script's byte budget or near the
+// bottom of the thread's real stack, keeping a reserve for unwinding, cleanup,
+// host calls and host guard pages such as the JVM's. Stacks grow downwards.
+constexpr std::size_t min_stack_reserve=64*1024,max_stack_reserve=1024*1024;
+// Applies only where the thread's stack bounds cannot be determined.
+constexpr std::size_t fallback_stack_budget=256*1024;
+struct native_stack {
+    std::uintptr_t base=0,floor=0;
+    std::size_t depth=0;
+    // Cached per thread: the main thread's bounds can require reading /proc.
+    std::uintptr_t low=0,high=0;
+};
+thread_local native_stack stack_state;
+std::uintptr_t stack_position() noexcept {
+#if defined(_MSC_VER)
+    return reinterpret_cast<std::uintptr_t>(_AddressOfReturnAddress());
+#else
+    // The frame address, unlike a local's address, is never on a sanitizer's fake stack.
+    return reinterpret_cast<std::uintptr_t>(__builtin_frame_address(0));
+#endif
+}
+void query_stack_bounds(native_stack& state) noexcept {
+    state.low=state.high=0;
+#if defined(_WIN32)
+#if defined(_WIN32_WINNT)&&_WIN32_WINNT>=0x0602
+    ULONG_PTR low=0,high=0;GetCurrentThreadStackLimits(&low,&high);
+    state.low=low;state.high=high;
+#endif
+#elif defined(__APPLE__)
+    const auto self=pthread_self();
+    state.high=reinterpret_cast<std::uintptr_t>(pthread_get_stackaddr_np(self));
+    state.low=state.high-pthread_get_stacksize_np(self);
+#elif defined(__linux__)
+    pthread_attr_t attributes;
+    if(pthread_getattr_np(pthread_self(),&attributes)!=0)return;
+    void* low=nullptr;std::size_t size=0;
+    if(pthread_attr_getstack(&attributes,&low,&size)==0) {
+        state.low=reinterpret_cast<std::uintptr_t>(low);state.high=state.low+size;
+    }
+    pthread_attr_destroy(&attributes);
+#endif
+}
+void check_native_stack(const script& s,std::uintptr_t here) {
+    const auto& state=stack_state;
+    const std::size_t budget=s.max_stack_bytes?s.max_stack_bytes:state.floor?0:fallback_stack_budget;
+    if((state.floor&&here<state.floor)||(budget&&here<state.base&&state.base-here>budget))
+        throw std::runtime_error("Script native stack limit exceeded");
+}
+// Counts the entry only after the check passes; each counted entry is paired
+// with leave_native_stack.
+void enter_native_stack(const script& s) {
+    auto& state=stack_state;
+    const auto here=stack_position();
+    if(!state.depth) {
+        // Bounds that do not contain this frame are stale, e.g. after a stack switch.
+        if(here<=state.low||here>state.high)query_stack_bounds(state);
+        state.base=here;state.floor=0;
+        if(here>state.low&&here<=state.high)
+            state.floor=state.low+std::clamp<std::size_t>((state.high-state.low)/4,min_stack_reserve,max_stack_reserve);
+    }
+    check_native_stack(s,here);
+    ++state.depth;
+}
+void leave_native_stack() noexcept {--stack_state.depth;}
 void tick(E env) {
     auto s=owner(env);
+    if(stack_state.depth)check_native_stack(*s,stack_position());
     if(!s->remaining_steps) throw std::runtime_error("Script execution step limit exceeded");
     --s->remaining_steps;
 }
@@ -246,10 +327,11 @@ struct call_guard {
     std::shared_ptr<script> s;
     explicit call_guard(E env):s(owner(env)) {
         if(s->active_calls>=s->max_call_depth) throw std::runtime_error("Script call depth limit exceeded");
+        enter_native_stack(*s);
         if(s->active_calls==0) s->remaining_steps=s->max_steps;
         ++s->active_calls;
     }
-    ~call_guard(){--s->active_calls;}
+    ~call_guard(){--s->active_calls;leave_native_stack();}
 };
 class checked_external_function final:public function {
     std::shared_ptr<function> target;

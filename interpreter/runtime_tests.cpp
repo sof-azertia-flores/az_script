@@ -18,6 +18,9 @@
 #include <string>
 #include <utility>
 #include <vector>
+#if !defined(_WIN32)
+#include <pthread.h>
+#endif
 namespace {
 std::vector<std::uint8_t> elf64_with_needed(std::initializer_list<const char*> names) {
     std::string table(1,'\0');
@@ -522,7 +525,76 @@ void buffer_tests() {
     rejects([&]{load_raw(rmodule({rfn(10,VOID_VALUE,bop(5,rc(n(0)),{}))}));},"buffer wire validates operation arity");
     rejects([&]{load_raw(rmodule({rfn(10,VOID_VALUE,bop(7,rc(n(0)),{}))}));},"buffer wire validates operation number");
 }
+#if !defined(_WIN32)
+// std::thread cannot choose its stack size; POSIX threads can.
+void on_thread_stack(std::size_t bytes,const std::function<void()>& body) {
+    struct task {const std::function<void()>* body;std::exception_ptr failure;} work{&body,nullptr};
+    pthread_attr_t attributes;
+    if(pthread_attr_init(&attributes)!=0)throw std::runtime_error("Cannot initialize thread attributes");
+    pthread_t thread;
+    int status=pthread_attr_setstacksize(&attributes,bytes);
+    if(status==0)status=pthread_create(&thread,&attributes,[](void* data)->void* {
+        auto& current=*static_cast<task*>(data);
+        try{(*current.body)();}catch(...){current.failure=std::current_exception();}
+        return nullptr;
+    },&work);
+    pthread_attr_destroy(&attributes);
+    if(status!=0)throw std::runtime_error("Cannot start a thread with the requested stack size");
+    pthread_join(thread,nullptr);
+    if(work.failure)std::rethrow_exception(work.failure);
+}
+#endif
+void native_stack_tests() {
+    constexpr int deep_id=0x7a010001,block_id=0x7a010002,reenter_id=0x7a010003,host_id=0x7a020001;
+    std::weak_ptr<script> weak;
+    auto host=std::make_shared<test_executor>(0x7a02);
+    host->functions[host_id]=std::make_shared<test_function>(INT_VALUE,[&](const std::vector<V>& args) {
+        return weak.lock()->invoke(reenter_id,{std::make_shared<variable>(*static_cast<int*>(args.at(0)->value)-1)});
+    });
+    registered_executor registered(host);
+    const auto stop=rx(27,{rx(19,{rvar(0),rc(n(0))}),rblock({rreturn(rc(n(0)))}),rb(false)});
+    // 1 + (1 + ... 20 nested ... target(n - 1)), as in the JVM reproduction.
+    const auto sum=[](R target){for(int i=0;i<20;++i)target=rx(12,{rc(n(1)),target});return target;};
+    const auto minus_one=rx(13,{rvar(0),rc(n(1))});
+    R nested=rreturn(rx(12,{rc(n(1)),rcall(block_id,{minus_one})}));
+    for(int i=0;i<56;++i)nested=rblock({nested});
+    auto deep=load_raw(rmodule({
+        // Slot 1 owns an allocation in every frame, released by scope cleanup.
+        rfn(deep_id,INT_VALUE,rblock({stop,rdef(1,rcall(0x0abd0003,{rc(n(1))})),rreturn(sum(rcall(deep_id,{minus_one})))}),1,{INT_VALUE}),
+        rfn(block_id,INT_VALUE,rblock({stop,nested}),0,{INT_VALUE}),
+        rfn(reenter_id,INT_VALUE,rblock({stop,rreturn(sum(rcall(host_id,{rvar(0)})))}),0,{INT_VALUE})}));
+    weak=deep;
+    const auto call=[&](int id,int argument){return integer(deep->invoke(id,{std::make_shared<variable>(argument)}));};
+    const auto exhausted=[&](int id,int argument,const char* what) {
+        const auto allocations=heap::lenAlloc();
+        rejects_containing([&]{call(id,argument);},"Script native stack limit exceeded",what);
+        check(deep->active_calls==0&&heap::lenAlloc()==allocations,"a native stack failure unwinds every call and releases scope allocations");
+    };
+    // Completing is fine wherever the stack suffices; crashing never is.
+    const auto completes_or_exhausts=[&](int id,int argument,int expected,const char* what) {
+        try{check(call(id,argument)==expected,what);}
+        catch(const std::runtime_error& error){check(std::string(error.what())=="Script native stack limit exceeded"&&deep->active_calls==0,what);}
+    };
+    check(call(deep_id,3)==60&&call(block_id,3)==3&&call(reenter_id,3)==60,"deep fixtures compute normally when the stack suffices");
+#if !defined(_WIN32)
+    for(std::size_t size:{std::size_t{256*1024},std::size_t{512*1024}})on_thread_stack(size,[&] {
+        exhausted(deep_id,254,"nested expressions on a small thread end in an ordinary error");
+        exhausted(block_id,250,"nested blocks on a small thread end in an ordinary error");
+        exhausted(reenter_id,120,"host callbacks reentering the script share the thread's stack limit");
+        check(call(deep_id,3)==60,"a thread runs scripts again after a native stack failure");
+    });
+    on_thread_stack(4*1024*1024,[&]{completes_or_exhausts(block_id,250,250,"nested blocks on a 4 MiB thread complete or fail cleanly");});
+#endif
+    completes_or_exhausts(block_id,250,250,"nested blocks on the main thread complete or fail cleanly");
+    deep->max_stack_bytes=128*1024;
+    exhausted(deep_id,254,"an explicit stack budget applies on a large thread");
+    check(call(deep_id,1)==20,"shallow calls fit an explicit stack budget");
+    deep->max_stack_bytes=0;
+    check(call(deep_id,20)==400,"the automatic limit leaves ordinary recursion alone");
+    deep->destroy();
+}
 int main(){try{
+    native_stack_tests();
     buffer_tests();
     check(getiFunction(0x0abd0006)->return_type()==ANY_VALUE,"mem_get reports its dynamic return type");
     {

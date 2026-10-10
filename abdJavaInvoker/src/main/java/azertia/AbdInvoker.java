@@ -110,6 +110,40 @@ public final class AbdInvoker {
             }
         }
     }
+    /**
+     * Steps one top-level call may execute; the default is 1,000,000. Limits are
+     * process-wide: they apply to the loaded script and to every script loaded
+     * later, and cannot change while functions are running.
+     */
+    public static synchronized void setMaxSteps(long maxSteps) {
+        if (maxSteps < 1) throw new IllegalArgumentException("maxSteps must be positive");
+        long[] limits = limitsForUpdate();
+        Caller.setLimits(maxSteps, (int) limits[1], limits[2]);
+    }
+    /** Nested script and host function calls allowed at once; the default is 256. */
+    public static synchronized void setMaxCallDepth(int maxCallDepth) {
+        if (maxCallDepth < 1) throw new IllegalArgumentException("maxCallDepth must be positive");
+        long[] limits = limitsForUpdate();
+        Caller.setLimits(limits[0], maxCallDepth, limits[2]);
+    }
+    /**
+     * Native stack bytes a top-level call may use on its thread. The default 0
+     * relies on the thread's detected stack size; that size, less a reserve,
+     * applies in every case. Exhausting either limit throws IllegalStateException.
+     */
+    public static synchronized void setMaxStackBytes(long maxStackBytes) {
+        if (maxStackBytes < 0) throw new IllegalArgumentException("maxStackBytes must not be negative");
+        long[] limits = limitsForUpdate();
+        Caller.setLimits(limits[0], (int) limits[1], maxStackBytes);
+    }
+    public static synchronized long getMaxSteps() { tryInit(); return Caller.limits()[0]; }
+    public static synchronized int getMaxCallDepth() { tryInit(); return (int) Caller.limits()[1]; }
+    public static synchronized long getMaxStackBytes() { tryInit(); return Caller.limits()[2]; }
+    private static long[] limitsForUpdate() {
+        tryInit();
+        if (activeCalls != 0) throw new IllegalStateException("Functions are running");
+        return Caller.limits();
+    }
     private static void checkValue(Object value) {
         if (value != null && !(value instanceof Integer) && !(value instanceof Float)
                 && !(value instanceof Double) && !(value instanceof Boolean) && !(value instanceof String)
