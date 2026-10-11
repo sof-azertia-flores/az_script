@@ -75,11 +75,32 @@ public class GeneraterJson {
         public List<AzFunction> functions = new ArrayList<>();
         public JsonArray classes = new JsonArray();
         public Map<String,ExternSignature> externSignatures = new LinkedHashMap<>();
+        /**
+         * Directories searched for an include after the including file's directory, in
+         * order, like {@code -I}. With the main file's directory, or the base directory of
+         * a string source, they are the include roots: unless {@link #unrestrictedIncludes}
+         * is set, every include must lie inside one of them. Kept across executions.
+         */
+        public final List<Path> includeDirectories = new ArrayList<>();
+        /** Allows absolute includes and includes outside the include roots, like {@code --unrestricted-includes}. Kept across executions. */
+        public boolean unrestrictedIncludes;
         private final Map<String,Macro> macros = new LinkedHashMap<>();
         /** Original locations of the program; the readable AST stores its units as {@code sources}. */
         private SourceMap sourceMap = SourceMap.single("<source>");
-        /** Include labels are relative to this directory: the main file's or, for string sources, the working directory. */
-        private Path labelRoot;
+        /** Real include roots: the main or base directory first, then the distinct include directories. */
+        private List<Path> includeRoots = List.of();
+        /** Real include directories, searched after the including file's directory. */
+        private List<Path> searchDirectories = List.of();
+        /**
+         * Absolute spellings of include directories given through a symbolic link: an
+         * include that reaches one by that spelling is inside the roots too.
+         */
+        private List<Path> rootAliases = List.of();
+        /** The label of every source file of this execution, by real path, and the file of every label. */
+        private final Map<Path,String> fileLabels = new HashMap<>();
+        private final Map<String,Path> labelFiles = new HashMap<>();
+        /** Real paths of the included files, in the order first included. */
+        private final Set<Path> includedFiles = new LinkedHashSet<>();
         /** Locations {unit, line, column} of #namespace/#namespace_hint, #assume_hint and #gvar directives. */
         private int[] namespaceDirective;
         private final Map<String,int[]> assumeDirectives = new LinkedHashMap<>(), globalDirectives = new LinkedHashMap<>();
@@ -98,29 +119,46 @@ public class GeneraterJson {
 
         /** Preprocesses a string source relative to the working directory and returns the combined text. */
         public String toPureSource(String src) throws IOException {
-            reset(); begin(new Diagnostics());
+            reset(); resolveIncludeDirectories(); begin(new Diagnostics());
+            Path base = baseDirectory(null);
             String[] text = new String[1];
-            run(() -> text[0] = preprocessMain(src, "<source>", Path.of(".").toAbsolutePath(), null));
+            run(() -> text[0] = preprocessMain(src, "<source>", base, null));
             return text[0];
         }
-        /** Parses a string source; includes resolve relative to the working directory. */
+        /**
+         * Parses a string source; includes resolve relative to the working directory, which
+         * is also an include root. Embedders compiling untrusted text should pass their own
+         * base directory to {@link #execute(String, Path)} instead.
+         */
         public void execute(String src) throws IOException { execute(src, new Diagnostics()); }
         /**
          * Parses a string source, reporting into {@code diagnostics}, which may then
          * compile the AST with {@link Compiler#compile(JsonObject, Diagnostics)}.
          */
-        public void execute(String src, Diagnostics diagnostics) throws IOException {
-            reset(); begin(diagnostics);
-            run(() -> parse(preprocessMain(src, "<source>", Path.of(".").toAbsolutePath(), null)));
+        public void execute(String src, Diagnostics diagnostics) throws IOException { execute(src, null, diagnostics); }
+        /** Parses a string source whose includes resolve relative to {@code baseDirectory}, which is also an include root. */
+        public void execute(String src, Path baseDirectory) throws IOException { execute(src, baseDirectory, new Diagnostics()); }
+        /**
+         * Parses a string source whose includes resolve relative to {@code baseDirectory}, or
+         * the working directory when it is null, reporting into {@code diagnostics}.
+         */
+        public void execute(String src, Path baseDirectory, Diagnostics diagnostics) throws IOException {
+            reset(); resolveIncludeDirectories();
+            Path base = baseDirectory(baseDirectory);
+            begin(diagnostics);
+            run(() -> parse(preprocessMain(src, "<source>", base, null)));
         }
-        /** Parses a source file; includes resolve relative to the including file. */
+        /**
+         * Parses a source file; includes resolve relative to the including file, then to
+         * each of {@link #includeDirectories}.
+         */
         public void execute(Path source) throws IOException { execute(source, new Diagnostics()); }
         /**
          * Parses a source file, reporting into {@code diagnostics}. Independent errors are
          * reported together, up to {@link Diagnostics#maxErrors()}, in one {@link CompileException}.
          */
         public void execute(Path source, Diagnostics diagnostics) throws IOException {
-            reset(); begin(diagnostics);
+            reset(); resolveIncludeDirectories(); begin(diagnostics);
             Path real;
             try { real = source.toRealPath(); }
             catch (IOException e) {
@@ -136,6 +174,53 @@ public class GeneraterJson {
                 throw fileError(name, e.getMessage());
             }
             run(() -> parse(preprocessMain(text, name, real.getParent(), real)));
+        }
+        /**
+         * The real paths of the files the last execution included, in the order first
+         * included, so a caller can keep its outputs from overwriting them.
+         */
+        public List<Path> includedFiles() { return List.copyOf(includedFiles); }
+        /**
+         * Resolves {@link #includeDirectories} to distinct real directories, with the aliases
+         * of those given through a symbolic link; a missing or empty one is a usage error.
+         */
+        private void resolveIncludeDirectories() {
+            List<Path> directories = new ArrayList<>(), aliases = new ArrayList<>();
+            for (Path directory : includeDirectories) {
+                // An empty path would silently stand for the working directory.
+                if (directory.toString().isEmpty()) throw new IllegalArgumentException("Empty include directory; use \".\" for the working directory");
+                String shown = AstShape.printable(directory.toString());
+                Path real;
+                try { real = directory.toRealPath(); }
+                catch (NoSuchFileException e) { throw new IllegalArgumentException("Include directory not found: " + shown); }
+                catch (IOException e) { throw new IllegalArgumentException("Cannot open include directory " + shown + ": " + reason(e)); }
+                if (!Files.isDirectory(real)) throw new IllegalArgumentException("Include directory is not a directory: " + shown);
+                if (!directories.contains(real)) directories.add(real);
+                Path lexical = directory.toAbsolutePath().normalize();
+                if (!lexical.equals(real) && !aliases.contains(lexical) && real.equals(realPath(lexical))) aliases.add(lexical);
+            }
+            searchDirectories = List.copyOf(directories); rootAliases = List.copyOf(aliases);
+        }
+        /** The real path of {@code path}, or null when it cannot be resolved. */
+        private static Path realPath(Path path) {
+            try { return path.toRealPath(); } catch (IOException e) { return null; }
+        }
+        /**
+         * The real base directory of a string source; null means the working directory,
+         * which falls back to its absolute path when it cannot be resolved.
+         */
+        private static Path baseDirectory(Path base) {
+            if (base == null) {
+                Path working = Path.of(".").toAbsolutePath().normalize();
+                try { return working.toRealPath(); } catch (IOException e) { return working; }
+            }
+            String shown = AstShape.printable(base.toString());
+            Path real;
+            try { real = base.toRealPath(); }
+            catch (NoSuchFileException e) { throw new IllegalArgumentException("Include base directory not found: " + shown); }
+            catch (IOException e) { throw new IllegalArgumentException("Cannot open include base directory " + shown + ": " + reason(e)); }
+            if (!Files.isDirectory(real)) throw new IllegalArgumentException("Include base directory is not a directory: " + shown);
+            return real;
         }
         /** The diagnostic name of a main source file: the name it was given, else that of its real path. */
         private static String sourceName(Path source, Path real) {
@@ -179,7 +264,9 @@ public class GeneraterJson {
             classes = new JsonArray();
             author = ""; functionNamespace = DEFAULT_FUNCTION_NAMESPACE;
             namespaceHint = ""; namespaceDeclared = false; assumeHints.clear();
-            sourceMap = SourceMap.single("<source>"); labelRoot = null;
+            sourceMap = SourceMap.single("<source>");
+            includeRoots = List.of(); searchDirectories = List.of(); rootAliases = List.of();
+            fileLabels.clear(); labelFiles.clear(); includedFiles.clear();
             namespaceDirective = null; assumeDirectives.clear(); globalDirectives.clear();
             sourceTexts.clear(); sourceFailures.clear(); onceFiles.clear(); includeExpansions = 0; sourceBytes = 0;
         }
@@ -193,13 +280,16 @@ public class GeneraterJson {
         }
         /** An object-like macro with the location of its #define directive. */
         private record Macro(String value, int reference) {}
+        /** Preprocesses the main text; {@code base} is the real directory of {@code real}, or of a string source. */
         private String preprocessMain(String src, String name, Path base, Path real) throws IOException {
             sourceMap = new SourceMap(); int unit = sourceMap.addUnit(name, -1, 0, 0); diagnostics.sources(sourceMap);
-            Path root = base.toAbsolutePath().normalize();
-            try { root = root.toRealPath(); } catch (IOException e) { /* labels then use the lexical directory */ }
-            labelRoot = root;
+            List<Path> roots = new ArrayList<>(List.of(base));
+            for (Path directory : searchDirectories) if (!roots.contains(directory)) roots.add(directory);
+            includeRoots = List.copyOf(roots);
             Map<Path,String> active = new LinkedHashMap<>();
-            if (real != null) active.put(real, name);
+            if (real != null) { active.put(real, name); fileLabels.put(real, name); }
+            // A string source reserves its name with its base directory, which no included file is.
+            labelFiles.put(name, real != null ? real : base);
             StringBuilder out = new StringBuilder();
             try { preprocess(src, real, base, unit, active, 0, out); }
             finally { sourceTexts.clear(); sourceFailures.clear(); }
@@ -367,15 +457,10 @@ public class GeneraterJson {
         }
         private void include(String arg, Path base, int unit, int line, int column, Map<Path,String> includes, int depth,
                              StringBuilder out) throws IOException {
-            String path = arg;
-            if (path.startsWith("\"") && path.endsWith("\"") && path.length() >= 2)
-                path = path.substring(1, path.length() - 1);
-            if (path.isBlank()) throw new IllegalArgumentException("Missing include path");
-            Path included;
-            try { included = base.resolve(path).toRealPath(); }
-            catch (InvalidPathException e) { throw new IllegalArgumentException("Invalid include path: \"" + path + "\""); }
-            catch (IOException e) { throw new IllegalArgumentException("Cannot open include file \"" + path + "\": " + reason(e)); }
-            String label = SourceMap.relativeName(labelRoot, included);
+            String path = includePath(arg);
+            Path included = resolveInclude(path, base);
+            includedFiles.add(included);
+            String label = label(included);
             if (AstShape.sourceNameProblem(label) != null)
                 throw new IllegalArgumentException("Invalid include file name: " + AstShape.sourceNameProblem(label));
             // Before the cycle check: a #pragma once file may include itself back, as in C.
@@ -394,11 +479,144 @@ public class GeneraterJson {
                 throw new LimitError("Include count exceeds " + TreeLimits.MAX_INCLUDES + "; add #pragma once to headers that are included repeatedly");
             String text;
             try { text = readSource(included, label); }
-            catch (IOException e) { throw new IllegalArgumentException("Cannot open include file \"" + path + "\": " + reason(e)); }
+            catch (IOException e) { throw new IllegalArgumentException("Cannot open include file \"" + AstShape.printable(path) + "\": " + reason(e)); }
             int child = sourceMap.addUnit(label, unit, line, column);
             includes.put(included, label);
             try { preprocess(text, included, included.getParent(), child, includes, depth + 1, out); }
             finally { includes.remove(included); }
+        }
+        /** The path of an #include: {@code "quoted"}, or the rest of the line unquoted. */
+        private static String includePath(String arg) {
+            String path = arg;
+            if (arg.startsWith("\"")) {
+                int end = arg.indexOf('"', 1);
+                if (end < 0) throw new IllegalArgumentException("Unterminated include path; expected #include \"path\"");
+                if (!arg.substring(end + 1).isBlank()) throw new IllegalArgumentException("Unexpected text after include path");
+                path = arg.substring(1, end);
+            } else if (arg.startsWith("<")) {
+                throw new IllegalArgumentException("Angle-bracket includes are not supported; use #include \"path\" with -I/--include-dir");
+            }
+            if (path.isBlank()) throw new IllegalArgumentException("Missing include path");
+            return path;
+        }
+        /**
+         * The real path of an included file: the first regular file named {@code path} in
+         * the including file's directory {@code directory}, then in each include directory.
+         * Unless includes are unrestricted, an absolute path is rejected, a candidate whose
+         * normalized path lies outside the include roots is never probed, and the real path,
+         * with symbolic links resolved, must lie inside a root as well. {@code ..} is
+         * resolved lexically, before any symbolic link.
+         */
+        private Path resolveInclude(String path, Path directory) {
+            String quoted = "\"" + AstShape.printable(path) + "\"";
+            Path relative;
+            try { relative = Path.of(path); }
+            catch (InvalidPathException e) { throw new IllegalArgumentException("Invalid include path: " + quoted); }
+            // A root also marks drive- or root-relative Windows paths such as C:x and \x.
+            boolean absolute = relative.getRoot() != null;
+            if (absolute && !unrestrictedIncludes)
+                throw new IllegalArgumentException("Absolute include path " + quoted + " is not allowed; add its directory with "
+                        + "-I/--include-dir and include the file by a relative path, or compile with --unrestricted-includes");
+            Set<Path> candidates = new LinkedHashSet<>();
+            candidates.add(directory.resolve(relative).normalize());
+            if (!absolute) for (Path search : searchDirectories) candidates.add(search.resolve(relative).normalize());
+            List<String> searched = new ArrayList<>();
+            Path irregular = null;
+            int outside = 0;
+            for (Path candidate : candidates) {
+                // Outside the roots, not even the existence of a file is checked.
+                if (!unrestrictedIncludes && !insideRoots(candidate)) { outside++; continue; }
+                // Like the read, this follows links; a directory or device of the name does not end the search.
+                if (Files.isRegularFile(candidate)) {
+                    Path real;
+                    try { real = candidate.toRealPath(); }
+                    catch (IOException e) { throw cannotOpen(quoted, e); }
+                    if (!unrestrictedIncludes && !insideRoots(real)) throw linkEscape(quoted);
+                    return real;
+                }
+                if (Files.exists(candidate)) {
+                    if (irregular == null) irregular = candidate;
+                } else if (!Files.notExists(candidate)) {
+                    // Neither present nor missing: a symbolic link loop or a directory that cannot be
+                    // searched. A path through a regular file, like a dangling link, is just missing.
+                    try { candidate.toRealPath(); }
+                    catch (AccessDeniedException e) { throw cannotOpen(quoted, e); }
+                    catch (IOException e) { if (Files.exists(candidate, LinkOption.NOFOLLOW_LINKS)) throw cannotOpen(quoted, e); }
+                }
+                searched.add(AstShape.printable(candidate.toString()));
+            }
+            if (irregular != null) {
+                Path target = realPath(irregular);
+                if (!unrestrictedIncludes && target != null && !insideRoots(target)) throw linkEscape(quoted);
+                String label = rootLabel(irregular);
+                throw new IllegalArgumentException("Source file \"" + AstShape.printable(label != null ? label : irregular.toString()) + "\" is not a regular file");
+            }
+            if (searched.isEmpty())
+                throw new IllegalArgumentException("Include " + quoted + " escapes the allowed include roots (" + roots()
+                        + "); add a directory with -I/--include-dir or compile with --unrestricted-includes");
+            throw new IllegalArgumentException("Include not found: " + quoted + " (searched " + String.join(", ", searched)
+                    + (outside == 0 ? "" : "; " + outside + (outside == 1 ? " candidate outside the allowed include roots was"
+                    : " candidates outside the allowed include roots were") + " not searched") + ")");
+        }
+        private static IllegalArgumentException cannotOpen(String quoted, IOException error) {
+            return new IllegalArgumentException("Cannot open include file " + quoted + ": " + reason(error));
+        }
+        private IllegalArgumentException linkEscape(String quoted) {
+            return new IllegalArgumentException("Include " + quoted + " resolves through a symbolic link to a file outside the allowed include roots ("
+                    + roots() + "); add its directory with -I/--include-dir or compile with --unrestricted-includes");
+        }
+        private boolean insideRoots(Path path) {
+            for (Path root : includeRoots) if (path.startsWith(root)) return true;
+            for (Path alias : rootAliases) if (path.startsWith(alias)) return true;
+            return false;
+        }
+        private String roots() {
+            return String.join(", ", includeRoots.stream().map(root -> AstShape.printable(root.toString())).toList());
+        }
+        /**
+         * The diagnostic name of an included file: its path relative to the first include
+         * root containing it, '/'-separated. When no root contains it, when an earlier root
+         * holds another file of that name or when another file already has it, the path
+         * relative to the main directory is used, and the absolute path when that one is
+         * taken too. Every inclusion of a file shares its name, whatever the include order.
+         */
+        private String label(Path real) {
+            String label = fileLabels.get(real);
+            if (label != null) return label;
+            int root = rootOf(real);
+            label = root < 0 ? null : SourceMap.relativeName(includeRoots.get(root), real);
+            if (label == null || shadowed(label, real, root) || labelTaken(label, real))
+                label = SourceMap.relativeName(includeRoots.get(0), real);
+            if (labelTaken(label, real)) label = SourceMap.relativeName(null, real);
+            fileLabels.put(real, label); labelFiles.put(label, real);
+            return label;
+        }
+        /** The index of the first include root containing {@code path}, or -1. */
+        private int rootOf(Path path) {
+            for (int i = 0; i < includeRoots.size(); i++)
+                if (path.startsWith(includeRoots.get(i)) && !path.equals(includeRoots.get(i))) return i;
+            return -1;
+        }
+        private String rootLabel(Path path) {
+            int root = rootOf(path);
+            return root < 0 ? null : SourceMap.relativeName(includeRoots.get(root), path);
+        }
+        /**
+         * Whether a root before {@code root} holds a regular file named {@code label} other
+         * than {@code real}: that file keeps the name, so a reader of a diagnostic finds the
+         * right one. The probed paths lie inside those roots.
+         */
+        private boolean shadowed(String label, Path real, int root) {
+            for (int i = 0; i < root; i++) {
+                Path other = includeRoots.get(i).resolve(label);
+                try { if (Files.isRegularFile(other) && !Files.isSameFile(other, real)) return true; }
+                catch (IOException e) { return true; }
+            }
+            return false;
+        }
+        private boolean labelTaken(String label, Path real) {
+            Path owner = labelFiles.get(label);
+            return owner != null && !owner.equals(real);
         }
         /**
          * The text of a source file, read at most once per compilation: a regular file of at

@@ -35,6 +35,9 @@ def main():
     runner = args.runner.resolve()
     library = (ROOT / 'compiler/stdlib/math.azs').resolve()
     header = (ROOT / 'compiler/stdlib/math.include.azs').resolve()
+    # Clients include the header by name from the standard library include directory.
+    include_stdlib = ['-I', ROOT / 'compiler/stdlib']
+    header_include = '#include "math.include.azs"'
     example = ROOT / 'compiler/examples/math-regressions.azs'
     regression_checks = example.read_text(encoding='utf-8').count(
         'failures += math_test_check('
@@ -43,7 +46,7 @@ def main():
 
     def compile_source(source, output, inspect=False):
         command = ['java', '-cp', args.classpath, 'azertia.Main', 'compile', source,
-                   '-o', output]
+                   '-o', output, *include_stdlib]
         if inspect:
             ast = output.with_suffix('.ast.json')
             executable = output.with_suffix('.exec.json')
@@ -222,7 +225,7 @@ def main():
         second_source = work / 'second-consumer.azs'
         second_source.write_text(
             '#namespace 1234\n'
-            f'#include "{header.as_posix()}"\n'
+            f'{header_include}\n'
             'double second_value():0002{\n'
             'int input=9;double value=input*1.0;int count=9;\n'
             'if(math_sqrt(count*1.0)!=3.0){return -1.0;}\n'
@@ -253,7 +256,7 @@ def main():
 
         signed_zero_source = work / 'signed-zero.azs'
         signed_zero_source.write_text(
-            f'#include "{header.as_posix()}"\n'
+            f'{header_include}\n'
             'double main(){return math_abs(-0.0);}\n',
             encoding='utf-8',
         )
@@ -263,11 +266,10 @@ def main():
         if result.returncode != 0 or result.stdout != '0\n':
             raise AssertionError((result.stdout, result.stderr))
 
-        library_path = header.as_posix()
         differential_source = work / 'differential.azs'
         differential_lines = [
-            f'#include "{library_path}"',
-            f'#include "{library_path}"',
+            header_include,
+            header_include,
             'int math_test_check(value){if(value){return 0;}return 1;}',
             'int main(){var failures=0;',
         ]
@@ -291,7 +293,7 @@ def main():
         invalid_binary = work / 'invalid.abd'
         for call, expected_error in invalid_calls:
             invalid_source.write_text(
-                f'#include "{library_path}"\n'
+                f'{header_include}\n'
                 f'double main(){{{call};return 0.0;}}\n',
                 encoding='utf-8',
             )
@@ -302,13 +304,13 @@ def main():
 
         for call in invalid_types:
             invalid_source.write_text(
-                f'#include "{library_path}"\n'
+                f'{header_include}\n'
                 f'double main(){{var dynamicValue=4.0;{call};return 0.0;}}\n',
                 encoding='utf-8',
             )
             result = subprocess.run(
                 ['java', '-cp', args.classpath, 'azertia.Main', 'compile',
-                 invalid_source, '-o', work / 'invalid-type.abd'],
+                 invalid_source, '-o', work / 'invalid-type.abd', *include_stdlib],
                 cwd=ROOT, capture_output=True, text=True, timeout=30,
             )
             assert result.returncode != 0, call

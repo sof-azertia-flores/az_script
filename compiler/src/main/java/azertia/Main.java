@@ -30,9 +30,15 @@ public class Main {
      * value, mapped to their canonical spelling, and value-less flags.
      */
     private static final Map<String,String> VALUE_OPTIONS = Map.of(
-            "-o", "-o", "--output", "-o", "--ast", "--ast", "--exec-json", "--exec-json", "--max-errors", "--max-errors");
-    /** {@code --debug-compiler} prints the stack trace of an internal compiler error. */
-    private static final Set<String> FLAG_OPTIONS = Set.of("--debug-compiler");
+            "-o", "-o", "--output", "-o", "--ast", "--ast", "--exec-json", "--exec-json", "--max-errors", "--max-errors",
+            "-I", "-I", "--include-dir", "-I");
+    /**
+     * {@code --debug-compiler} prints the stack trace of an internal compiler error;
+     * {@code --unrestricted-includes} allows absolute includes and includes outside the include roots.
+     */
+    private static final Set<String> FLAG_OPTIONS = Set.of("--debug-compiler", "--unrestricted-includes");
+    /** The system property naming the standard library directory, searched after every {@code -I} directory. */
+    public static final String STDLIB_PROPERTY = "azscript.stdlib";
     /** Warning options other than {@code -W<name>} and {@code -Wno-<name>}. */
     private static final Set<String> WARNING_FLAGS = Set.of("-w", "-Wall", "-Werror");
     private static final Pattern GSON_POSITION = Pattern.compile("(?s)^(?:[\\w.$]+(?:Exception|Error): )?(.*?) at line (\\d+) column (\\d+)(?: path .*)?$");
@@ -41,11 +47,14 @@ public class Main {
      * Parsed {@code compile}/{@code compile-json} arguments. Options may appear before
      * or after the input path, and {@code --} ends them so a path may begin with '-';
      * unset outputs are null, {@code flags} holds the given flags, {@code maxErrors}
-     * is the error limit ({@link Diagnostics#DEFAULT_MAX_ERRORS} unless given, 0 for none)
-     * and {@code warnings} lists the warning options in order.
+     * is the error limit ({@link Diagnostics#DEFAULT_MAX_ERRORS} unless given, 0 for none),
+     * {@code warnings} lists the warning options in order and {@code includeDirectories}
+     * the {@code -I}/{@code --include-dir} directories in order.
      */
     public record CompileArguments(String command, Path source, Path output, Path astOutput, Path execOutput, Set<String> flags,
-                                   int maxErrors, List<String> warnings) {
+                                   int maxErrors, List<String> warnings, List<Path> includeDirectories) {
+        /** Whether {@code --unrestricted-includes} was given. */
+        public boolean unrestrictedIncludes() { return flags.contains("--unrestricted-includes"); }
         /** The ABD output: {@code -o}, or the source name with {@code .exec.abd} beside it. */
         public Path outputOrDefault() {
             if (output != null) return output;
@@ -80,6 +89,7 @@ public class Main {
         Map<String,String> values = new HashMap<>();
         Set<String> flags = new LinkedHashSet<>();
         List<String> warnings = new ArrayList<>();
+        List<Path> includeDirectories = new ArrayList<>();
         boolean operands = false;
         for (int i = 1; i < args.size(); i++) {
             String argument = args.get(i), option = VALUE_OPTIONS.get(argument);
@@ -90,7 +100,11 @@ public class Main {
                 operands = true;
             } else if (option != null) {
                 if (i + 1 >= args.size()) throw new IllegalArgumentException("Missing value for " + argument);
-                values.put(option, args.get(++i));
+                String value = args.get(++i);
+                if (!option.equals("-I")) values.put(option, value);
+                // An empty directory, e.g. from an unset variable, would stand for the working directory.
+                else if (value.isEmpty()) throw new IllegalArgumentException("Empty directory for " + argument + "; use . for the working directory");
+                else includeDirectories.add(path(value));
             } else if (FLAG_OPTIONS.contains(argument)) {
                 flags.add(argument);
             } else if (argument.equals("-w") || argument.startsWith("-W")) {
@@ -104,6 +118,8 @@ public class Main {
             else throw new IllegalArgumentException("Unexpected argument: " + argument);
         }
         if (source == null) throw new IllegalArgumentException("Missing input path");
+        if (args.get(0).equals("compile-json") && (!includeDirectories.isEmpty() || flags.contains("--unrestricted-includes")))
+            throw new IllegalArgumentException("-I, --include-dir and --unrestricted-includes apply only to compile");
         int maxErrors = Diagnostics.DEFAULT_MAX_ERRORS;
         if (values.containsKey("--max-errors")) {
             String limit = values.get("--max-errors");
@@ -112,7 +128,7 @@ public class Main {
             if (maxErrors < 0) throw new IllegalArgumentException("--max-errors expects a non-negative integer, got " + limit);
         }
         return new CompileArguments(args.get(0), source, path(values.get("-o")), path(values.get("--ast")), path(values.get("--exec-json")),
-                Set.copyOf(flags), maxErrors, List.copyOf(warnings));
+                Set.copyOf(flags), maxErrors, List.copyOf(warnings), List.copyOf(includeDirectories));
     }
     /** A command-line path; one the platform cannot represent, e.g. with a NUL character, is a usage error. */
     private static Path path(String value) {
@@ -122,17 +138,35 @@ public class Main {
     }
 
     public static void main(String[] args) {
-        int status = run(args, System.out, System.err);
+        int status = run(args, System.out, System.err, defaultIncludeDirectories());
         if (status != 0) System.exit(status);
     }
-    public static int run(String[] args, PrintStream out, PrintStream err) {
+    /**
+     * The standard library directory named by the {@value #STDLIB_PROPERTY} system property,
+     * which the {@code ./azscript} wrapper sets, or none when it is unset or not a directory.
+     */
+    public static List<Path> defaultIncludeDirectories() {
+        String value = System.getProperty(STDLIB_PROPERTY);
+        if (value == null || value.isBlank()) return List.of();
+        try {
+            Path directory = Path.of(value);
+            return Files.isDirectory(directory) ? List.of(directory) : List.of();
+        } catch (InvalidPathException e) { return List.of(); }
+    }
+    /** Runs a command without default include directories. */
+    public static int run(String[] args, PrintStream out, PrintStream err) { return run(args, out, err, List.of()); }
+    /**
+     * Runs a command. {@code compile} searches {@code defaultIncludeDirectories} after
+     * every {@code -I} directory; those that are not directories are skipped.
+     */
+    public static int run(String[] args, PrintStream out, PrintStream err, List<Path> defaultIncludeDirectories) {
         boolean debug = false;
         try {
             if (args.length == 0 || args[0].equals("--help") || args[0].equals("help")) {
                 StringBuilder warnings = new StringBuilder();
                 for (Diagnostics.Warning warning : Diagnostics.WARNINGS)
                     warnings.append(String.format("\n  %-20s %s (%s)", warning.name(), warning.description(), warning.enabledByDefault() ? "on" : "off"));
-                out.println("AzScript compiler\n  compile <source.azs> [-o output.abd] [--ast tree.json] [--exec-json instructions.json]\n  compile-json <tree.json> [-o output.abd] [--exec-json instructions.json]\n  pack <output.abd> <file-or-directory>...\n  unpack <archive.abd> <new-or-empty-directory>\nCompile options:\n  --max-errors N     stop after N errors (default " + Diagnostics.DEFAULT_MAX_ERRORS + ", 0 for no limit)\n  --debug-compiler   print the stack trace of an internal compiler error\n  -Wall              enable every warning\n  -W<name>           enable one warning; -Wno-<name> disables it, also after -Wall\n  -w                 suppress all warnings\n  -Werror            report warnings as errors\nWarnings (default state):" + warnings + "\nOptions may precede or follow the input path; -- ends the options. Diagnostics are written to stderr as\nfile:line:column: error: message, or warning: message [-W<name>]. The exit status is 1 when compilation fails\nand 2 for an internal compiler error; warnings alone do not fail it.");
+                out.println("AzScript compiler\n  compile <source.azs> [-o output.abd] [--ast tree.json] [--exec-json instructions.json] [-I dir]... [--unrestricted-includes]\n  compile-json <tree.json> [-o output.abd] [--exec-json instructions.json]\n  pack <output.abd> <file-or-directory>...\n  unpack <archive.abd> <new-or-empty-directory>\nCompile options:\n  --max-errors N     stop after N errors (default " + Diagnostics.DEFAULT_MAX_ERRORS + ", 0 for no limit)\n  --debug-compiler   print the stack trace of an internal compiler error\n  -I dir, --include-dir dir\n                     search dir for includes; repeatable\n  --unrestricted-includes\n                     allow absolute includes and includes outside the include roots\n  -Wall              enable every warning\n  -W<name>           enable one warning; -Wno-<name> disables it, also after -Wall\n  -w                 suppress all warnings\n  -Werror            report warnings as errors\nWarnings (default state):" + warnings + "\nIncludes are searched in the including file's directory, then in each -I directory in order, then in the\nstandard library directory of the ./azscript wrapper or the distribution. They must stay inside the main\nfile's directory or one of those directories.\nOptions may precede or follow the input path; -- ends the options. Diagnostics are written to stderr as\nfile:line:column: error: message, or warning: message [-W<name>]. The exit status is 1 when compilation fails\nand 2 for an internal compiler error; warnings alone do not fail it.");
                 return 0;
             }
             switch (args[0]) {
@@ -142,23 +176,32 @@ public class Main {
                     Path astOutput = arguments.astOutput(), execOutput = arguments.execOutput();
                     debug = arguments.flags().contains("--debug-compiler");
                     com.google.gson.JsonObject ast;
+                    List<Path> included = List.of();
                     // One collector serves the parse and the compilation, which marks the AST as the parser's own.
                     Diagnostics diagnostics = arguments.diagnostics();
                     if (args[0].equals("compile-json")) {
                         String label = source.getFileName() == null ? source.toString() : source.getFileName().toString();
                         diagnostics.defaultFile(label);
                         ast = readTree(source, label);
-                    } else ast = parse(source, diagnostics).toObj();
+                    } else {
+                        var script = new GeneraterJson.AzScript();
+                        script.includeDirectories.addAll(arguments.includeDirectories());
+                        // A missing default directory is skipped; a missing -I directory is an error.
+                        for (Path directory : defaultIncludeDirectories) if (Files.isDirectory(directory)) script.includeDirectories.add(directory);
+                        script.unrestrictedIncludes = arguments.unrestrictedIncludes();
+                        script.execute(source, diagnostics);
+                        ast = script.toObj(); included = script.includedFiles();
+                    }
                     AcsObject compiled = Compiler.compile(ast, diagnostics);
                     // A successful compilation may still report warnings.
                     for (Diagnostic warning : diagnostics.warnings()) err.println(warning.format());
-                    Path normalizedSource = source.toAbsolutePath().normalize();
                     var outputs = new java.util.HashSet<Path>();
                     for (Path target : new Path[]{output, astOutput, execOutput}) {
                         if (target == null) continue;
                         Path normalized = target.toAbsolutePath().normalize();
-                        if (normalized.equals(normalizedSource) || (Files.exists(target) && Files.isSameFile(source, target)))
-                            throw new IllegalArgumentException("Output must not overwrite the source: " + target);
+                        if (aliases(target, source)) throw new IllegalArgumentException("Output must not overwrite the source: " + target);
+                        for (Path input : included)
+                            if (aliases(target, input)) throw new IllegalArgumentException("Output must not overwrite an included source: " + target);
                         if (!outputs.add(normalized)) throw new IllegalArgumentException("Output paths must be distinct");
                     }
                     write(output, compiled.toValue().toAbdFormat());
@@ -234,8 +277,10 @@ public class Main {
     private static CompileException fileError(String label, String message) {
         return new CompileException(Diagnostic.error(Diagnostic.Position.file(label), message));
     }
-    private static GeneraterJson.AzScript parse(Path source, Diagnostics diagnostics) throws IOException {
-        var script = new GeneraterJson.AzScript(); script.execute(source, diagnostics); return script;
+    /** Whether writing {@code target} would overwrite the input file {@code input}. */
+    private static boolean aliases(Path target, Path input) throws IOException {
+        return target.toAbsolutePath().normalize().equals(input.toAbsolutePath().normalize())
+                || Files.exists(target) && Files.isSameFile(input, target);
     }
     private static void write(Path target, byte[] bytes) throws IOException {
         Path path = target.toAbsolutePath().normalize();

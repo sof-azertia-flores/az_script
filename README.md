@@ -55,7 +55,7 @@ cd /path/to/azscript
 
 ## 编译器现在怎样工作
 
-1. 预处理相对于当前源文件的 `#include`、宏和条件指令，并记录每行的原始文件和行号；诊断因此按 `文件:行:列: error: ...` 指向被包含文件和宏的使用位置。
+1. 预处理 `#include`、宏和条件指令，并记录每行的原始文件和行号；诊断因此按 `文件:行:列: error: ...` 指向被包含文件和宏的使用位置。include 先在所在源文件的目录中查找，再查找 `-I` 目录，且不得离开这些根目录。
 2. 词法分析将标识符、数值、字符串、运算符和注释分离，字符串内部的逗号、括号、分号不会被当成语法分隔符。
 3. 递归下降解析明确处理优先级、左右结合性、嵌套调用、代码块和控制流。
 4. 校验变量和函数、作用域、函数签名、参数类型与数量、重复定义和返回形式，再生成 JSON/ABD 指令树。
@@ -78,7 +78,7 @@ int main() {
 }
 ```
 
-内置函数 `print`、`getDepth`、`mem_free`、`alloc`、`make_free`、`mem_send_up`、`mem_get` 和 `load_extern_library` 由编译器直接提供，不需要 include 或声明。`load_extern_library("xxx")` 按当前系统加载已签名的 `xxx.so` / `xxx.dylib` / `xxx.dll`，库内用现有的 C++ 宿主注册接口挂上外部函数。独立运行时从 `AZSCRIPT_TRUSTED_KEY` 或 `trusted_key.pem` 读取公钥；嵌入式宿主通过 C++ / Java API 提供公钥。完整约定见 [外部动态库](docs/EXTERN_LIBRARY.md)。include 仍按源文件所在目录解析。
+内置函数 `print`、`getDepth`、`mem_free`、`alloc`、`make_free`、`mem_send_up`、`mem_get` 和 `load_extern_library` 由编译器直接提供，不需要 include 或声明。`load_extern_library("xxx")` 按当前系统加载已签名的 `xxx.so` / `xxx.dylib` / `xxx.dll`，库内用现有的 C++ 宿主注册接口挂上外部函数。独立运行时从 `AZSCRIPT_TRUSTED_KEY` 或 `trusted_key.pem` 读取公钥；嵌入式宿主通过 C++ / Java API 提供公钥。完整约定见 [外部动态库](docs/EXTERN_LIBRARY.md)。include 先按所在源文件的目录解析，再依次查找各 `-I` 目录和包装脚本的标准库目录；绝对路径和离开这些根目录的路径需要 `--unrestricted-includes`（见[预处理](compiler/LANGUAGE.md#字符串注释与预处理)）。
 
 `address` 是独立的无符号 64 位地址类型，表示 slot 位置，空地址写作 `null`。例如 `address p = alloc(2); mem_get(p + 1) = 42; mem_free(p);`。地址支持与 int32 偏移加减并检查越界；对象引用也使用该运行时类型，类成员的静态类型检查和继承规则保持不变。地址值、变量槽编号、分配数量和函数 ID 是不同概念，后面三者仍使用既有 32 位表示。
 
@@ -103,6 +103,8 @@ int main() {
     return math_round(math_hypot(3.0, 4.0)); // 5
 }
 ```
+
+在其他位置，调用方可写 `#include "math.include.azs"`，其他标准库头文件同理：`./azscript` 包装脚本和发行包的 `compile.sh` / `compile.cmd` 在所有 `-I` 目录之后查找标准库目录。不经包装脚本时传入 `-I compiler/stdlib`；`examples/` 中的 `../stdlib/` 路径离开了示例目录，同样需要它。
 
 分别编译库与调用方后装配执行：
 
@@ -140,7 +142,7 @@ int main() {
 ./build/native/interpreter/azscript-run build/containers-regressions.exec.abd --insert build/containers.exec.abd
 ```
 
-回归示例成功返回 `0`。链表元素放在节点字段里，按下标访问要沿链表行走，类值需要无参构造。`Vector` 和 `Set` 可以写入已有的类值；按下标得到的是副本。说明见 [`compiler/stdlib/CONTAINERS.md`](compiler/stdlib/CONTAINERS.md)。
+回归示例成功返回 `0`。链表元素放在节点字段里，按下标访问要沿链表行走，类值需要无参构造。`Vector` 和 `Set` 可以写入已有的类值；按下标得到的是副本。与数学库头文件相同，`examples/` 之外的调用方写 `#include "containers.include.azs"`，直接调用编译器时需要 `-I compiler/stdlib`。说明见 [`compiler/stdlib/CONTAINERS.md`](compiler/stdlib/CONTAINERS.md)。
 
 ## 主要修复
 

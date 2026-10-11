@@ -17,7 +17,7 @@ python3 tools/build_and_test.py --offline
 
 离线构建使用本机已有依赖缓存；首次缺少依赖时去掉 `--offline`。
 
-CLI 的 `compile-json` 接受原有的可读代码树；`pack` 和 `unpack` 打包、解包文件。所有路径由参数传入，选项可以写在输入路径之前或之后；`--` 结束选项，其后的路径可以以 `-` 开头。源码中的 include 总是相对于当前被包含文件的目录解析。编译输出不会覆盖输入源码。编译错误和警告的格式见[诊断](#诊断)。
+CLI 的 `compile-json` 接受原有的可读代码树；`pack` 和 `unpack` 打包、解包文件。所有路径由参数传入，选项可以写在输入路径之前或之后；`--` 结束选项，其后的路径可以以 `-` 开头。include 先在所在文件的目录中查找，再依次查找每个 `-I dir` / `--include-dir dir`；`./azscript` 包装脚本和发行包的 `compile.sh` / `compile.cmd` 最后查找标准库目录，所以任意位置的调用方都可以写 `#include "math.include.azs"`。该目录由单一路径的系统属性 `azscript.stdlib` 指定，包装脚本会设置它；未设置时发行包的启动器使用包内的 `stdlib/`，不是目录的属性值会被忽略。`-I` 目录不存在、为空或不是目录属于用法错误，输出 `Error: ...` 并以退出码 1 结束。除非指定 `--unrestricted-includes`，include 必须位于主文件目录或上述目录之内，见[预处理](#字符串注释与预处理)。`compile-json` 不接受 include 选项。编译输出不会覆盖输入源码，包括被包含的文件。编译错误和警告的格式见[诊断](#诊断)。
 
 ```java
 var script = new azertia.script.GeneraterJson.AzScript();
@@ -33,9 +33,9 @@ try {
 }
 ```
 
-`execute(String)` 也可使用，其 include 基目录是进程工作目录。每次 execute 清空上一次程序的函数、预处理属性和元数据。编译器实例不应由多个线程同时使用。
+`execute(String)` 也可使用，其 include 基目录和 include 根目录是进程工作目录；`execute(String, Path)` 改用给定目录，编译不可信文本的嵌入方应传入专用目录。`AzScript.includeDirectories` 和 `AzScript.unrestrictedIncludes` 对应 `-I` 和 `--unrestricted-includes`，在多次 execute 之间保留；`includedFiles()` 列出上一次 execute 所 include 文件的真实路径。`includeDirectories` 中的条目不存在、为空或不是目录，或 `execute(String, Path)` 的基目录不存在或不是目录时，在记录任何诊断之前抛出普通的 `IllegalArgumentException`，而不是 `CompileException`。每次 execute 清空上一次程序的函数、预处理属性和元数据。编译器实例不应由多个线程同时使用。
 
-纯脚本基础数学库 [`stdlib/math.azs`](stdlib/math.azs) 使用 `#namespace_hint AZSCRIPT_MATH` 独立编译。调用方只通过相对路径 include [`stdlib/math.include.azs`](stdlib/math.include.azs) 中的类型声明；运行时插入库 ABD 并 `flush()`，独立解释器可用 `--insert math.exec.abd` 自动完成链接。头文件的 `4d41` 为假定 namespace，实际位置由运行时分配。浮点 API 接收 `double`，整数 API 接收 `int`，`math_pow` 为 `(double, int)`；extern 参数类型须精确匹配。编译和接入步骤、API、int32 输入域、取整边界及精度约定见 [`stdlib/MATH.md`](stdlib/MATH.md)。
+纯脚本基础数学库 [`stdlib/math.azs`](stdlib/math.azs) 使用 `#namespace_hint AZSCRIPT_MATH` 独立编译。调用方只 include [`stdlib/math.include.azs`](stdlib/math.include.azs) 中的类型声明（使用相对路径，或借助 `-I` 及包装脚本的默认标准库目录按文件名 include）；运行时插入库 ABD 并 `flush()`，独立解释器可用 `--insert math.exec.abd` 自动完成链接。头文件的 `4d41` 为假定 namespace，实际位置由运行时分配。浮点 API 接收 `double`，整数 API 接收 `int`，`math_pow` 为 `(double, int)`；extern 参数类型须精确匹配。编译和接入步骤、API、int32 输入域、取整边界及精度约定见 [`stdlib/MATH.md`](stdlib/MATH.md)。
 
 容器库 [`stdlib/containers.azs`](stdlib/containers.azs) 同样独立编译，hint 为 `AZSCRIPT_CONTAINERS`。调用方 include [`stdlib/containers.include.azs`](stdlib/containers.include.azs)。`List<T>`、`Stack<T>` 和 `Queue<T>` 仍把元素放在链表节点字段中，两端保持 O(1)。`Vector<T>`、`Set<T>` 和 `Map<K, V>` 使用连续 `buffer`；`Set` 和 `Map` 默认用 `value_compare`，类值键要另设普通比较函数。假定 namespace 是 `c071`。操作、所有权和编号见 [`stdlib/CONTAINERS.md`](stdlib/CONTAINERS.md)。
 
@@ -313,6 +313,8 @@ extern int host_add(int, int):0xccf0001;
 #undef LIMIT
 ```
 
+`#include "path"` 先查找所在文件的目录，再依次查找每个 include 目录（`-I` 或 `AzScript.includeDirectories`），使用找到的第一个普通文件；同名目录不会中止查找。包装脚本的标准库目录排在所有 `-I` 目录之后。include 根目录是主文件所在目录（字符串源码为其基目录）和各 include 目录，include 必须位于其中之一。绝对路径（`Absolute include path "/etc/passwd" is not allowed`）以及离开所有根目录的路径（`Include "../x.azs" escapes the allowed include roots (...)`）不经文件系统即被拒绝。根目录内的符号链接会被跟随；目标位于所有根目录之外的 include 被拒绝且不会被读取，但错误信息仍可能反映该目标是否存在。`..` 按词法解析，先于符号链接；经符号链接给出的 include 目录也包含按该链接写法拼出的路径。根目录下整个子树中的文件都可以被 include，其内容也可能出现在诊断中，所以编译不可信源码时，根目录中不应有私密内容。`--unrestricted-includes`（`AzScript.unrestrictedIncludes`）允许绝对路径和根目录之外的路径。找不到 include 时列出全部查找过的路径，例如 `Include not found: "x.azs" (searched /work/app/x.azs, /work/lib/x.azs)`，并说明有几个位于根目录之外的候选路径未被查找。路径写在双引号中，以 `/` 分隔；旧的无引号写法 `#include lib/x.azs` 以该行其余部分为路径，不支持 `#include <x.azs>`。
+
 `#setattr` 用于条件，不替换代码；`#define` 是标识符级文本替换，不替换字符串、注释、数值字面量内部或其他标识符的子串；紧贴数字的标识符字符（如 `5N`、`0x10`、`2e`）属于该数值字面量，不会展开，而由词法分析报告非法后缀。不支持带参数的宏：`#define F(x) ...` 报告 `Function-like macros are not supported: F; write a function, or put a space before '(' for an object-like macro`，`(` 前有空格的 `#define F (x)` 则是值为 `(x)` 的普通宏。include 循环、宏循环、超出 64 层展开、单行（含注释）在宏展开前或展开后超过 1,048,576 个字符（`Source line exceeds 1048576 characters` / `Macro expansion exceeds 1048576 characters on one line`）、不匹配条件等会报错。未识别的预处理指令会立即报错，包括未启用的条件分支；普通说明文字应使用 `//` 或 `/* ... */`。宏展开采用文本语义，复杂表达式请写 `#define VALUE (1 + 2)`。
 
 `#pragma once` 使所在文件在一次编译中只展开一次：之后再 include 同一文件时不产生任何内容，也不计入 include 次数。同一文件按解析符号链接后的真实路径判断，与 include 的写法无关。该检查先于 include 循环检查，所以带 `#pragma once` 的文件经其他文件再 include 自身时直接跳过；文件在执行到 `#pragma once` 之前 include 自身仍是循环。未启用条件分支中的 `#pragma once` 不生效。只支持 `once`，在启用的分支中其他名称或其后多余的文字会报错；与 C 相同，未启用的分支不检查 pragma；字符串源码不能被 include，其中的 `#pragma once` 没有效果。`#ifndef` include guard 照常可用。
@@ -340,12 +342,12 @@ Error: compilation failed: 1 error
 
 - 被包含文件中的错误之后，每层外围 `#include` 各有一行 `note: in file included from here`，由内向外排列。
 - 宏展开产生的记号上的词法或语法错误报告在宏的使用位置，随后一行 `note: in expansion of macro 'NAME' defined here` 指向其 `#define`；`#define` 位于另一文件时，还附上该文件的 include 链。展开代码中的语义错误报告在宏的使用位置，不附此注释。展开之后的记号保持各自的列号。
-- 预处理错误指向指令的 `#`；未闭合的条件报告在其起始指令，未结束的注释报告在注释开始处。找不到主文件时提示 `Cannot open source file "x.azs": file not found`，找不到 include 文件时提示 `Cannot open include file "x.azs": file not found`，非普通文件提示 `Source file "x.azs" is not a regular file`，非法 UTF-8 提示 `Source file "x.azs" is not valid UTF-8 (line 3, column 7)`；include 循环会列出相关文件。源文件和被包含文件的名称不能含有控制字符或双向格式字符，因为诊断会输出这些名称（`Invalid source file name` / `Invalid include file name`）。
+- 预处理错误指向指令的 `#`；未闭合的条件报告在其起始指令，未结束的注释报告在注释开始处。找不到主文件时提示 `Cannot open source file "x.azs": file not found`，找不到 include 文件时提示 `Include not found: "x.azs" (searched /work/x.azs)`，其中查找过的路径为绝对路径，存在但无法打开的 include（例如符号链接循环）提示 `Cannot open include file "x.azs": <原因>`，非普通文件提示 `Source file "x.azs" is not a regular file`，非法 UTF-8 提示 `Source file "x.azs" is not valid UTF-8 (line 3, column 7)`；include 循环会列出相关文件。源文件和被包含文件的名称不能含有控制字符或双向格式字符，因为诊断会输出这些名称（`Invalid source file name` / `Invalid include file name`）。
 - 上下文指出外围声明：`function main`、`function C::m`、构造与析构函数的 `function C::C` 和 `function C::~C`、`function C::operator[]`、`initializer of class P`、`class P` 或 `global g`。没有源码位置的错误（例如手写 AST 的格式错误）只给出输入文件名：`compile` 为源文件，`compile-json` 为 JSON 文件。
 - 从源码编译时，重复的函数、类、函数 ID 以及冲突的 extern 声明附带 `previous definition is here` 或 `previous declaration is here` 注释；同一头文件被读取两次造成的重复定义还会提示添加 `#pragma once` 或 include guard。函数 ID 按 8 位十六进制显示，例如 `0x0fff0005`。
 - 非 void 函数可能不经 `return` 走到末尾时，错误报告在其结束的右花括号处。
 
-文件名对主文件使用其文件名，对被包含文件使用相对主文件目录、以 `/` 分隔的路径；`execute(String)` 使用 `<source>`，单独编译的表达式使用 `<expression>`。这些名称保存在 AST 的 `sources` 表中，所以同一程序的 `compile` 与 `compile-json` 输出完全相同的带位置诊断。`compile-json` 将格式错误的 JSON 报告在其行列，没有 `sources` 表的 AST 以 JSON 文件名命名。
+文件名对主文件使用其文件名，对被包含文件使用相对于包含它的第一个 include 根目录（先主文件目录，再依次为各 include 目录）、以 `/` 分隔的路径，所以与项目或发行包所在的位置无关。若更靠前的根目录中有同名的另一个文件，或该名称已属于另一个文件，则改用相对主文件目录的路径（例如 `../lib/util.azs`），因此名称不随 include 顺序变化；位于所有根目录之外的文件（仅 `--unrestricted-includes` 允许）同样如此命名。这个名称也被占用或不存在相对路径时，最后才使用绝对路径。`execute(String)` 使用 `<source>`，单独编译的表达式使用 `<expression>`。这些名称保存在 AST 的 `sources` 表中，所以同一程序的 `compile` 与 `compile-json` 输出完全相同的带位置诊断。`compile-json` 将格式错误的 JSON 报告在其行列，没有 `sources` 表的 AST 以 JSON 文件名命名。
 
 #### 多个错误与退出码
 

@@ -18,6 +18,8 @@ int main() {
 }
 ```
 
+Elsewhere, include it by name as `#include "math.include.azs"`. The repository's `./azscript` wrapper and the distribution's `compile.sh` / `compile.cmd` search this directory after every `-I` directory; a direct compiler call passes `-I compiler/stdlib`. The `../stdlib/` path above leaves the client's directory, so it also relies on this directory being an include root.
+
 The `AZSCRIPT_MATH_INCLUDED` guard allows repeated inclusion in one compilation. Compile the implementation separately; clients should not include it. The full runnable example [`../examples/math-regressions.azs`](../examples/math-regressions.azs) returns 0 on success.
 
 ## Compilation and assembly

@@ -2,7 +2,7 @@
 
 [中文](USAGE.md) | English
 
-Move this directory as a unit. The compiler produces ABD; the standalone interpreter defaults to main (0x0fff0000). C++ and Java hosts use the same ABD. Relative input/output paths resolve against the terminal working directory; includes resolve against their containing source file.
+Move this directory as a unit. The compiler produces ABD; the standalone interpreter defaults to main (0x0fff0000). C++ and Java hosts use the same ABD. Relative input/output paths resolve against the terminal working directory; includes resolve against their containing source file, then each `-I` directory, then the package's stdlib/ (see [compile and run](#compile-and-run)).
 
 Export from source with `python3 tools/export_distribution.py /path/to/azscript --offline`, replacing the destination. Offline mode requires cached dependencies. A Java runtime is bundled by default; `--system-java` reduces package size and requires installed Java 17+ on the recipient.
 
@@ -32,6 +32,8 @@ Compile errors go to stderr as `file:line:column: error: message`, positioned in
 
 Warnings, such as an assignment used as a condition or unreachable code, read `file:line:column: warning: message [-W<name>]`; they keep exit status 0 and the outputs. `-Wall` enables all warnings, `-W<name>` enables one (for example `-Wunused-variable`, which is off by default), `-Wno-<name>` disables one, `-w` suppresses them, and `-Werror` turns them into errors that fail the compilation. See [warnings](LANGUAGE.en.md#warnings) for the list.
 
+Includes are searched in the directory of the including file, then in each `-I dir` / `--include-dir dir` in order, then in the package's stdlib/, so a client anywhere can write `#include "math.include.azs"`. An include must stay inside the source file's directory or one of these directories: absolute paths, paths that lead out of them such as `../../private.azs`, and symbolic links pointing outside are rejected without reading the file. `--unrestricted-includes` lifts this restriction. A missing include lists every searched path. Include options apply to source compilation only, not to `compile-json`.
+
 With `-o output/demo.abd` or `-o output/demo.exec.abd`, JSON defaults are output/demo.ast.json and output/demo.exec.json, individually overridden by explicit flags.
 
 Compiler launchers prefer bundled runtime/. Without it, install Java 17+ and use JAVA_HOME or PATH. Compilation needs no Gradle, source checkout, or downloads. The native interpreter needs no Java.
@@ -51,7 +53,7 @@ Call bin/azscript-run (Windows bin\azscript-run.exe) directly or through run.sh/
 
 ## Math library
 
-Clients include declarations from stdlib/math.include.azs, e.g. `#include "../stdlib/math.include.azs"` under examples/. Implementation stdlib/math.azs compiles independently with AZSCRIPT_MATH; do not include it in clients. Precompiled ABD and matching AST/exec JSON are bundled. Recompilation updates all three:
+Clients include declarations from stdlib/math.include.azs, by name as `#include "math.include.azs"` from anywhere, since the package's stdlib/ is searched by default, or by relative path, e.g. `#include "../stdlib/math.include.azs"` under examples/. Implementation stdlib/math.azs compiles independently with AZSCRIPT_MATH; do not include it in clients. Precompiled ABD and matching AST/exec JSON are bundled. Recompilation updates all three:
 
 ```sh
 ./compile.sh stdlib/math.azs
@@ -65,7 +67,7 @@ C++ insert_script or Java insertScript(new File("stdlib/math.exec.abd")) assembl
 
 ## Container library
 
-Clients include stdlib/containers.include.azs, for example `#include "../stdlib/containers.include.azs"` under examples/. Implementation stdlib/containers.azs compiles independently as AZSCRIPT_CONTAINERS. The package ships stdlib/containers.exec.abd and both JSON views:
+Clients include stdlib/containers.include.azs, by name as `#include "containers.include.azs"` or, under examples/, as `#include "../stdlib/containers.include.azs"`. Implementation stdlib/containers.azs compiles independently as AZSCRIPT_CONTAINERS. The package ships stdlib/containers.exec.abd and both JSON views:
 
 ```sh
 ./compile.sh stdlib/containers.azs

@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 
 ROOT=Path(__file__).resolve().parents[1]
@@ -123,6 +124,47 @@ def main():
                                         'with-include.azs:2:1: note: in file included from here\n'),syntax.stderr
         assert not (work/'broken.abd').exists()
         checks+=3
+        # Includes search the including directory, then every -I/--include-dir in order, and
+        # must stay inside those roots unless --unrestricted-includes is given.
+        for name,body in (('first','int first(){return 1;}\n'),('second','int second(){return 2;}\n')):
+            (work/name).mkdir();(work/name/(name+'.azs')).write_text(body,encoding='utf-8')
+        (work/'app').mkdir()
+        searching=work/'app/searching.azs'
+        searching.write_text('#include "first.azs"\n#include "second.azs"\nint main(){return first()+second();}\n',encoding='utf-8')
+        compiler('compile',searching,'-I',work/'first','--include-dir',work/'second','-o',work/'searching.abd')
+        result=subprocess.run([str(a.runner),str(work/'searching.abd')],capture_output=True,text=True,timeout=10)
+        assert result.returncode==0 and result.stdout=='3\n',(result.stdout,result.stderr)
+        missing=compiler('compile',searching,'-I',work/'first','-o',work/'searching.abd',success=False)
+        assert missing.stderr.startswith('searching.azs:2:1: error: Include not found: "second.azs" (searched '+str(work.resolve()/'app/second.azs')+', '
+                                         +str(work.resolve()/'first/second.azs')+')\n'),missing.stderr
+        secret=work/'secret.azs';secret.write_text('SECRET_MARKER_42 x;\n',encoding='utf-8')
+        absolute=work/'app/absolute.azs'
+        absolute.write_text(f'#include "{secret.resolve()}"\nint main(){{return 0;}}\n',encoding='utf-8')
+        rejected=compiler('compile',absolute,'-o',work/'absolute.abd',success=False)
+        assert rejected.stderr.startswith('absolute.azs:1:1: error: Absolute include path "') and 'SECRET_MARKER_42' not in rejected.stderr,rejected.stderr
+        opened=compiler('compile',absolute,'-o',work/'absolute.abd','--unrestricted-includes',success=False)
+        assert opened.stderr.startswith('../secret.azs:1:1: error: ') and 'SECRET_MARKER_42' in opened.stderr,opened.stderr
+        escaping=work/'app/escaping.azs'
+        escaping.write_text('#include "../first/first.azs"\nint main(){return first();}\n',encoding='utf-8')
+        escaped=compiler('compile',escaping,'-o',work/'escaping.abd',success=False)
+        assert escaped.stderr.startswith('escaping.azs:1:1: error: Include "../first/first.azs" escapes the allowed include roots ('+str(work.resolve()/'app')+'); add a directory with -I/--include-dir or compile with --unrestricted-includes\n'),escaped.stderr
+        compiler('compile',escaping,'-I',work/'first','-o',work/'escaping.abd','--ast',work/'escaping.ast.json')
+        assert [source['name'] for source in json.loads((work/'escaping.ast.json').read_text(encoding='utf-8'))['sources']]==['escaping.azs','first.azs']
+        aliased=compiler('compile',searching,'-I',work/'first','-I',work/'second','-o',work/'second/second.azs',success=False)
+        assert aliased.stderr.startswith('Error: Output must not overwrite an included source: '),aliased.stderr
+        assert (work/'second/second.azs').read_text(encoding='utf-8')=='int second(){return 2;}\n'
+        json_options=compiler('compile-json',work/'escaping.ast.json','-I',work/'first','-o',work/'json.abd',success=False)
+        assert json_options.stderr=='Error: -I, --include-dir and --unrestricted-includes apply only to compile\n',json_options.stderr
+        # Examples include ../stdlib, which the ./azscript wrapper allows through its default
+        # standard library directory; the plain compiler needs it as -I.
+        example=ROOT/'compiler/examples/math-regressions.azs'
+        plain=compiler('compile',example,'-o',work/'math-client.abd',success=False)
+        assert 'escapes the allowed include roots' in plain.stderr,plain.stderr
+        compiler('compile',example,'-I',ROOT/'compiler/stdlib','-o',work/'math-client.abd')
+        wrapped=subprocess.run([sys.executable,ROOT/'azscript','compile',example,'-o',work/'math-wrapper.abd'],capture_output=True,text=True,timeout=30,cwd=ROOT)
+        assert wrapped.returncode==0 and wrapped.stderr=='',wrapped.stderr
+        assert (work/'math-wrapper.abd').read_bytes()==(work/'math-client.abd').read_bytes()
+        checks+=6
         # Independent errors are reported together and --max-errors limits them.
         multiple=work/'multiple.azs'
         multiple.write_text('int f(){\n  string s = 1;\n  return 0;\n}\nint main(){\n  return missing;\n}\n',encoding='utf-8')

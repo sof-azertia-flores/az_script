@@ -90,7 +90,7 @@ Omitting `: Point(value)` calls the base default constructor, failing compilatio
 
 ## Includes, host entry points, and memory
 
-Includes resolve relative to the containing source file. Under distribution examples/:
+Includes resolve relative to the containing source file, then in each `-I` directory and the package's stdlib/, and must stay inside those directories unless `--unrestricted-includes` is given. Under distribution examples/ the math header is `../stdlib/math.include.azs`; from anywhere, `#include "math.include.azs"` also works:
 
 ```c
 #include "../stdlib/math.include.azs"

@@ -338,6 +338,45 @@ def verify(package: Path, java: Optional[Path] = None) -> Dict[str, object]:
         _require(result.stdout.splitlines() == ["0"], f"Packaged math library regression failed: {result.stdout!r}")
         passed("precompiled math hint library, relocated rebuild and separate consumer")
 
+        # The launcher searches the package's stdlib/ after every -I directory, so a client
+        # outside examples/ includes the math header by name, with no -I at all.
+        plain_client = source_directory / "plain math client.azs"
+        plain_client.write_text('#include "math.include.azs"\n'
+                                'int main() { return math_round(math_hypot(3.0, 4.0)); }\n', encoding="utf-8")
+        _run([compiler, plain_client], cwd, compiler_environment)
+        plain_abd = source_directory / "plain math client.exec.abd"
+        _outputs(plain_abd, source_directory / "plain math client.ast.json", source_directory / "plain math client.exec.json")
+        result = _run([runner, plain_abd, "--insert", package / "stdlib/math.exec.abd"], cwd, environment)
+        _require(result.stdout.splitlines() == ["5"], f"Client of the default include directory failed: {result.stdout!r}")
+        include_directory = work / "include dir with spaces"
+        include_directory.mkdir()
+        (include_directory / "offset.azs").write_text("int offset() { return 1; }\n", encoding="utf-8")
+        named_client = source_directory / "math client.azs"
+        named_client.write_text('#include "math.include.azs"\n#include "offset.azs"\n'
+                                'int main() { return math_round(math_hypot(3.0, 4.0)) + offset(); }\n', encoding="utf-8")
+        _run([compiler, named_client, "-I", include_directory], cwd, compiler_environment)
+        named_abd = source_directory / "math client.exec.abd"
+        named_ast = source_directory / "math client.ast.json"
+        _outputs(named_abd, named_ast, source_directory / "math client.exec.json")
+        # File names are relative to their include root, independent of the package location.
+        names = [entry["name"] for entry in json.loads(named_ast.read_text(encoding="utf-8"))["sources"]]
+        _require(names == ["math client.azs", "math.include.azs", "offset.azs"], f"Unexpected include names: {names!r}")
+        result = _run([runner, named_abd, "--insert", package / "stdlib/math.exec.abd"], cwd, environment)
+        _require(result.stdout.splitlines() == ["6"], f"Client of the default include directory failed: {result.stdout!r}")
+        missing = _run([compiler, named_client, "-o", "missing include/client.abd"], cwd, compiler_environment, succeeds=False)
+        _require('error: Include not found: "offset.azs"' in missing.stderr and str((package / "stdlib").resolve()) in missing.stderr,
+                 f"A missing include did not list the package stdlib/: {missing.stderr!r}")
+        absolute_client = source_directory / "absolute client.azs"
+        absolute_client.write_text(f'#include "{(package / "stdlib/math.include.azs").as_posix()}"\n'
+                                   'int main() { return math_round(math_hypot(3.0, 4.0)); }\n', encoding="utf-8")
+        rejected = _run([compiler, absolute_client, "-o", "absolute/client.abd"], cwd, compiler_environment, succeeds=False)
+        _require("error: Absolute include path" in rejected.stderr and "--unrestricted-includes" in rejected.stderr,
+                 f"An absolute include was not rejected: {rejected.stderr!r}")
+        _require(not (cwd / "absolute").exists(), "A rejected include wrote outputs")
+        _run([compiler, absolute_client, "-o", "absolute/client.abd", "--unrestricted-includes"], cwd, compiler_environment)
+        _outputs(cwd / "absolute/client.abd", cwd / "absolute/client.ast.json", cwd / "absolute/client.exec.json")
+        passed("default stdlib include directory, -I with spaces and the absolute include policy")
+
         containers_output = cwd / "containers output"
         containers_abd = containers_output / "containers.exec.abd"
         _run([compiler, package / "stdlib/containers.azs", "-o", containers_abd], cwd, compiler_environment)

@@ -2,7 +2,7 @@
 
 中文 | [English](USAGE.en.md)
 
-本目录可整体移动到另一位置使用。编译器生成 ABD，独立解释器默认调用 `main`（`0x0fff0000`）；C++ 与 Java 宿主使用相同 ABD 文件。相对输入、输出路径按终端当前目录解析，`#include` 按包含它的源文件所在目录解析。
+本目录可整体移动到另一位置使用。编译器生成 ABD，独立解释器默认调用 `main`（`0x0fff0000`）；C++ 与 Java 宿主使用相同 ABD 文件。相对输入、输出路径按终端当前目录解析，`#include` 先按包含它的源文件所在目录解析，再依次查找各 `-I` 目录，最后查找本包的 `stdlib/`（见[编译并运行](#编译并运行)）。
 
 从源码仓库导出时执行 `python3 tools/export_distribution.py /path/to/azscript --offline`，将目标路径替换为要交付的目录。`--offline` 要求本机已有构建依赖缓存。默认附带 Java 运行环境；加 `--system-java` 可缩小发行包，改用目标机器已安装的 Java 17+。
 
@@ -32,6 +32,8 @@ run.cmd examples\hello.exec.abd
 
 警告（例如把赋值用作条件、不可达代码）的格式为 `文件:行:列: warning: 消息 [-W<名称>]`，退出码仍为 `0`，照常生成产物。`-Wall` 开启全部警告，`-W<名称>` 开启单个警告（例如默认关闭的 `-Wunused-variable`），`-Wno-<名称>` 关闭单个警告，`-w` 关闭全部警告，`-Werror` 把警告变为错误并使编译失败。警告列表见[警告](LANGUAGE.md#警告)。
 
+`#include` 先在所在源文件的目录中查找，再依次查找每个 `-I dir` / `--include-dir dir`，最后查找本包的 `stdlib/`，所以任意位置的调用方都可以写 `#include "math.include.azs"`。include 必须位于源文件目录或上述目录之内：绝对路径、`../../private.azs` 这类离开这些目录的路径以及指向外部的符号链接都会被拒绝，且不会读取该文件。`--unrestricted-includes` 解除这一限制。找不到 include 时列出全部查找过的路径。include 选项只用于源码编译，不用于 `compile-json`。
+
 使用 `-o output/demo.abd` 或 `-o output/demo.exec.abd` 时，两个 JSON 默认分别为 `output/demo.ast.json` 和 `output/demo.exec.json`；显式 `--ast`、`--exec-json` 各自覆盖默认位置。
 
 常规导出包含 `runtime/` 下的 Java 运行环境，编译脚本优先使用它；若导出时选择不带运行环境，需要安装 Java 17 或更新版本，脚本通过 `JAVA_HOME` 或 `PATH` 查找 Java。使用编译器不需要 Gradle、源码目录或网络下载。原生解释器不依赖 Java。
@@ -53,7 +55,7 @@ AST 包含 extern 优先的名称绑定；普通定义的独立 ID 由 body name
 
 ## 使用数学库
 
-调用方包含 `stdlib/math.include.azs` 中的 extern 声明，`#include` 路径按调用源文件所在目录填写，例如 `examples/` 中使用 `#include "../stdlib/math.include.azs"`。实现 `stdlib/math.azs` 使用 `AZSCRIPT_MATH` hint 独立编译，不能 include 到调用方。发行包附带预编译的 `stdlib/math.exec.abd` 及配套 AST、exec JSON；修改实现后重新编译会默认更新这三份产物：
+调用方包含 `stdlib/math.include.azs` 中的 extern 声明：本包的 `stdlib/` 默认在查找范围内，任意位置都可写 `#include "math.include.azs"`；也可按调用源文件所在目录填写相对路径，例如 `examples/` 中使用 `#include "../stdlib/math.include.azs"`。实现 `stdlib/math.azs` 使用 `AZSCRIPT_MATH` hint 独立编译，不能 include 到调用方。发行包附带预编译的 `stdlib/math.exec.abd` 及配套 AST、exec JSON；修改实现后重新编译会默认更新这三份产物：
 
 ```sh
 ./compile.sh stdlib/math.azs
@@ -67,7 +69,7 @@ C++ 使用 `insert_script`，Java 使用 `insertScript(new File("stdlib/math.exe
 
 ## 使用容器库
 
-调用方包含 `stdlib/containers.include.azs`，例如 `examples/` 中写 `#include "../stdlib/containers.include.azs"`。实现 `stdlib/containers.azs` 以 `AZSCRIPT_CONTAINERS` 独立编译。发行包附带 `stdlib/containers.exec.abd` 及配套 JSON：
+调用方包含 `stdlib/containers.include.azs`，可写 `#include "containers.include.azs"`，在 `examples/` 中也可写 `#include "../stdlib/containers.include.azs"`。实现 `stdlib/containers.azs` 以 `AZSCRIPT_CONTAINERS` 独立编译。发行包附带 `stdlib/containers.exec.abd` 及配套 JSON：
 
 ```sh
 ./compile.sh stdlib/containers.azs

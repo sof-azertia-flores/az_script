@@ -1,5 +1,8 @@
 package azertia.distribution;
 
+import java.net.URISyntaxException;
+import java.nio.file.FileSystemNotFoundException;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -21,14 +24,38 @@ public final class Compile {
                     || forwarded[0].equals("help")) {
                 System.out.println("Distribution shortcut: compile.sh <source.azs> [options]");
                 System.out.println("Source compilation also writes .ast.json and .exec.json by default.");
-                System.out.println("Explicit --ast and --exec-json override those output paths.\n");
+                System.out.println("Explicit --ast and --exec-json override those output paths.");
+                System.out.println("Includes search the package's stdlib/ directory after every -I directory,");
+                System.out.println("so a client anywhere can #include \"math.include.azs\".\n");
             }
-            status = azertia.Main.run(forwarded, System.out, System.err);
+            status = azertia.Main.run(forwarded, System.out, System.err, standardLibrary());
         } catch (IllegalArgumentException e) {
             System.err.println("Error: " + e.getMessage());
             status = 1;
         }
         if (status != 0) System.exit(status);
+    }
+
+    /**
+     * The package's stdlib/ directory, found from this launcher's own location,
+     * compiler/lib/launcher.jar, so compile.sh and compile.cmd need not pass it; the
+     * azscript.stdlib system property, when it names a directory, takes precedence.
+     */
+    private static List<Path> standardLibrary() {
+        List<Path> configured = azertia.Main.defaultIncludeDirectories();
+        if (!configured.isEmpty()) return configured;
+        try {
+            var source = Compile.class.getProtectionDomain().getCodeSource();
+            if (source == null) return List.of();
+            Path lib = Path.of(source.getLocation().toURI()).getParent();
+            Path compiler = lib == null ? null : lib.getParent();
+            Path root = compiler == null ? null : compiler.getParent();
+            if (root == null) return List.of();
+            Path stdlib = root.resolve("stdlib");
+            return Files.isDirectory(stdlib) ? List.of(stdlib) : List.of();
+        } catch (URISyntaxException | IllegalArgumentException | FileSystemNotFoundException | SecurityException e) {
+            return List.of();
+        }
     }
 
     private static String[] arguments(String[] original) {

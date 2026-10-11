@@ -145,7 +145,8 @@ class DiagnosticsTest {
                 failure("int main(){return 0;}\n  #ifdef A\n").getMessage());
         assertEquals("<source>:2:3: error: Unterminated block comment", failure("int main(){return 0;}\n  /* open\n comment\n").getMessage());
         Path missing = write("missing.azs", "int main(){return 0;}\n#include \"nothere.azs\"\n");
-        assertEquals("missing.azs:2:1: error: Cannot open include file \"nothere.azs\": file not found", failure(missing).getMessage());
+        assertEquals("missing.azs:2:1: error: Include not found: \"nothere.azs\" (searched " + temporary.toRealPath().resolve("nothere.azs") + ")",
+                failure(missing).getMessage());
         write("inc/a.azs", "#include \"b.azs\"\n"); write("inc/b.azs", "#include \"a.azs\"\n");
         Path cycle = write("cycle.azs", "#include \"inc/a.azs\"\n");
         assertEquals("inc/b.azs:1:1: error: Include cycle: inc/a.azs -> inc/b.azs -> inc/a.azs\n"
@@ -482,7 +483,7 @@ class DiagnosticsTest {
         Path main = write("pre.azs", "#bogus\n#ifdef\nint broken(\n#else\n#endif\n#include \"nothere.azs\"\n#include \"inc/broken.azs\"\n#define BAD + *\n#undef\nint main(){return 0;}\n");
         assertEquals("pre.azs:1:1: error: Unknown preprocessor directive: #bogus\n"
                 + "pre.azs:2:1: error: Missing condition argument\n"
-                + "pre.azs:6:1: error: Cannot open include file \"nothere.azs\": file not found\n"
+                + "pre.azs:6:1: error: Include not found: \"nothere.azs\" (searched " + temporary.toRealPath().resolve("nothere.azs") + ")\n"
                 + "inc/broken.azs:1:1: error: Unknown preprocessor directive: #bogus\n"
                 + "pre.azs:7:1: note: in file included from here\n"
                 + "pre.azs:9:1: error: Invalid identifier: ", failure(main).getMessage());
@@ -948,7 +949,9 @@ class DiagnosticsTest {
         assertTrue(sources.size() >= 18, sources::toString);
         for (Path source : sources)
             for (Diagnostics diagnostics : List.of(new Diagnostics(), new Diagnostics().allWarnings())) {
-                var script = new GeneraterJson.AzScript(); script.execute(source, diagnostics); Compiler.compile(script.toObj(), diagnostics);
+                // Examples include the standard library through ../stdlib, inside the stdlib include root.
+                var script = new GeneraterJson.AzScript(); script.includeDirectories.add(Path.of("stdlib"));
+                script.execute(source, diagnostics); Compiler.compile(script.toObj(), diagnostics);
                 assertEquals(List.of(), diagnostics.warnings().stream().map(Diagnostic::format).toList(), source.toString());
             }
     }

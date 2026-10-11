@@ -51,7 +51,7 @@ Artifacts target the current system, architecture, and compatible native ABI; ex
 
 ## How compilation works
 
-1. Preprocess relative includes, macros, and conditions, recording each line's original file and line, so diagnostics read `file:line:column: error: ...` inside included files and at macro uses.
+1. Preprocess includes, macros, and conditions, recording each line's original file and line, so diagnostics read `file:line:column: error: ...` inside included files and at macro uses. Includes are searched beside the including file, then in `-I` directories, and must stay inside those roots.
 2. Lex identifiers, numbers, strings, operators, and comments, preserving punctuation inside strings.
 3. Parse precedence, associativity, nested calls, blocks, and control flow recursively.
 4. Validate symbols, scopes, signatures, argument types/counts, duplicates, and returns, then generate JSON/ABD instructions.
@@ -74,7 +74,7 @@ int main() {
 }
 ```
 
-Print, getDepth, mem_free, alloc, make_free, mem_send_up, mem_get, and load_extern_library are compiler-provided built-ins requiring no include/declaration. `load_extern_library("xxx")` loads the platform's signed .so/.dylib/.dll; libraries register functions through the existing C++ API. Standalone runners read keys from AZSCRIPT_TRUSTED_KEY or trusted_key.pem; embedded hosts provide keys through C++/Java APIs. See [external libraries](docs/EXTERN_LIBRARY.en.md). Includes still resolve relative to source files.
+Print, getDepth, mem_free, alloc, make_free, mem_send_up, mem_get, and load_extern_library are compiler-provided built-ins requiring no include/declaration. `load_extern_library("xxx")` loads the platform's signed .so/.dylib/.dll; libraries register functions through the existing C++ API. Standalone runners read keys from AZSCRIPT_TRUSTED_KEY or trusted_key.pem; embedded hosts provide keys through C++/Java APIs. See [external libraries](docs/EXTERN_LIBRARY.en.md). Includes resolve relative to the including source file first, then in each `-I` directory and the wrappers' standard library directory; absolute paths and paths leaving those roots need `--unrestricted-includes` (see [preprocessing](compiler/LANGUAGE.en.md#strings-comments-and-preprocessing)).
 
 Address is independent unsigned 64-bit slot addressing with null as zero. Example: `address p = alloc(2); mem_get(p + 1) = 42; mem_free(p);`. Int32 offsets support checked addition/subtraction. Object references use this runtime type while static class checks/inheritance remain. Addresses differ from slot IDs, counts, and function IDs, which retain 32-bit representations.
 
@@ -99,6 +99,8 @@ int main() {
     return math_round(math_hypot(3.0, 4.0)); // 5
 }
 ```
+
+Elsewhere, a client writes `#include "math.include.azs"`, and likewise for the other standard library headers: the `./azscript` wrapper and the distribution's `compile.sh` / `compile.cmd` search the standard library directory after every `-I` directory. Without a wrapper, pass `-I compiler/stdlib`; the `../stdlib/` path from `examples/` needs it too, since it leaves the example's directory.
 
 Compile library and client separately, then assemble:
 
@@ -136,7 +138,7 @@ int main() {
 ./build/native/interpreter/azscript-run build/containers-regressions.exec.abd --insert build/containers.exec.abd
 ```
 
-The regression returns `0`. List elements live in node fields, so indexing walks the list, and class values need a zero-argument constructor. `Vector` and `Set` can store an existing class value. Subscripting returns a copy. See [`compiler/stdlib/CONTAINERS.en.md`](compiler/stdlib/CONTAINERS.en.md).
+The regression returns `0`. List elements live in node fields, so indexing walks the list, and class values need a zero-argument constructor. `Vector` and `Set` can store an existing class value. Subscripting returns a copy. As with the math header, a client outside `examples/` writes `#include "containers.include.azs"`, and a direct compiler call needs `-I compiler/stdlib`. See [`compiler/stdlib/CONTAINERS.en.md`](compiler/stdlib/CONTAINERS.en.md).
 
 ## Principal fixes
 

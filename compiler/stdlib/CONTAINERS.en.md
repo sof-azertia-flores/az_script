@@ -18,6 +18,8 @@ int main() {
 }
 ```
 
+That path is relative to a client under `examples/`. Elsewhere, write `#include "containers.include.azs"`: the `./azscript` wrapper and the distribution's `compile.sh` / `compile.cmd` search this directory after every `-I` directory, and a direct compiler call passes `-I compiler/stdlib`, which the `../stdlib/` path needs as well.
+
 The header guard is `AZSCRIPT_CONTAINERS_INCLUDED`. Do not include the implementation. [`../examples/containers-regressions.azs`](../examples/containers-regressions.azs) returns `0` on success.
 
 ## Build and link

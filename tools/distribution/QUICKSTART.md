@@ -90,7 +90,7 @@ class TaggedPoint : Point {
 
 ## include、宿主入口与内存
 
-`#include` 相对于写下该指令的源文件解析；可以在发行包的 `examples/` 目录下使用数学库：
+`#include` 先相对于写下该指令的源文件解析，再查找各 `-I` 目录和发行包的 `stdlib/`；除非指定 `--unrestricted-includes`，include 不能离开这些目录。在发行包的 `examples/` 目录下，数学库头文件是 `../stdlib/math.include.azs`；在任意位置也可直接写 `#include "math.include.azs"`：
 
 ```c
 #include "../stdlib/math.include.azs"
