@@ -223,11 +223,13 @@ def verify(package: Path, java: Optional[Path] = None) -> Dict[str, object]:
         _run([compiler, "-dash.azs"], cwd, compiler_environment, succeeds=False)
         _run([compiler, "--", "-dash.azs"], cwd, compiler_environment)
         _outputs(cwd / "-dash.exec.abd", cwd / "-dash.ast.json", cwd / "-dash.exec.json")
-        # Trailing diagnostic options keep the default outputs.
+        # Trailing diagnostic and warning options keep the default outputs.
         _run([compiler, source, "-o", "flags/last.abd", "--max-errors", "5", "--debug-compiler"], cwd,
              compiler_environment)
         _outputs(cwd / "flags/last.abd", cwd / "flags/last.ast.json", cwd / "flags/last.exec.json")
-        passed("explicit AST and executable JSON locations, options before the source, -- and diagnostic flags")
+        _run([compiler, source, "-o", "flags/warnings.abd", "-Wall"], cwd, compiler_environment)
+        _outputs(cwd / "flags/warnings.abd", cwd / "flags/warnings.ast.json", cwd / "flags/warnings.exec.json")
+        passed("explicit AST and executable JSON locations, options before the source, -- and diagnostic and warning flags")
 
         ast_bytes = default_ast.read_bytes()
         _run([compiler, "compile-json", default_ast, "-o", "roundtrip/from ast.abd"], cwd,
@@ -259,11 +261,26 @@ def verify(package: Path, java: Optional[Path] = None) -> Dict[str, object]:
                      "invalid source.azs:1:21: error: Expected expression, found ';'",
                      "Error: compilation failed: 1 error"],
                  f"--max-errors 1 did not stop at the first error: {limited.stderr!r}")
+        # Warnings keep the status and the outputs; -Werror turns them into errors.
+        warned_source = source_directory / "warned source.azs"
+        warned_source.write_text("void main() {\n  return;\n  print(1);\n}\n", encoding="utf-8")
+        warning = "warned source.azs:3:3: {}: in function main: unreachable statement after return [-W{}unreachable-code]"
+        warned = _run([compiler, warned_source, "-o", "warned/program.abd"], cwd, compiler_environment)
+        _require(warned.stderr.splitlines() == [warning.format("warning", "")],
+                 f"A warning was not reported on a successful compilation: {warned.stderr!r}")
+        _outputs(cwd / "warned/program.abd", cwd / "warned/program.ast.json", cwd / "warned/program.exec.json")
+        strict = _run([compiler, warned_source, "-o", "warned/strict.abd", "-Werror"], cwd, compiler_environment,
+                      succeeds=False)
+        _require(strict.returncode == 1 and strict.stderr.splitlines() == [
+                     warning.format("error", "error="), "Error: compilation failed: 1 error"],
+                 f"-Werror did not fail the compilation: {strict.returncode} {strict.stderr!r}")
+        for name in ("strict.abd", "strict.ast.json", "strict.exec.json"):
+            _require(not (cwd / "warned" / name).exists(), f"-Werror wrote {name}")
         _run([compiler, source, "-o"], cwd, compiler_environment, succeeds=False)
         _run([compiler, source, "-o", source], cwd, compiler_environment, succeeds=False)
         _require(source.read_bytes() == original_source, "Rejected output alias changed source")
         _run([runner, cwd / "missing script.abd"], cwd, environment, succeeds=False)
-        passed("compile/runner failures return nonzero and preserve input")
+        passed("warnings keep the outputs; -Werror and compile/runner failures return nonzero and preserve input")
 
         result = _run([runner, default_abd], cwd, environment)
         _require(result.stdout.splitlines() == ["Hello, AzScript!", "42"],

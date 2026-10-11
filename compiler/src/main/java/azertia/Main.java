@@ -33,21 +33,43 @@ public class Main {
             "-o", "-o", "--output", "-o", "--ast", "--ast", "--exec-json", "--exec-json", "--max-errors", "--max-errors");
     /** {@code --debug-compiler} prints the stack trace of an internal compiler error. */
     private static final Set<String> FLAG_OPTIONS = Set.of("--debug-compiler");
+    /** Warning options other than {@code -W<name>} and {@code -Wno-<name>}. */
+    private static final Set<String> WARNING_FLAGS = Set.of("-w", "-Wall", "-Werror");
     private static final Pattern GSON_POSITION = Pattern.compile("(?s)^(?:[\\w.$]+(?:Exception|Error): )?(.*?) at line (\\d+) column (\\d+)(?: path .*)?$");
 
     /**
      * Parsed {@code compile}/{@code compile-json} arguments. Options may appear before
      * or after the input path, and {@code --} ends them so a path may begin with '-';
-     * unset outputs are null, {@code flags} holds the given flags and {@code maxErrors}
-     * is the error limit ({@link Diagnostics#DEFAULT_MAX_ERRORS} unless given, 0 for none).
+     * unset outputs are null, {@code flags} holds the given flags, {@code maxErrors}
+     * is the error limit ({@link Diagnostics#DEFAULT_MAX_ERRORS} unless given, 0 for none)
+     * and {@code warnings} lists the warning options in order.
      */
     public record CompileArguments(String command, Path source, Path output, Path astOutput, Path execOutput, Set<String> flags,
-                                   int maxErrors) {
+                                   int maxErrors, List<String> warnings) {
         /** The ABD output: {@code -o}, or the source name with {@code .exec.abd} beside it. */
         public Path outputOrDefault() {
             if (output != null) return output;
             if (source.getFileName() == null) throw new IllegalArgumentException("Input path must name a file: " + source);
             return source.resolveSibling(source.getFileName().toString().replaceFirst("\\.[^.]+$", "") + ".exec.abd");
+        }
+        /**
+         * A collector with the error limit and warning options: {@code -Wall} enables every
+         * warning, {@code -W<name>}/{@code -Wno-<name>} enable or disable one whatever their
+         * position relative to {@code -Wall}, {@code -w} suppresses all and {@code -Werror}
+         * reports warnings as errors.
+         */
+        public Diagnostics diagnostics() {
+            Diagnostics diagnostics = new Diagnostics().maxErrors(maxErrors);
+            for (String option : warnings) switch (option) {
+                case "-w" -> diagnostics.noWarnings();
+                case "-Wall" -> diagnostics.allWarnings();
+                case "-Werror" -> diagnostics.warningsAsErrors(true);
+                default -> {
+                    if (option.startsWith("-Wno-")) diagnostics.warning(option.substring(5), false);
+                    else diagnostics.warning(option.substring(2), true);
+                }
+            }
+            return diagnostics;
         }
     }
     /** Parses {@code compile} or {@code compile-json} followed by its operands and options. */
@@ -57,6 +79,7 @@ public class Main {
         Path source = null;
         Map<String,String> values = new HashMap<>();
         Set<String> flags = new LinkedHashSet<>();
+        List<String> warnings = new ArrayList<>();
         boolean operands = false;
         for (int i = 1; i < args.size(); i++) {
             String argument = args.get(i), option = VALUE_OPTIONS.get(argument);
@@ -70,6 +93,11 @@ public class Main {
                 values.put(option, args.get(++i));
             } else if (FLAG_OPTIONS.contains(argument)) {
                 flags.add(argument);
+            } else if (argument.equals("-w") || argument.startsWith("-W")) {
+                String name = argument.startsWith("-Wno-") ? argument.substring(5) : argument.substring(2);
+                if (!WARNING_FLAGS.contains(argument) && !Diagnostics.isWarning(name))
+                    throw new IllegalArgumentException("Unknown warning option: " + argument);
+                warnings.add(argument);
             } else if (argument.startsWith("-") && argument.length() > 1) {
                 throw new IllegalArgumentException("Unknown option: " + argument);
             } else if (source == null) source = path(argument);
@@ -84,7 +112,7 @@ public class Main {
             if (maxErrors < 0) throw new IllegalArgumentException("--max-errors expects a non-negative integer, got " + limit);
         }
         return new CompileArguments(args.get(0), source, path(values.get("-o")), path(values.get("--ast")), path(values.get("--exec-json")),
-                Set.copyOf(flags), maxErrors);
+                Set.copyOf(flags), maxErrors, List.copyOf(warnings));
     }
     /** A command-line path; one the platform cannot represent, e.g. with a NUL character, is a usage error. */
     private static Path path(String value) {
@@ -101,7 +129,10 @@ public class Main {
         boolean debug = false;
         try {
             if (args.length == 0 || args[0].equals("--help") || args[0].equals("help")) {
-                out.println("AzScript compiler\n  compile <source.azs> [-o output.abd] [--ast tree.json] [--exec-json instructions.json]\n  compile-json <tree.json> [-o output.abd] [--exec-json instructions.json]\n  pack <output.abd> <file-or-directory>...\n  unpack <archive.abd> <new-or-empty-directory>\nCompile options:\n  --max-errors N     stop after N errors (default " + Diagnostics.DEFAULT_MAX_ERRORS + ", 0 for no limit)\n  --debug-compiler   print the stack trace of an internal compiler error\nOptions may precede or follow the input path; -- ends the options. Diagnostics are written to stderr as\nfile:line:column: error: message. The exit status is 1 when compilation fails and 2 for an internal compiler error.");
+                StringBuilder warnings = new StringBuilder();
+                for (Diagnostics.Warning warning : Diagnostics.WARNINGS)
+                    warnings.append(String.format("\n  %-20s %s (%s)", warning.name(), warning.description(), warning.enabledByDefault() ? "on" : "off"));
+                out.println("AzScript compiler\n  compile <source.azs> [-o output.abd] [--ast tree.json] [--exec-json instructions.json]\n  compile-json <tree.json> [-o output.abd] [--exec-json instructions.json]\n  pack <output.abd> <file-or-directory>...\n  unpack <archive.abd> <new-or-empty-directory>\nCompile options:\n  --max-errors N     stop after N errors (default " + Diagnostics.DEFAULT_MAX_ERRORS + ", 0 for no limit)\n  --debug-compiler   print the stack trace of an internal compiler error\n  -Wall              enable every warning\n  -W<name>           enable one warning; -Wno-<name> disables it, also after -Wall\n  -w                 suppress all warnings\n  -Werror            report warnings as errors\nWarnings (default state):" + warnings + "\nOptions may precede or follow the input path; -- ends the options. Diagnostics are written to stderr as\nfile:line:column: error: message, or warning: message [-W<name>]. The exit status is 1 when compilation fails\nand 2 for an internal compiler error; warnings alone do not fail it.");
                 return 0;
             }
             switch (args[0]) {
@@ -112,13 +143,15 @@ public class Main {
                     debug = arguments.flags().contains("--debug-compiler");
                     com.google.gson.JsonObject ast;
                     // One collector serves the parse and the compilation, which marks the AST as the parser's own.
-                    Diagnostics diagnostics = new Diagnostics().maxErrors(arguments.maxErrors());
+                    Diagnostics diagnostics = arguments.diagnostics();
                     if (args[0].equals("compile-json")) {
                         String label = source.getFileName() == null ? source.toString() : source.getFileName().toString();
                         diagnostics.defaultFile(label);
                         ast = readTree(source, label);
                     } else ast = parse(source, diagnostics).toObj();
                     AcsObject compiled = Compiler.compile(ast, diagnostics);
+                    // A successful compilation may still report warnings.
+                    for (Diagnostic warning : diagnostics.warnings()) err.println(warning.format());
                     Path normalizedSource = source.toAbsolutePath().normalize();
                     var outputs = new java.util.HashSet<Path>();
                     for (Path target : new Path[]{output, astOutput, execOutput}) {

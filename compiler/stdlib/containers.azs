@@ -5,7 +5,7 @@
 // A bounds failure divides by zero so the runtime reports "Division by zero".
 
 void containers__bounds() {
-    int broken = 1 / 0;
+    int _broken = 1 / 0;
 }
 
 <T> void containers__link_back(List<T> * xs, Node<T> * node) {

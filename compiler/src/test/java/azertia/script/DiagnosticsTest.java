@@ -720,6 +720,237 @@ class DiagnosticsTest {
         assertFalse(Files.exists(temporary.resolve("deep.abd")));
     }
 
+    /** Compiles a program with the given collector and returns its warnings, one formatted diagnostic each. */
+    private static List<String> warnings(Diagnostics diagnostics, String source) throws Exception {
+        var script = new GeneraterJson.AzScript(); script.execute(source, diagnostics); Compiler.compile(script.toObj(), diagnostics);
+        return diagnostics.warnings().stream().map(Diagnostic::format).toList();
+    }
+    private static List<String> warnings(String source) throws Exception { return warnings(new Diagnostics(), source); }
+    private static final String ASSIGNMENT = "assignment used as a condition; use '==' to compare, or wrap the assignment in parentheses";
+    private static final String CONDITIONS = "class Flag { boolean on; }\n"
+            + "boolean f() { return true; }\n"
+            + "void main() {\n"
+            + "  boolean b = false;\n"
+            + "  if (b = f()) { print(1); }\n"
+            + "  if ((b = f())) { print(2); }\n"
+            + "  int i = 0;\n"
+            + "  while ((i = i + 1) < 3) { print(i); }\n"
+            + "  for (; b = f(); ) { break; }\n"
+            + "  Flag * p = new Flag();\n"
+            + "  while (p.on = f()) { break; }\n"
+            + "  address a = alloc(1);\n"
+            + "  if (mem_get(a) = true) { print(3); }\n"
+            + "  if (b == f()) { print(4); }\n"
+            + "  mem_free(a);\n"
+            + "  delete p;\n"
+            + "}\n";
+
+    @Test void assignmentsUsedAsConditionsWarn() throws Exception {
+        assertEquals(List.of("<source>:5:9: warning: in function main: " + ASSIGNMENT + " [-Wassign-in-condition]",
+                        "<source>:9:12: warning: in function main: " + ASSIGNMENT + " [-Wassign-in-condition]",
+                        "<source>:11:15: warning: in function main: " + ASSIGNMENT + " [-Wassign-in-condition]",
+                        "<source>:13:18: warning: in function main: " + ASSIGNMENT + " [-Wassign-in-condition]"),
+                warnings(CONDITIONS));
+        assertEquals(List.of(), warnings(new Diagnostics().warning("assign-in-condition", false), CONDITIONS));
+        // The parentheses marker is part of the AST, so compile-json reports the same warnings.
+        JsonObject tree = JsonParser.parseString(tree(CONDITIONS).toString()).getAsJsonObject();
+        Diagnostics fromJson = new Diagnostics(); Compiler.compile(tree, fromJson);
+        assertEquals(warnings(CONDITIONS), fromJson.warnings().stream().map(Diagnostic::format).toList());
+        Diagnostic first = fromJson.warnings().get(0);
+        assertEquals(Diagnostic.Severity.WARNING, first.severity());
+        assertEquals("assign-in-condition", first.code());
+        assertEquals(new Diagnostic.Position("<source>", 5, 9), first.position());
+    }
+
+    @Test void unreachableStatementsWarnOncePerBlock() throws Exception {
+        String source = "int g(boolean c) {\n"
+                + "  if (c) { return 1; } else { return 2; }\n"
+                + "  print(0);\n"
+                + "}\n"
+                + "int spin() {\n"
+                + "  while (true) { print(1); }\n"
+                + "  print(2);\n"
+                + "}\n"
+                + "void main() {\n"
+                + "  boolean b = g(true) == 1;\n"
+                + "  while (b) { break; print(3); print(4); }\n"
+                + "  for (int i = 0; i < 2; i++) { continue; { print(5); } }\n"
+                + "  while (b) { if (b) { break; } print(6); }\n"
+                + "  return;\n"
+                + "  print(7);\n"
+                + "}\n";
+        assertEquals(List.of("<source>:3:3: warning: in function g: unreachable statement [-Wunreachable-code]",
+                        "<source>:7:3: warning: in function spin: unreachable statement after a loop that never ends [-Wunreachable-code]",
+                        "<source>:11:22: warning: in function main: unreachable statement after break [-Wunreachable-code]",
+                        "<source>:12:45: warning: in function main: unreachable statement after continue [-Wunreachable-code]",
+                        "<source>:15:3: warning: in function main: unreachable statement after return [-Wunreachable-code]"),
+                warnings(source));
+        assertEquals(List.of(), warnings(new Diagnostics().warning("unreachable-code", false), source));
+        // A handwritten AST without positions, as in a forged compile-json input, never warns.
+        JsonObject unpositioned = tree("void main() {\n  return;\n  print(1);\n}\n");
+        stripPositions(unpositioned.get("body"));
+        Diagnostics diagnostics = new Diagnostics(); Compiler.compile(unpositioned, diagnostics);
+        assertEquals(List.of(), diagnostics.warnings());
+        // Statements the compiler adds around class functions (field and base initializers, cleanup) never warn.
+        // An assignment is located at its operator.
+        assertEquals(List.of("<source>:1:50: warning: in function B::B: unreachable statement after return [-Wunreachable-code]"),
+                warnings("class B { int x = 1; B(int v) { x = v; return; x = 2; } ~B() { return; } }\n"
+                        + "class D : B { int y = 3; D() : B(1) { return; } ~D() { return; } }\n"
+                        + "void main() { D d; for (int i = 0; i < 1; i++) { return; } }\n"));
+    }
+    private static void stripPositions(JsonElement element) {
+        if (element.isJsonArray()) element.getAsJsonArray().forEach(DiagnosticsTest::stripPositions);
+        else if (element.isJsonObject()) {
+            JsonObject object = element.getAsJsonObject();
+            object.remove("_line"); object.remove("_column"); object.remove("_file");
+            object.entrySet().forEach(entry -> stripPositions(entry.getValue()));
+        }
+    }
+
+    @Test void unusedVariablesWarnOnlyWhenEnabled() throws Exception {
+        String source = "class P { int x; }\n"
+                + "int use(int parameter) {\n"
+                + "  int used = 1;\n"
+                + "  int unused = 2;\n"
+                + "  int _ignored = 3;\n"
+                + "  P literal;\n"
+                + "  P * owned();\n"
+                + "  buffer<int> values;\n"
+                + "  var assigned = 0;\n"
+                + "  assigned = 4;\n"
+                + "  if (used > 0) int scoped = 5;\n"
+                + "  for (int i = 0; i < 1; i++) { }\n"
+                + "  { int inner = used; }\n"
+                + "  int shadowed = 7;\n"
+                + "  { int shadowed = shadowed + 1; }\n"
+                + "  return used;\n"
+                + "}\n"
+                + "void main() { use(1); }\n";
+        assertEquals(List.of(), warnings(source));
+        List<String> expected = List.of("<source>:4:3: warning: in function use: unused variable 'unused' [-Wunused-variable]",
+                "<source>:11:17: warning: in function use: unused variable 'scoped' [-Wunused-variable]",
+                "<source>:13:5: warning: in function use: unused variable 'inner' [-Wunused-variable]",
+                "<source>:15:5: warning: in function use: unused variable 'shadowed' [-Wunused-variable]");
+        assertEquals(expected, warnings(new Diagnostics().allWarnings(), source));
+        assertEquals(expected, warnings(new Diagnostics().warning("unused-variable", true), source));
+        // A warning disabled by name stays disabled whether it comes before or after allWarnings().
+        assertEquals(List.of(), warnings(new Diagnostics().warning("unused-variable", false).allWarnings(), source));
+        assertEquals(List.of(), warnings(new Diagnostics().allWarnings().warning("unused-variable", false), source));
+        assertEquals(List.of(), warnings(new Diagnostics().allWarnings().noWarnings(), source));
+    }
+
+    @Test void warningOptionsAndWarningsAsErrors() throws Exception {
+        assertEquals(List.of("assign-in-condition", "unreachable-code", "unused-variable"),
+                Diagnostics.WARNINGS.stream().map(Diagnostics.Warning::name).toList());
+        assertTrue(new Diagnostics().warningEnabled("unreachable-code"));
+        assertFalse(new Diagnostics().warningEnabled("unused-variable"));
+        assertFalse(new Diagnostics().noWarnings().warning("unreachable-code", true).warningEnabled("unreachable-code"));
+        assertEquals("Unknown warning: bogus", assertThrows(IllegalArgumentException.class, () -> new Diagnostics().warning("bogus", true)).getMessage());
+        assertThrows(IllegalArgumentException.class, () -> new Diagnostics().warningEnabled("bogus"));
+        // -Werror reports every enabled warning as an error and fails the compilation.
+        Diagnostics strict = new Diagnostics().warningsAsErrors(true);
+        CompileException failure = assertThrows(CompileException.class, () -> warnings(strict, CONDITIONS));
+        assertEquals(4, failure.errors().size());
+        assertTrue(failure.getMessage().startsWith("<source>:5:9: error: in function main: " + ASSIGNMENT + " [-Werror=assign-in-condition]\n"), failure.getMessage());
+        assertEquals(0, strict.warningCount());
+        // Errors and warnings are reported together, in source order.
+        CompileException mixed = assertThrows(CompileException.class, () -> warnings(
+                "void main() {\n  return;\n  string s = 1;\n}\nint f() {\n  string t = 2;\n  return 0;\n}\n"));
+        assertEquals(List.of("<source>:3:3: warning: in function main: unreachable statement after return [-Wunreachable-code]",
+                        "<source>:3:3: error: in function main: Initializer for s expected string, got int",
+                        "<source>:6:3: error: in function f: Initializer for t expected string, got int"),
+                mixed.diagnostics().stream().map(Diagnostic::format).toList());
+        assertEquals(List.of(), warnings(new Diagnostics().warningsAsErrors(true).noWarnings(), CONDITIONS));
+        // A collector that stops at the first error stops at the first promoted warning.
+        CompileException first = assertThrows(CompileException.class, () -> warnings(Diagnostics.failFast().warningsAsErrors(true), CONDITIONS));
+        assertEquals(1, first.errors().size());
+    }
+
+    @Test void commandLineWarningOptions() throws Exception {
+        Path source = write("w.azs", "boolean f() { return true; }\nvoid main() {\n  boolean b = false;\n  if (b = f()) { print(1); }\n  int unused = 1;\n}\n");
+        String output = temporary.resolve("w.abd").toString(), ast = temporary.resolve("w.ast.json").toString();
+        String warning = "w.azs:4:9: warning: in function main: " + ASSIGNMENT + " [-Wassign-in-condition]\n";
+        var bytes = new ByteArrayOutputStream(); var stream = new PrintStream(bytes, true, StandardCharsets.UTF_8);
+        assertEquals(0, Main.run(new String[]{"compile", source.toString(), "-o", output, "--ast", ast}, stream, stream));
+        String printed = bytes.toString(StandardCharsets.UTF_8).replace("\r\n", "\n");
+        assertTrue(printed.startsWith(warning) && printed.contains("Compiled "), printed);
+        assertTrue(Files.exists(Path.of(output)));
+        // compile-json reports the same warnings for the stored AST.
+        assertTrue(run("compile-json", ast, "-o", output).replace("\r\n", "\n").startsWith(warning));
+        // -Wall, -W<name> and -Wno-<name> may appear anywhere; a disabled warning stays disabled after -Wall.
+        String unused = "w.azs:5:3: warning: in function main: unused variable 'unused' [-Wunused-variable]\n";
+        assertTrue(run("compile", "-Wall", source.toString(), "-o", output).replace("\r\n", "\n").startsWith(warning + unused));
+        assertTrue(run("compile", source.toString(), "-o", output, "-Wunused-variable", "-Wno-assign-in-condition").replace("\r\n", "\n").startsWith(unused));
+        assertTrue(run("compile", source.toString(), "-o", output, "-Wno-unused-variable", "-Wall").replace("\r\n", "\n").startsWith(warning + "Compiled "));
+        assertTrue(run("compile", source.toString(), "-o", output, "-w", "-Wall").startsWith("Compiled "));
+        // -Werror fails the compilation and writes no output.
+        Files.delete(Path.of(output));
+        bytes.reset();
+        assertEquals(1, Main.run(new String[]{"compile", source.toString(), "-o", output, "-Werror"}, stream, stream));
+        assertEquals("w.azs:4:9: error: in function main: " + ASSIGNMENT + " [-Werror=assign-in-condition]\n"
+                + "Error: compilation failed: 1 error\n", bytes.toString(StandardCharsets.UTF_8).replace("\r\n", "\n"));
+        assertFalse(Files.exists(Path.of(output)));
+        // Warnings are counted in the failure summary.
+        Path broken = write("broken.azs", "void main() {\n  return;\n  string s = 1;\n}\n");
+        assertTrue(run("compile", broken.toString(), "-o", output).replace("\r\n", "\n")
+                .endsWith("Error: compilation failed: 1 error, 1 warning\n"));
+        for (String option : List.of("-Wbogus", "-Wno-bogus", "-W", "-Wno-all", "-Werror=unused-variable"))
+            assertEquals("Error: Unknown warning option: " + option + "\n", run("compile", source.toString(), option).replace("\r\n", "\n"));
+        Main.CompileArguments parsed = Main.parseCompileArguments(List.of("compile", "-w", "x.azs", "-Wall", "-Wno-unreachable-code", "-Werror"));
+        assertEquals(Path.of("x.azs"), parsed.source());
+        assertEquals(List.of("-w", "-Wall", "-Wno-unreachable-code", "-Werror"), parsed.warnings());
+        Diagnostics configured = Main.parseCompileArguments(List.of("compile", "x.azs", "-Wunused-variable", "-Wno-unreachable-code", "-Werror")).diagnostics();
+        assertTrue(configured.warningEnabled("unused-variable") && configured.warningEnabled("assign-in-condition"));
+        assertFalse(configured.warningEnabled("unreachable-code"));
+        assertTrue(configured.warningsAsErrors());
+        assertTrue(run("--help").contains("-Wall") && run("--help").contains("unused-variable"));
+    }
+
+    @Test void warningsInIncludedFilesNameTheIncludeChain() throws Exception {
+        write("inc/lib.azs", "// lib\nvoid helper() {\n  return;\n  print(1);\n}\n");
+        Path main = write("main.azs", "void first() {\n  return;\n  print(0);\n}\n#include \"inc/lib.azs\"\n"
+                + "void main() {\n  first();\n  helper();\n  return;\n  print(2);\n}\n");
+        String output = temporary.resolve("inc.abd").toString(), ast = temporary.resolve("inc.ast.json").toString();
+        // Warnings are sorted in translation order, where the included file stands at its #include.
+        List<String> expected = List.of(
+                "main.azs:3:3: warning: in function first: unreachable statement after return [-Wunreachable-code]",
+                "inc/lib.azs:4:3: warning: in function helper: unreachable statement after return [-Wunreachable-code]",
+                "main.azs:5:1: note: in file included from here",
+                "main.azs:10:3: warning: in function main: unreachable statement after return [-Wunreachable-code]");
+        String compiled = run("compile", main.toString(), "-o", output, "--ast", ast).replace("\r\n", "\n");
+        assertEquals(String.join("\n", expected) + "\n", compiled.substring(0, compiled.indexOf("Compiled ")));
+        // compile-json reports the same warnings and include notes from the stored AST's sources.
+        String fromJson = run("compile-json", ast, "-o", output).replace("\r\n", "\n");
+        assertEquals(String.join("\n", expected) + "\n", fromJson.substring(0, fromJson.indexOf("Compiled ")));
+        // -Werror keeps the notes and the order, and fails the compilation.
+        Files.delete(Path.of(output));
+        List<String> strict = new java.util.ArrayList<>();
+        for (String line : expected) strict.add(line.replace(": warning: ", ": error: ").replace("[-W", "[-Werror="));
+        strict.add("Error: compilation failed: 3 errors");
+        assertEquals(String.join("\n", strict) + "\n", run("compile", main.toString(), "-o", output, "-Werror").replace("\r\n", "\n"));
+        assertFalse(Files.exists(Path.of(output)));
+    }
+
+    /**
+     * The shipped examples, the standard library and the host test script compile
+     * without warnings, also with every warning enabled, so that -Wall -Werror builds
+     * them: several end-to-end suites require an empty compiler stderr.
+     */
+    @Test void examplesAndStdlibAreWarningClean() throws Exception {
+        List<Path> sources = new java.util.ArrayList<>();
+        for (String directory : List.of("examples", "examples/multifile", "stdlib", "../tools/distribution/examples"))
+            try (var files = Files.list(Path.of(directory))) {
+                files.filter(file -> file.toString().endsWith(".azs") && !file.toString().endsWith(".include.azs")).sorted().forEach(sources::add);
+            }
+        sources.add(Path.of("../abdJavaInvoker/tse.azs"));
+        assertTrue(sources.size() >= 18, sources::toString);
+        for (Path source : sources)
+            for (Diagnostics diagnostics : List.of(new Diagnostics(), new Diagnostics().allWarnings())) {
+                var script = new GeneraterJson.AzScript(); script.execute(source, diagnostics); Compiler.compile(script.toObj(), diagnostics);
+                assertEquals(List.of(), diagnostics.warnings().stream().map(Diagnostic::format).toList(), source.toString());
+            }
+    }
+
     @Test void diagnosticsFormatAndHexIds() {
         assertEquals("0x0fff0002", Diagnostic.hexId(0x0fff0002));
         assertEquals("0xffff0001", Diagnostic.hexId(0xffff0001));

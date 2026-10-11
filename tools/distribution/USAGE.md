@@ -30,6 +30,8 @@ run.cmd examples\hello.exec.abd
 
 编译错误以 `文件:行:列: error: 消息` 写到标准错误，位置指向原始文件，包括被包含的头文件和宏的使用位置；随后的 `note:` 行给出 include 链。彼此独立的错误会一并报告，默认最多 20 个；`--max-errors N` 修改上限（0 表示不限）。编译失败时最后输出汇总行，例如 `Error: compilation failed: 2 errors`，退出码为 `1`，不生成任何产物。退出码 `2` 表示内部编译器错误，即编译器自身的缺陷；`--debug-compiler` 会在报告中附上 Java 堆栈。选项可以写在源文件路径之前或之后；`--` 结束选项，用于以 `-` 开头的源文件路径。格式详见[语言说明](LANGUAGE.md#诊断)。
 
+警告（例如把赋值用作条件、不可达代码）的格式为 `文件:行:列: warning: 消息 [-W<名称>]`，退出码仍为 `0`，照常生成产物。`-Wall` 开启全部警告，`-W<名称>` 开启单个警告（例如默认关闭的 `-Wunused-variable`），`-Wno-<名称>` 关闭单个警告，`-w` 关闭全部警告，`-Werror` 把警告变为错误并使编译失败。警告列表见[警告](LANGUAGE.md#警告)。
+
 使用 `-o output/demo.abd` 或 `-o output/demo.exec.abd` 时，两个 JSON 默认分别为 `output/demo.ast.json` 和 `output/demo.exec.json`；显式 `--ast`、`--exec-json` 各自覆盖默认位置。
 
 常规导出包含 `runtime/` 下的 Java 运行环境，编译脚本优先使用它；若导出时选择不带运行环境，需要安装 Java 17 或更新版本，脚本通过 `JAVA_HOME` 或 `PATH` 查找 Java。使用编译器不需要 Gradle、源码目录或网络下载。原生解释器不依赖 Java。

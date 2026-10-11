@@ -17,7 +17,7 @@ python3 tools/build_and_test.py --offline
 
 Offline builds use locally cached dependencies. Omit `--offline` if initial dependencies are missing.
 
-The CLI's `compile-json` accepts the readable code tree; `pack` and `unpack` archive and extract files. All paths are arguments, and options may precede or follow the input path; `--` ends the options, so a following path may begin with `-`. Includes resolve relative to the file containing them. Compiler output never overwrites source input. Compile errors are reported as described in [Diagnostics](#diagnostics).
+The CLI's `compile-json` accepts the readable code tree; `pack` and `unpack` archive and extract files. All paths are arguments, and options may precede or follow the input path; `--` ends the options, so a following path may begin with `-`. Includes resolve relative to the file containing them. Compiler output never overwrites source input. Compile errors and warnings are reported as described in [Diagnostics](#diagnostics).
 
 ```java
 var script = new azertia.script.GeneraterJson.AzScript();
@@ -26,6 +26,7 @@ try {
     script.execute(java.nio.file.Path.of("example.azs"), diagnostics);
     var jsonTree = script.toObj();
     var instructions = azertia.script.Compiler.compile(jsonTree, diagnostics);
+    diagnostics.warnings().forEach(warning -> System.err.println(warning.format()));
     byte[] executable = instructions.toValue().toAbdFormat();
 } catch (azertia.script.CompileException error) {
     error.diagnostics().forEach(diagnostic -> System.err.println(diagnostic.format()));
@@ -344,7 +345,25 @@ An internal compiler error is a failure of the compiler itself rather than of th
 
 `compile-json` first checks the AST's shape: required fields, the JSON types the compiler reads, positions, the `sources` table and number ranges. Each violation is reported against the JSON file with its JSON pointer, e.g. `tree.json: error: Malformed script JSON at /body/fff/_funcfff0000/metadata/position: expected an integer, got "abc"`. An unexpected failure on such an AST is reported as `Malformed script JSON near main.azs:3:10` at the nearest positioned node with exit status 1; `--debug-compiler` prints the underlying exception.
 
-Java callers receive the same diagnostics as `azertia.script.CompileException`, an `IllegalArgumentException` whose `diagnostics()` lists them, whose message is their text, and whose `internal()` reports an internal compiler error. `AzScript.execute(...)` and `Compiler.compile(...)` report up to 20 errors by default. Pass one `azertia.script.Diagnostics` to both steps, as in the example at the top of this guide: only then is an unexpected failure on the parsed program an internal compiler error, while an AST compiled with another collector is treated as supplied JSON. Configure that collector to change the limit, e.g. `new Diagnostics().maxErrors(0)`. An instance serves one compilation; `Diagnostics.failFast()` stops at the first error. Standalone expressions compiled with `Compiler.compileExpression` stop at the first error.
+Java callers receive the same diagnostics as `azertia.script.CompileException`, an `IllegalArgumentException` whose `diagnostics()` lists them, whose message is their text, and whose `internal()` reports an internal compiler error. `AzScript.execute(...)` and `Compiler.compile(...)` report up to 20 errors by default. Pass one `azertia.script.Diagnostics` to both steps, as in the example at the top of this guide: only then is an unexpected failure on the parsed program an internal compiler error, while an AST compiled with another collector is treated as supplied JSON. Configure that collector to change the limit, e.g. `new Diagnostics().maxErrors(0)`, or the [warnings](#warnings). An instance serves one compilation; `Diagnostics.failFast()` stops at the first error. Standalone expressions compiled with `Compiler.compileExpression` stop at the first error.
+
+#### Warnings
+
+Warnings point at code that compiles but is probably a mistake. They use the same layout with `warning:` and end with the option that controls them; they never change the compiled output:
+
+```text
+main.azs:4:9: warning: in function main: assignment used as a condition; use '==' to compare, or wrap the assignment in parentheses [-Wassign-in-condition]
+```
+
+| Warning | Default | Reported for |
+|---|---|---|
+| `assign-in-condition` | on | A plain `=` assignment written directly as the condition of `if`, `while` or `for`, e.g. `if (done = check())`, at its `=`. Parentheses mark an intended assignment: `if ((done = check()))`. |
+| `unreachable-code` | on | The first statement after `return`, `break`, `continue`, an `if`/`else` whose branches all leave, or a `while (true)`/`for (;;)` loop without `break`; once per block. As in errors, an assignment or `++`/`--` statement is located at its operator. |
+| `unused-variable` | off | A local variable that is never used after its declaration; reading or assigning it counts as a use. Parameters, names starting with `_`, and objects declared for their construction and destruction (`C c;`, `C * p(args);`, buffers and type-parameter values) are exempt. |
+
+`-Wall` enables every warning, `-W<name>` enables one and `-Wno-<name>` disables one; an option naming a warning wins over `-Wall` in either order, and the last option for the same warning wins. `-w` suppresses all warnings. `-Werror` reports enabled warnings as errors, e.g. `main.azs:4:9: error: in function main: ... [-Werror=assign-in-condition]`, so the compilation fails. An unknown warning name is a usage error (`Error: Unknown warning option: -Wxyz`).
+
+A successful compilation prints its warnings to stderr and exits with status 0. A failed compilation lists warnings among its errors in source order and counts them in the summary, e.g. `Error: compilation failed: 1 error, 1 warning`. The checks run on the AST, so `compile` and `compile-json` report the same warnings; AST nodes without a source position, such as those of a handwritten AST, and code the compiler generates never warn. In Java, configure the `Diagnostics` collector, e.g. `new Diagnostics().allWarnings().warning("unreachable-code", false).warningsAsErrors(true)`, and read `diagnostics.warnings()` after compiling; `Diagnostics.WARNINGS` lists the warnings.
 
 ## Generics
 

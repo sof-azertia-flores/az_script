@@ -6,6 +6,8 @@ import java.util.List;
 /**
  * One compiler message in the gcc/clang layout
  * {@code file:line:column: severity: [in context: ]message}, followed by its notes.
+ * A warning ends with its option, e.g. {@code [-Wunreachable-code]}, or with
+ * {@code [-Werror=unreachable-code]} when {@code -Werror} made it an error.
  * Positions name original source files after includes and macro expansion.
  */
 public final class Diagnostic {
@@ -56,6 +58,11 @@ public final class Diagnostic {
     public static Diagnostic note(Position position, String message) {
         return new Diagnostic(Severity.NOTE, null, position, null, message, List.of(), false);
     }
+    /** A warning named by its code, e.g. {@code unreachable-code}; see {@link Diagnostics#WARNINGS}. */
+    public static Diagnostic warning(String code, Position position, String context, String message, List<Diagnostic> notes) {
+        if (code == null || code.isEmpty()) throw new IllegalArgumentException("A warning needs a code");
+        return new Diagnostic(Severity.WARNING, code, position, context, message, notes, false);
+    }
     /**
      * An internal compiler error: an unexpected exception of the compiler itself, as
      * opposed to an error in the compiled program. It carries a note asking for a bug report.
@@ -89,6 +96,11 @@ public final class Diagnostic {
         return new Diagnostic(severity, code, position, context, message, notes, internal, unit);
     }
 
+    /** This warning reported as an error, as {@code -Werror} does; it keeps its code. */
+    Diagnostic asError() {
+        return new Diagnostic(Severity.ERROR, code, position, context, message, notes, internal, unit);
+    }
+
     /** A copy with additional notes appended. */
     public Diagnostic withNotes(List<Diagnostic> extra) {
         if (extra.isEmpty()) return this;
@@ -107,7 +119,8 @@ public final class Diagnostic {
         text.append(severity.label()).append(": ");
         if (context != null && !context.isEmpty()) text.append("in ").append(context).append(": ");
         text.append(message);
-        if (code != null) text.append(" [-W").append(code).append(']');
+        // A warning promoted by -Werror names the option that made it an error.
+        if (code != null) text.append(severity == Severity.ERROR ? " [-Werror=" : " [-W").append(code).append(']');
     }
     @Override public String toString() { return format(); }
 

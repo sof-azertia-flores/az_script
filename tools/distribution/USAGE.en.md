@@ -30,6 +30,8 @@ Three outputs default beside the source: hello.exec.abd executable, hello.ast.js
 
 Compile errors go to stderr as `file:line:column: error: message`, positioned in the original file, including included headers and macro uses; following `note:` lines give the include chain. Independent errors are reported together, at most 20 by default; `--max-errors N` changes the limit (0 for none). A failed compilation ends with a summary such as `Error: compilation failed: 2 errors`, exits with status 1, and writes no outputs. Status 2 means an internal compiler error, a bug of the compiler itself; `--debug-compiler` adds its Java stack trace to the report. Options may precede or follow the source path; `--` ends the options, for a source path that begins with `-`. See [the language guide](LANGUAGE.en.md#diagnostics) for the format.
 
+Warnings, such as an assignment used as a condition or unreachable code, read `file:line:column: warning: message [-W<name>]`; they keep exit status 0 and the outputs. `-Wall` enables all warnings, `-W<name>` enables one (for example `-Wunused-variable`, which is off by default), `-Wno-<name>` disables one, `-w` suppresses them, and `-Werror` turns them into errors that fail the compilation. See [warnings](LANGUAGE.en.md#warnings) for the list.
+
 With `-o output/demo.abd` or `-o output/demo.exec.abd`, JSON defaults are output/demo.ast.json and output/demo.exec.json, individually overridden by explicit flags.
 
 Compiler launchers prefer bundled runtime/. Without it, install Java 17+ and use JAVA_HOME or PATH. Compilation needs no Gradle, source checkout, or downloads. The native interpreter needs no Java.

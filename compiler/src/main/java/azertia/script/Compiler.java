@@ -51,6 +51,9 @@ public class Compiler {
         public int slot;
         public List<String> alias = new ArrayList<>();
         public int type = AsTypes.ANY_VALUE;
+        /** The source declaration checked by the unused-variable warning, or null when the variable is exempt. */
+        private JsonObject declaration;
+        private boolean used;
     }
     private record Signature(int id, int returnType, List<Integer> paramTypes, boolean requireKnown,
                              List<Integer> typeParameters, int classParameters, boolean internal) {
@@ -92,6 +95,11 @@ public class Compiler {
         final SourceMap sources;
         /** Whether the in-process parser produced the AST, which makes unexpected exceptions internal compiler errors. */
         final boolean parsed;
+        /**
+         * Nodes the compiler synthesized and positioned after a source node. Warnings
+         * are reported only at positioned nodes of the compiled AST, never at these.
+         */
+        final Set<JsonObject> synthesized = Collections.newSetFromMap(new IdentityHashMap<>());
         CompilationState(Diagnostics diagnostics, SourceMap sources, boolean parsed) {
             this.diagnostics = diagnostics; this.sources = sources; this.parsed = parsed;
         }
@@ -139,18 +147,19 @@ public class Compiler {
             if (id != null) return id;
             throw new IllegalArgumentException("Unknown function: " + name);
         }
+        // Every lookup is a use of the variable for the unused-variable warning.
         public LogicVariable getVariable(String name) {
-            for (LogicVariable variable : vars) if (variable.alias.contains(name)) return variable;
+            for (LogicVariable variable : vars) if (variable.alias.contains(name)) { variable.used = true; return variable; }
             if (parent != null) return parent.getVariable(name);
             throw new IllegalArgumentException("Unknown variable: " + name);
         }
         private LogicVariable findVariable(String name) {
-            for (LogicVariable variable : vars) if (variable.alias.contains(name)) return variable;
+            for (LogicVariable variable : vars) if (variable.alias.contains(name)) { variable.used = true; return variable; }
             return parent == null ? null : parent.findVariable(name);
         }
         private LogicVariable findLexicalVariable(String name) {
             if (parent == null) return null;
-            for (LogicVariable variable : vars) if (variable.alias.contains(name)) return variable;
+            for (LogicVariable variable : vars) if (variable.alias.contains(name)) { variable.used = true; return variable; }
             return parent.findLexicalVariable(name);
         }
         private LogicVariable define(String alias, int slot) {
@@ -490,16 +499,19 @@ public class Compiler {
         if (error instanceof CompileException || info.sources == null || !Diagnostics.userError(error)) return error;
         return new CompileException(info.sources.error(anchor, "class " + info.name, message(error)), error);
     }
-    /** Copies a node's original position onto a node the compiler synthesized from it. */
-    private static void copyPosition(JsonElement from, JsonObject to) {
+    /** Copies a node's original position onto a node the compiler synthesized from it; such a node never warns. */
+    private static void copyPosition(JsonElement from, JsonObject to, LogicEnvironment environment) {
         if (from == null || !from.isJsonObject() || !from.getAsJsonObject().has("_line")) return;
         for (String key : new String[]{"_file", "_line", "_column"})
             if (from.getAsJsonObject().has(key)) to.add(key, from.getAsJsonObject().get(key));
+        environment.state().synthesized.add(to);
     }
-    private static void position(JsonObject node, Field field) {
+    /** Positions a node synthesized for a field at the field's declaration; such a node never warns. */
+    private static void position(JsonObject node, Field field, LogicEnvironment environment) {
         if (field.line() <= 0) return;
         if (field.file() != 0) node.addProperty("_file", field.file());
         node.addProperty("_line", field.line()); node.addProperty("_column", field.column());
+        environment.state().synthesized.add(node);
     }
     /** The diagnostic context of a function: "function main", "function C::C", "function C::operator[]". */
     static String contextName(String function) {
@@ -516,6 +528,65 @@ public class Compiler {
             } : member;
         };
         return "function " + owner + "::" + name;
+    }
+    /**
+     * Reports a warning at a node of the compiled AST. Nodes without a source
+     * position, such as handwritten AST statements, and nodes the compiler
+     * synthesized never warn.
+     */
+    private static void warn(String code, JsonObject node, String message, LogicEnvironment environment) {
+        CompilationState state = environment.state();
+        if (!state.diagnostics.warningEnabled(code) || state.synthesized.contains(node)) return;
+        Diagnostic.Position at = state.sources.position(node);
+        if (at == null) return;
+        int unit = state.sources.unitOf(node);
+        state.diagnostics.warn(Diagnostic.warning(code, at, environment.context, message, state.sources.includeNotes(unit)).inUnit(unit));
+    }
+    /** assign-in-condition: an assignment written directly as a condition is probably a mistyped '=='. */
+    private static void warnAssignmentCondition(JsonElement condition, LogicEnvironment environment) {
+        if (!condition.isJsonObject() || !isControl(condition.getAsJsonObject())) return;
+        JsonObject node = condition.getAsJsonObject();
+        // Parentheses around the assignment mark it as intended; compound assignments are never comparisons.
+        if (node.has("_parenthesized")) return;
+        String call = node.get("call").getAsString();
+        if (call.equals("varset") && !node.has("compound") || call.equals("member-set") || call.equals("index-set") || call.equals("mov"))
+            warn("assign-in-condition", node, "assignment used as a condition; use '==' to compare, or wrap the assignment in parentheses", environment);
+    }
+    /**
+     * unreachable-code: reports the first positioned statement in or at {@code statement},
+     * which follows {@code end}, a statement that never completes normally. Returns
+     * whether the statement was reported; a statement without a position is skipped.
+     */
+    private static boolean warnUnreachable(JsonElement end, JsonElement statement, LogicEnvironment environment) {
+        JsonObject first = firstStatement(statement, environment.state());
+        if (first == null) return false;
+        String call = end.isJsonObject() && isControl(end.getAsJsonObject()) ? end.getAsJsonObject().get("call").getAsString() : "";
+        String message = switch (call) {
+            case "return", "break", "continue" -> "unreachable statement after " + call;
+            case "while", "for" -> "unreachable statement after a loop that never ends";
+            default -> "unreachable statement";
+        };
+        warn("unreachable-code", first, message, environment);
+        return true;
+    }
+    /** The first positioned source statement of a statement or nested block, or null. */
+    private static JsonObject firstStatement(JsonElement statement, CompilationState state) {
+        if (statement.isJsonArray()) {
+            for (JsonElement inner : statement.getAsJsonArray()) {
+                JsonObject first = firstStatement(inner, state);
+                if (first != null) return first;
+            }
+            return null;
+        }
+        if (!statement.isJsonObject()) return null;
+        JsonObject node = statement.getAsJsonObject();
+        return state.synthesized.contains(node) || state.sources.position(node) == null ? null : node;
+    }
+    /** unused-variable: reports the source declarations of a scope's variables that were never looked up. */
+    private static void finishScope(LogicEnvironment scope) {
+        for (LogicVariable variable : scope.vars)
+            if (variable.declaration != null && !variable.used)
+                warn("unused-variable", variable.declaration, "unused variable '" + variable.name + "'", scope);
     }
     private static AcsElement compileExpressionBody(JsonElement input, LogicEnvironment environment) {
         if (input == null || input.isJsonNull()) throw new IllegalArgumentException("Null is not an AzScript value");
@@ -534,10 +605,18 @@ public class Compiler {
         }
         if (input.isJsonArray()) {
             AcsArray block = new AcsArray(); LogicEnvironment scope = environment.child();
+            boolean checkReachability = scope.state().diagnostics.warningEnabled("unreachable-code");
             withDepth(1, () -> {
-                for (JsonElement statement : input.getAsJsonArray()) block.acsa.add(compileExpression(statement, scope));
+                // The first statement that execution cannot reach is reported once per block.
+                JsonElement end = null; boolean reported = !checkReachability;
+                for (JsonElement statement : input.getAsJsonArray()) {
+                    if (end != null && !reported) reported = warnUnreachable(end, statement, scope);
+                    block.acsa.add(compileExpression(statement, scope));
+                    if (end == null && !reported && !canCompleteNormally(statement)) end = statement;
+                }
                 return null;
             });
+            finishScope(scope);
             return block;
         }
         if (!input.isJsonObject()) throw new IllegalArgumentException("Invalid expression");
@@ -588,7 +667,7 @@ public class Compiler {
                 String alias = string(params.get(0), "Variable name");
                 if (alias.equals("this") && environment.ownerClass == null) throw new IllegalArgumentException("this is only available inside a class");
                 if (environment.findLexicalVariable(alias) == null && implicitField(alias, environment) != null) {
-                    JsonObject member = node("member", variable("this"), new JsonPrimitive(alias)); copyPosition(source, member);
+                    JsonObject member = node("member", variable("this"), new JsonPrimitive(alias)); copyPosition(source, member, environment);
                     return compileInstruction(member, environment);
                 }
                 result.put("v", environment.getVariable(alias).slot);
@@ -619,6 +698,10 @@ public class Compiler {
                     throw new IllegalArgumentException("Function frame exceeds " + MAX_VARIABLE_SLOTS + " variable slots");
                 LogicVariable variable = environment.define(
                         alias, environment.counter.next++, declaredType);
+                // Objects and buffers declared for their construction and destruction are exempt.
+                if (!isOwnedValue(declaredType) && !isTypeParameter(declaredType) && !alias.equals("this")
+                        && !alias.startsWith("_") && !alias.startsWith("#") && !alias.startsWith("<"))
+                    variable.declaration = source;
                 result.put("c", ExecOpcodes.code("vd")); result.put("v", variable.slot);
                 if (initializer != null) result.put("val", initializer);
                 if (declaredType != AsTypes.ANY_VALUE) result.put("declared-type", abiType(declaredType));
@@ -630,7 +713,7 @@ public class Compiler {
                 if (environment.findLexicalVariable(alias) == null && implicitField(alias, environment) != null) {
                     if (source.has("compound")) throw new IllegalArgumentException("Compound assignment to a member is not supported");
                     JsonObject assignment = node("member-set", node("member", variable("this"), new JsonPrimitive(alias)), params.get(1));
-                    copyPosition(source, assignment); return compileInstruction(assignment, environment);
+                    copyPosition(source, assignment, environment); return compileInstruction(assignment, environment);
                 }
                 LogicVariable variable = environment.getVariable(alias);
                 rejectVoidValue("Assignment to " + alias, params.get(1), environment);
@@ -647,12 +730,12 @@ public class Compiler {
                 if (params.get(0).isJsonObject() && isControl(params.get(0).getAsJsonObject())) {
                     JsonObject target = params.get(0).getAsJsonObject(); String operation = target.get("call").getAsString();
                     if (operation.equals("member")) {
-                        JsonObject assignment = node("member-set", target, params.get(1)); copyPosition(source, assignment);
+                        JsonObject assignment = node("member-set", target, params.get(1)); copyPosition(source, assignment, environment);
                         return compileInstruction(assignment, environment);
                     }
                     if (operation.equals("var")) {
                         arity("var", parameters(target), 1, 1);
-                        JsonObject assignment = node("varset", parameters(target).get(0), params.get(1)); copyPosition(source, assignment);
+                        JsonObject assignment = node("varset", parameters(target).get(0), params.get(1)); copyPosition(source, assignment, environment);
                         return compileInstruction(assignment, environment);
                     }
                 }
@@ -734,7 +817,7 @@ public class Compiler {
                 validateConstruction(info,environment,new HashSet<>());
                 JsonObject construct = ownedCall(factoryName(info,false),args,info,environment);
                 // The generated call is compiled as a nested expression; keep the declaration's location.
-                copyPosition(source, construct);
+                copyPosition(source, construct, environment);
                 JsonObject definition = node("vardef", new JsonPrimitive(alias), construct);
                 definition.addProperty("declared-type", info.name + "*");
                 return compileInstruction(definition, environment);
@@ -882,7 +965,7 @@ public class Compiler {
                     // A dynamic value still needs the same numeric check as a known operand.
                     // Multiplication by int one preserves numeric type, signed zero and evaluation count.
                     if (expressionType(params.get(0), environment) == AsTypes.ANY_VALUE) {
-                        JsonObject product = node("multiply", params.get(0), new JsonPrimitive(1)); copyPosition(source, product);
+                        JsonObject product = node("multiply", params.get(0), new JsonPrimitive(1)); copyPosition(source, product, environment);
                         return compileInstruction(product, environment);
                     }
                     return compileExpression(params.get(0), environment);
@@ -915,11 +998,12 @@ public class Compiler {
                 // Subtraction checks numeric values or address offsets even for dynamic variables.
                 JsonObject assignment = node("varset", targetParams.get(0), node("minus", target,
                         new JsonPrimitive(call.equals("increment") ? -1 : 1)));
-                assignment.addProperty("compound", true); copyPosition(source, assignment);
+                assignment.addProperty("compound", true); copyPosition(source, assignment, environment);
                 return compileExpression(assignment, environment);
             }
             case "for" -> {
                 arity(call, params, 4, 4);
+                warnAssignmentCondition(params.get(1), environment);
                 // Keep the initializer in a dedicated enclosing scope. Every next
                 // iteration runs the step before testing the condition; continue
                 // reaches that path after the previous body's scope has cleaned up.
@@ -929,7 +1013,7 @@ public class Compiler {
                 // The loop test reports at the condition itself, or at the for statement for a literal condition.
                 JsonElement condition = params.get(1).isJsonObject() && params.get(1).getAsJsonObject().has("_line") ? params.get(1) : source;
                 JsonObject negated = node("not", params.get(1)), exit = node("if", negated, node("break"));
-                copyPosition(condition, negated); copyPosition(condition, exit);
+                copyPosition(condition, negated, environment); copyPosition(condition, exit, environment);
                 JsonArray iteration = array(
                         node("if", variable(first), node("varset", new JsonPrimitive(first), new JsonPrimitive(false)), params.get(2)),
                         exit, array(params.get(3)));
@@ -938,13 +1022,18 @@ public class Compiler {
             }
             case "if", "while" -> {
                 arity(call, params, 2, call.equals("if") ? 3 : 2);
+                warnAssignmentCondition(params.get(0), environment);
                 rejectVoidValue(call + " condition", params.get(0), environment);
                 requireConditionOrUnknown(call + " condition", params.get(0), environment);
                 result.put("c", ExecOpcodes.code(call.equals("if") ? "if" : "wi"));
                 result.put("v", compileExpression(params.get(0), environment));
                 LogicEnvironment body = call.equals("while") ? environment.loopChild() : environment.child();
-                result.put("val", compileExpression(params.get(1), body));
-                if (params.size() == 3) result.put("else", compileExpression(params.get(2), environment.child()));
+                // A body without braces, e.g. "if (c) int x = f();", still ends its own scope.
+                result.put("val", compileExpression(params.get(1), body)); finishScope(body);
+                if (params.size() == 3) {
+                    LogicEnvironment otherwise = environment.child();
+                    result.put("else", compileExpression(params.get(2), otherwise)); finishScope(otherwise);
+                }
             }
             default -> throw new IllegalArgumentException("Unknown control operation: " + call);
         }
@@ -1706,7 +1795,7 @@ public class Compiler {
             int id = nextId.get(); String name = info.destructor;
             if (global.abs.containsKey(name)) throw new IllegalArgumentException("Reserved compiler function: " + name);
             JsonObject metadata = new JsonObject(); metadata.addProperty("owner-class", info.name); metadata.addProperty("function-kind", "destructor");
-            copyPosition(info.source, metadata);
+            copyPosition(info.source, metadata, global);
             JsonArray names = new JsonArray(); names.add("this"); metadata.add("param", names);
             List<Integer> types = List.of(info.pointerType);
             functions.add(new Function(id, name, AsTypes.VOID_VALUE, types, metadata, new JsonArray()));
@@ -1721,7 +1810,7 @@ public class Compiler {
                 String name = literal ? info.name + VALUE_FACTORY : factoryName(info, manual);
                 if (global.abs.containsKey(name)) throw new IllegalArgumentException("Reserved compiler function: " + name);
                 if (literal) info.valueFactory = id; else if (manual) info.manualFactory = id; else info.scopedFactory = id;
-                JsonObject metadata = new JsonObject(); metadata.addProperty("owner-class", info.name); copyPosition(info.source, metadata);
+                JsonObject metadata = new JsonObject(); metadata.addProperty("owner-class", info.name); copyPosition(info.source, metadata, global);
                 String storage = literal ? "#object" : "this";
                 JsonArray names = new JsonArray(), ctorArgs = new JsonArray();
                 ctorArgs.add(literal ? internal(global, "#address-of", variable(storage)) : variable(storage));
@@ -1746,7 +1835,7 @@ public class Compiler {
             }
             if(constructor.paramTypes().size()==1) {
                 int id=nextId.get();String name=info.name+PLACEMENT_FACTORY;
-                JsonObject metadata=new JsonObject();metadata.addProperty("owner-class",info.name);copyPosition(info.source,metadata);metadata.add("param",array(new JsonPrimitive("this")));
+                JsonObject metadata=new JsonObject();metadata.addProperty("owner-class",info.name);copyPosition(info.source,metadata,global);metadata.add("param",array(new JsonPrimitive("this")));
                 JsonArray body=new JsonArray();body.add(callNode(info.constructor,array(variable("this"))));
                 body.add(internal(global,"#bind",variable("this"),info.cleanupDestructor==null?JsonNull.INSTANCE:new JsonPrimitive(info.cleanupDestructor),new JsonPrimitive(false)));
                 functions.add(new Function(id,name,AsTypes.VOID_VALUE,List.of(info.pointerType),metadata,body));
@@ -1804,13 +1893,13 @@ public class Compiler {
                 boolean genericDefault=value==null&&isTypeParameter(field.type());
                 if(value==null) {
                     value=genericDefault?internal(global,"#context-default",new JsonPrimitive(field.type())):isBuffer(field.type())?node("buffer-new",new JsonPrimitive(typeName(BUFFER_ELEMENTS.get().get(field.type())))):node("object-value",new JsonPrimitive(CLASS_LAYOUTS.get().get(field.type()).name));
-                    if(value.isJsonObject())position(value.getAsJsonObject(),field);
+                    if(value.isJsonObject())position(value.getAsJsonObject(),field,global);
                 }
                 JsonObject assignment=node("member-set",node("member",variable("this"),new JsonPrimitive(field.name())),value);
-                position(assignment,field);
+                position(assignment,field,global);
                 JsonElement initialize=genericDefault?node("if",node("cmp",internal(global,"#context-abi",new JsonPrimitive(field.type())),new JsonPrimitive(8)),assignment):assignment;
                 JsonObject initializer=internal(global,"#field-initialize",initialize);
-                position(initializer,field);
+                position(initializer,field,global);
                 guarded.add(initializer);
             }
         }
@@ -1831,7 +1920,7 @@ public class Compiler {
         JsonArray arguments = new JsonArray(); arguments.add(variable("this"));
         if (metadata.has("base-args")) metadata.getAsJsonArray("base-args").forEach(arguments::add);
         JsonObject baseCall = callNode(info.base.constructor, arguments);
-        copyPosition(metadata, baseCall);
+        copyPosition(metadata, baseCall, global);
         JsonArray construction = new JsonArray(); construction.add(internal(global, "#check-this"));
         if (info.base.cleanupDestructor == null) { construction.add(baseCall); construction.add(guarded); }
         else {

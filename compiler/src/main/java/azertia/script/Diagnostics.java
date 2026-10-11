@@ -20,9 +20,21 @@ import java.util.*;
  * positioned AST node or source token. Any other exception is unexpected: for a
  * program compiled from source it is an internal compiler error, while for an
  * AST supplied as JSON it is reported as malformed input.
+ *
+ * <p>Warnings are listed in {@link #WARNINGS}. They never stop a compilation
+ * unless {@link #warningsAsErrors(boolean)} reports them as errors. An option for
+ * one warning overrides {@link #allWarnings()} in either order, and
+ * {@link #noWarnings()} suppresses every warning.
  */
 public final class Diagnostics {
     public static final int DEFAULT_MAX_ERRORS = 20;
+    /** A compiler warning: its name as in {@code -W<name>}, whether it is reported by default, and what it reports. */
+    public record Warning(String name, boolean enabledByDefault, String description) {}
+    /** Every warning the compiler reports. */
+    public static final List<Warning> WARNINGS = List.of(
+            new Warning("assign-in-condition", true, "an assignment used directly as an if, while or for condition"),
+            new Warning("unreachable-code", true, "a statement after return, break, continue or another statement that never completes"),
+            new Warning("unused-variable", false, "a local variable that is declared but never used"));
     private enum Stage { NEW, PARSING, PARSED, COMPILING }
 
     private final List<Diagnostic> diagnostics = new ArrayList<>();
@@ -30,6 +42,9 @@ public final class Diagnostics {
     private String defaultFile;
     private int maxErrors = DEFAULT_MAX_ERRORS, errors, phaseStart;
     private Stage stage = Stage.NEW;
+    /** Warnings enabled or disabled one by one; they override {@link #allWarnings}. */
+    private final Map<String,Boolean> warningChoices = new HashMap<>();
+    private boolean allWarnings, noWarnings, warningsAsErrors;
     private SourceMap sources;
     /** The first unexpected exception, kept as the cause of the final failure. */
     private Throwable unexpected;
@@ -59,6 +74,29 @@ public final class Diagnostics {
     public int maxErrors() { return maxErrors; }
     /** Whether the compiler continues after an error to report further ones. */
     public boolean recovering() { return maxErrors != 1; }
+
+    /** Whether the compiler reports a warning of this name. */
+    public static boolean isWarning(String name) { return WARNINGS.stream().anyMatch(warning -> warning.name().equals(name)); }
+    /** Enables or disables one warning, like {@code -W<name>} and {@code -Wno-<name>}; the last choice for a warning wins. */
+    public Diagnostics warning(String name, boolean enabled) {
+        if (!isWarning(name)) throw new IllegalArgumentException("Unknown warning: " + name);
+        warningChoices.put(name, enabled); return this;
+    }
+    /** Enables every warning that is not disabled by name, like {@code -Wall}. */
+    public Diagnostics allWarnings() { allWarnings = true; return this; }
+    /** Suppresses every warning, like {@code -w}, whatever the other warning options say. */
+    public Diagnostics noWarnings() { noWarnings = true; return this; }
+    /** Reports enabled warnings as errors, like {@code -Werror}, so that they fail the compilation. */
+    public Diagnostics warningsAsErrors(boolean enabled) { warningsAsErrors = enabled; return this; }
+    public boolean warningsAsErrors() { return warningsAsErrors; }
+    /** Whether a warning is reported under the current options. */
+    public boolean warningEnabled(String name) {
+        Warning warning = WARNINGS.stream().filter(candidate -> candidate.name().equals(name)).findFirst()
+                .orElseThrow(() -> new IllegalArgumentException("Unknown warning: " + name));
+        if (noWarnings) return false;
+        Boolean chosen = warningChoices.get(name);
+        return chosen != null ? chosen : allWarnings || warning.enabledByDefault();
+    }
 
     /** Marks the start of parsing; a collector parses at most once. */
     void startParse() {
@@ -114,6 +152,16 @@ public final class Diagnostics {
         }
         if (failure.fatal() || !recovering()) throw failure();
     }
+    /**
+     * Records a warning when it is enabled. With {@link #warningsAsErrors(boolean)} it
+     * is recorded as an error instead, which fails the compilation at the end of the
+     * phase, or at once when recovery is off or the error limit is exceeded.
+     */
+    void warn(Diagnostic warning) {
+        if (warning.severity() != Diagnostic.Severity.WARNING || !warningEnabled(warning.code())) return;
+        if (warningsAsErrors) { report(new CompileException(warning.asError())); return; }
+        if (!reported.contains(warning.format())) add(warning);
+    }
     /** Ends a phase: throws the failure when any error was reported. */
     void checkpoint() {
         sortPhase();
@@ -133,6 +181,14 @@ public final class Diagnostics {
     /** Every recorded diagnostic in report order. */
     public List<Diagnostic> diagnostics() { return List.copyOf(diagnostics); }
     public int errorCount() { return errors; }
+    /** Recorded warnings, not counting those reported as errors. */
+    public int warningCount() {
+        return (int) diagnostics.stream().filter(diagnostic -> diagnostic.severity() == Diagnostic.Severity.WARNING).count();
+    }
+    /** The recorded warnings in report order. */
+    public List<Diagnostic> warnings() {
+        return diagnostics.stream().filter(diagnostic -> diagnostic.severity() == Diagnostic.Severity.WARNING).toList();
+    }
 
     private void add(Diagnostic diagnostic) {
         reported.add(diagnostic.format()); diagnostics.add(diagnostic);

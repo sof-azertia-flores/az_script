@@ -17,7 +17,7 @@ python3 tools/build_and_test.py --offline
 
 离线构建使用本机已有依赖缓存；首次缺少依赖时去掉 `--offline`。
 
-CLI 的 `compile-json` 接受原有的可读代码树；`pack` 和 `unpack` 打包、解包文件。所有路径由参数传入，选项可以写在输入路径之前或之后；`--` 结束选项，其后的路径可以以 `-` 开头。源码中的 include 总是相对于当前被包含文件的目录解析。编译输出不会覆盖输入源码。编译错误的格式见[诊断](#诊断)。
+CLI 的 `compile-json` 接受原有的可读代码树；`pack` 和 `unpack` 打包、解包文件。所有路径由参数传入，选项可以写在输入路径之前或之后；`--` 结束选项，其后的路径可以以 `-` 开头。源码中的 include 总是相对于当前被包含文件的目录解析。编译输出不会覆盖输入源码。编译错误和警告的格式见[诊断](#诊断)。
 
 ```java
 var script = new azertia.script.GeneraterJson.AzScript();
@@ -26,6 +26,7 @@ try {
     script.execute(java.nio.file.Path.of("example.azs"), diagnostics);
     var jsonTree = script.toObj();
     var instructions = azertia.script.Compiler.compile(jsonTree, diagnostics);
+    diagnostics.warnings().forEach(warning -> System.err.println(warning.format()));
     byte[] executable = instructions.toValue().toAbdFormat();
 } catch (azertia.script.CompileException error) {
     error.diagnostics().forEach(diagnostic -> System.err.println(diagnostic.format()));
@@ -346,7 +347,25 @@ Error: compilation failed: 1 error
 
 `compile-json` 先检查 AST 的结构：必需字段、编译器读取的 JSON 类型、位置、`sources` 表以及数值范围。每处违例都针对 JSON 文件报告并给出 JSON 指针，例如 `tree.json: error: Malformed script JSON at /body/fff/_funcfff0000/metadata/position: expected an integer, got "abc"`。此类 AST 引起的意外故障报告为最近带位置节点处的 `Malformed script JSON near main.azs:3:10`，退出码为 1；`--debug-compiler` 输出底层异常。
 
-Java 调用方得到同样诊断的 `azertia.script.CompileException`，它是 `IllegalArgumentException`，`diagnostics()` 列出各条诊断，消息即其文本，`internal()` 表示是否为内部编译器错误。`AzScript.execute(...)` 与 `Compiler.compile(...)` 默认最多报告 20 个错误。请像本文开头的示例那样向两个步骤传入同一个 `azertia.script.Diagnostics`：只有这样，已解析程序上的意外故障才归为内部编译器错误；以其他实例编译的 AST 按外部提供的 JSON 处理。修改上限时配置该实例，例如 `new Diagnostics().maxErrors(0)`。一个实例只服务一次编译；`Diagnostics.failFast()` 在第一个错误处停止。通过 `Compiler.compileExpression` 单独编译的表达式在第一个错误处停止。
+Java 调用方得到同样诊断的 `azertia.script.CompileException`，它是 `IllegalArgumentException`，`diagnostics()` 列出各条诊断，消息即其文本，`internal()` 表示是否为内部编译器错误。`AzScript.execute(...)` 与 `Compiler.compile(...)` 默认最多报告 20 个错误。请像本文开头的示例那样向两个步骤传入同一个 `azertia.script.Diagnostics`：只有这样，已解析程序上的意外故障才归为内部编译器错误；以其他实例编译的 AST 按外部提供的 JSON 处理。修改上限或[警告](#警告)时配置该实例，例如 `new Diagnostics().maxErrors(0)`。一个实例只服务一次编译；`Diagnostics.failFast()` 在第一个错误处停止。通过 `Compiler.compileExpression` 单独编译的表达式在第一个错误处停止。
+
+#### 警告
+
+警告指出能够编译、但很可能有误的代码。其格式与错误相同，严重级别为 `warning:`，末尾给出控制它的选项；警告从不改变编译产物：
+
+```text
+main.azs:4:9: warning: in function main: assignment used as a condition; use '==' to compare, or wrap the assignment in parentheses [-Wassign-in-condition]
+```
+
+| 警告 | 默认 | 报告对象 |
+|---|---|---|
+| `assign-in-condition` | 开启 | 直接写作 `if`、`while` 或 `for` 条件的普通 `=` 赋值，例如 `if (done = check())`，位置为其 `=`。确需赋值时加括号表明意图：`if ((done = check()))`。 |
+| `unreachable-code` | 开启 | `return`、`break`、`continue`、各分支都会离开的 `if`/`else`，或不含 `break` 的 `while (true)`/`for (;;)` 循环之后的第一条语句；每个块只报告一次。与错误相同，赋值或 `++`/`--` 语句的位置为其运算符。 |
+| `unused-variable` | 关闭 | 声明后从未使用的局部变量；读取或赋值都算使用。参数、以 `_` 开头的名字，以及为构造和析构而声明的对象（`C c;`、`C * p(args);`、buffer 和类型参数的值）不在此列。 |
+
+`-Wall` 开启全部警告，`-W<名称>` 开启、`-Wno-<名称>` 关闭单个警告；指名某个警告的选项无论写在 `-Wall` 之前还是之后都优先，同一警告以最后一个选项为准。`-w` 关闭全部警告。`-Werror` 把已开启的警告作为错误报告，例如 `main.azs:4:9: error: in function main: ... [-Werror=assign-in-condition]`，编译随之失败。未知的警告名称属于用法错误（`Error: Unknown warning option: -Wxyz`）。
+
+编译成功时警告写到标准错误，退出码为 0。编译失败时警告与错误按源码顺序一并列出，并计入汇总行，例如 `Error: compilation failed: 1 error, 1 warning`。这些检查在 AST 上进行，所以 `compile` 与 `compile-json` 报告相同的警告；没有源码位置的 AST 节点（例如手写 AST 中的节点）和编译器生成的代码从不产生警告。Java 调用方配置 `Diagnostics` 实例，例如 `new Diagnostics().allWarnings().warning("unreachable-code", false).warningsAsErrors(true)`，并在编译后读取 `diagnostics.warnings()`；`Diagnostics.WARNINGS` 列出全部警告。
 
 ## 泛型
 
