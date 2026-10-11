@@ -28,6 +28,8 @@ run.cmd examples\hello.exec.abd
 
 默认在源文件旁边生成三份产物：`hello.exec.abd` 可执行文件、`hello.ast.json` 可读语法树和 `hello.exec.json` 降级后的指令树。`-o` 指定 ABD 输出位置，`--ast` 和 `--exec-json` 可分别指定两个 JSON 的位置。`hello.azs` 输出 `Hello, AzScript!` 和主函数返回值 `42`。解释器将非 `void` 返回值打印到标准输出，成功执行的进程退出码为 `0`，并不把脚本的整数返回值当作进程退出码。执行失败返回非零值并向标准错误输出诊断。
 
+编译错误以 `文件:行:列: error: 消息` 写到标准错误，位置指向原始文件，包括被包含的头文件和宏的使用位置；随后的 `note:` 行给出 include 链。编译失败时最后输出 `Error: compilation failed: 1 error`，退出码为 `1`，不生成任何产物。选项可以写在源文件路径之前或之后；`--` 结束选项，用于以 `-` 开头的源文件路径。格式详见[语言说明](LANGUAGE.md#诊断)。
+
 使用 `-o output/demo.abd` 或 `-o output/demo.exec.abd` 时，两个 JSON 默认分别为 `output/demo.ast.json` 和 `output/demo.exec.json`；显式 `--ast`、`--exec-json` 各自覆盖默认位置。
 
 常规导出包含 `runtime/` 下的 Java 运行环境，编译脚本优先使用它；若导出时选择不带运行环境，需要安装 Java 17 或更新版本，脚本通过 `JAVA_HOME` 或 `PATH` 查找 Java。使用编译器不需要 Gradle、源码目录或网络下载。原生解释器不依赖 Java。

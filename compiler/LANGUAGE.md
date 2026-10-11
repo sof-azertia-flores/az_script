@@ -17,14 +17,18 @@ python3 tools/build_and_test.py --offline
 
 离线构建使用本机已有依赖缓存；首次缺少依赖时去掉 `--offline`。
 
-CLI 的 `compile-json` 接受原有的可读代码树；`pack` 和 `unpack` 打包、解包文件。所有路径由参数传入。源码中的 include 总是相对于当前被包含文件的目录解析。编译输出不会覆盖输入源码。
+CLI 的 `compile-json` 接受原有的可读代码树；`pack` 和 `unpack` 打包、解包文件。所有路径由参数传入，选项可以写在输入路径之前或之后；`--` 结束选项，其后的路径可以以 `-` 开头。源码中的 include 总是相对于当前被包含文件的目录解析。编译输出不会覆盖输入源码。编译错误的格式见[诊断](#诊断)。
 
 ```java
 var script = new azertia.script.GeneraterJson.AzScript();
-script.execute(java.nio.file.Path.of("example.azs"));
-var jsonTree = script.toObj();
-var instructions = azertia.script.Compiler.compile(jsonTree);
-byte[] executable = instructions.toValue().toAbdFormat();
+try {
+    script.execute(java.nio.file.Path.of("example.azs"));
+    var jsonTree = script.toObj();
+    var instructions = azertia.script.Compiler.compile(jsonTree);
+    byte[] executable = instructions.toValue().toAbdFormat();
+} catch (azertia.script.CompileException error) {
+    error.diagnostics().forEach(diagnostic -> System.err.println(diagnostic.format()));
+}
 ```
 
 `execute(String)` 也可使用，其 include 基目录是进程工作目录。每次 execute 清空上一次程序的函数、预处理属性和元数据。编译器实例不应由多个线程同时使用。
@@ -310,9 +314,28 @@ extern int host_add(int, int):0xccf0001;
 
 源文件开头的 UTF-8 BOM 会被忽略，不影响首行指令。`return`、`if`、`else`、`while`、`for`、`break`、`continue`、`def`、`var`、`class`、`new`、`this`、`null`、`delete`、`extern`、`public/private/protected/virtual`、所有类型名以及 `true/false` 是保留字，不能声明为函数、参数、变量、`#gvar`、`#define` 或 `extern` 的名字。
 
-嵌套上限以 ABD 的 128 层容器嵌套为准：函数体从第 4 层开始，每个二元/一元运算、每个调用参数、每条语句和每个块各占一层，所以一个表达式大约可以串联 120 个运算符，或嵌套约 60 层块。超限时编译器报告所在函数和行列，例如 `In function main:2:8: Expression nesting exceeds the ABD limit of 128 levels`。泛型类型及指针的类型表达式嵌套最多 64 层，手写 AST 中的类型字符串也遵守此限制。语法递归和 JSON 容器另有 320 层防护上限，用于保护宿主；循环引用的 AST 会提前拒绝。错误后同一进程可以继续编译其他程序。
+嵌套上限以 ABD 的 128 层容器嵌套为准：函数体从第 4 层开始，每个二元/一元运算、每个调用参数、每条语句和每个块各占一层，所以一个表达式大约可以串联 120 个运算符，或嵌套约 60 层块。超限时编译器报告文件、行列和所在函数，例如 `main.azs:2:8: error: in function main: Expression nesting exceeds the ABD limit of 128 levels; split the expression or statement`。泛型类型及指针的类型表达式嵌套最多 64 层，手写 AST 中的类型字符串也遵守此限制。语法递归和 JSON 容器另有 320 层防护上限，用于保护宿主，超限时报告最内层所在的语句或字段，或 JSON 行列；循环引用的 AST 会提前拒绝。错误后同一进程可以继续编译其他程序。
 
-语法错误包含行列，符号错误包含函数名及行列。经过 include 或宏展开后，语法诊断的行列目前对应合并后的源码，并非精确映射回每个 include 文件；预处理本身的错误另包含处理目录与行号。
+### 诊断
+
+编译错误采用 gcc/clang 格式 `文件:行:列: error: [in 上下文: ]消息`，输出到标准错误。经过 `#include` 和宏展开后，位置仍指向原始文件、行和列：
+
+```text
+inc/lib.azs:6:3: error: in function broken: Initializer for s expected string, got int
+main.azs:2:1: note: in file included from here
+Error: compilation failed: 1 error
+```
+
+- 被包含文件中的错误之后，每层外围 `#include` 各有一行 `note: in file included from here`，由内向外排列。
+- 宏展开产生的记号上的词法或语法错误报告在宏的使用位置，随后一行 `note: in expansion of macro 'NAME' defined here` 指向其 `#define`；`#define` 位于另一文件时，还附上该文件的 include 链。展开代码中的语义错误报告在宏的使用位置，不附此注释。展开之后的记号保持各自的列号。
+- 预处理错误指向指令的 `#`；未闭合的条件报告在其起始指令，未结束的注释报告在注释开始处。找不到 include 文件时提示 `Cannot open include file "x.azs": file not found`；include 循环会列出相关文件。
+- 上下文指出外围声明：`function main`、`function C::m`、构造与析构函数的 `function C::C` 和 `function C::~C`、`function C::operator[]`、`initializer of class P`、`class P` 或 `global g`。没有源码位置的错误（例如手写 AST 的格式错误）只给出输入文件名：`compile` 为源文件，`compile-json` 为 JSON 文件。
+- 从源码编译时，重复的函数、类、函数 ID 以及冲突的 extern 声明附带 `previous definition is here` 或 `previous declaration is here` 注释；同一头文件被读取两次造成的重复定义还会提示添加 include guard。函数 ID 按 8 位十六进制显示，例如 `0x0fff0005`。
+- 非 void 函数可能不经 `return` 走到末尾时，错误报告在其结束的右花括号处。
+
+文件名对主文件使用其文件名，对被包含文件使用相对主文件目录、以 `/` 分隔的路径；`execute(String)` 使用 `<source>`，单独编译的表达式使用 `<expression>`。这些名称保存在 AST 的 `sources` 表中，所以同一程序的 `compile` 与 `compile-json` 输出完全相同的带位置诊断。`compile-json` 将格式错误的 JSON 报告在其行列，没有 `sources` 表的 AST 以 JSON 文件名命名。
+
+编译在第一个错误处停止。CLI 随后输出汇总行 `Error: compilation failed: 1 error`，不写出任何输出文件，退出码为 1；未知选项等用法错误输出 `Error: 消息`。Java 调用方得到同样诊断的 `azertia.script.CompileException`，它是 `IllegalArgumentException`，`diagnostics()` 列出各条诊断，消息即其文本。
 
 ## 泛型
 
@@ -419,7 +442,9 @@ int functionId(int ns, int position) {
 
 ## AST 与 ABD 契约
 
-可读 AST 保持 `metadata/ext/abstract/global-variable/body` 结构，并为带签名的宿主函数增加 `extern-signatures`。类程序额外保存类定义、字段顺序和成员表达式等编译信息；`compile-json` 会重新执行类型检查与降级。AST 还保存模块 hint、assume、外部声明、定义名称与实际定义编号；调用绑定与定义位置分开，支持完全相同的 ABD 往返。`abstract` 是 extern 优先的源码名称绑定：有 extern 时保存声明 ID，否则保存定义 ID；hint 库的本地定义仍使用 0000 占位，实际调用的 self-assume 地址在降级时生成。函数定义的独立位置由 `body` 的 namespace 和 `metadata.position/name` 保存；每个签名另保存 `return-type` 与 `param-types`。表达式对象有 `t: "ctrl" | "call"`、`call`、`param`，块是数组；`_line/_column` 仅用于诊断，不写入 ABD 指令。
+可读 AST 保持 `metadata/ext/abstract/global-variable/body` 结构，并为带签名的宿主函数增加 `extern-signatures`。类程序额外保存类定义、字段顺序和成员表达式等编译信息；`compile-json` 会重新执行类型检查与降级。AST 还保存模块 hint、assume、外部声明、定义名称与实际定义编号；调用绑定与定义位置分开，支持完全相同的 ABD 往返。`abstract` 是 extern 优先的源码名称绑定：有 extern 时保存声明 ID，否则保存定义 ID；hint 库的本地定义仍使用 0000 占位，实际调用的 self-assume 地址在降级时生成。函数定义的独立位置由 `body` 的 namespace 和 `metadata.position/name` 保存；每个签名另保存 `return-type` 与 `param-types`。表达式对象有 `t: "ctrl" | "call"`、`call`、`param`，块是数组。
+
+根节点的 `sources` 表对文件的每次包含各有一项，例如 `{"name": "inc/lib.azs", "included-from": {"source": 0, "line": 2, "column": 1}}`；第 0 项是主文件，include 总是指向更早的项。表达式对象、函数元数据、类、字段和 extern 签名带有原始文件中的 `_line/_column`，以及所在 `sources` 项的下标 `_file`（为 0 时省略）。函数元数据还以 `_end_line/_end_column` 记录结束的右花括号，加括号的赋值带有 `_parenthesized: true`。字面值和块不带位置，诊断使用最近的带位置祖先。这些字段仅用于诊断，不写入 ABD 指令。compile-json 输入中的 `sources` 可以省略，此时所有位置都属于以输入文件命名的同一文件。
 
 可读类 AST 保存 `operators` 映射及方法的 `operator-kind`，下标读写和后缀调用使用 `index`、`index-set`、`invoke` 节点，空 buffer 使用 `buffer-new`。compile-json 重新检查类型和降级，保持 ABD 字节一致。
 

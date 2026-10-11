@@ -28,6 +28,8 @@ run.cmd examples\hello.exec.abd
 
 Three outputs default beside the source: hello.exec.abd executable, hello.ast.json readable syntax tree, and hello.exec.json lowered instructions. -o chooses ABD output; --ast and --exec-json override JSON paths. Hello prints `Hello, AzScript!` and main result 42. The interpreter prints nonvoid results to stdout; successful process exit is 0, not the script's integer return value. Failure returns nonzero and diagnostics go to stderr.
 
+Compile errors go to stderr as `file:line:column: error: message`, positioned in the original file, including included headers and macro uses; following `note:` lines give the include chain. A failed compilation ends with `Error: compilation failed: 1 error`, exits with status 1, and writes no outputs. Options may precede or follow the source path; `--` ends the options, for a source path that begins with `-`. See [the language guide](LANGUAGE.en.md#diagnostics) for the format.
+
 With `-o output/demo.abd` or `-o output/demo.exec.abd`, JSON defaults are output/demo.ast.json and output/demo.exec.json, individually overridden by explicit flags.
 
 Compiler launchers prefer bundled runtime/. Without it, install Java 17+ and use JAVA_HOME or PATH. Compilation needs no Gradle, source checkout, or downloads. The native interpreter needs no Java.

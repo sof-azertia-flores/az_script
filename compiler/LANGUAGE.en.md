@@ -17,14 +17,18 @@ python3 tools/build_and_test.py --offline
 
 Offline builds use locally cached dependencies. Omit `--offline` if initial dependencies are missing.
 
-The CLI's `compile-json` accepts the readable code tree; `pack` and `unpack` archive and extract files. All paths are arguments. Includes resolve relative to the file containing them. Compiler output never overwrites source input.
+The CLI's `compile-json` accepts the readable code tree; `pack` and `unpack` archive and extract files. All paths are arguments, and options may precede or follow the input path; `--` ends the options, so a following path may begin with `-`. Includes resolve relative to the file containing them. Compiler output never overwrites source input. Compile errors are reported as described in [Diagnostics](#diagnostics).
 
 ```java
 var script = new azertia.script.GeneraterJson.AzScript();
-script.execute(java.nio.file.Path.of("example.azs"));
-var jsonTree = script.toObj();
-var instructions = azertia.script.Compiler.compile(jsonTree);
-byte[] executable = instructions.toValue().toAbdFormat();
+try {
+    script.execute(java.nio.file.Path.of("example.azs"));
+    var jsonTree = script.toObj();
+    var instructions = azertia.script.Compiler.compile(jsonTree);
+    byte[] executable = instructions.toValue().toAbdFormat();
+} catch (azertia.script.CompileException error) {
+    error.diagnostics().forEach(diagnostic -> System.err.println(diagnostic.format()));
+}
 ```
 
 `execute(String)` is also available, using the process working directory as its include base. Each execution clears the previous program's functions, preprocessor attributes, and metadata. Do not share a compiler instance concurrently between threads.
@@ -308,9 +312,28 @@ Setattr affects conditions without substitution. Define substitutes whole identi
 
 A leading UTF-8 BOM is ignored. Reserved words include return, if, else, while, for, break, continue, def, var, class, new, this, null, delete, extern, public/private/protected/virtual, all type names, and true/false; none may name functions, parameters, variables, globals, macros, or externs.
 
-ABD's 128-level container bound governs nesting. Function bodies start at level 4; expression nodes, arguments, statements, and blocks consume levels, allowing roughly 120 chained operators or 60 nested blocks. Excess depth reports function and line/column, e.g. `In function main:2:8: Expression nesting exceeds the ABD limit of 128 levels`. Generic and pointer type expressions have a separate 64-level nesting limit, including type strings in handwritten ASTs. Parser recursion and JSON containers have an additional 320-level guard; cyclic ASTs are rejected early. Compilation may continue with other programs in the same process after errors.
+ABD's 128-level container bound governs nesting. Function bodies start at level 4; expression nodes, arguments, statements, and blocks consume levels, allowing roughly 120 chained operators or 60 nested blocks. Excess depth reports the file, line/column and function, e.g. `main.azs:2:8: error: in function main: Expression nesting exceeds the ABD limit of 128 levels; split the expression or statement`. Generic and pointer type expressions have a separate 64-level nesting limit, including type strings in handwritten ASTs. Parser recursion and JSON containers have an additional 320-level guard, reported at the innermost enclosing statement or field, or at the JSON line/column; cyclic ASTs are rejected early. Compilation may continue with other programs in the same process after errors.
 
-Syntax errors include line/column; symbol errors also name the function. After includes/macros, syntax positions refer to combined source rather than exact original include locations. Preprocessor errors additionally identify the processing directory and line.
+### Diagnostics
+
+Compile errors use the gcc/clang layout `file:line:column: error: [in context: ]message` and go to stderr. Positions always name the original file, line, and column, also after `#include` and macro expansion:
+
+```text
+inc/lib.azs:6:3: error: in function broken: Initializer for s expected string, got int
+main.azs:2:1: note: in file included from here
+Error: compilation failed: 1 error
+```
+
+- An error inside an included file is followed by one `note: in file included from here` line per enclosing `#include`, innermost first.
+- A lexical or syntax error at a token produced by a macro is reported at the macro's use, followed by `note: in expansion of macro 'NAME' defined here` at its `#define` and, when the `#define` is in another file, that file's include chain. Semantic errors in expanded code are reported at the macro's use without this note. Tokens after an expansion keep their own columns.
+- Preprocessor errors point at the directive's `#`; an unclosed condition is reported at its opening directive and an unterminated comment where it starts. Missing includes read `Cannot open include file "x.azs": file not found`; include cycles list the files involved.
+- The context names the enclosing declaration: `function main`, `function C::m`, `function C::C` and `function C::~C` for constructors and destructors, `function C::operator[]`, `initializer of class P`, `class P`, or `global g`. Errors without a source position, such as a malformed AST field, name only the input file: the source for `compile`, the JSON file for `compile-json`.
+- When compiling from source, duplicate functions, classes, function IDs, and conflicting extern declarations add a `previous definition is here` or `previous declaration is here` note; a definition read twice from the same header adds an include-guard hint. Function IDs are printed as eight hexadecimal digits, e.g. `0x0fff0005`.
+- A function that can fall off its end without returning a value is reported at its closing brace.
+
+File names are the main file's name and include paths relative to the main file's directory, with `/` separators; `execute(String)` uses `<source>` and standalone expressions use `<expression>`. They are stored in the AST `sources` table, so `compile` and `compile-json` of the same program print identical positioned diagnostics. `compile-json` reports malformed JSON at its line and column and names an AST without a `sources` table after the JSON file.
+
+Compilation stops at the first error. The CLI then prints the summary `Error: compilation failed: 1 error`, writes no output files, and exits with status 1; usage errors such as an unknown option print `Error: message`. Java callers receive the same diagnostics as `azertia.script.CompileException`, an `IllegalArgumentException` whose `diagnostics()` lists them and whose message is their text.
 
 ## Generics
 
@@ -417,7 +440,9 @@ int functionId(int ns, int position) {
 
 ## AST and ABD contract
 
-Readable AST retains metadata/ext/abstract/global-variable/body, plus extern-signatures. Class programs retain definitions, ordered fields, member expressions, and other compile-time data; compile-json reruns checks/lowering. Hint, assumes, extern declarations, definition names, and actual definition numbers are retained for byte-identical roundtrips. Abstract maps source names with extern priority: declaration ID when present, otherwise definition ID. Hint definitions retain placeholder 0000; self-assume call addresses are produced during lowering. Independent definition positions live in body namespaces and metadata.position/name. Signatures store return-type and param-types. Expression objects use `t: "ctrl" | "call"`, call, param; blocks are arrays. _line/_column serve diagnostics only, never ABD instructions.
+Readable AST retains metadata/ext/abstract/global-variable/body, plus extern-signatures. Class programs retain definitions, ordered fields, member expressions, and other compile-time data; compile-json reruns checks/lowering. Hint, assumes, extern declarations, definition names, and actual definition numbers are retained for byte-identical roundtrips. Abstract maps source names with extern priority: declaration ID when present, otherwise definition ID. Hint definitions retain placeholder 0000; self-assume call addresses are produced during lowering. Independent definition positions live in body namespaces and metadata.position/name. Signatures store return-type and param-types. Expression objects use `t: "ctrl" | "call"`, call, param; blocks are arrays.
+
+The root `sources` table has one entry per inclusion of a file, `{"name": "inc/lib.azs", "included-from": {"source": 0, "line": 2, "column": 1}}`; entry 0 is the main file and an include always names an earlier entry. Expression objects, function metadata, classes, fields, and extern signatures carry `_line/_column` in their original file and `_file`, the index of their `sources` entry (omitted for 0). Function metadata also records the closing brace as `_end_line/_end_column`, and a parenthesized assignment carries `_parenthesized: true`. Literal values and blocks carry no position; diagnostics use the nearest positioned ancestor. These fields serve diagnostics only and never reach ABD instructions. `sources` is optional in compile-json input; without it, all positions belong to one file named after the input.
 
 Readable class ASTs retain an `operators` mapping and each method’s `operator-kind`. Index read/write and suffix invocation use `index`, `index-set`, and `invoke` nodes; empty buffers use `buffer-new`. Type checking and lowering rerun during compile-json, preserving byte-identical ABD output.
 

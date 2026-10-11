@@ -3,6 +3,7 @@ package azertia.script;
 import com.google.gson.*;
 import java.io.IOException;
 import java.math.BigDecimal;
+import java.nio.charset.CharacterCodingException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
 import java.util.*;
@@ -36,7 +37,10 @@ public class GeneraterJson {
         public Integer explicitPosition;
         public JsonArray baseArguments;
         public String baseInitializer;
-        public int line, column;
+        /** Position of the parameter list: source unit (index into {@code sources}), line and column. */
+        public int file, line, column;
+        /** Position of the closing brace, or 0 when unknown or in another unit. */
+        public int endLine, endColumn;
     }
     public static class ExternSignature {
         public String returnType;
@@ -44,6 +48,8 @@ public class GeneraterJson {
         public String ownerClass, functionKind, operatorKind;
         public JsonArray typeParameters = new JsonArray();
         public int id;
+        /** Position of the declaration's parameter list, or line 0 when unknown. */
+        public int file, line, column;
 
         ExternSignature(String returnType, List<String> paramTypes) {
             this.returnType = returnType;
@@ -63,23 +69,39 @@ public class GeneraterJson {
         public List<AzFunction> functions = new ArrayList<>();
         public JsonArray classes = new JsonArray();
         public Map<String,ExternSignature> externSignatures = new LinkedHashMap<>();
-        private final Map<String,String> macros = new LinkedHashMap<>();
-        private String sourceName = "<source>";
+        private final Map<String,Macro> macros = new LinkedHashMap<>();
+        /** Original locations of the program; the readable AST stores its units as {@code sources}. */
+        private SourceMap sourceMap = SourceMap.single("<source>");
+        /** Include labels are relative to this directory: the main file's or, for string sources, the working directory. */
+        private Path labelRoot;
+        /** Locations {unit, line, column} of #namespace/#namespace_hint, #assume_hint and #gvar directives. */
+        private int[] namespaceDirective;
+        private final Map<String,int[]> assumeDirectives = new LinkedHashMap<>(), globalDirectives = new LinkedHashMap<>();
 
+        /** Preprocesses a string source relative to the working directory and returns the combined text. */
         public String toPureSource(String src) throws IOException {
-            return preprocess(src, Path.of(".").toAbsolutePath(), new LinkedHashSet<>(), 0);
+            reset();
+            return preprocessMain(src, "<source>", Path.of(".").toAbsolutePath(), null);
         }
         public void execute(String src) throws IOException {
             reset();
-            parse(preprocess(src, Path.of(".").toAbsolutePath(), new LinkedHashSet<>(), 0));
+            parse(preprocessMain(src, "<source>", Path.of(".").toAbsolutePath(), null));
         }
         public void execute(Path source) throws IOException {
             reset();
-            Path real = source.toRealPath();
-            sourceName = real.toString();
-            Set<Path> includes = new LinkedHashSet<>();
-            includes.add(real);
-            parse(preprocess(Files.readString(real, StandardCharsets.UTF_8), real.getParent(), includes, 0));
+            Path real;
+            try { real = source.toRealPath(); }
+            catch (NoSuchFileException e) { throw new IllegalArgumentException("Cannot open source file \"" + source + "\": file not found"); }
+            Path typedName = source.getFileName();
+            Path realName = real.getFileName();
+            String name = typedName != null && !typedName.toString().isEmpty() ? typedName.toString()
+                    : realName != null ? realName.toString() : source.toString();
+            String text;
+            try { text = Files.readString(real, StandardCharsets.UTF_8); }
+            catch (CharacterCodingException e) {
+                throw new CompileException(Diagnostic.error(Diagnostic.Position.file(name), "Source file \"" + name + "\" is not valid UTF-8"));
+            }
+            parse(preprocessMain(text, name, real.getParent(), real));
         }
         private void reset() {
             name2Id.clear(); exts.clear(); globalVariables.clear(); functions.clear();
@@ -87,32 +109,54 @@ public class GeneraterJson {
             classes = new JsonArray();
             author = ""; functionNamespace = DEFAULT_FUNCTION_NAMESPACE;
             namespaceHint = ""; namespaceDeclared = false; assumeHints.clear();
-            sourceName = "<source>";
+            sourceMap = SourceMap.single("<source>"); labelRoot = null;
+            namespaceDirective = null; assumeDirectives.clear(); globalDirectives.clear();
         }
-        private void parse(String source) { new Parser(source, this).program(); }
-        private record Conditional(boolean parent, boolean condition, boolean inElse) {
+        private void parse(String source) { new Parser(source, sourceMap, this).program(); }
+        private record Conditional(boolean parent, boolean condition, boolean inElse, int line, int column) {
             boolean active() { return parent && (inElse ? !condition : condition); }
         }
-        private String preprocess(String src, Path base, Set<Path> includes, int depth) throws IOException {
-            if (depth > 64) throw new IllegalArgumentException("Include nesting exceeds 64 levels");
+        /** An object-like macro with the location of its #define directive. */
+        private record Macro(String value, int reference) {}
+        private String preprocessMain(String src, String name, Path base, Path real) throws IOException {
+            sourceMap = new SourceMap(); int unit = sourceMap.addUnit(name, -1, 0, 0);
+            Path root = base.toAbsolutePath().normalize();
+            try { root = root.toRealPath(); } catch (IOException e) { /* labels then use the lexical directory */ }
+            labelRoot = root;
+            Map<Path,String> active = new LinkedHashMap<>();
+            if (real != null) active.put(real, name);
+            StringBuilder out = new StringBuilder();
+            preprocess(src, base, unit, active, 0, out);
+            return out.toString();
+        }
+        private CompileException located(int unit, int line, int column, String message) {
+            return new CompileException(sourceMap.error(unit, line, column, -1, null, message));
+        }
+        /**
+         * Appends exactly one output line per input line to {@code out}, recording each in the
+         * source map; an included file's lines precede the #include line itself.
+         */
+        private void preprocess(String src, Path base, int unit, Map<Path,String> includes, int depth, StringBuilder out) throws IOException {
             // A UTF-8 byte order mark must not hide a directive on the first line.
             if (src.startsWith("﻿")) src = src.substring(1);
-            StringBuilder out = new StringBuilder();
             Deque<Conditional> stack = new ArrayDeque<>();
             boolean blockComment = false;
-            int lineNo = 0;
+            int lineNo = 0, commentLine = 0, commentColumn = 0;
             for (String line : src.split("\\R", -1)) {
                 lineNo++;
                 // Comments remain lexical even inside an excluded conditional branch.
-                Expansion cleaned = stripComments(line, blockComment);
+                Stripped cleaned = stripComments(line, blockComment);
+                if (cleaned.openColumn() > 0) { commentLine = lineNo; commentColumn = cleaned.openColumn(); }
                 blockComment = cleaned.blockComment();
                 String content = cleaned.text();
                 String trimmed = content.stripLeading();
                 boolean active = stack.isEmpty() || stack.peek().active();
                 if (trimmed.startsWith("#")) {
+                    int hash = content.length() - trimmed.length() + 1;
                     String[] parts = trimmed.substring(1).trim().split("\\s+", 2);
                     String command = parts[0].toLowerCase(Locale.ROOT);
                     String arg = parts.length > 1 ? parts[1].trim() : "";
+                    int[] directive = {unit, lineNo, hash};
                     try {
                         if (!PREPROCESSOR_DIRECTIVES.contains(command))
                             throw new IllegalArgumentException("Unknown preprocessor directive: #" + command);
@@ -124,14 +168,14 @@ public class GeneraterJson {
                                 boolean defined = tmpoVars.containsKey(args[0]) || macros.containsKey(args[0]);
                                 boolean condition = command.equals("ifndef") ? !defined : defined;
                                 if (command.equals("if_equals")) condition = defined && args[1].equals(
-                                        tmpoVars.getOrDefault(args[0], macros.get(args[0])));
-                                stack.push(new Conditional(active, condition, false));
+                                        tmpoVars.containsKey(args[0]) ? tmpoVars.get(args[0]) : macros.get(args[0]).value());
+                                stack.push(new Conditional(active, condition, false, lineNo, hash));
                             }
                             case "else" -> {
                                 if (stack.isEmpty() || stack.peek().inElse())
                                     throw new IllegalArgumentException("Unmatched or repeated #else");
                                 Conditional previous = stack.pop();
-                                stack.push(new Conditional(previous.parent(), previous.condition(), true));
+                                stack.push(new Conditional(previous.parent(), previous.condition(), true, previous.line(), previous.column()));
                             }
                             case "fi", "endif" -> {
                                 if (stack.isEmpty()) throw new IllegalArgumentException("Unmatched #" + command);
@@ -140,23 +184,12 @@ public class GeneraterJson {
                             default -> {
                                 if (!active) break;
                                 switch (command) {
-                                    case "include" -> {
-                                        String path = arg;
-                                        if (path.startsWith("\"") && path.endsWith("\"") && path.length() >= 2)
-                                            path = path.substring(1, path.length() - 1);
-                                        if (path.isBlank()) throw new IllegalArgumentException("Missing include path");
-                                        Path included = base.resolve(path).toRealPath();
-                                        if (!includes.add(included)) throw new IllegalArgumentException("Include cycle: " + included);
-                                        try {
-                                            out.append(preprocess(Files.readString(included, StandardCharsets.UTF_8),
-                                                    included.getParent(), includes, depth + 1));
-                                        } finally { includes.remove(included); }
-                                    }
+                                    case "include" -> include(arg, base, unit, lineNo, hash, includes, depth, out);
                                     case "author" -> author = arg;
                                     case "gvar" -> {
                                         identifier(arg);
                                         if (globalVariables.contains(arg)) throw new IllegalArgumentException("Duplicate global variable: " + arg);
-                                        globalVariables.add(arg);
+                                        globalVariables.add(arg); globalDirectives.put(arg, directive);
                                     }
                                     case "namespace" -> {
                                         if (namespaceDeclared) throw new IllegalArgumentException("Only one #namespace or #namespace_hint is allowed");
@@ -166,11 +199,12 @@ public class GeneraterJson {
                                         int value = hexadecimal(args[0], 4, "namespace");
                                         if (value == RESERVED_RUNTIME_NAMESPACE)
                                             throw new IllegalArgumentException("Namespace 0xabd is reserved for the runtime");
-                                        functionNamespace = value; namespaceDeclared = true;
+                                        functionNamespace = value; namespaceDeclared = true; namespaceDirective = directive;
                                     }
                                     case "namespace_hint" -> {
                                         if (namespaceDeclared) throw new IllegalArgumentException("Only one #namespace or #namespace_hint is allowed");
                                         hintIdentifier(arg); namespaceHint = arg; functionNamespace = 0; namespaceDeclared = true;
+                                        namespaceDirective = directive;
                                     }
                                     case "assume_hint" -> {
                                         String[] args = arg.split("\\s+");
@@ -181,7 +215,7 @@ public class GeneraterJson {
                                         Integer previous = assumeHints.get(args[0]);
                                         if (previous != null && previous != value || previous == null && assumeHints.containsValue(value))
                                             throw new IllegalArgumentException("Conflicting hint or assumed namespace");
-                                        assumeHints.put(args[0], value);
+                                        assumeHints.put(args[0], value); assumeDirectives.putIfAbsent(args[0], directive);
                                     }
                                     case "setmeta", "setattr", "define" -> {
                                         String[] args = arg.split("\\s+", 2);
@@ -191,7 +225,10 @@ public class GeneraterJson {
                                         switch (command) {
                                             case "setmeta" -> exts.put(args[0], value);
                                             case "setattr" -> tmpoVars.put(args[0], value);
-                                            case "define" -> { identifier(args[0]); macros.put(args[0], value); }
+                                            case "define" -> {
+                                                identifier(args[0]);
+                                                macros.put(args[0], new Macro(value, sourceMap.addMacro(args[0], unit, lineNo, hash)));
+                                            }
                                         }
                                     }
                                     case "undef" -> { identifier(arg); macros.remove(arg); tmpoVars.remove(arg); }
@@ -200,34 +237,77 @@ public class GeneraterJson {
                                 }
                             }
                         }
-                    } catch (IllegalArgumentException | IOException e) {
-                        throw new IllegalArgumentException("Preprocessor " + base + ":" + lineNo + ": " + e.getMessage(), e);
+                    } catch (CompileException e) {
+                        throw e;
+                    } catch (IllegalArgumentException e) {
+                        throw located(unit, lineNo, hash, e.getMessage());
                     }
-                    out.append('\n');
+                    out.append('\n'); sourceMap.line(unit, lineNo, null);
                 } else {
+                    int[] runs = null;
                     if (active) {
-                        Expansion expanded = expand(content, false, new HashSet<>(), 0);
-                        out.append(expanded.text());
+                        SourceMap.Columns columns = new SourceMap.Columns();
+                        try { out.append(expand(content, false, new HashSet<>(), 0, columns).text()); }
+                        catch (CompileException e) { throw e; }
+                        catch (IllegalArgumentException e) { throw located(unit, lineNo, columns.errorColumn(), e.getMessage()); }
+                        runs = columns.build();
                     }
-                    out.append('\n');
+                    out.append('\n'); sourceMap.line(unit, lineNo, runs);
                 }
             }
-            if (blockComment) throw new IllegalArgumentException("Unterminated block comment in " + base + ":" + lineNo);
-            if (!stack.isEmpty()) throw new IllegalArgumentException("Unclosed preprocessor condition in " + base);
-            return out.toString();
+            if (blockComment) throw located(unit, commentLine, commentColumn, "Unterminated block comment");
+            if (!stack.isEmpty()) throw located(unit, stack.peek().line(), stack.peek().column(), "Unclosed preprocessor condition");
+        }
+        private void include(String arg, Path base, int unit, int line, int column, Map<Path,String> includes, int depth,
+                             StringBuilder out) throws IOException {
+            String path = arg;
+            if (path.startsWith("\"") && path.endsWith("\"") && path.length() >= 2)
+                path = path.substring(1, path.length() - 1);
+            if (path.isBlank()) throw new IllegalArgumentException("Missing include path");
+            if (depth >= 64) throw new IllegalArgumentException("Include nesting exceeds 64 levels");
+            Path included;
+            try { included = base.resolve(path).toRealPath(); }
+            catch (InvalidPathException e) { throw new IllegalArgumentException("Invalid include path: \"" + path + "\""); }
+            catch (IOException e) { throw new IllegalArgumentException("Cannot open include file \"" + path + "\": " + reason(e)); }
+            String label = SourceMap.relativeName(labelRoot, included);
+            if (includes.containsKey(included)) {
+                List<String> cycle = new ArrayList<>(); boolean inCycle = false;
+                for (var entry : includes.entrySet()) {
+                    inCycle |= entry.getKey().equals(included);
+                    if (inCycle) cycle.add(entry.getValue());
+                }
+                cycle.add(label);
+                throw new IllegalArgumentException("Include cycle: " + String.join(" -> ", cycle));
+            }
+            String text;
+            try { text = Files.readString(included, StandardCharsets.UTF_8); }
+            catch (CharacterCodingException e) { throw new IllegalArgumentException("Source file \"" + label + "\" is not valid UTF-8"); }
+            catch (IOException e) { throw new IllegalArgumentException("Cannot open include file \"" + path + "\": " + reason(e)); }
+            int child = sourceMap.addUnit(label, unit, line, column);
+            includes.put(included, label);
+            try { preprocess(text, included.getParent(), child, includes, depth + 1, out); }
+            finally { includes.remove(included); }
+        }
+        private static String reason(IOException error) {
+            if (error instanceof NoSuchFileException) return "file not found";
+            if (error instanceof AccessDeniedException) return "permission denied";
+            if (error instanceof FileSystemException fileSystem && fileSystem.getReason() != null) return fileSystem.getReason();
+            return error.getMessage() == null ? error.getClass().getSimpleName() : error.getMessage();
         }
         private record Expansion(String text, boolean blockComment) {}
-        private Expansion stripComments(String line, boolean block) {
+        /** Comment-free text; {@code openColumn} is where a comment still open at the line end started on this line, else 0. */
+        private record Stripped(String text, boolean blockComment, int openColumn) {}
+        private Stripped stripComments(String line, boolean block) {
             StringBuilder out = new StringBuilder();
-            int i = 0;
+            int i = 0, openColumn = 0;
             while (i < line.length()) {
                 if (block) {
                     int end = line.indexOf("*/", i);
                     if (end < 0) { out.append(" ".repeat(line.length() - i)); break; }
-                    out.append(" ".repeat(end + 2 - i)); i = end + 2; block = false; continue;
+                    out.append(" ".repeat(end + 2 - i)); i = end + 2; block = false; openColumn = 0; continue;
                 }
                 if (line.startsWith("//", i)) { out.append(" ".repeat(line.length() - i)); break; }
-                if (line.startsWith("/*", i)) { out.append("  "); i += 2; block = true; continue; }
+                if (line.startsWith("/*", i)) { out.append("  "); openColumn = i + 1; i += 2; block = true; continue; }
                 char c = line.charAt(i++); out.append(c);
                 if (c == '\'' || c == '"') {
                     char quote = c;
@@ -238,13 +318,18 @@ public class GeneraterJson {
                     }
                 }
             }
-            return new Expansion(out.toString(), block);
+            return new Stripped(out.toString(), block, block ? openColumn : 0);
         }
-        private Expansion expand(String line, boolean block, Set<String> expanding, int depth) {
+        /**
+         * Expands object-like macros on one line. At depth 0, {@code columns} records which
+         * output columns came from which source column and macro.
+         */
+        private Expansion expand(String line, boolean block, Set<String> expanding, int depth, SourceMap.Columns columns) {
             if (depth > 64) throw new IllegalArgumentException("Macro nesting exceeds 64 levels");
             StringBuilder out = new StringBuilder();
             int i = 0;
             while (i < line.length()) {
+                if (columns != null) columns.verbatim(out.length(), i);
                 if (block) {
                     int end = line.indexOf("*/", i);
                     if (end < 0) { out.append(line.substring(i)); break; }
@@ -283,9 +368,11 @@ public class GeneraterJson {
                     int start = i++;
                     while (i < line.length() && Character.isJavaIdentifierPart(line.charAt(i))) i++;
                     String word = line.substring(start, i);
-                    if (macros.containsKey(word)) {
+                    Macro macro = macros.get(word);
+                    if (macro != null) {
                         if (!expanding.add(word)) throw new IllegalArgumentException("Recursive macro: " + word);
-                        appendLimited(out, expand(macros.get(word), false, expanding, depth + 1).text());
+                        if (columns != null) columns.macro(out.length(), start, macro.reference());
+                        appendLimited(out, expand(macro.value(), false, expanding, depth + 1, null).text());
                         expanding.remove(word);
                     } else appendLimited(out, word);
                 } else { appendLimited(out, String.valueOf(c)); i++; }
@@ -304,6 +391,7 @@ public class GeneraterJson {
             metadata.addProperty("author", author); metadata.addProperty("version", 2);
             metadata.addProperty("function-namespace", functionNamespace);
             result.add("metadata", metadata);
+            result.add("sources", sourceMap.toJson());
             result.addProperty("namespace-hint", namespaceHint);
             JsonArray assumptions = new JsonArray();
             assumeHints.forEach((hint, namespace) -> {
@@ -327,6 +415,7 @@ public class GeneraterJson {
                 JsonArray parameterTypes = new JsonArray();
                 signature.paramTypes.forEach(parameterTypes::add);
                 value.add("param-types", parameterTypes);
+                if (signature.line != 0) position(value, signature.file, signature.line, signature.column);
                 signatures.add(name, value);
             });
             result.add("extern-signatures", signatures);
@@ -351,8 +440,11 @@ public class GeneraterJson {
                     meta.addProperty("base-initializer", function.baseInitializer);
                 }
                 if (function.line != 0) {
-                    meta.addProperty("_line", function.line);
-                    meta.addProperty("_column", function.column);
+                    position(meta, function.file, function.line, function.column);
+                    if (function.endLine != 0) {
+                        meta.addProperty("_end_line", function.endLine);
+                        meta.addProperty("_end_column", function.endColumn);
+                    }
                 }
                 JsonArray params = new JsonArray(); function.params.forEach(params::add);
                 JsonArray paramTypes = new JsonArray(); function.paramTypes.forEach(paramTypes::add);
@@ -364,6 +456,11 @@ public class GeneraterJson {
             if (!classes.isEmpty()) result.add("classes", classes.deepCopy());
             return result;
         }
+    }
+    /** Writes an original position; {@code _file} indexes the AST {@code sources} table and is omitted for the main unit. */
+    private static void position(JsonObject node, int file, int line, int column) {
+        if (file != 0) node.addProperty("_file", file);
+        node.addProperty("_line", line); node.addProperty("_column", column);
     }
     private static void identifier(String value) {
         if (value.isEmpty() || !Character.isJavaIdentifierStart(value.charAt(0)))
@@ -397,15 +494,30 @@ public class GeneraterJson {
         if (value.length() > digits) throw new IllegalArgumentException("Invalid " + description + ": " + text);
         return (int) Long.parseLong(value, 16);
     }
-    private record Token(String text, JsonElement literal, int line, int column, boolean identifier) {}
+    /**
+     * A lexical token at its original position: source unit (index into the AST
+     * {@code sources} table), line and column, plus the macro it was expanded from or -1.
+     */
+    private record Token(String text, JsonElement literal, int unit, int line, int column, boolean identifier, int macro) {}
     private static final class Lexer {
         private final String source;
-        private int offset, line = 1, column = 1;
-        Lexer(String source) { this.source = source; }
+        private final SourceMap map;
+        private int offset, line = 1, column = 1, lastLine = 1, lastColumn = 1;
+        Lexer(String source, SourceMap map) { this.source = source; this.map = map; }
         private char peek(int delta) { return offset + delta < source.length() ? source.charAt(offset + delta) : '\0'; }
-        private char take() { char c = source.charAt(offset++); if (c == '\n') { line++; column = 1; } else column++; return c; }
-        private IllegalArgumentException error(String message, int l, int c) {
-            return new IllegalArgumentException("line " + l + ", column " + c + ": " + message);
+        private char take() {
+            char c = source.charAt(offset++);
+            if (c == '\n') { lastLine = line; lastColumn = column; line++; column = 1; } else column++;
+            return c;
+        }
+        /** A token at preprocessed line l and column c. */
+        private Token token(String text, JsonElement literal, int l, int c, boolean identifier) {
+            SourceMap.Origin origin = map.resolve(l, c);
+            return new Token(text, literal, origin.unit(), origin.line(), origin.column(), identifier, origin.macro());
+        }
+        private CompileException error(String message, int l, int c) {
+            SourceMap.Origin origin = map.resolve(l, c);
+            return new CompileException(map.error(origin.unit(), origin.line(), origin.column(), origin.macro(), null, message));
         }
         List<Token> scan() {
             List<Token> tokens = new ArrayList<>();
@@ -452,14 +564,14 @@ public class GeneraterJson {
                     // UTF-8 cannot encode a lone surrogate; Java would silently write '?' instead.
                     if (!wellFormedUtf16(value))
                         throw error("Unpaired surrogate in string literal; write a supplementary character as a \\uD8xx\\uDCxx pair", l, col);
-                    tokens.add(new Token(source.substring(start, offset), new JsonPrimitive(value.toString()), l, col, false));
+                    tokens.add(token(source.substring(start, offset), new JsonPrimitive(value.toString()), l, col, false));
                 } else if (!tokens.isEmpty() && tokens.get(tokens.size() - 1).text().equals(":")
                         && Character.isJavaIdentifierPart(c)) {
                     // A colon introduces either a hexadecimal ID or a class/base name.
                     // Keep IDs such as 000a intact and defer their validation to the parser.
                     take();
                     while (peek(0) != '\0' && Character.isJavaIdentifierPart(peek(0))) take();
-                    tokens.add(new Token(source.substring(start, offset), null, l, col, Character.isJavaIdentifierStart(c)));
+                    tokens.add(token(source.substring(start, offset), null, l, col, Character.isJavaIdentifierStart(c)));
                 } else if (Character.isDigit(c) || (c == '.' && Character.isDigit(peek(1)))) {
                     while (Character.isDigit(peek(0))) take();
                     if (peek(0) == '.') { take(); while (Character.isDigit(peek(0))) take(); }
@@ -473,14 +585,17 @@ public class GeneraterJson {
                     if (Character.isJavaIdentifierPart(peek(0)) && peek(0) != '\0')
                         throw error("Invalid numeric suffix", l, col);
                     String text = source.substring(start, offset - (floatSuffix ? 1 : 0));
-                    BigDecimal decimal = new BigDecimal(text);
+                    BigDecimal decimal;
+                    try { decimal = new BigDecimal(text); }
+                    catch (NumberFormatException e) { throw error("Numeric literal is out of range", l, col); }
                     JsonPrimitive literal;
                     if (floatSuffix) {
                         float value = decimal.floatValue();
                         if (!Float.isFinite(value) || (value == 0 && decimal.signum() != 0))
                             throw error("Floating literal is outside float range", l, col);
-                        JsonObject object = operation("ctrl", "float", new Token(text, null, l, col, false), new JsonPrimitive(value));
-                        tokens.add(new Token(source.substring(start, offset), object, l, col, false));
+                        Token at = token(source.substring(start, offset), null, l, col, false);
+                        JsonObject object = operation("ctrl", "float", at, new JsonPrimitive(value));
+                        tokens.add(new Token(at.text(), object, at.unit(), at.line(), at.column(), false, at.macro()));
                         continue;
                     } else if (text.indexOf('.') >= 0 || text.indexOf('e') >= 0 || text.indexOf('E') >= 0) {
                         double value = decimal.doubleValue();
@@ -489,36 +604,43 @@ public class GeneraterJson {
                         // Keep lexical floating kind even for 5., 5e0 and zero; BigDecimal normalizes these away.
                         literal = new JsonPrimitive(value);
                     } else literal = new JsonPrimitive(decimal);
-                    tokens.add(new Token(text, literal, l, col, false));
+                    tokens.add(token(text, literal, l, col, false));
                 } else if (Character.isJavaIdentifierStart(c)) {
                     take(); while (Character.isJavaIdentifierPart(peek(0)) && peek(0) != '\0') take();
                     String text = source.substring(start, offset);
                     JsonElement literal = text.equals("true") || text.equals("false") ? new JsonPrimitive(Boolean.parseBoolean(text)) : null;
-                    tokens.add(new Token(text, literal, l, col, true));
+                    tokens.add(token(text, literal, l, col, true));
                 } else {
                     String two = "" + c + peek(1);
                     if (Set.of("==", "!=", "<=", ">=", "&&", "||", "+=", "-=", "*=", "/=", "%=", "++", "--", "::").contains(two)) {
-                        take(); take(); tokens.add(new Token(two, null, l, col, false));
+                        take(); take(); tokens.add(token(two, null, l, col, false));
                     } else if (c == ':') {
-                        take(); tokens.add(new Token(":", null, l, col, false));
+                        take(); tokens.add(token(":", null, l, col, false));
                     } else if ("{}[](),;+-*/%=<>!.~".indexOf(c) >= 0) {
-                        take(); tokens.add(new Token(String.valueOf(c), null, l, col, false));
+                        take(); tokens.add(token(String.valueOf(c), null, l, col, false));
                     } else throw error("Unexpected character: " + c, l, col);
                 }
             }
-            tokens.add(new Token("<eof>", null, line, column, false)); return tokens;
+            // Preprocessed text ends with a newline per line; place <eof> at the end of the last line.
+            boolean newline = !source.isEmpty() && source.charAt(source.length() - 1) == '\n';
+            tokens.add(token("<eof>", null, newline ? lastLine : line, newline ? lastColumn : column, false)); return tokens;
         }
     }
     private static JsonObject operation(String kind, String name, Token at, JsonElement... params) {
         JsonObject object = new JsonObject(); object.addProperty("t", kind); object.addProperty("call", name);
         JsonArray array = new JsonArray(); for (JsonElement param : params) array.add(param);
         object.add("param", array);
-        object.addProperty("_line", at.line()); object.addProperty("_column", at.column());
+        position(object, at.unit(), at.line(), at.column());
         return object;
     }
     private static final class Parser {
         private final List<Token> tokens;
         private final AzScript script;
+        private final SourceMap map;
+        /** Exact tokens of declarations, so later errors keep their macro and include notes. */
+        private final Map<JsonObject,Token> classTokens = new IdentityHashMap<>();
+        private final Map<AzFunction,Token> functionTokens = new IdentityHashMap<>();
+        private final Map<ExternSignature,Token> externTokens = new IdentityHashMap<>();
         private int index;
         private int recursionDepth;
         private int loopDepth;
@@ -526,8 +648,8 @@ public class GeneraterJson {
         private final Set<String> classNames = new LinkedHashSet<>();
         private final Map<String,List<String>> classTypeParameters = new LinkedHashMap<>();
         private Set<String> typeParameters = new LinkedHashSet<>();
-        Parser(String source, AzScript script) {
-            this.tokens = new Lexer(source).scan(); this.script = script;
+        Parser(String source, SourceMap map, AzScript script) {
+            this.map = map; this.tokens = new Lexer(source, map).scan(); this.script = script;
             for (JsonElement item : script.classes) {
                 JsonObject declaration = item.getAsJsonObject(); String name = declaration.get("name").getAsString();
                 classNames.add(name); classTypeParameters.put(name, parameterNames(declaration.getAsJsonArray("type-parameters")));
@@ -564,7 +686,7 @@ public class GeneraterJson {
             if (!at("<")) return declarations;
             List<String> names = typeParameterNamesAhead(index); Set<String> own = new HashSet<>();
             for (String parameter : names) {
-                try { identifier(parameter); } catch (IllegalArgumentException e) { throw error(e.getMessage()); }
+                try { identifier(parameter); } catch (CompileException e) { throw e; } catch (IllegalArgumentException e) { throw error(e.getMessage()); }
                 if (!own.add(parameter) || knownType(parameter) || Compiler.isBuiltinName(parameter))
                     throw error("Duplicate or reserved type parameter: " + parameter);
             }
@@ -581,6 +703,7 @@ public class GeneraterJson {
         private String sourceType(String value, boolean allowVoid) {
             if (classNames.contains(value) || typeParameters.contains(value)) return value;
             try { return normalizeType(value, allowVoid, "type"); }
+            catch (CompileException e) { throw e; }
             catch (IllegalArgumentException e) { throw error(e.getMessage(), tokens.get(index - 1)); }
         }
         private static String rawClass(String type) {
@@ -659,16 +782,49 @@ public class GeneraterJson {
                 throw error("'" + current().text() + "' is a type name and cannot be declared as a name");
             return name();
         }
-        private IllegalArgumentException error(String message) { return error(message, current()); }
-        private IllegalArgumentException error(String message, Token at) {
-            return new IllegalArgumentException(script.sourceName + ":" + at.line() + ":" + at.column() + ": " + message);
+        private CompileException error(String message) { return error(message, current()); }
+        private CompileException error(String message, Token at) { return error(message, at, List.of()); }
+        private CompileException error(String message, Token at, List<Diagnostic> notes) { return error(message, at, null, notes); }
+        /** An error at a token; {@code context} names the enclosing declaration, e.g. {@code function main}, or is null. */
+        private CompileException error(String message, Token at, String context, List<Diagnostic> notes) {
+            return new CompileException(map.error(at.unit(), at.line(), at.column(), at.macro(), context, message).withNotes(notes));
+        }
+        /** A note such as "previous definition is here", followed by the include chain of that location. */
+        private List<Diagnostic> noteAt(Token at, String text) {
+            List<Diagnostic> notes = new ArrayList<>();
+            notes.add(Diagnostic.note(map.position(at.unit(), at.line(), at.column()), text));
+            notes.addAll(map.includeNotes(at.unit()));
+            return notes;
+        }
+        /** Definitions read twice from one header also get an include-guard hint. */
+        private String duplicate(String message, Token first, Token second) {
+            boolean sameText = first.unit() != second.unit() && map.name(first.unit()).equals(map.name(second.unit()))
+                    && first.line() == second.line() && first.column() == second.column();
+            return sameText ? message + " (the header was included twice; add an include guard)" : message;
+        }
+        /** A position recorded in an AST node (for example by TreeLimits), as a token. */
+        private Token located(JsonObject node, Token fallback) {
+            int line = node == null ? -1 : SourceMap.integer(node.get("_line"));
+            if (line <= 0) return fallback;
+            return new Token("", null, map.unitOf(node), line, Math.max(0, SourceMap.integer(node.get("_column"))), false, -1);
+        }
+        private Token directive(int[] location, Token fallback) {
+            return location == null ? fallback : new Token("#", null, location[0], location[1], location[2], false, -1);
+        }
+        private Token functionLocation(AzFunction function) {
+            Token token = functionTokens.get(function);
+            return token != null ? token : new Token(function.name, null, function.file, function.line, function.column, true, -1);
         }
         private final Map<String,AzFunction> definitions = new LinkedHashMap<>();
         private record DuplicateExtern(String name, ExternSignature first, ExternSignature second) {}
         private final List<DuplicateExtern> duplicateExterns = new ArrayList<>();
         void program() {
-            if (script.assumeHints.containsValue(script.functionNamespace))
-                throw error("Assumed namespace overlaps the module namespace");
+            for (var assumption : script.assumeHints.entrySet())
+                if (assumption.getValue() == script.functionNamespace)
+                    throw error("Assumed namespace overlaps the module namespace",
+                            directive(script.assumeDirectives.get(assumption.getKey()), current()),
+                            script.namespaceDirective == null ? List.of()
+                                    : noteAt(directive(script.namespaceDirective, current()), "module namespace declared here"));
             while (!at("<eof>")) {
                 if (match(";")) continue;
                 if (match("class")) { classDeclaration(); continue; }
@@ -700,7 +856,25 @@ public class GeneraterJson {
             }
             Map<String,JsonArray> layouts = validateClassLayouts();
             validateDuplicateExterns(layouts); assignFunctionIds();
-            for (AzFunction function : script.functions) TreeLimits.validate(function.body.generate());
+            // Bound every tree before toObj() and the compiler copy or walk it recursively.
+            for (AzFunction function : script.functions) {
+                String context = Compiler.contextName(function.name);
+                try { TreeLimits.validate(function.body.generate()); }
+                catch (TreeLimits.LimitExceeded e) { throw error(e.getMessage(), located(e.anchor(), functionLocation(function)), context, List.of()); }
+                if (function.baseArguments != null) {
+                    // Like other base-initializer errors, reported at the constructor.
+                    try { TreeLimits.validate(function.baseArguments); }
+                    catch (TreeLimits.LimitExceeded e) { throw error(e.getMessage(), functionLocation(function), context, List.of()); }
+                }
+            }
+            for (JsonElement item : script.classes) {
+                JsonObject definition = item.getAsJsonObject(); String name = definition.get("name").getAsString();
+                try { TreeLimits.validate(definition); }
+                catch (TreeLimits.LimitExceeded e) {
+                    throw error(e.getMessage(), located(e.anchor(), classLocation(definition)),
+                            (e.anchor() == definition ? "class " : "initializer of class ") + name, List.of());
+                }
+            }
         }
         /** Index of the :: after a complete owner type, or -1 for an ordinary identifier. */
         private int classOwnerEnd(int start) {
@@ -731,8 +905,8 @@ public class GeneraterJson {
                 throw error("An out-of-class definition must use its class type parameters: " + selfType(rawClass(type)));
         }
         private Token classLocation(JsonObject definition) {
-            return new Token(definition.get("name").getAsString(), null,
-                    definition.get("_line").getAsInt(), definition.get("_column").getAsInt(), true);
+            Token token = classTokens.get(definition);
+            return token != null ? token : located(definition, current());
         }
         private Map<String,JsonArray> validateClassLayouts() {
             Map<String,JsonObject> declarations = new LinkedHashMap<>();
@@ -771,7 +945,7 @@ public class GeneraterJson {
                 JsonObject owner = declarations.get(function.ownerClass);
                 if (owner == null || !owner.has("base") || !owner.get("base").getAsString().equals(function.baseInitializer))
                     throw error("Constructor " + function.ownerClass + " can initialize only its direct base class",
-                            new Token(function.name, null, function.line, function.column, true));
+                            functionLocation(function));
             }
             return layouts;
         }
@@ -791,21 +965,29 @@ public class GeneraterJson {
         private void validateDuplicateExterns(Map<String,JsonArray> layouts) {
             for (DuplicateExtern duplicate : duplicateExterns) {
                 ExternSignature first = duplicate.first(), second = duplicate.second();
-                if (first.typeParameters.size() != second.typeParameters.size()) throw error("Conflicting extern declaration: " + duplicate.name());
-                Map<String,String> renames = new HashMap<>();
-                for (int i = 0; i < first.typeParameters.size(); i++)
-                    renames.put(second.typeParameters.get(i).getAsJsonObject().get("name").getAsString(), first.typeParameters.get(i).getAsJsonObject().get("name").getAsString());
-                for (int i = 0; i < first.typeParameters.size(); i++) {
-                    JsonObject left = first.typeParameters.get(i).getAsJsonObject(), right = second.typeParameters.get(i).getAsJsonObject();
-                    if (left.has("bound") != right.has("bound") || left.has("bound") && !sameSourceType(left.get("bound").getAsString(),
-                            renameType(right.get("bound").getAsString(), renames), layouts)) throw error("Conflicting extern declaration: " + duplicate.name());
-                }
-                if (first.paramTypes.size() != second.paramTypes.size() || !sameSourceType(first.returnType, renameType(second.returnType, renames), layouts))
-                    throw error("Conflicting extern declaration: " + duplicate.name());
-                for (int i = 0; i < first.paramTypes.size(); i++)
-                    if (!sameSourceType(first.paramTypes.get(i), renameType(second.paramTypes.get(i), renames), layouts))
-                        throw error("Conflicting extern declaration: " + duplicate.name());
+                if (!sameExtern(first, second, layouts)) throw conflictingExtern(duplicate.name(), first, second);
             }
+        }
+        private CompileException conflictingExtern(String name, ExternSignature first, ExternSignature second) {
+            Token at = externTokens.getOrDefault(second, current()), before = externTokens.getOrDefault(first, at);
+            return error("Conflicting extern declaration: " + name, at, noteAt(before, "previous declaration is here"));
+        }
+        private boolean sameExtern(ExternSignature first, ExternSignature second, Map<String,JsonArray> layouts) {
+            if (first.typeParameters.size() != second.typeParameters.size()) return false;
+            Map<String,String> renames = new HashMap<>();
+            for (int i = 0; i < first.typeParameters.size(); i++)
+                renames.put(second.typeParameters.get(i).getAsJsonObject().get("name").getAsString(), first.typeParameters.get(i).getAsJsonObject().get("name").getAsString());
+            for (int i = 0; i < first.typeParameters.size(); i++) {
+                JsonObject left = first.typeParameters.get(i).getAsJsonObject(), right = second.typeParameters.get(i).getAsJsonObject();
+                if (left.has("bound") != right.has("bound") || left.has("bound") && !sameSourceType(left.get("bound").getAsString(),
+                        renameType(right.get("bound").getAsString(), renames), layouts)) return false;
+            }
+            if (first.paramTypes.size() != second.paramTypes.size() || !sameSourceType(first.returnType, renameType(second.returnType, renames), layouts))
+                return false;
+            for (int i = 0; i < first.paramTypes.size(); i++)
+                if (!sameSourceType(first.paramTypes.get(i), renameType(second.paramTypes.get(i), renames), layouts))
+                    return false;
+            return true;
         }
         private static String renameType(String type, Map<String,String> renames) {
             StringBuilder result = new StringBuilder();
@@ -838,6 +1020,7 @@ public class GeneraterJson {
         }
         private void assignFunctionIds() {
             Set<Integer> used = new HashSet<>(), selfReserved = new HashSet<>();
+            Map<Integer,AzFunction> owners = new HashMap<>();
             for (ExternSignature imported : script.externSignatures.values()) {
                 boolean self = script.namespaceHint.isEmpty() ? (imported.id >>> 16) == script.functionNamespace
                         : Objects.equals(script.assumeHints.get(script.namespaceHint), imported.id >>> 16);
@@ -849,7 +1032,7 @@ public class GeneraterJson {
                 ExternSignature imported = script.externSignatures.get(function.name);
                 if (fixed != null) {
                     if (function.explicitPosition != null && function.explicitPosition != (fixed & 0xffff))
-                        throw error("Explicit ID disagrees with lifecycle function " + function.name);
+                        throw error("Explicit ID disagrees with lifecycle function " + function.name, functionLocation(function));
                     function.id = fixed;
                 } else {
                     Integer position = function.explicitPosition;
@@ -858,17 +1041,22 @@ public class GeneraterJson {
                             : Objects.equals(script.assumeHints.get(script.namespaceHint), imported.id >>> 16));
                     if (selfImport) {
                         if (position != null && position != (imported.id & 0xffff))
-                            throw error("Definition ID disagrees with extern declaration: " + function.name);
+                            throw error("Definition ID disagrees with extern declaration: " + function.name, functionLocation(function));
                         position = imported.id & 0xffff;
                     }
                     if (position == null) continue;
                     function.id = (script.functionNamespace << 16) | position;
                     if (function.id == 0 || function.id == 1 || function.id == 0x0fff0000)
-                        throw error("Explicit function ID is reserved: " + function.name);
+                        throw error("Explicit function ID is reserved: " + function.name, functionLocation(function));
                     if (selfReserved.contains(function.id) && !selfImport)
-                        throw error("Explicit function ID is reserved by a self extern declaration: " + function.name);
+                        throw error("Explicit function ID is reserved by a self extern declaration: " + function.name, functionLocation(function));
                 }
-                if (!used.add(function.id)) throw error("Duplicate function ID: " + Integer.toHexString(function.id));
+                AzFunction earlier = owners.putIfAbsent(function.id, function);
+                if (!used.add(function.id)) {
+                    Token first = functionLocation(earlier != null ? earlier : function), second = functionLocation(function);
+                    throw error(duplicate("Duplicate function ID: " + Diagnostic.hexId(function.id), first, second), second,
+                            earlier == null ? List.of() : noteAt(first, "previous definition is here"));
+                }
                 function.explicitPosition = function.id & 0xffff;
             }
             for (ExternSignature imported : script.externSignatures.values()) {
@@ -879,30 +1067,41 @@ public class GeneraterJson {
             for (AzFunction function : script.functions) {
                 if (function.explicitPosition == null) {
                     do {
-                        if (nextFunctionPosition > 0xffff) throw error("Namespace has no free function IDs");
+                        if (nextFunctionPosition > 0xffff) throw error("Namespace has no free function IDs", functionLocation(function));
                         function.id = (script.functionNamespace << 16) | nextFunctionPosition++;
                     } while (used.contains(function.id) || specialNames.containsValue(function.id)
                             || script.externSignatures.values().stream().anyMatch(ext -> ext.id == function.id));
                     used.add(function.id);
                 }
                 if ((function.id == 0 || function.id == 1) && (!function.returnType.equals("void") || !function.params.isEmpty()))
-                    throw error(function.name + " must be declared as void with no parameters");
+                    throw error(function.name + " must be declared as void with no parameters", functionLocation(function));
                 script.name2Id.put(function.name, function.id);
             }
             script.externSignatures.forEach((name, signature) -> script.name2Id.put(name, signature.id));
         }
         private void classDeclaration() {
             Token classToken = name(); String className = classToken.text();
-            try { identifier(className); } catch (IllegalArgumentException e) { throw error(e.getMessage(), classToken); }
+            try { identifier(className); } catch (CompileException e) { throw e; } catch (IllegalArgumentException e) { throw error(e.getMessage(), classToken); }
             if (TYPES.contains(className) || Compiler.isBuiltinName(className) || definitions.containsKey(className)
-                    || script.externSignatures.containsKey(className) || script.globalVariables.contains(className))
-                throw error("Duplicate or reserved class name: " + className);
+                    || script.externSignatures.containsKey(className) || script.globalVariables.contains(className)) {
+                List<Diagnostic> notes = new ArrayList<>();
+                if (definitions.containsKey(className)) notes.addAll(noteAt(functionLocation(definitions.get(className)), "previous definition is here"));
+                else if (script.externSignatures.containsKey(className) && externTokens.containsKey(script.externSignatures.get(className)))
+                    notes.addAll(noteAt(externTokens.get(script.externSignatures.get(className)), "previous declaration is here"));
+                else if (script.globalDirectives.containsKey(className))
+                    notes.addAll(noteAt(directive(script.globalDirectives.get(className), classToken), "previous declaration is here"));
+                throw error("Duplicate or reserved class name: " + className, classToken, notes);
+            }
             for (JsonElement item : script.classes)
-                if (item.getAsJsonObject().get("name").getAsString().equals(className)) throw error("Duplicate class: " + className);
+                if (item.getAsJsonObject().get("name").getAsString().equals(className)) {
+                    Token first = classLocation(item.getAsJsonObject());
+                    throw error(duplicate("Duplicate class: " + className, first, classToken), classToken,
+                            noteAt(first, "previous definition is here"));
+                }
             Set<String> outer = typeParameters; typeParameters = new LinkedHashSet<>(outer);
             try {
             JsonObject definition = new JsonObject(); definition.addProperty("name", className);
-            definition.addProperty("_line", classToken.line()); definition.addProperty("_column", classToken.column());
+            position(definition, classToken.unit(), classToken.line(), classToken.column()); classTokens.put(definition, classToken);
             JsonArray generic = readTypeParameters();
             if (!generic.isEmpty()) definition.add("type-parameters", generic);
             classTypeParameters.put(className, parameterNames(generic));
@@ -945,7 +1144,7 @@ public class GeneraterJson {
                         if (!methodGeneric.isEmpty()) throw error("Fields cannot declare type parameters");
                         if (type.equals("void")) throw error("Field cannot have type void");
                         JsonObject field=new JsonObject();field.addProperty("name",member);field.addProperty("type",type);
-                        field.addProperty("_line",start.line());field.addProperty("_column",start.column());
+                        position(field,start.unit(),start.line(),start.column());
                         if (at("(")) {
                             // Only an embedded literal object takes constructor arguments.
                             if (type.endsWith("*")) throw error("A pointer field cannot own an automatic object; initialize it with = new " + type.substring(0, type.length() - 1) + "(...)");
@@ -964,13 +1163,18 @@ public class GeneraterJson {
             if(!constructor) {
                 AzFunction function=new AzFunction();function.ownerClass=className;function.functionKind="constructor";
                 function.name=className+"::<ctor>";function.returnType="void";function.params.add("this");function.paramTypes.add(selfType(className)+"*");
-                function.line=classToken.line();function.column=classToken.column();
+                function.file=classToken.unit();function.line=classToken.line();function.column=classToken.column();functionTokens.put(function,classToken);
                 function.body=JsonArray::new;addDefinition(function);definition.addProperty("constructor",function.name);
             }
             } finally { typeParameters = outer; }
         }
         private void addDefinition(AzFunction function) {
-            if(definitions.putIfAbsent(function.name,function)!=null)throw error("Duplicate function definition: "+function.name);
+            AzFunction earlier = definitions.putIfAbsent(function.name, function);
+            if (earlier != null) {
+                Token first = functionLocation(earlier), second = functionLocation(function);
+                throw error(duplicate("Duplicate function definition: " + function.name, first, second), second,
+                        noteAt(first, "previous definition is here"));
+            }
             script.functions.add(function);
         }
         private static String operatorKind(String member) { return member.substring(4, member.length() - 1); }
@@ -999,7 +1203,8 @@ public class GeneraterJson {
                     && !(member.equals("main") && !script.namespaceHint.isEmpty()))
                 throw error("Entry and lifecycle functions cannot declare type parameters");
             function.typeParameters = generic.deepCopy();
-            function.line=current().line();function.column=current().column();
+            Token location=current();functionTokens.put(function,location);
+            function.file=location.unit();function.line=location.line();function.column=location.column();
             if(owner!=null){function.params.add("this");function.paramTypes.add(selfType(owner)+"*");}
             expect("(");
             if(!at(")"))do {
@@ -1035,7 +1240,7 @@ public class GeneraterJson {
                         && (tokens.get(index+1).text().equals("(") || tokens.get(index+1).text().equals("<"));
                 if(!initializer) {
                     Token token=advance();
-                    try{suffix=hexadecimal(token.text(),external?8:4,"function ID");}catch(IllegalArgumentException e){throw error(e.getMessage(),token);}
+                    try{suffix=hexadecimal(token.text(),external?8:4,"function ID");}catch(CompileException e){throw e;}catch(IllegalArgumentException e){throw error(e.getMessage(),token);}
                     initializer=match(":");
                 }
                 if(initializer) {
@@ -1051,19 +1256,23 @@ public class GeneraterJson {
                 if(suffix==null)throw error("Extern function requires a full hexadecimal ID");
                 if((suffix>>>16)==RESERVED_RUNTIME_NAMESPACE||specialNames.containsValue(suffix))throw error("Reserved external function ID");
                 expect(";");ExternSignature signature=new ExternSignature(type,function.paramTypes);signature.id=suffix;
+                signature.file=location.unit();signature.line=location.line();signature.column=location.column();externTokens.put(signature,location);
                 signature.ownerClass=owner;signature.functionKind=kind;
                 signature.operatorKind=function.operatorKind;
                 signature.typeParameters=generic.deepCopy();
                 ExternSignature previous=script.externSignatures.putIfAbsent(qualified,signature);
                 if(previous!=null) {
                     if(previous.id!=signature.id || !Objects.equals(previous.ownerClass,owner) || !Objects.equals(previous.functionKind,kind))
-                        throw error("Conflicting extern declaration: "+qualified);
+                        throw conflictingExtern(qualified,previous,signature);
                     duplicateExterns.add(new DuplicateExtern(qualified,previous,signature));
                 }
             } else {
                 if(inClass&&!script.namespaceHint.isEmpty())throw error("Hinted library class functions must use extern declarations and out-of-class definitions");
                 function.explicitPosition=suffix;int enclosingLoop=loopDepth;loopDepth=0;
-                JsonElement body;try{body=block();}finally{loopDepth=enclosingLoop;}function.body=()->body;addDefinition(function);match(";");
+                JsonElement body;try{body=block();}finally{loopDepth=enclosingLoop;}function.body=()->body;
+                Token end=tokens.get(index-1);
+                if(end.unit()==function.file){function.endLine=end.line();function.endColumn=end.column();}
+                addDefinition(function);match(";");
             }
         }
         JsonElement block() {
@@ -1328,7 +1537,13 @@ public class GeneraterJson {
                 expect(")"); return operation("ctrl", "object-new", token, args.toArray(JsonElement[]::new));
             }
             if (token.literal() != null) { advance(); return token.literal(); }
-            if (match("(")) { JsonElement value = expression(); expect(")"); return value; }
+            if (match("(")) {
+                JsonElement value = expression(); expect(")");
+                // Diagnostic-only marker: a parenthesized assignment is an intentional value.
+                if (value.isJsonObject() && Set.of("varset", "member-set", "index-set", "mov").contains(value.getAsJsonObject().get("call").getAsString()))
+                    value.getAsJsonObject().addProperty("_parenthesized", true);
+                return value;
+            }
             if (at("{")) return block();
             if (token.identifier()) {
                 String name = advance().text();
@@ -1352,13 +1567,16 @@ public class GeneraterJson {
     }
     public static AzExpression getExpression(String source, int offset, AzScript script) {
         if (offset < 0 || offset > source.length()) throw new IllegalArgumentException("Invalid source offset");
-        Parser parser = new Parser(source.substring(offset), script);
+        Parser parser = new Parser(source.substring(offset), SourceMap.single("<expression>"), script);
         JsonElement result;
         if (parser.at("{")) result = parser.block();
         else if (Set.of("return", "break", "continue", "def", "var", "if", "while", "for", "delete", "++", "--").contains(parser.current().text())
                 || parser.knownType(parser.current().text())) result = parser.statement();
         else result = parser.expression();
-        parser.match(";"); parser.expect("<eof>"); TreeLimits.validate(result); return () -> result;
+        parser.match(";"); parser.expect("<eof>");
+        try { TreeLimits.validate(result); }
+        catch (TreeLimits.LimitExceeded e) { throw parser.error(e.getMessage(), parser.located(e.anchor(), parser.current())); }
+        return () -> result;
     }
     public static class ConstantExpression implements AzExpression {
         private final JsonElement value;

@@ -214,7 +214,16 @@ def verify(package: Path, java: Optional[Path] = None) -> Dict[str, object]:
                  cwd / "metadata/instruction tree.json")
         _require(not (cwd / "chosen/program.ast.json").exists(), "Explicit AST path was ignored")
         _require(not (cwd / "chosen/program.exec.json").exists(), "Explicit exec JSON path was ignored")
-        passed("explicit AST and executable JSON locations")
+        # Options may precede the source; the launcher still derives the default JSON paths.
+        _run([compiler, "-o", "leading options/first.abd", source], cwd, compiler_environment)
+        _outputs(cwd / "leading options/first.abd", cwd / "leading options/first.ast.json",
+                 cwd / "leading options/first.exec.json")
+        # "--" ends the options, so a relative source may begin with '-'; defaults still apply.
+        (cwd / "-dash.azs").write_bytes(original_source)
+        _run([compiler, "-dash.azs"], cwd, compiler_environment, succeeds=False)
+        _run([compiler, "--", "-dash.azs"], cwd, compiler_environment)
+        _outputs(cwd / "-dash.exec.abd", cwd / "-dash.ast.json", cwd / "-dash.exec.json")
+        passed("explicit AST and executable JSON locations, options before the source and --")
 
         ast_bytes = default_ast.read_bytes()
         _run([compiler, "compile-json", default_ast, "-o", "roundtrip/from ast.abd"], cwd,
@@ -227,7 +236,11 @@ def verify(package: Path, java: Optional[Path] = None) -> Dict[str, object]:
 
         broken_source = source_directory / "invalid source.azs"
         broken_source.write_text("int main() { return missing_name; }\n", encoding="utf-8")
-        _run([compiler, broken_source], cwd, compiler_environment, succeeds=False)
+        broken = _run([compiler, broken_source], cwd, compiler_environment, succeeds=False)
+        _require(broken.stderr.splitlines() == [
+                     "invalid source.azs:1:21: error: in function main: Unknown variable: missing_name",
+                     "Error: compilation failed: 1 error"],
+                 f"Compile errors are not reported as located diagnostics: {broken.stderr!r}")
         _run([compiler, source, "-o"], cwd, compiler_environment, succeeds=False)
         _run([compiler, source, "-o", source], cwd, compiler_environment, succeeds=False)
         _require(source.read_bytes() == original_source, "Rejected output alias changed source")

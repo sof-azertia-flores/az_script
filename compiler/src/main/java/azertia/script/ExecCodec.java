@@ -80,10 +80,10 @@ public final class ExecCodec {
             throw invalid("invalid "+(parameter?"parameter":"return")+" type "+value);
     }
     private static void scriptId(int id) {
-        if((id>>>16)==0xabd)throw invalid("invalid script function id "+id);
+        if((id>>>16)==0xabd)throw invalid("invalid script function id "+Diagnostic.hexId(id));
     }
     private static void externalId(int id) {
-        if(id==0||id==1||id==0x0fff0000||(id>>>16)==0xabd)throw invalid("invalid external function id "+id);
+        if(id==0||id==1||id==0x0fff0000||(id>>>16)==0xabd)throw invalid("invalid external function id "+Diagnostic.hexId(id));
     }
     private static void slot(int slot,Layout layout,boolean declaration) {
         if(slot<0) {

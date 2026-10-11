@@ -40,40 +40,34 @@ public final class Compile {
         if ((!command.equals("compile") && !command.equals("compile-json")) || args.size() < 2)
             return args.toArray(String[]::new);
 
-        Path source = Path.of(args.get(1));
+        // The compiler's own parser accepts options anywhere and reports malformed ones,
+        // so no default can become a missing option's value.
+        azertia.Main.CompileArguments parsed = azertia.Main.parseCompileArguments(args);
+        Path source = parsed.source();
         if (source.getFileName() == null)
             throw new IllegalArgumentException("Input path must name a file: " + source);
-        Path output = source.resolveSibling(
-                source.getFileName().toString().replaceFirst("\\.[^.]+$", "") + ".exec.abd");
-        boolean explicitAst = false;
-        boolean explicitExec = false;
-        for (int i = 2; i < args.size(); i++) {
-            // Leave malformed options to the original CLI, without appending a
-            // default that could accidentally become a missing option's value.
-            if (i + 1 >= args.size()) return args.toArray(String[]::new);
-            switch (args.get(i)) {
-                case "-o", "--output" -> output = Path.of(args.get(++i));
-                case "--ast" -> { explicitAst = true; i++; }
-                case "--exec-json" -> { explicitExec = true; i++; }
-                default -> { return args.toArray(String[]::new); }
-            }
-        }
+        Path output = parsed.outputOrDefault();
+        boolean explicitAst = parsed.astOutput() != null;
+        boolean explicitExec = parsed.execOutput() != null;
 
         if (output.getFileName() == null)
             throw new IllegalArgumentException("Output path must name a file: " + output);
         String name = output.getFileName().toString();
         String stem = name.endsWith(".exec.abd") ? name.substring(0, name.length() - 9)
                 : name.endsWith(".abd") ? name.substring(0, name.length() - 4) : name;
+        // Defaults go right after the command, ahead of any "--" that ends the options.
+        List<String> defaults = new ArrayList<>();
         if (command.equals("compile") && !explicitAst) {
-            args.add("--ast");
-            args.add(output.resolveSibling(stem + ".ast.json").toString());
+            defaults.add("--ast");
+            defaults.add(output.resolveSibling(stem + ".ast.json").toString());
         }
         // An AST input is never rewritten unless --ast explicitly requests it;
         // the compiler itself rejects any output which aliases its input.
         if (!explicitExec) {
-            args.add("--exec-json");
-            args.add(output.resolveSibling(stem + ".exec.json").toString());
+            defaults.add("--exec-json");
+            defaults.add(output.resolveSibling(stem + ".exec.json").toString());
         }
+        args.addAll(1, defaults);
         return args.toArray(String[]::new);
     }
 }

@@ -51,7 +51,7 @@ Artifacts target the current system, architecture, and compatible native ABI; ex
 
 ## How compilation works
 
-1. Preprocess relative includes, macros, and conditions.
+1. Preprocess relative includes, macros, and conditions, recording each line's original file and line, so diagnostics read `file:line:column: error: ...` inside included files and at macro uses.
 2. Lex identifiers, numbers, strings, operators, and comments, preserving punctuation inside strings.
 3. Parse precedence, associativity, nested calls, blocks, and control flow recursively.
 4. Validate symbols, scopes, signatures, argument types/counts, duplicates, and returns, then generate JSON/ABD instructions.
@@ -208,7 +208,7 @@ Non-library main is 0x0fff0000; ordinary definitions may fix low IDs with :0003.
 - Automatically owned allocations may be freed only from their owning scope chain (lexical parents/callers). Reentrant functions in other active scopes cannot free them. Java memFree permits ownerless or globally promoted blocks. Make_free removes this restriction.
 - Namespaces 0, 0xfff, and 0xabd are reserved; hosts cannot take active script namespaces. Hint mounts allocate available positions. Function IDs retain all 32 bits.
 - Heap/external registry remain process-shared. Java maintains one active script, serializes calls, and allows same-thread callback reentry. Callbacks must not wait for another runtime-calling thread. Multiple C++ scripts still share resources and are not independent security sandboxes.
-- Collection literals, closures, and a complete static type system are not implemented. See the language guide for annotation semantics and include-diagnostic limitations.
+- Collection literals, closures, and a complete static type system are not implemented. See the language guide for annotation semantics and the diagnostic format.
 - ABD is a recoverable binary instruction tree, not encryption or guaranteed decompilation protection. Numeric variable slots hide source names only in exec; AST retains them. Sources/debug JSON may be omitted from releases, but secrets must not rely solely on this format.
 
 ## Data compatibility

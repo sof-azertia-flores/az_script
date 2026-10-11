@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Check source -> JSON AST -> ABD -> native execution, including bad programs."""
 import argparse
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -95,6 +96,33 @@ def main():
             result=compiler('compile-json',path,'-o',work/'invalid.abd',success=False)
             assert 'Error:' in result.stderr and 'Exception in thread' not in result.stderr,result.stderr
             checks+=1
+        # Diagnostics name the original file and line through includes, and compile and
+        # compile-json report the same text for the same program.
+        (work/'inc').mkdir()
+        header=work/'inc/lib.azs'
+        header.write_text('// header\nint helper(){\n  string s = "x";\n  return 1;\n}\n',encoding='utf-8')
+        program=work/'with-include.azs'
+        program.write_text('// main\n#include "inc/lib.azs"\nint main(){return helper();}\n',encoding='utf-8')
+        compiler('compile',program,'-o',work/'with-include.abd','--ast',work/'with-include.ast.json')
+        tree=json.loads((work/'with-include.ast.json').read_text(encoding='utf-8'))
+        assert tree['sources']==[{'name':'with-include.azs'},{'name':'inc/lib.azs','included-from':{'source':0,'line':2,'column':1}}],tree['sources']
+        helper=next(item for namespace in tree['body'].values() for item in namespace.values() if item['metadata']['name']=='helper')
+        assert helper['metadata']['_file']==1 and helper['metadata']['_line']==2,helper['metadata']
+        helper['script'][0]['param'][1]=1
+        (work/'broken.ast.json').write_text(json.dumps(tree),encoding='utf-8')
+        header.write_text('// header\nint helper(){\n  string s = 1;\n  return 1;\n}\n',encoding='utf-8')
+        from_source=compiler('compile',program,'-o',work/'broken.abd',success=False)
+        assert from_source.stderr==('inc/lib.azs:3:3: error: in function helper: Initializer for s expected string, got int\n'
+                                    'with-include.azs:2:1: note: in file included from here\n'
+                                    'Error: compilation failed: 1 error\n'),from_source.stderr
+        from_json=compiler('compile-json',work/'broken.ast.json','-o',work/'broken.abd',success=False)
+        assert from_json.stderr==from_source.stderr,(from_json.stderr,from_source.stderr)
+        header.write_text('int helper(){\n  return 1 +* 2;\n}\n',encoding='utf-8')
+        syntax=compiler('compile',program,'-o',work/'broken.abd',success=False)
+        assert syntax.stderr.startswith("inc/lib.azs:2:13: error: Expected expression, found '*'\n"
+                                        'with-include.azs:2:1: note: in file included from here\n'),syntax.stderr
+        assert not (work/'broken.abd').exists()
+        checks+=3
         original=ROOT/'compiler/examples/parser-regressions.azs'
         binary=work/'regressions.abd';ast=work/'ast.json';instructions=work/'instructions.json'
         compiler('compile',original,'-o',binary,'--ast',ast,'--exec-json',instructions)

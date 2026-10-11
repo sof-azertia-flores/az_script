@@ -173,7 +173,9 @@ class CompilerTest {
         assertEquals(2, main("int main(int a,b){return a+b;}").get("param-count").getAsInt());
         assertThrows(IllegalArgumentException.class, () -> compile("int main(){return f(1);} int f(a,b){return a+b;}"));
         var unknown = assertThrows(IllegalArgumentException.class, () -> compile("int main(){\n return missing;\n}"));
-        assertTrue(unknown.getMessage().contains("main:2:")); assertTrue(unknown.getMessage().contains("missing"));
+        assertTrue(unknown.getMessage().startsWith("<source>:2:"), unknown::getMessage);
+        assertTrue(unknown.getMessage().contains("error: in function main: "), unknown::getMessage);
+        assertTrue(unknown.getMessage().contains("missing"));
         assertThrows(IllegalArgumentException.class, () -> compile("void main(){unknown();}"));
         assertThrows(IllegalArgumentException.class, () -> compile("void main(){return 1;}"));
         assertThrows(IllegalArgumentException.class, () -> compile("int main(){return();}"));
@@ -498,7 +500,7 @@ class CompilerTest {
             Path source = temporary.resolve("invalid.json"); Files.writeString(source, content);
             var bytes = new ByteArrayOutputStream(); var errors = new PrintStream(bytes);
             assertEquals(1, Main.run(new String[]{"compile-json", source.toString()}, errors, errors));
-            assertTrue(bytes.toString().startsWith("Error: "));
+            assertTrue(bytes.toString().matches("(?s)invalid\\.json(:\\d+:\\d+)?: error: .*\\RError: compilation failed: 1 error\\R"), bytes::toString);
             assertFalse(Files.exists(temporary.resolve("invalid.exec.abd")));
         }
     }
@@ -549,7 +551,7 @@ class CompilerTest {
         var failure = assertThrows(IllegalArgumentException.class,
                 () -> compile("int main(){\nreturn " + "1+".repeat(130) + "1;}"));
         assertTrue(failure.getMessage().contains("ABD limit"), failure::getMessage);
-        assertTrue(failure.getMessage().contains("main:2:"), failure::getMessage);
+        assertTrue(failure.getMessage().contains("<source>:2:"), failure::getMessage);
         var calls = assertThrows(IllegalArgumentException.class,
                 () -> compile("int id(int v){return v;} int main(){return " + "id(".repeat(70) + "1" + ")".repeat(70) + ";}"));
         assertTrue(calls.getMessage().contains("ABD limit"), calls::getMessage);
@@ -715,7 +717,7 @@ class CompilerTest {
     @Test void fieldInitializationDiagnosticsRetainTheDeclarationLocation() {
         var error = assertThrows(IllegalArgumentException.class,
                 () -> compile("class P{\n  int value=\"wrong\";\n}\nvoid main(){P p;}"));
-        assertTrue(error.getMessage().contains("P initialization:2:3"), error::getMessage);
+        assertTrue(error.getMessage().startsWith("<source>:2:3: error: in initializer of class P: "), error::getMessage);
         assertTrue(error.getMessage().contains("value"), error::getMessage);
     }
     @Test void readableMemoryMovesCannotBypassClassFieldOrReferenceTypes() throws Exception {
@@ -884,7 +886,7 @@ class CompilerTest {
         assertArrayEquals(chain.toValue().toAbdFormat(), ExecCodec.decode(chain.toValue()).toValue().toAbdFormat());
         var sourceDepth = assertThrows(IllegalArgumentException.class,
                 () -> compile("void main(){" + "if(true){".repeat(45) + "print(1);" + "}".repeat(45) + "}"));
-        assertTrue(sourceDepth.getMessage().contains("main:1:"), sourceDepth::getMessage);
+        assertTrue(sourceDepth.getMessage().contains("<source>:1:"), sourceDepth::getMessage);
         assertTrue(sourceDepth.getMessage().contains("ABD limit"), sourceDepth::getMessage);
         AbdValue program = Compiler.compile(newTree("void main(){}")).toValue();
         AbdValue body = rawStack(AbdBasicType.int2Abd(ExecOpcodes.BREAK));
@@ -929,7 +931,7 @@ class CompilerTest {
     @Test void classDiagnosticsUseSourceLocationsNamesAndUserArgumentNumbers() throws Exception {
         var scoped = assertThrows(IllegalArgumentException.class, () -> compile(
                 "class P { int v; P(int a) { v = a; } }\nvoid main() {\n    P p(1, 2);\n}"));
-        assertTrue(scoped.getMessage().contains("main:3:"), scoped::getMessage);
+        assertTrue(scoped.getMessage().startsWith("<source>:3:5: error: in function main: "), scoped::getMessage);
         assertTrue(scoped.getMessage().contains("P constructor expects 1 arguments, got 2"), scoped::getMessage);
         var manual = assertThrows(IllegalArgumentException.class, () -> compile(
                 "class P { int v; P(int a) { v = a; } }\nvoid main() { P* p = new P(\"x\"); }"));
@@ -1182,7 +1184,7 @@ class CompilerTest {
                 point + "class Box{P * p(1);}void main(){}", point + "class Box{P p;}void main(){}"))
             assertThrows(IllegalArgumentException.class, () -> compile(invalid), invalid);
         var field = assertThrows(IllegalArgumentException.class, () -> compile(point + "class Box{\n  P inner;\n}\nvoid main(){}"));
-        assertTrue(field.getMessage().contains("Box initialization:2:"), field::getMessage);
+        assertTrue(field.getMessage().startsWith("<source>:2:3: error: in initializer of class Box: "), field::getMessage);
     }
 
     @Test void flexibleParametersTakePointersAndLiteralObjectsByAddress() throws Exception {
