@@ -74,7 +74,7 @@ void main() {
 
 `Point a(3);`（或 `Point a;`、`Point a();`）创建字面量对象：它是一个值，赋值、传参和返回都会复制全部字段，每个副本到期时各自析构；返回局部字面量对象直接交给调用方，不额外复制。`Point * p(3);` 创建离块自动销毁的指针对象，无参也要写 `Point * p();`。`Point * b = new Point(5);` 创建需要显式 `delete b;` 的手动对象；单写 `Point * q;` 是空指针，等同 `Point * q = null;`。参数写成 `Point (*) p` 时函数同时接受 `Point *` 和字面量 `Point`：字面量对象按地址借入，不复制，函数内 `p` 就是 `Point *`。指针赋值、别名与传参只复制地址；指针字段不拥有目标对象。同一块中的对象按创建逆序析构，未绑定变量的临时对象在语句结束时析构。`delete` 只接受指针，`delete null;` 无操作，删除自动指针对象或使用失效地址会报错。脚本只能通过方法中的 `this` 或 `Point (*)` 参数（类型均为 `Point *`）拿到字面量对象的地址，对象到期后再经它访问会报错。字面量对象不能与 `null` 比较、不能存进 `var` 或全局变量。
 
-访问成员使用 `object.field`、`object.method()`、`this.field`。接收对象和实参从左到右各求值一次。类内先找局部变量和参数，再找成员，最后找全局变量。成员赋值支持 `=`，暂不支持成员 `+=`。指针支持结构等价的赋值及相等比较，也能与 `null` 比较；整数 `0` 不能代替 `null`。对象须写显式类类型，`var object = new Point(1); object.get();` 不能编译，应写 `Point * object = new Point(1);`。
+访问成员使用 `object.field`、`object.method()`、`this.field`。接收对象和实参从左到右各求值一次。类内先找局部变量和参数，再找成员，最后找全局变量。成员赋值支持 `=`，暂不支持成员 `+=`。类按名称区分：指针只能在同一个类之间赋值和相等比较，子类指针可以转为父类指针，字段布局相同的其他类不能互换；指针也能与 `null` 比较；整数 `0` 不能代替 `null`。对象须写显式类类型，`var object = new Point(1); object.get();` 不能编译，应写 `Point * object = new Point(1);`。
 
 类继承写作 `class Child : Base` 或 `class Child : public Base`。父类字段位于对象 slots 前部，子类字段追加在后；继承方法直接使用同一个对象地址。子类指针可赋给父类指针变量、参数或返回值（字面量对象不做切片），父类方法的调用按静态类型绑定；同名字段和方法可由子类遮蔽，没有虚函数派发。
 
@@ -131,4 +131,4 @@ int main() { return math_round(math_hypot(3.0, 4.0)); }
 
 头文件使用 `#assume_hint MY_LIB abcd` 和 `extern int answer():abcd0002;` 声明调用；实现文件写 `#namespace_hint MY_LIB` 和 `int answer():0002 {return 42;}`。两者独立编译后，使用 `./run.sh main.exec.abd --insert library.exec.abd` 装配。C++ / JNI 宿主须在装配后显式 flush。
 
-类库在共享头文件中声明 extern 构造、方法及析构，实现写在类外，如 `Point::Point(int value):0002 {this.x=value;}`。类型按有序字段结构比较，类名和字段名不影响等价。完整可运行例子位于 `examples/multifile/`，见 [多文件库文档](HINT_LINKING.md)。
+类库在共享头文件中声明 extern 构造、方法及析构，实现写在类外，如 `Point::Point(int value):0002 {this.x=value;}`。编译单元内类按名称区分；执行文件不含类名，跨模块时这份共享声明就是不受检查的约定，各模块应 include 同一份头文件。完整可运行例子位于 `examples/multifile/`，见 [多文件库文档](HINT_LINKING.md)。

@@ -134,15 +134,11 @@ def main():
         execute('base-alias-delete-automatic', '''class A{int x=3;~A(){print(x);}}
             class B:A{int y=7;~B(){print(y);}}
             void main(){B * b();A* a=b;delete a;}''', '7\n3\n', error=True)
-        execute('most-derived-destructor-structural-alias', '''class A{int x=3;~A(){print("A");}}
-            class B:A{int y=7;~B(){print("B");}}class C{int first;int second;~C(){print("wrong");}}
-            void main(){B* b=new B();C* c=b;delete c;}''', 'B\nA\n')
-        execute('structural-flat-equivalence', '''class A{int x=3;}class B:A{double y=4.5;}
-            class C{int first;double second;}
-            void main(){B b;C c=b;print(c.first);print(c.second);}''', '3\n4.5\n')
-        execute('recursive-structural-equivalence', '''class A{int x;A* next;}
-            class B:A{int y;}class C{int renamed;D* next;int end;}class D{int renamed;D* next;}
-            void main(){B b;C c=b;print(c.next==null);}''', 'true\n')
+        execute('most-derived-destructor-base-alias', '''class A{int x=3;~A(){print("A");}}
+            class B:A{int y=7;~B(){print("B");}}
+            void main(){B* b=new B();A* a=b;delete a;}''', 'B\nA\n')
+        execute('inherited-value-copy', '''class A{int x=3;}class B:A{double y=4.5;}
+            void main(){B b;B c=b;print(c.x);print(c.y);}''', '3\n4.5\n')
         execute('inherited-self-return', '''class A{int x=5;A* self(){return this;}}
             class B:A{int y=7;}
             void main(){B b;print(b.self().x);}''', '5\n')
@@ -235,6 +231,14 @@ def main():
             'return-downcast': 'class A{int x;}class B:A{int y;}B bad(A a){return a;}void main(){}',
             'inherited-self-downcast': 'class A{int x;A* self(){return this;}}class B:A{int y;}void main(){B b;B* c=b.self();}',
             'unrelated-prefix': 'class A{int x;}class B{int x;int y;}void main(){B b;A a=b;}',
+            # Classes are nominal: a flattened layout equal to another class does not convert.
+            'flat-layout-alias': 'class A{int x=3;~A(){print("A");}}class B:A{int y=7;~B(){print("B");}}'
+                                 'class C{int first;int second;~C(){print("wrong");}}void main(){B* b=new B();C* c=b;delete c;}',
+            'flat-layout-value': 'class A{int x=3;}class B:A{double y=4.5;}class C{int first;double second;}void main(){B b;C c=b;}',
+            'recursive-layout-value': 'class A{int x;A* next;}class B:A{int y;}class C{int renamed;D* next;int end;}'
+                                      'class D{int renamed;D* next;}void main(){B b;C c=b;}',
+            'fieldless-derived-downcast': 'class A{int x;}class B:A{}void main(){A* a=new A();B* b=a;}',
+            'fieldless-derived-slice': 'class A{int x;}class B:A{}void main(){B b;A a=b;}',
             'hidden-field-wrong-type': 'class A{int x;}class B:A{string x;}void main(){B b;b.x=7;}',
             'hidden-method-wrong-signature': 'class A{int x;int f(int n){return n;}}class B:A{int y;int f(){return 2;}}void main(){B b;b.f(3);}',
             'duplicate-derived-field': 'class A{int x;}class B:A{int y;int y;}void main(){}',

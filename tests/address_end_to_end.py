@@ -111,9 +111,8 @@ def main():
             void main(){Child * c();c.pointer=alloc(2);c.next=c.pointer+1;
             mem_get(c.get())=11;mem_get(c.next)=13;Base* b=c;
             print(mem_get(b.get()));print(mem_get(c.next));print(b.value+c.extra);}''', '11\n13\n12\n')
-        execute('structural-address-fields', '''class A{address p;A* next;}
-            class B{address renamed;B* link;}
-            address offset(){address p=null;return p+4;}void main(){A a;a.p=offset();B b=a;print(b.renamed);print(b.link==null);}''', '4\ntrue\n')
+        execute('same-class-address-fields', '''class A{address p;A* next;}
+            address offset(){address p=null;return p+4;}void main(){A a;a.p=offset();A b=a;print(b.p);print(b.next==null);}''', '4\ntrue\n')
         execute('raw-return-transfer', '''address create(){address p=alloc(2);mem_get(p)=7;
             mem_get(p+1)=9;mem_send_up(p);return p;}
             address forward(){address p=create();mem_send_up(p);return p;}
@@ -184,6 +183,8 @@ def main():
             'class-equals-raw': 'class C{int x;}void main(){C c;address p=null;print(c==p);}',
             'address-int-layout': 'class A{address p;}class B{int n;}void main(){A a;B b=a;}',
             'address-class-layout': 'class A{address p;}class B{B* next;}void main(){A a;B b=a;}',
+            # Classes are nominal: an identical layout under another name does not convert.
+            'address-same-layout': 'class A{address p;A* next;}class B{address renamed;B* link;}void main(){A a;B b=a;}',
             'address-reserved-class': 'class address{int n;}void main(){}',
         }
         for name, source in bad_sources.items():
@@ -229,7 +230,7 @@ def main():
             execute(name, IMPORTS + 'void main(){' + body + '}', error=message, libraries=(library,))
         execute('high-address-free', IMPORTS + 'void main(){print(mem_free(maximum()));}', 'false\n', libraries=(library,))
 
-        # Structural type erasure still distinguishes object/raw-address values
+        # ABI type erasure still distinguishes object/raw-address values
         # from ordinary integer values in every runtime function signature.
         _, layout = compile_case('''class C{address p;C* next;C(address p){this.p=p;}
             address get(){return p;}C* self(){return this;}~C(){}}

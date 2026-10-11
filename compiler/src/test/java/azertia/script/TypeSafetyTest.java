@@ -7,6 +7,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
 import java.util.List;
 import java.util.function.Consumer;
+import java.util.function.Function;
 import static org.junit.jupiter.api.Assertions.*;
 
 /** Source and compile-json share one set of naming, hint, namespace and class layout rules. */
@@ -144,20 +145,105 @@ class TypeSafetyTest {
                 new Case("class A<T>{B<T> b;}\nclass B<T>{A<T> a;}\nint main(){A<int>* p=null;return 0;}",
                         "<source>:1:7: error: in class A: Class A contains itself by value; use a pointer field"),
                 new Case(deep, "<source>:1:7: error: in class C0: Literal object nesting exceeds 64 levels"),
-                // Duplicate externs are compared only once every layout is valid, so a broken class reports its own error.
-                new Case("class A : Z{int v;}\nclass Z : A{int w;}\nclass C{int x;}\nextern int f(A* a):12340001;\nextern int f(C* c):12340001;\nint main(){return 0;}",
+                // Duplicate externs compare class names, not layouts, so a broken class they agree on reports only its own error.
+                new Case("class A : Z{int v;}\nclass Z : A{int w;}\nextern int f(A* a):12340001;\nextern int f(A* other):12340001;\nint main(){return 0;}",
                         "<source>:1:7: error: in class A: Inheritance cycle involving A\n<source>:2:7: error: in class Z: Inheritance cycle involving Z"),
-                new Case("class A{}\nclass C{int x;}\nextern int f(A* a):12340001;\nextern int f(C* c):12340001;\nint main(){return 0;}",
+                new Case("class A{}\nextern int f(A* a):12340001;\nextern int f(A* other):12340001;\nint main(){return 0;}",
                         "<source>:1:7: error: in class A: Class A must declare at least one field"))) {
             // The parser leaves layouts to the compiler, so the AST exists and compile-json reports the same errors.
             JsonObject tree = tree(item.source());
             assertEquals(item.expected(), assertThrows(CompileException.class, () -> bytes(tree), item.source()).getMessage());
             assertEquals(item.expected(), failure(item.source()).getMessage());
         }
+        // Duplicate externs compare class names in the parser, so a genuine conflict is reported before the compiler sees the broken classes.
+        assertEquals("<source>:4:13: error: Conflicting extern declaration: f\n<source>:3:13: note: previous declaration is here",
+                failure("class A : Z{int v;}\nclass Z : A{int w;}\nextern int f(A* a):12340001;\nextern int f(Z* z):12340001;\nint main(){return 0;}").getMessage());
         // The parser still checks base initializers, and reports each one.
         assertEquals("<source>:3:21: error: Constructor A can initialize only its direct base class\n"
                         + "<source>:4:17: error: Constructor D can initialize only its direct base class",
                 failure("class B{int x;}\nclass C{int z;}\nclass A : B{int y; A() : C() {}}\nclass D{int w; D() : B() {}}\nint main(){return 0;}").getMessage());
+    }
+
+    @Test void classesAreNominalEvenWithIdenticalLayouts() throws Exception {
+        String units = "class Seconds{double v;}\nclass Meters{double v;}\n";
+        String base = "class A{int x;}\nclass A2 : A{}\nclass B : A{int y;}\n";
+        record Case(String source, String expected) {}
+        for (Case item : List.of(
+                new Case(units + "double run(Meters* m){return m.v;}\nvoid main(){Seconds* s=new Seconds();print(run(s));delete s;}",
+                        "<source>:4:44: error: in function main: run argument 1 expected Meters *, got Seconds *"),
+                new Case(units + "void main(){Seconds* s=new Seconds();Meters* m=s;delete s;}",
+                        "<source>:3:38: error: in function main: Initializer for m expected Meters *, got Seconds *"),
+                new Case(units + "double run(Meters (*) m){return m.v;}\nvoid main(){Seconds s;print(run(s));}",
+                        "<source>:4:29: error: in function main: run argument 1 expected Meters (*), got Seconds"),
+                new Case(units + "void main(){Seconds s;Meters m=s;}",
+                        "<source>:3:23: error: in function main: Initializer for m expected Meters, got Seconds"),
+                new Case(units + "void main(){Seconds* s=new Seconds();Meters* m=new Meters();print(s==m);delete s;delete m;}",
+                        "<source>:3:68: error: in function main: Object equality requires compatible class references or null"),
+                // A derived class without fields of its own is still a different class: no downcast, no slicing.
+                new Case(base + "void main(){A* a=new A();A2* b=a;delete a;}",
+                        "<source>:4:26: error: in function main: Initializer for b expected A2 *, got A *"),
+                new Case(base + "void main(){A2 b;A a=b;}",
+                        "<source>:4:18: error: in function main: Initializer for a expected A, got A2"),
+                new Case(units + "class M{int n;int operator[](Seconds* k){return n;}void operator[]=(Meters* k,int v){n=v;}}\nint main(){return 0;}",
+                        "<source>:3:7: error: in class M: Index getter and setter types must match: M"),
+                new Case(units + "extern int f(Seconds* s):12340001;\nextern int f(Meters* m):12340001;\nint main(){return 0;}",
+                        "<source>:4:13: error: Conflicting extern declaration: f\n<source>:3:13: note: previous declaration is here"),
+                new Case(units + "extern int f(Seconds* s):12340001;\nextern int g(Meters* m):12340001;\nint main(){return 0;}",
+                        "<source>:4:13: error: Conflicting external signature ID: 0x12340001"),
+                // Declarations and definitions match by class name; the bodies here do not depend on the class.
+                new Case(units + "extern int f(Seconds* s):12340001;\nint f(Meters* s):0001{return 1;}\nint main(){return 0;}",
+                        "<source>:3:13: error: Extern and definition signatures disagree: f"),
+                new Case(units + "extern double Seconds::add(Seconds* o):12340003;\ndouble Seconds::add(Meters* o){return v;}\nint main(){return 0;}",
+                        "<source>:3:27: error: Extern and definition signatures disagree: Seconds::add"),
+                new Case(units + "extern <T extends Seconds*> int g(T t):12340002;\n<T extends Meters*> int g(T t):0002{return 1;}\nint main(){return 0;}",
+                        "<source>:3:34: error: Extern and definition signatures disagree: g")))
+            assertEquals(item.expected(), failure(item.source()).getMessage(), item.source());
+        // Only a derived pointer converts implicitly, to its base; related pointers compare.
+        assertDoesNotThrow(() -> bytes(tree(base + "A* up(B* b){return b;}\nvoid main(){B* b=new B();A* a=up(b);A* c=b;"
+                + "print(a==b);print(b==c);A2* d=new A2();a=d;print(a==d);delete b;delete d;}")));
+        // A generic application learns its base with its layout; the first function to use it still upcasts.
+        String generic = "class Base<T>{T value;}\nclass Child<T> : Base<T>{int extra;}\n";
+        for (String first : List.of("Base<int>* up(Child<int>* c){return c;}\n", "void up(Child<int>* c){Base<int>* b=c;}\n",
+                "bool up(Base<int>* b,Child<int>* c){return b==c;}\n"))
+            assertDoesNotThrow(() -> bytes(tree(generic + first + "void main(){}")), first);
+    }
+
+    @Test void valueBranchesHaveACommonTypeAndNeverLaunderReferences() throws Exception {
+        JsonObject tree = tree("class A{int x;}\nclass B : A{int y;}\nclass C{int x;}\n"
+                + "A* pick(bool c,A* a,B* b,C* other,int n,u){return a;}\nint main(){return 0;}");
+        Function<String, Consumer<JsonObject>> returning = body -> copy -> {
+            JsonObject returned = function(copy, "pick").getAsJsonArray("script").get(0).getAsJsonObject();
+            returned.getAsJsonArray("param").set(0, JsonParser.parseString(body));
+        };
+        Function<String, Consumer<JsonObject>> declaring = type -> copy ->
+                function(copy, "pick").getAsJsonObject("metadata").addProperty("return-type", type);
+        String variable = "{\"t\":\"ctrl\",\"call\":\"var\",\"param\":[\"%s\"]}";
+        String choose = "{\"t\":\"ctrl\",\"call\":\"if\",\"param\":[" + variable.formatted("c") + ",%s,%s]}";
+        // Derived and base give the base pointer; null takes the other branch's pointer type.
+        for (String value : List.of(choose.formatted(variable.formatted("b"), variable.formatted("a")),
+                choose.formatted(variable.formatted("a"), "{\"t\":\"ctrl\",\"call\":\"null\",\"param\":[]}"))) {
+            JsonObject copy = tree.deepCopy(); returning.apply(value).accept(copy);
+            assertDoesNotThrow(() -> bytes(copy), value);
+        }
+        JsonObject derived = tree.deepCopy();
+        returning.apply(choose.formatted(variable.formatted("b"), variable.formatted("a"))).andThen(declaring.apply("B*")).accept(derived);
+        assertTrue(assertThrows(CompileException.class, () -> bytes(derived)).getMessage().endsWith("return expected B *, got A *"));
+        record Case(String left, String right, String types) {}
+        for (Case item : List.of(new Case("a", "other", "A * and C *"), new Case("a", "n", "A * and int"),
+                new Case("other", "u", "C * and any"))) {
+            CompileException error = rejected(tree, edited -> returning.apply(
+                    choose.formatted(variable.formatted(item.left()), variable.formatted(item.right()))).accept(edited));
+            assertTrue(error.getMessage().contains("Branches have incompatible types " + item.types()), error::getMessage);
+        }
+        // The if opcode converts neither arm, so int and double branches have no single numeric type.
+        JsonObject numbers = tree("double pick(bool c,int n,double d){double r=d;return r;}\nint main(){return 0;}");
+        Function<String, Consumer<JsonObject>> initializing = value -> copy -> function(copy, "pick").getAsJsonArray("script").get(0)
+                .getAsJsonObject().getAsJsonArray("param").set(1, JsonParser.parseString(value));
+        JsonObject same = numbers.deepCopy();
+        initializing.apply(choose.formatted(variable.formatted("d"), variable.formatted("d"))).accept(same);
+        assertDoesNotThrow(() -> bytes(same));
+        CompileException mixed = rejected(numbers, initializing.apply(choose.formatted(variable.formatted("n"), variable.formatted("d")))::accept);
+        assertTrue(mixed.getMessage().endsWith("Initializer for r has unknown type; expected double"), mixed::getMessage);
     }
 
     @Test void hexadecimalIdsAndReservedNamespacesMatchBetweenSourceAndAst() throws Exception {

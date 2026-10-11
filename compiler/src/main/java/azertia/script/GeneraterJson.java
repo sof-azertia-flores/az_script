@@ -1423,10 +1423,7 @@ public class GeneraterJson {
             // The compiler validates class layouts, so source and compile-json report the same located errors.
             validateBaseInitializers();
             diagnostics.checkpoint();
-            // With a broken class the compiler reports its layout error; comparing externs
-            // against a partial layout could report a conflict in its place.
-            Map<String,JsonArray> layouts = classLayouts();
-            if (layouts != null) validateDuplicateExterns(layouts);
+            validateDuplicateExterns();
             diagnostics.checkpoint();
             try { assignFunctionIds(); }
             catch (IllegalArgumentException e) { report(e); }
@@ -1495,58 +1492,31 @@ public class GeneraterJson {
                             functionLocation(function)));
             }
         }
-        /**
-         * Flattened field lists for comparing duplicate extern signatures, or null when a
-         * class has an unknown or cyclic base chain or no fields. Reports nothing: the
-         * compiler always rejects such a class and reports its layout error at the class.
-         */
-        private Map<String,JsonArray> classLayouts() {
-            Map<String,JsonObject> declarations = new HashMap<>();
-            for (JsonElement item : script.classes) declarations.put(item.getAsJsonObject().get("name").getAsString(), item.getAsJsonObject());
-            Map<String,JsonArray> layouts = new HashMap<>();
-            for (JsonElement item : script.classes) {
-                Deque<JsonObject> pending = new ArrayDeque<>(); Set<String> chain = new HashSet<>();
-                JsonObject next = item.getAsJsonObject();
-                while (next != null && !layouts.containsKey(next.get("name").getAsString())) {
-                    if (!chain.add(next.get("name").getAsString())) return null;
-                    pending.push(next);
-                    next = next.has("base") ? declarations.get(rawClass(next.get("base").getAsString())) : null;
-                    if (next == null && pending.peek().has("base")) return null;
-                }
-                while (!pending.isEmpty()) {
-                    JsonObject value = pending.pop(); JsonArray fields = new JsonArray();
-                    if (value.has("base")) fields.addAll(layouts.get(rawClass(value.get("base").getAsString())));
-                    fields.addAll(value.getAsJsonArray("fields"));
-                    if (fields.isEmpty()) return null;
-                    layouts.put(value.get("name").getAsString(), fields);
-                }
-            }
-            return layouts;
-        }
-        private void validateDuplicateExterns(Map<String,JsonArray> layouts) {
+        private void validateDuplicateExterns() {
             for (DuplicateExtern duplicate : duplicateExterns) {
                 ExternSignature first = duplicate.first(), second = duplicate.second();
-                if (!sameExtern(first, second, layouts)) report(conflictingExtern(duplicate.name(), first, second));
+                if (!sameExtern(first, second)) report(conflictingExtern(duplicate.name(), first, second));
             }
         }
         private CompileException conflictingExtern(String name, ExternSignature first, ExternSignature second) {
             Token at = externTokens.getOrDefault(second, current()), before = externTokens.getOrDefault(first, at);
             return error("Conflicting extern declaration: " + name, at, noteAt(before, "previous declaration is here"));
         }
-        private boolean sameExtern(ExternSignature first, ExternSignature second, Map<String,JsonArray> layouts) {
+        /** Classes are nominal: the declarations agree up to renamed type parameters. */
+        private boolean sameExtern(ExternSignature first, ExternSignature second) {
             if (first.typeParameters.size() != second.typeParameters.size()) return false;
             Map<String,String> renames = new HashMap<>();
             for (int i = 0; i < first.typeParameters.size(); i++)
                 renames.put(second.typeParameters.get(i).getAsJsonObject().get("name").getAsString(), first.typeParameters.get(i).getAsJsonObject().get("name").getAsString());
             for (int i = 0; i < first.typeParameters.size(); i++) {
                 JsonObject left = first.typeParameters.get(i).getAsJsonObject(), right = second.typeParameters.get(i).getAsJsonObject();
-                if (left.has("bound") != right.has("bound") || left.has("bound") && !sameSourceType(left.get("bound").getAsString(),
-                        renameType(right.get("bound").getAsString(), renames), layouts)) return false;
+                if (left.has("bound") != right.has("bound") || left.has("bound") && !left.get("bound").getAsString().equals(
+                        renameType(right.get("bound").getAsString(), renames))) return false;
             }
-            if (first.paramTypes.size() != second.paramTypes.size() || !sameSourceType(first.returnType, renameType(second.returnType, renames), layouts))
+            if (first.paramTypes.size() != second.paramTypes.size() || !first.returnType.equals(renameType(second.returnType, renames)))
                 return false;
             for (int i = 0; i < first.paramTypes.size(); i++)
-                if (!sameSourceType(first.paramTypes.get(i), renameType(second.paramTypes.get(i), renames), layouts))
+                if (!first.paramTypes.get(i).equals(renameType(second.paramTypes.get(i), renames)))
                     return false;
             return true;
         }
@@ -1564,21 +1534,6 @@ public class GeneraterJson {
         }
         /** "(*)" for a flexible parameter, "*" for a pointer, "" for a literal object or scalar. */
         private static String classSuffix(String type) { return type.endsWith("(*)") ? "(*)" : type.endsWith("*") ? "*" : ""; }
-        private boolean sameSourceType(String first, String second, Map<String,JsonArray> layouts) {
-            ArrayDeque<List<String>> pending = new ArrayDeque<>();Set<List<String>> compared = new HashSet<>();pending.add(List.of(first, second));
-            while (!pending.isEmpty()) {
-                List<String> pair = pending.removeLast();if (pair.get(0).equals(pair.get(1))) continue;
-                String kind = classSuffix(pair.get(0));
-                if (!kind.equals(classSuffix(pair.get(1)))) return false;
-                JsonArray left = layouts.get(pair.get(0).substring(0, pair.get(0).length() - kind.length())),
-                        right = layouts.get(pair.get(1).substring(0, pair.get(1).length() - kind.length()));
-                if (left == null || right == null || left.size() != right.size()) return false;
-                if (!compared.add(pair)) continue;
-                for (int i = 0; i < left.size(); i++)
-                    pending.add(List.of(left.get(i).getAsJsonObject().get("type").getAsString(), right.get(i).getAsJsonObject().get("type").getAsString()));
-            }
-            return true;
-        }
         private void assignFunctionIds() {
             Set<Integer> used = new HashSet<>(), selfReserved = new HashSet<>();
             Map<Integer,AzFunction> owners = new HashMap<>();

@@ -120,15 +120,44 @@ def main():
         execute(cycle, [a, b], ['A', 'B', 'root', '4'])
         execute(cycle, [b, a], ['B', 'A', 'root', '4'])
 
-        equivalent, _ = compile_module('equivalent', '''
+        # Classes are nominal within a compilation unit: a renamed copy with the same layout does not convert.
+        renamed = work / 'renamed.azs'
+        renamed.write_text('''
             class A{int first; B* next;}
             class B{double value; A* link;}
             class C{int renamed; D* child;}
             class D{double renamed; C* ref;}
             int accept(C value){return value.renamed;}
-            C convert(A value){return value;}
-            int main(){A a;a.first=7;C c=a;return accept(a)+convert(a).renamed;}''')
-        execute(equivalent, [], ['14'])
+            int main(){A a;a.first=7;return accept(a);}''', encoding='utf-8')
+        rejected = run(compiler + ['compile', renamed, '-o', work / 'renamed.abd'], success=False)
+        assert 'accept argument 1 expected C, got A' in rejected.stderr, rejected.stderr
+        # Across modules, one shared declaration is the class contract; the runtime does not check it.
+        (work / 'chain.include.azs').write_text('''#ifndef CHAIN_INCLUDED
+            #define CHAIN_INCLUDED 1
+            #assume_hint CHAIN_LIB c4a1
+            class Link{int value; Link* next;}
+            extern int total(Link* head):c4a10002;
+            extern Link* prepend(Link* rest, int value):c4a10003;
+            extern int first(Link (*) link):c4a10004;
+            #fi''', encoding='utf-8')
+        chain, _ = compile_module('chain', '''#namespace_hint CHAIN_LIB
+            #include "chain.include.azs"
+            int total(Link* head):0002{if(head==null){return 0;}return head.value+total(head.next);}
+            Link* prepend(Link* rest, int value):0003{Link* link=new Link();link.value=value;link.next=rest;return link;}
+            int first(Link (*) link):0004{return link.value;}''')
+        shared, _ = compile_module('chain_client', '''#include "chain.include.azs"
+            int main(){Link* a=new Link();a.value=5;Link* b=prepend(a,9);Link literal;literal.value=4;literal.next=b;
+            print(total(b));print(first(literal));int result=total(b)+first(literal);delete b;delete a;return result;}''')
+        execute(shared, [chain], ['14', '4', '18'])
+        # Executables carry no class names, so renamed copies in two modules link unchecked.
+        copy_library, _ = compile_module('copy_library', '''#namespace_hint COPY_LIB
+            class X{int v;}
+            int get(X* x):0002{return x.v;}''')
+        copy_client, _ = compile_module('copy_client', '''#assume_hint COPY_LIB c4b1
+            class Y{int w;}
+            extern int get(Y* y):c4b10002;
+            int main(){Y* y=new Y();y.w=42;int result=get(y);delete y;return result;}''')
+        execute(copy_client, [copy_library], ['42'])
         initialization, _ = compile_module('init_scope', '''
             class C{int x=7;int y=x;C(int x){this.x=x;}}
             int main(){C c(100);return c.y;}''')
@@ -250,8 +279,8 @@ public class HintSourceSnapshot {
             assert result.stdout.splitlines() == ['library-load', 'point:42', 'point:42', 'point:41'], result.stdout
             assert 'WARNING in native method' not in result.stdout + result.stderr
         print('Hint linking: source/AST/ABD roundtrips, extern class factories, implementation-local '
-              'initializers, dependency cycles, alias isolation, atomic retry, readiness, structural '
-              'types, full-width IDs, module-assembly diagnostics and grammar rejection passed.')
+              'initializers, dependency cycles, alias isolation, atomic retry, readiness, nominal '
+              'and shared-header class types, full-width IDs, module-assembly diagnostics and grammar rejection passed.')
 
 
 if __name__ == '__main__':

@@ -387,9 +387,31 @@ public class Compiler {
     }
     private static int branchType(JsonArray params, LogicEnvironment environment) {
         if (params.size() != 3) return AsTypes.VOID_VALUE;
-        int first = expressionType(params.get(1), environment);
-        int second = expressionType(params.get(2), environment);
-        return equivalent(first, second) ? first : AsTypes.ANY_VALUE;
+        return commonType(expressionType(params.get(1), environment), expressionType(params.get(2), environment), false);
+    }
+    /**
+     * The type of a value that is either branch: identical types, a pointer for null,
+     * or the base pointer of a derived/base pair. Strict callers convert the narrower
+     * numeric arm, so they also get the wider numeric type; without that conversion
+     * mixed numerics stay any. Unrelated scalars give any unless strict. Object
+     * references never pass through any: a class, buffer, type parameter or null
+     * without a common type is an error.
+     */
+    private static int commonType(int first, int second, boolean strict) {
+        if (first == second) return first;
+        if (numeric(first) && numeric(second)) return strict ? arithmeticType(first, second) : AsTypes.ANY_VALUE;
+        if (first != NULL_TYPE && second != NULL_TYPE && !isValueClass(first) && !isValueClass(second)) {
+            if (assignable(first, second)) return first;
+            if (assignable(second, first)) return second;
+        } else if (first == NULL_TYPE && assignable(second, NULL_TYPE)) return second;
+        else if (second == NULL_TYPE && assignable(first, NULL_TYPE)) return first;
+        if (strict || reference(first) || reference(second))
+            throw new IllegalArgumentException("Branches have incompatible types " + typeName(first) + " and " + typeName(second));
+        return AsTypes.ANY_VALUE;
+    }
+    /** Class, buffer, type-parameter and null values, which must keep their static type. */
+    private static boolean reference(int type) {
+        return isClass(type) || isBuffer(type) || isTypeParameter(type) || type == NULL_TYPE;
     }
     private static int numericOrAny(int type) {
         return numeric(type) ? type : AsTypes.ANY_VALUE;
@@ -422,39 +444,21 @@ public class Compiler {
     private static boolean assignable(int expected, int actual) {
         if(isTypeParameter(expected))return expected==actual || actual==NULL_TYPE&&isPointerClass(typeBound(expected));
         if(isTypeParameter(actual))return isPointerClass(typeBound(actual))&&assignable(expected,typeBound(actual));
-        if (equivalent(expected, actual))
-            return !isValueClass(expected) || Objects.equals(CLASS_LAYOUTS.get().get(expected).cleanupDestructor,
-                    CLASS_LAYOUTS.get().get(actual).cleanupDestructor) || expected == actual;
+        // Classes are nominal; a literal object only takes its own class, so it never slices.
+        if (expected == actual) return true;
         if ((isPointerClass(expected) || isFlexibleClass(expected) || expected == AsTypes.ADDRESS_VALUE) && actual == NULL_TYPE) return true;
         // "C (*)" takes a pointer, or a literal object by its address, under the pointer conversion rules.
         if (isFlexibleClass(expected))
             return (isPointerClass(actual) || isValueClass(actual)) && assignable(pointerOf(expected), pointerOf(actual));
         if (!isPointerClass(expected) || !isPointerClass(actual)) return false;
-        for (ClassInfo base = CLASS_LAYOUTS.get().get(actual).base; base != null; base = base.base)
-            if (equivalent(expected, base.pointerType)) return true;
+        for (ClassInfo base = laidOutBase(CLASS_LAYOUTS.get().get(actual)); base != null; base = laidOutBase(base))
+            if (expected == base.pointerType) return true;
         return false;
     }
-    private static boolean equivalent(int first, int second) {
-        if (first == second) return true;
-        ArrayDeque<Long> pending = new ArrayDeque<>(); Set<Long> compared = new HashSet<>();
-        pending.add(((long)first << 32) | (second & 0xffffffffL));
-        while (!pending.isEmpty()) {
-            long pair = pending.removeLast(); int leftType = (int)(pair >> 32), rightType = (int)pair;
-            if (leftType == rightType) continue;
-            if (!isClass(leftType) || !isClass(rightType) || classKind(leftType) != classKind(rightType)) return false;
-            if (!compared.add(pair)) continue;
-            ClassInfo left = CLASS_LAYOUTS.get().get(leftType), right = CLASS_LAYOUTS.get().get(rightType);
-            if(left==null||right==null)return false;
-            if(!left.arguments.isEmpty()||!right.arguments.isEmpty()) {
-                if(!sameApplication(left,right))return false;
-                continue;
-            }
-            ensureLayout(left);ensureLayout(right);
-            if (left.fields.size() != right.fields.size()) return false;
-            for (int i = 0; i < left.fields.size(); i++)
-                pending.add(((long)left.fields.get(i).type() << 32) | (right.fields.get(i).type() & 0xffffffffL));
-        }
-        return true;
+    /** A generic application learns its base when its layout is prepared, which may not have happened yet. */
+    private static ClassInfo laidOutBase(ClassInfo info) {
+        if (!info.prepared && !info.building) ensureLayout(info);
+        return info.base;
     }
     private static boolean conditionType(int type) {
         return type == AsTypes.BOOLEAN_VALUE || numeric(type);
@@ -1873,7 +1877,7 @@ public class Compiler {
                 if(!info.operators.containsKey("index-get"))throw new IllegalArgumentException("Index setter requires a getter: "+info.name);
                 Signature getter=operatorSignature(info,byName.get(info.operators.get("index-get")));
                 Signature setter=operatorSignature(info,byName.get(info.operators.get("index-set")));
-                if(!equivalent(getter.paramTypes().get(1),setter.paramTypes().get(1))||!equivalent(getter.returnType(),setter.paramTypes().get(2)))
+                if(getter.paramTypes().get(1)!=setter.paramTypes().get(1)||getter.returnType()!=setter.paramTypes().get(2))
                     throw new IllegalArgumentException("Index getter and setter types must match: "+info.name);
             }
         } catch (RuntimeException error) { recover(error, info.source, "class " + info.name, global); }
@@ -2162,12 +2166,12 @@ public class Compiler {
         Map<Integer,Integer> renaming=new HashMap<>();
         for(int i=0;i<first.typeParameters().size();i++) {
             int left=first.typeParameters().get(i),right=second.typeParameters().get(i);
-            if(!equivalent(TYPE_PARAMETERS.get().get(left).bound(),substitute(TYPE_PARAMETERS.get().get(right).bound(),renaming)))return false;
+            if(TYPE_PARAMETERS.get().get(left).bound()!=substitute(TYPE_PARAMETERS.get().get(right).bound(),renaming))return false;
             renaming.put(right,left);
         }
-        if (!equivalent(first.returnType(), substitute(second.returnType(),renaming)) || first.paramTypes().size() != second.paramTypes().size()) return false;
+        if (first.returnType() != substitute(second.returnType(),renaming) || first.paramTypes().size() != second.paramTypes().size()) return false;
         for (int i = 0; i < first.paramTypes().size(); i++)
-            if (!equivalent(first.paramTypes().get(i), substitute(second.paramTypes().get(i),renaming))) return false;
+            if (first.paramTypes().get(i) != substitute(second.paramTypes().get(i),renaming)) return false;
         return true;
     }
     /**

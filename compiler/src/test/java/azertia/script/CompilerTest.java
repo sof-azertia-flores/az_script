@@ -1129,13 +1129,16 @@ class CompilerTest {
         assertDoesNotThrow(() -> compile("class C{int x=missingPrivate();extern C():abcd0002;}void main(){C c;}"));
         assertThrows(IllegalArgumentException.class, () -> compile("class C{int x;extern C(int n):abcd0002;}void main(){C c;}"));
     }
-    @Test void structuralClassTypesRecurseIgnoreNamesAndNeverBecomeIntegers() throws Exception {
+    @Test void classTypesAreNominalAndNeverBecomeIntegers() throws Exception {
         String declarations = "class A{A* next;int x;}class B{B* link;int value;int method(){return value;}}";
-        assertDoesNotThrow(() -> compile(declarations + "B* convert(A* a){return a;}void main(){A * a();B* b=a;b=convert(a);print(a==b);}"));
-        // Literal objects of structurally equivalent classes also convert (both have no destructor).
-        assertDoesNotThrow(() -> compile(declarations + "extern A f(B):abcd0002;B f(A a){return a;}void main(){A a;B b=f(a);}"));
-        assertDoesNotThrow(() -> compile("class A{B* next;}class B{A* next;}class C{C* next;}void main(){A * a();C* c=a;}"));
-        for (String bad : List.of("class A{A* next;int x;}class B{B* next;string x;}void main(){A a;B b=a;}",
+        assertDoesNotThrow(() -> compile(declarations + "A* same(A* a){return a.next;}void main(){A * a();A* b=same(a);print(a==b);}"));
+        // Equal layouts do not make classes interchangeable: pointers, literal objects and externs keep their class.
+        for (String bad : List.of(declarations + "B* convert(A* a){return a;}void main(){}",
+                declarations + "void main(){A * a();B* b=a;}",
+                declarations + "void main(){A * a();B * b();print(a==b);}",
+                declarations + "extern A f(B):abcd0002;B f(A a){return a;}void main(){}",
+                "class A{B* next;}class B{A* next;}class C{C* next;}void main(){A * a();C* c=a;}",
+                "class A{A* next;int x;}class B{B* next;string x;}void main(){A a;B b=a;}",
                 "class A{int x;}void main(){A a;int n=a;}", "class A{int x;}void main(){A a=0;}",
                 "class A{int x;string y;}class B{string x;int y;}void main(){A a;B b=a;}"))
             assertThrows(IllegalArgumentException.class, () -> compile(bad), bad);
@@ -1160,23 +1163,24 @@ class CompilerTest {
             assertThrows(IllegalArgumentException.class, () -> ExecCodec.decode(invalid));
     }
 
-    @Test void structuralEquivalenceHandlesLongReferenceChainsWithoutJavaRecursion() throws Exception {
+    @Test void nominalTypingIgnoresLongReferenceChains() throws Exception {
         StringBuilder source = new StringBuilder(); int length = 1500;
         for (String prefix : List.of("A", "B")) for (int i = 0; i < length; i++)
             source.append("class ").append(prefix).append(i).append("{").append(prefix).append((i+1)%length).append("* next;}\n");
-        source.append("void main(){A0 * a();B0* b=a;}");
-        assertDoesNotThrow(() -> compile(source.toString()));
+        assertDoesNotThrow(() -> compile(source + "void main(){A0 * a();A0* b=a;A1* c=b.next;}"));
+        assertThrows(IllegalArgumentException.class, () -> compile(source + "void main(){A0 * a();B0* b=a;}"));
         assertThrows(IllegalArgumentException.class, () -> compile("#namespace_hint OWN\n#assume_hint OWN abcd\n"
                 + "extern int reserved():abcd0003;int unrelated():0003{return 1;}"));
     }
 
-    @Test void structuralExternAliasesKeepEachDeclaredSurfaceType() throws Exception {
+    @Test void externAliasesMustDeclareTheSameClasses() throws Exception {
         String classes = "class A{int x;int onlyA(){return x;}}class B{int y;int onlyB(){return y;}}";
-        assertDoesNotThrow(() -> compile(classes + "extern A makeA():abcd0002;extern B makeB():abcd0002;"
-                + "int main(){return makeA().onlyA()+makeB().onlyB();}"));
-        assertDoesNotThrow(() -> compile(classes + "extern A f(B):abcd0002;extern B f(A value):abcd0002;void main(){}"));
-        assertThrows(IllegalArgumentException.class, () -> compile("class A{int x;}class B{string y;}"
-                + "extern A f():abcd0002;extern B f():abcd0002;void main(){}"));
+        assertDoesNotThrow(() -> compile(classes + "extern A makeA():abcd0002;extern A makeAlias():abcd0002;"
+                + "int main(){return makeA().onlyA()+makeAlias().onlyA();}"));
+        for (String bad : List.of(classes + "extern A makeA():abcd0002;extern B makeB():abcd0002;void main(){}",
+                classes + "extern A f(B):abcd0002;extern B f(A value):abcd0002;void main(){}",
+                "class A{int x;}class B{string y;}extern A f():abcd0002;extern B f():abcd0002;void main(){}"))
+            assertThrows(IllegalArgumentException.class, () -> compile(bad), bad);
     }
 
     @Test void addressesHaveDistinctSignaturesAndLosslessNullConstants() throws Exception {
@@ -1305,12 +1309,10 @@ class CompilerTest {
             return argument.isJsonObject() && argument.getAsJsonObject().has("c")
                     && argument.getAsJsonObject().get("c").getAsInt() == ExecOpcodes.BLOCK_ADDRESS;
         }).count());
-        // Unspaced spelling, extern members defined out of class, and structurally equivalent (*) externs.
+        // Unspaced spelling and extern members defined out of class.
         assertDoesNotThrow(() -> compile(point + "int f(P(*)p){return p.x;}void main(){P a(1);print(f(a));}"));
         assertDoesNotThrow(() -> compile(point + "class H{int n;extern int plus(P (*) o):0fff0005;}"
                 + "int H::plus(P (*) o):0005{return o.x+n;}void main(){H h;P a(1);print(h.plus(a));}"));
-        assertDoesNotThrow(() -> compile(point + "class Q{int x;Q(int v){x=v;}}"
-                + "extern int f(P (*)):12340002;extern int f(Q (*)):12340002;void main(){Q q(1);print(f(q));}"));
         for (String invalid : List.of(point + "int f(int (*) p){return 1;}", point + "int f(P * (*) p){return 1;}",
                 point + "class H{int n;extern int plus(P (*) o):0fff0005;}int H::plus(P * o):0005{return o.x;}",
                 point + "void main(){P (*) p=null;}", point + "P (*) f(){return null;}", point + "class B{P (*) p;}",
@@ -1319,7 +1321,10 @@ class CompilerTest {
                 point + "class T:P{string tag;T():P(1){}}int f(T (*) p){return 1;}void main(){P a(1);f(a);}",
                 point + "int f(P (*) p){return 1;}void main(){f(3);}",
                 point + "extern int f(P (*)):12340002;int f(P * p){return 1;}",
-                point + "extern int f(P (*)):12340002;extern int f(P *):12340002;"))
+                point + "extern int f(P (*)):12340002;extern int f(P *):12340002;",
+                // Classes are nominal, so (*) parameters of equally laid out classes differ.
+                point + "class Q{int x;Q(int v){x=v;}}extern int f(P (*)):12340002;extern int f(Q (*)):12340002;",
+                point + "class Q{int x;Q(int v){x=v;}}int f(P (*) p){return p.x;}void main(){Q q(1);f(q);}"))
             assertThrows(IllegalArgumentException.class, () -> compile(invalid), invalid);
         var local = assertThrows(IllegalArgumentException.class, () -> compile(point + "void main(){\n  P (*) p=null;\n}"));
         assertTrue(local.getMessage().contains(":2:") && local.getMessage().contains("only allowed as a function parameter"),

@@ -2,7 +2,7 @@
 
 [中文](HINT_LINKING.md) | English
 
-AzScript libraries compile independently, receive a namespace when loaded, and link through explicit `flush()`. Classes remain compile-time structures: executables contain slot addresses, ordinary function references, and destructor IDs, but no class names, field names, or layout tables. Shared declarations define the cross-module structural contract. See [Exec v9](EXEC_FORMAT.en.md) for the binary contract.
+AzScript libraries compile independently, receive a namespace when loaded, and link through explicit `flush()`. Classes remain compile-time structures: executables contain slot addresses, ordinary function references, and destructor IDs, but no class names, field names, or layout tables. The shared class declaration is the cross-module class contract. See [Exec v9](EXEC_FORMAT.en.md) for the binary contract.
 
 ## Declarations and numbering
 
@@ -14,7 +14,7 @@ Ordinary hint-library functions initially occupy namespace 0000. Numbers 0000/00
 
 Each hint library assumes itself. An explicit self-assumption wins; otherwise the lowest available namespace alias is chosen, avoiding reserved, fixed-function, explicit-assume, and fixed-extern namespaces. Internal calls, recursion, and factory calls use this self-assumption. Call lookup prefers externs. Same-name externs and definitions may coexist with matching signatures; definition positions and call bindings are separate. Self-import declarations and implementations must use the same low number; an omitted definition number inherits the declaration's, so each public ID need only be written once, in the shared header. Identical extern declarations merge; signature or ID conflicts fail.
 
-## Out-of-class implementations and structural types
+## Out-of-class implementations and class types
 
 In hint libraries, class bodies contain fields and extern members only; explicit method bodies go outside the class. Non-hint programs also retain inline method bodies. Constructors/destructors omit return types: `extern C(int n):addd0002;` / `C::C(int n):0002 { ... }`, and `extern ~C():addd0003;` / `C::~C():0003 { ... }`. Ordinary members use `extern int get():addd0004;` / `int C::get():0004 { ... }`. Out-of-class implementations must match declared members, signatures, and self-library numbers.
 
@@ -22,11 +22,11 @@ Clients and implementations include the same class declaration. Each creating mo
 
 No constructor declaration means a synthesized local default constructor. Any constructor, including extern, suppresses replacement/default synthesis. Pointer fields are non-owning. Automatic-pointer cleanup stays bound to the creation address. Literal fields embed complete objects and die with their containing object.
 
-For non-generic classes, compile-time structural equivalence compares field types and order, ignoring class/field names, methods, and initializers. Values and pointers are compared separately. Pointer-field targets compare recursively; visited type pairs terminate self/cyclic comparisons. Equivalence applies to assignment, arguments, returns, and declaration/definition signatures. Int, raw address, literal objects, and class pointers are distinct compile-time types; address fields match only address fields. Class pointers, `C (*)`, and implicit this erase to address (type 7); literal parameters/returns use object (type 8). The runtime does not validate cross-module class structures; shared declarations are the contract. Addresses are uint64, each field still occupies one slot, and inheritance preserves base prefixes. IDs, namespaces, and offsets do not widen. Extern address signatures do not match int; update clients, libraries, and hosts together.
+Within one compilation unit, classes are nominal: only the same class declaration is the same type. Two classes with the same field layout but different names cannot be assigned, passed, returned, or compared as each other, and duplicate extern declarations and declaration/definition signatures must name the same class. The only implicit conversion is from a derived pointer to a base pointer. Int, raw address, literal objects, and class pointers are distinct compile-time types. Class pointers, `C (*)`, and implicit this erase to address (type 7); literal parameters/returns use object (type 8). Executables carry no class names, so the runtime does not validate classes across modules: every module must include the same shared declaration, which is an unchecked contract between modules. Renamed copies with the same layout in two modules still link, without any check; avoid them. Addresses are uint64, each field still occupies one slot, and inheritance preserves base prefixes. IDs, namespaces, and offsets do not widen. Extern address signatures do not match int; update clients, libraries, and hosts together.
 
 ## Shared generic declarations and implementations
 
-Generic classes and functions still compile independently, with one function body per definition. Shared headers retain type parameters, bounds, and complete signatures; declarations and implementations match generic parameters by position. Generic class applications are invariant: `Box<int>` and `Box<string>` are not interchangeable, and applications of different generic declarations are not structurally equivalent. Put function type parameters after `extern`:
+Generic classes and functions still compile independently, with one function body per definition. Shared headers retain type parameters, bounds, and complete signatures; declarations and implementations match generic parameters by position. Generic class applications are invariant: `Box<int>` and `Box<string>` are not interchangeable, and neither are applications of different generic declarations. Put function type parameters after `extern`:
 
 ```cpp
 #assume_hint GENERIC_BOX_LIB beef
@@ -124,7 +124,7 @@ Runtime, link and Java host errors print function IDs like the source and the co
 
 JNI v9 snapshots require initialized stable state without active calls. Literal objects inside heap fields and their addresses are saved; restoration assigns new IDs and rewrites references. Captured generic destructor contexts, including default-factory IDs and child contexts, are saved as data and checked against the assembled functions before restoration. No context points into an expired call frame. Address scalars, allocation bases, object records, and cleanup order use independent uint64 addresses; allocation counts and IDs remain 32-bit. Identity includes ordered original module bytes, actual namespaces, hints, and global offsets/counts; differing assemblies are rejected. Restore validates fully before atomic replacement, without relinking, initialization, or old-state destructors. The 64 MiB limit remains; oversized saves fail explicitly. Old exec and snapshots are incompatible.
 
-Validation covers high-bit IDs, forward/recursive calls, cross-module alias reuse, retry after missing libraries, mismatched signatures and link atomicity, cyclic initialization, out-of-class constructors/destructors, structural types, cross-library returns, ordinary-module ID and namespace collisions, JNI callbacks, and multimodule snapshots. Run `python3 tools/build_and_test.py --offline`, then `--sanitize`, and export/validate a full distribution.
+Validation covers high-bit IDs, forward/recursive calls, cross-module alias reuse, retry after missing libraries, mismatched signatures and link atomicity, cyclic initialization, out-of-class constructors/destructors, nominal types with shared headers, cross-library returns, ordinary-module ID and namespace collisions, JNI callbacks, and multimodule snapshots. Run `python3 tools/build_and_test.py --offline`, then `--sanitize`, and export/validate a full distribution.
 
 ## Running the bundled example
 
