@@ -173,7 +173,7 @@ script->destroy();
 
 See [examples/embedded.cpp](examples/embedded.cpp), target azscript-embed. Always bound external input by length. Load only mounts; configure budgets, register hosts, insert libraries, then flush to link/initialize. Onload host callbacks may call linked functions.
 
-Insert_script appends modules and requires another flush on success. Exec globals are -1, -2, etc.; parameters/locals consecutive nonnegative slots; global declarations store counts only. Each function's global_offset makes negative v resolve as `global_offset + (-v - 1)`, isolating independently compiled globals even with identical names/IDs. Call frames remain separate and block cleanup unchanged. Fixed function IDs must not collide; hint libraries receive runtime namespaces. See [insert offsets](compiler/LANGUAGE.en.md#insert-and-module-global-offsets).
+Insert_script appends modules and requires another flush on success. Exec globals are -1, -2, etc.; parameters/locals consecutive nonnegative slots; global declarations store counts only. Each function's global_offset makes negative v resolve as `global_offset + (-v - 1)`, isolating independently compiled globals even with identical names/IDs. Call frames remain separate and block cleanup unchanged. Fixed function IDs must not collide (see [hint linking](docs/HINT_LINKING.en.md) when separately compiled ordinary modules collide in the default namespace); hint libraries receive runtime namespaces. See [insert offsets](compiler/LANGUAGE.en.md#insert-and-module-global-offsets).
 
 Execution throws standard C++ exceptions. Destroy is idempotent, runs destruction hooks, and releases globals. C++ object destruction releases owned storage but does not automatically run user hooks.
 

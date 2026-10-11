@@ -166,6 +166,29 @@ def main():
         result = run([args.host, reserved_missing, 'reject-flush'])
         assert result.stdout.splitlines() == ['rejected'], result.stdout
 
+        # Ordinary modules keep their compiled IDs, so two of them in the default
+        # namespace collide; the runner names the inserted file, the hex ID and the remedy.
+        assembly_main, _ = compile_module('assembly_main', 'int helper() { return 1; }\nint main() { return helper() + 1; }')
+        default_library, default_exec = compile_module('default_library', 'int other() { return 2; }')
+        assert [f['id'] for f in default_exec['f']] == [0x0fff0001], default_exec['f']
+        result = run([args.runner, assembly_main, '--insert', default_library], success=False)
+        assert result.stderr.startswith(f'AzScript error: Cannot insert {default_library}: Duplicate function id: 0x0fff0001 '
+                                        '(namespace 0x0fff, position 0x0001) is already defined by module #0 (ordinary); '), result.stderr
+        assert '#namespace' in result.stderr and '#namespace_hint' in result.stderr and not result.stdout, result
+        second_main, _ = compile_module('second_main', 'int main() { return 3; }')
+        result = run([args.runner, assembly_main, '--insert', second_main], success=False)
+        assert 'Duplicate function id: 0x0fff0000' in result.stderr, result.stderr
+        assert 'only one module may define main' in result.stderr, result.stderr
+        shifted, _ = compile_module('shifted_client', 'extern int other():0fff0002;\nint main() { return other(); }')
+        result = run([args.runner, shifted, '--insert', default_library], success=False)
+        assert result.stderr == 'AzScript error: Imported script function is missing: 0x0fff0002\n', result.stderr
+        spaced_library, spaced_exec = compile_module('spaced_library', '#namespace 5151\nint other() { return 2; }')
+        assert [f['id'] for f in spaced_exec['f']] == [0x51510001], spaced_exec['f']
+        execute(assembly_main, [spaced_library], ['2'])
+        spaced_client, _ = compile_module('spaced_client', 'extern int other():51510001;\n'
+                                          'int helper() { return 1; }\nint main() { return helper() + other(); }')
+        execute(spaced_client, [spaced_library], ['3'])
+
         bad_sources = {
             'old-extern': '#extern int a() 0x12340002\nvoid main(){}',
             'double-namespace': '#namespace 1234\n#namespace_hint A\nvoid main(){}',
@@ -223,7 +246,7 @@ public class HintSourceSnapshot {
             assert 'WARNING in native method' not in result.stdout + result.stderr
         print('Hint linking: source/AST/ABD roundtrips, extern class factories, implementation-local '
               'initializers, dependency cycles, alias isolation, atomic retry, readiness, structural '
-              'types, full-width IDs and grammar rejection passed.')
+              'types, full-width IDs, module-assembly diagnostics and grammar rejection passed.')
 
 
 if __name__ == '__main__':

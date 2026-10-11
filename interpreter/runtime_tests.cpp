@@ -6,6 +6,7 @@
 #include "extern_library.h"
 #include <algorithm>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -208,7 +209,9 @@ struct fixture_encoder {
             return init?rx(4,{ri(index),ri(ANY_VALUE),rb(true),init}):rx(4,{ri(index),ri(ANY_VALUE),rb(false)});
         }
         if(code=="vs"){const int index=slot(map->get("v"));return rx(5,{ri(index),node(map->get("val"))});}
-        if(code=="r")return map->get("r")?rx(7,{rb(true),node(map->get("r"))}):rx(7,{rb(false)});
+        // Encode the value before building the list. Malformed fixtures throw here, and GCC 13
+        // ASan reports stack-use-after-scope while unwinding a partly built list inside ?:.
+        if(code=="r"){if(!map->get("r"))return rx(7,{rb(false)});auto value=node(map->get("r"));return rx(7,{rb(true),value});}
         if(code=="ro")return rx(8,{node(map->get("r"))});
         if(code=="oa")return rx(9,{node(map->get("v")),map->get("offset")->toAbdValue()});
         if(code=="ob") {
@@ -779,14 +782,17 @@ int main(){try{
               value_to_string(linked->invoke(linked->namespace_for_hint("Delta")<<16|2))=="beta",
               "same placeholder address in different modules links independently with different signatures");
         const int beta_ns=linked->namespace_for_hint("Beta");
-        rejects([&]{insert_raw(linked,rmodule({rfn(beta_ns<<16|9,VOID_VALUE,rblock({}))}),false);},"fixed module cannot occupy mounted hint namespace");
+        rejects_containing([&]{insert_raw(linked,rmodule({rfn(beta_ns<<16|9,VOID_VALUE,rblock({}))}),false);},
+            "conflicts with hint Beta, which module #2 mounted there","fixed module cannot occupy mounted hint namespace");
         check(linked->setup&&linked->module_manifest().size()==5,"namespace collision does not invalidate setup");
         linked->destroy();
 
         auto bad_signature=load_raw(rhint("",{rfn(0,VOID_VALUE,rset(-1,rc(n(1)))),rfn(0x0fff0000,DOUBLE_VALUE,rreturn(rcall(alias)))},
             1,raw({assume("Alpha",0x1234)}),raw({rsignature(alias,DOUBLE_VALUE)})),false);
         insert_raw(bad_signature,alpha,false);
-        rejects_containing([&]{bad_signature->flush();},"signature","imported script signatures must match exactly");
+        char mismatch[80];std::snprintf(mismatch,sizeof mismatch,"External signature does not match script function: 0x%08x",
+            static_cast<unsigned>(bad_signature->namespace_for_hint("Alpha")<<16|2));
+        rejects_message([&]{bad_signature->flush();},mismatch,"imported script signatures must match exactly");
         check(!bad_signature->setup&&!bad_signature->faulted&&bad_signature->baseEnv->getVariable(-1)->type==VOID_VALUE&&
               bad_signature->baseEnv->getVariable(-2)->type==VOID_VALUE,"signature failure executes no onload and is not a runtime fault");
         bad_signature->destroy();
@@ -882,6 +888,55 @@ int main(){try{
         },1));
         high->invoke(maker);check(integer(high->baseEnv->getVariable(-1))==1&&heap::lenAlloc()==0,
               "optional destructor supports the full 0xffffffff function address");high->destroy();
+    }
+    {
+        // Assembly errors print IDs in hex and name the module that already owns them.
+        auto hex4=[](int ns){char text[8];std::snprintf(text,sizeof text,"0x%04x",ns);return std::string(text);};
+        auto value=[](int id,int result){return rfn(id,INT_VALUE,rreturn(rc(n(result))));};
+        auto assembly=load_raw(rmodule({value(0x0fff0000,1),value(0x0fff0001,2)}));
+        rejects_message([&]{insert_raw(assembly,rmodule({value(0x0fff0001,3)}),false);},
+            "Duplicate function id: 0x0fff0001 (namespace 0x0fff, position 0x0001) is already defined by module #0 (ordinary); "
+            "modules without #namespace share the default namespace 0x0fff, so give each module its own #namespace away from "
+            "the low range hint libraries take, insert fixed-namespace modules before hint libraries, or use #namespace_hint",
+            "default-namespace collisions name the owner and the remedy");
+        check(assembly->setup&&assembly->module_manifest().size()==1&&integer(assembly->invoke(0x0fff0001))==2,
+              "a rejected collision leaves the assembled script unchanged");
+        insert_raw(assembly,rmodule({value(0x51510001,4)}));
+        rejects_containing([&]{insert_raw(assembly,rmodule({value(0x0fff0000,5)}),false);},
+            "Duplicate function id: 0x0fff0000 (namespace 0x0fff, position 0x0000) is already defined by module #0 (ordinary); "
+            "only one module may define main","main collisions say that only one module may define main");
+        rejects_containing([&]{insert_raw(assembly,rmodule({value(0x51510001,6)}),false);},
+            "Duplicate function id: 0x51510001 (namespace 0x5151, position 0x0001) is already defined by module #1 (ordinary); "
+            "give each module a distinct #namespace","explicit-namespace collisions name the inserted owner");
+        rejects_message([&]{assembly->getFunction(static_cast<int>(0xfedc0001u));},"Unknown function id: 0xfedc0001",
+            "unknown IDs print the full 32-bit pattern");
+        rejects_message([&]{assembly->getFunction(0x51510009);},"Unknown function id: 0x51510009 (script namespace)",
+            "unknown script-namespace IDs print hex");
+        // Hint libraries take the lowest free namespace, so insertion order decides fixed-namespace conflicts.
+        insert_raw(assembly,rhint("Alpha",{value(2,7)}),false);
+        const int alpha=assembly->namespace_for_hint("Alpha");
+        rejects_message([&]{insert_raw(assembly,rmodule({value(alpha<<16|5,8)}),false);},
+            "Fixed namespace "+hex4(alpha)+" conflicts with hint Alpha, which module #2 mounted there; hint libraries take "
+            "the lowest free namespace, so insert fixed-namespace modules before hint libraries or choose another #namespace",
+            "fixed-vs-hint conflicts name the hint and its namespace");
+        rejects_message([&]{insert_raw(assembly,rmodule({},0,raw({rsignature(alpha<<16|9,INT_VALUE)})),false);},
+            "Fixed external namespace "+hex4(alpha)+" conflicts with hint Alpha, which module #2 mounted there; hint libraries "
+            "take the lowest free namespace, so insert this module before hint libraries or import script libraries through #assume_hint",
+            "fixed external namespaces name the mounted hint");
+        assembly->flush();
+        check(assembly->module_manifest().size()==3&&integer(assembly->invoke(alpha<<16|2))==7&&integer(assembly->invoke(0x51510001))==4,
+              "rejected inserts keep the earlier assembly linkable");
+        assembly->destroy();
+        auto ordered=load_raw(rmodule({value(0x0fff0000,1)}),false);
+        insert_raw(ordered,rmodule({value(alpha<<16|5,8)}),false);
+        insert_raw(ordered,rhint("Alpha",{value(2,7)}),false);
+        ordered->flush();const int moved=ordered->namespace_for_hint("Alpha");
+        check(moved!=alpha&&integer(ordered->invoke(alpha<<16|5))==8&&integer(ordered->invoke(moved<<16|2))==7,
+              "a fixed-namespace module inserted first moves later hint libraries past its namespace");
+        ordered->destroy();
+        auto missing=load_raw(rmodule({},0,raw({rsignature(0x0fff0010,INT_VALUE)})),false);
+        rejects_message([&]{missing->flush();},"Imported script function is missing: 0x0fff0010","link errors print hex IDs");
+        missing->destroy();
     }
     {
         auto twenty=rc(n(20));auto zero=rc(n(0));
@@ -994,7 +1049,9 @@ int main(){try{
         insert_module(numeric,slot_module({slot_fn(0,VOID_VALUE,block({set(-1,n(40))})),
             slot_fn(300,INT_VALUE,block({ret(binary("add",call(200),var(-1)))}))},1));
         check(integer(numeric->invoke(300))==60&&numeric->baseEnv->variables.size()==4,"successive inserts all use module-local minus one independently");
-        rejects([&]{insert_module(numeric,slot_module({slot_fn(200,VOID_VALUE,block({}))},2));},"duplicate numeric function insert rejected");
+        rejects_message([&]{insert_module(numeric,slot_module({slot_fn(200,VOID_VALUE,block({}))},2));},
+            "Duplicate function id: 0x000000c8 (namespace 0x0000, position 0x00c8) is already defined by module #1 (ordinary); "
+            "give each module a distinct #namespace, or use #namespace_hint","duplicate numeric function insert names its owner");
         rejects([&]{insert_module(numeric,slot_module({slot_fn(400,INT_VALUE,block({ret(var(-2))}))},1));},"module cannot escape global bounds after relocation");
         check(numeric->baseEnv->variables.size()==4&&!numeric->functions.count(400)&&integer(numeric->invoke(300))==60,
               "failed insert does not change global layout or existing functions");
@@ -1173,7 +1230,7 @@ int main(){try{
         typed_fn(21,INT_VALUE,block({ret(n(7))}),{ANY_VALUE})
     });
     check(integer(typed->invoke(20,{std::make_shared<variable>(9)}))==9,"typed script parameter accepts exact dynamic type");
-    rejects_containing([&]{typed->invoke(20,{std::make_shared<variable>(std::string("9"))});},"argument 1 type mismatch","typed script parameter rejects wrong dynamic type");
+    rejects_containing([&]{typed->invoke(20,{std::make_shared<variable>(std::string("9"))});},"Script function 0x00000014 argument 1 type mismatch","typed script parameter rejects wrong dynamic type");
     check(integer(typed->invoke(21,{std::make_shared<variable>(std::string("anything"))}))==7,"script any parameter accepts arbitrary dynamic type");
     rejects([]{program({typed_fn(22,VOID_VALUE,block({}),{VOID_VALUE})});},"script void parameter metadata rejected");
     rejects([]{auto malformed=fn(23,VOID_VALUE,block({}),2);malformed->put("param-types",type_list({INT_VALUE}));program({malformed});},"script parameter count metadata disagreement rejected");
@@ -1217,12 +1274,12 @@ int main(){try{
     check(integer(external->invoke(30))==5,"script internal external call accepts matching signature");
     check(integer(external->getFunction(host_add)->invoke(external->baseEnv,{std::make_shared<variable>(1),std::make_shared<variable>(2)}))==3,"getFunction also returns a signature-checked callback");
     check(add_calls==3,"matching external callbacks invoked");
-    rejects_containing([&]{external->invoke(host_add,{std::make_shared<variable>(1)});},"argument count mismatch","direct external arity checked before callback");
+    rejects_message([&]{external->invoke(host_add,{std::make_shared<variable>(1)});},"External function 0xf2340001 argument count mismatch: expected 2, got 1","direct external arity checked before callback");
     rejects_containing([&]{external->invoke(host_add,{std::make_shared<variable>(std::string("1")),std::make_shared<variable>(2)});},"argument 1 type mismatch","direct external argument type checked before callback");
     rejects_containing([&]{external->invoke(31);},"argument count mismatch","internal external arity checked before callback");
     rejects_containing([&]{external->invoke(32);},"argument 1 type mismatch","internal external argument type checked before callback");
     check(add_calls==3,"invalid arguments never reach external callback");
-    rejects_containing([&]{external->invoke(host_wrong_return);},"return type mismatch: expected int, got float","direct external return type checked");
+    rejects_message([&]{external->invoke(host_wrong_return);},"External function 0xf2340002 return type mismatch: expected int, got float","direct external return type checked");
     rejects_containing([&]{external->invoke(33);},"return type mismatch: expected int, got float","internal external return type checked");
     check(wrong_return_calls==2,"return mismatch is checked after callback");
     check(external->invoke(host_void)->type==VOID_VALUE,"direct external void return accepts actual void");
@@ -1464,7 +1521,8 @@ int main(){try{
         auto shadow=std::make_shared<test_executor>(0x123);
         shadow->functions[0x01230009]=std::make_shared<test_function>(INT_VALUE,[](const std::vector<V>&){return std::make_shared<variable>(1);});
         registered_executor keep(shadow);
-        rejects([&]{program({fn(0x01230001,INT_VALUE,block({ret(n(7))}))});},"mount rejects a namespace already registered by the host");
+        rejects_message([&]{program({fn(0x01230001,INT_VALUE,block({ret(n(7))}))});},
+            "Script namespace 0x0123 conflicts with registered host executor","mount rejects a namespace already registered by the host");
         unregisterExecutor(0x123);
         auto namespaced=program({fn(0x01230001,INT_VALUE,block({ret(n(7))}))});
         rejects([&]{registerExecutor(shadow);},"host registration rejects a mounted script namespace");

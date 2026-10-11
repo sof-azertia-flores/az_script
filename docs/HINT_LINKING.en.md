@@ -103,11 +103,28 @@ Onload failure preserves the original error, cleans its scope, and faults the sc
 
 JNI exposes `insertScript(File)`, `flush()`, and `namespaceForHint(String)`. Java/C++ hosts load all libraries, flush, then invoke. The standalone interpreter accepts repeated `--insert path` and an optional entry ID; it flushes assembled modules before entry execution.
 
+### Separately compiled ordinary modules
+
+A module without `#namespace_hint` is ordinary: it keeps the IDs it was compiled with and is never relocated. Without `#namespace`, its functions live in the default namespace 0fff. Each compilation unit assigns automatic positions in source order on its own, so two separately compiled ordinary modules that both rely on the default namespace usually collide at `0x0fff0001`. The insert fails and leaves the assembled script unchanged. The standalone interpreter names the inserted file:
+
+```text
+AzScript error: Cannot insert lib.exec.abd: Duplicate function id: 0x0fff0001 (namespace 0x0fff, position 0x0001) is already defined by module #0 (ordinary); modules without #namespace share the default namespace 0x0fff, so give each module its own #namespace away from the low range hint libraries take, insert fixed-namespace modules before hint libraries, or use #namespace_hint
+```
+
+Module ordinals count successfully inserted modules in insertion order, and the primary script is `#0`. The earlier owner is always an ordinary module, because hint libraries move to a free namespace. Only one module may define `main` (`0x0fff0000`); a second one is reported with that remedy. To combine ordinary modules:
+
+- give each library its own `#namespace abcd` and declare its functions in a shared header with full IDs (`extern int other():abcd0001;`); fixed positions such as `int other():0001` keep those IDs stable when the library changes. The main program may stay in the default namespace;
+- or compile the library with `#namespace_hint NAME`, and let clients declare `#assume_hint NAME abcd` and import its functions through the assumed namespace (`extern int other():abcd0002;`); the loader then chooses the namespace and relocates those IDs.
+
+Insertion order matters when fixed namespaces and hint libraries are mixed. A hint library takes the lowest free namespace when it is inserted, so a later ordinary module whose fixed namespace is already mounted fails with `Fixed namespace 0x0001 conflicts with hint NAME, which module #N mounted there`. Fixed `extern` namespaces that `#assume_hint` does not cover are checked the same way. Insert fixed-namespace modules before hint libraries, which then skip those namespaces, or choose fixed namespaces away from the low range.
+
+Runtime, link and Java host errors print function IDs like the source and the compiler do: `0x` followed by eight hexadecimal digits of the 32-bit pattern, for example `Unknown function id: 0xfedc0001` or `Imported script function is missing: 0x0fff0002`.
+
 ## Snapshots and validation
 
 JNI v9 snapshots require initialized stable state without active calls. Literal objects inside heap fields and their addresses are saved; restoration assigns new IDs and rewrites references. Captured generic destructor contexts, including default-factory IDs and child contexts, are saved as data and checked against the assembled functions before restoration. No context points into an expired call frame. Address scalars, allocation bases, object records, and cleanup order use independent uint64 addresses; allocation counts and IDs remain 32-bit. Identity includes ordered original module bytes, actual namespaces, hints, and global offsets/counts; differing assemblies are rejected. Restore validates fully before atomic replacement, without relinking, initialization, or old-state destructors. The 64 MiB limit remains; oversized saves fail explicitly. Old exec and snapshots are incompatible.
 
-Validation covers high-bit IDs, forward/recursive calls, cross-module alias reuse, retry after missing libraries, mismatched signatures and link atomicity, cyclic initialization, out-of-class constructors/destructors, structural types, cross-library returns, JNI callbacks, and multimodule snapshots. Run `python3 tools/build_and_test.py --offline`, then `--sanitize`, and export/validate a full distribution.
+Validation covers high-bit IDs, forward/recursive calls, cross-module alias reuse, retry after missing libraries, mismatched signatures and link atomicity, cyclic initialization, out-of-class constructors/destructors, structural types, cross-library returns, ordinary-module ID and namespace collisions, JNI callbacks, and multimodule snapshots. Run `python3 tools/build_and_test.py --offline`, then `--sanitize`, and export/validate a full distribution.
 
 ## Running the bundled example
 

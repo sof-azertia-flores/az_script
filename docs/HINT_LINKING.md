@@ -103,11 +103,28 @@ onload失败保留原错误并清理当前作用域，脚本进入故障态，�
 
 JNI增加 `insertScript(File)`、`flush()`、`namespaceForHint(String)`。Java和C++宿主都应先装载全部库，再flush，再invoke。独立解释器支持可重复 `--insert path`，保留可选入口ID；它装配后flush再执行入口。
 
+### 独立编译的普通模块
+
+没有 `#namespace_hint` 的模块是普通模块：保留编译时的函数 ID，装载时不重定位。未写 `#namespace` 时函数位于默认 namespace 0fff。每个编译单元各自按源码顺序分配自动编号，因此两个独立编译且都使用默认 namespace 的普通模块通常在 `0x0fff0001` 冲突。此时 insert 失败，已装配的脚本保持不变；独立解释器会写出被插入的文件：
+
+```text
+AzScript error: Cannot insert lib.exec.abd: Duplicate function id: 0x0fff0001 (namespace 0x0fff, position 0x0001) is already defined by module #0 (ordinary); modules without #namespace share the default namespace 0x0fff, so give each module its own #namespace away from the low range hint libraries take, insert fixed-namespace modules before hint libraries, or use #namespace_hint
+```
+
+模块序号按成功插入的顺序从 0 开始，主脚本为 `#0`。已定义该 ID 的模块总是普通模块，因为 hint 库会移到空闲 namespace。只有一个模块可以定义 `main`（`0x0fff0000`），重复定义时错误会给出相应提示。组合普通模块的方式：
+
+- 为每个库指定独立的 `#namespace abcd`，并在共享头文件中以完整 ID 声明其函数（`extern int other():abcd0001;`）；`int other():0001` 这类固定编号可使库修改后 ID 保持不变。主程序可以继续使用默认 namespace；
+- 或使用 `#namespace_hint NAME` 编译库，调用方声明 `#assume_hint NAME abcd`，并通过假定的 namespace 导入其函数（`extern int other():abcd0002;`），由装载器选择 namespace 并重定位这些 ID。
+
+混合固定 namespace 与 hint 库时，插入顺序有影响。hint 库在插入时取最小的空闲 namespace；之后插入的普通模块若固定 namespace 已被它占用，会报 `Fixed namespace 0x0001 conflicts with hint NAME, which module #N mounted there`。未被 `#assume_hint` 覆盖的固定 `extern` namespace 按同样规则检查。应先插入固定 namespace 的模块，之后的 hint 库会避开这些 namespace；也可以选择远离低位区间的固定 namespace。
+
+运行时、链接及 Java 宿主错误中的函数 ID 与源码和编译器一致，写为 `0x` 加 32 位模式的 8 位十六进制数，例如 `Unknown function id: 0xfedc0001` 或 `Imported script function is missing: 0x0fff0002`。
+
 ## 快照与验证
 
 JNI v9快照只保存已完成初始化、无运行中调用的稳定状态，堆对象字段中的字面量对象连同其地址一起保存，恢复时重新编号并改写指向它们的地址。泛型析构捕获的上下文以数据保存，包含默认工厂 ID 及其子上下文；恢复前按已装配函数检查，不引用已结束的调用帧。地址标量、分配起点、对象登记及自动回收顺序使用独立 uint64 地址，分配数量和函数 ID 保持 32 位。身份包括有序模块原始字节、实际namespace、hint和全局offset/count；不同装配身份必须拒绝。恢复先验证再原子替换，不重新链接、不执行初始化或被替换对象的析构。文件仍受64MiB上限，过大的快照保存明确失败。旧exec和快照不兼容。
 
-验证覆盖高位函数ID、前向/递归调用、别名跨模块复用、缺库后重试、签名不符及链接原子性、循环依赖初始化、类外构造/析构、结构类型、跨库对象返回、JNI回调和多模块快照。运行 `python3 tools/build_and_test.py --offline` 与 `--sanitize`，再导出并验收完整发行包。
+验证覆盖高位函数ID、前向/递归调用、别名跨模块复用、缺库后重试、签名不符及链接原子性、循环依赖初始化、类外构造/析构、结构类型、跨库对象返回、普通模块的 ID 与 namespace 冲突、JNI回调和多模块快照。运行 `python3 tools/build_and_test.py --offline` 与 `--sanitize`，再导出并验收完整发行包。
 
 ## 运行随附示例
 

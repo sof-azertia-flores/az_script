@@ -43,7 +43,11 @@ int main(int argc,char* argv[]) {
         if(source.empty())throw std::invalid_argument("A primary script path is required");
         azertian::load_standalone_trusted_keys();
         auto bytes=read_script(source);script=azertian::load_script(bytes.data(),bytes.size());
-        for(auto& path:additions){auto module=read_script(path);script->insert_script(module.data(),module.size());}
+        for(auto& path:additions) {
+            auto module=read_script(path);
+            try{script->insert_script(module.data(),module.size());}
+            catch(const std::exception& error){throw std::runtime_error("Cannot insert "+path+": "+error.what());}
+        }
         script->flush();auto value=script->invoke(id);
         if(value->type!=azertian::VOID_VALUE)std::cout<<azertian::value_to_string(value)<<'\n';
         script->destroy();return 0;

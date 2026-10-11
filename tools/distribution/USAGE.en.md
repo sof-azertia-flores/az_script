@@ -47,7 +47,7 @@ Exec v9 uses numeric opcodes and raw ordered ABD stacks. Exec JSON retains field
 
 Launchers also accept full CLI commands: `./compile.sh compile-json hello.ast.json -o restored.abd` rebuilds ABD and defaults restored.exec.json without overwriting the input AST. Use `./compile.sh --help`; pack/unpack archive/extract files.
 
-Call bin/azscript-run (Windows bin\azscript-run.exe) directly or through run.sh/run.cmd. An optional second argument is a hex/decimal function ID, for parameterless functions only. Repeated --insert path assembles libraries, then automatically flushes, runs dependency-ordered onload, executes entry, and closes.
+Call bin/azscript-run (Windows bin\azscript-run.exe) directly or through run.sh/run.cmd. An optional second argument is a hex/decimal function ID, for parameterless functions only. Repeated --insert path assembles libraries, then automatically flushes, runs dependency-ordered onload, executes entry, and closes. A rejected library is reported as `AzScript error: Cannot insert <path>: ...`; function IDs in errors are printed in hex, such as `0x0fff0001`. See [hint linking](HINT_LINKING.en.md) for separately compiled ordinary modules that collide in the default namespace.
 
 ## Math library
 

@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <bit>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <exception>
 #include <limits>
@@ -46,6 +47,14 @@ using V=std::shared_ptr<variable>;
 using E=std::shared_ptr<environment>;
 using M=std::shared_ptr<AbdMap>;
 V nil() { return std::make_shared<variable>(nullptr); }
+// Runtime messages spell IDs like source and the CLI do: 0x plus the full
+// 32-bit pattern, so negative and high-bit IDs read the same everywhere.
+std::string hex_text(std::uint32_t value,int digits) {
+    char text[16];std::snprintf(text,sizeof text,"0x%0*x",digits,static_cast<unsigned>(value));
+    return text;
+}
+std::string function_id_text(int id) { return hex_text(static_cast<std::uint32_t>(id),8); }
+std::string namespace_text(int ns) { return hex_text(static_cast<std::uint32_t>(ns)&0xffffu,4); }
 bool valid_context_kind(int abi,int kind) {
     return (kind==0&&abi>=INT_VALUE&&abi<=VOID_VALUE)||((kind==1||kind==2)&&abi==ADDRESS_VALUE)
         ||((kind==3||kind==4)&&abi==OBJECT_VALUE);
@@ -85,15 +94,15 @@ const char* type_name(int type) {
 void validate_arguments(const std::string& kind,int id,const std::vector<int>& expected,
                         const std::vector<V>& actual,bool allow_any) {
     if(actual.size()!=expected.size())
-        throw std::runtime_error(kind+" "+std::to_string(id)+" argument count mismatch: expected "+
+        throw std::runtime_error(kind+" "+function_id_text(id)+" argument count mismatch: expected "+
             std::to_string(expected.size())+", got "+std::to_string(actual.size()));
     for(std::size_t i=0;i<expected.size();++i) {
         if(!actual[i])
-            throw std::runtime_error(kind+" "+std::to_string(id)+" argument "+std::to_string(i+1)+
+            throw std::runtime_error(kind+" "+function_id_text(id)+" argument "+std::to_string(i+1)+
                 " is a null pointer; use variable(nullptr) for void");
         const int got=static_cast<int>(actual[i]->type);
         if(expected[i]!=got&&!(allow_any&&expected[i]==ANY_VALUE))
-            throw std::runtime_error(kind+" "+std::to_string(id)+" argument "+std::to_string(i+1)+
+            throw std::runtime_error(kind+" "+function_id_text(id)+" argument "+std::to_string(i+1)+
                 " type mismatch: expected "+type_name(expected[i])+", got "+type_name(got));
     }
 }
@@ -110,6 +119,34 @@ struct parsed_module {
 int namespace_of(int id) { return static_cast<int>(static_cast<unsigned int>(id)>>16); }
 int relocate_id(int id,int ns) {
     return std::bit_cast<int>((static_cast<std::uint32_t>(ns)<<16)|(static_cast<std::uint32_t>(id)&0xffffu));
+}
+using module_list=std::vector<std::shared_ptr<loaded_module>>;
+// Ordinary modules keep their compiled IDs, so a collision names the earlier
+// owner and how to separate the modules. Module ordinals count successful
+// inserts and the primary script is #0. The owner is always ordinary: hint
+// libraries move to a free namespace, and a fixed ID inside a mounted hint
+// namespace is rejected as a namespace conflict first.
+std::string duplicate_function_message(int id,const module_list& modules) {
+    std::string message="Duplicate function id: "+function_id_text(id)+" (namespace "+namespace_text(namespace_of(id))+
+        ", position "+namespace_text(id&0xffff)+") is already defined";
+    for(std::size_t i=0;i<modules.size();++i) {
+        const auto& definitions=modules[i]->definitions;
+        if(std::any_of(definitions.begin(),definitions.end(),[&](const auto& entry){return entry.second->function_id==id;})) {
+            message+=" by module #"+std::to_string(i)+" (ordinary)";break;
+        }
+    }
+    if(id==0x0fff0000)return message+"; only one module may define main, so remove main from the inserted module";
+    if(namespace_of(id)==0x0fff)
+        return message+"; modules without #namespace share the default namespace 0x0fff, so give each module its own "
+            "#namespace away from the low range hint libraries take, insert fixed-namespace modules before hint libraries, "
+            "or use #namespace_hint";
+    return message+"; give each module a distinct #namespace, or use #namespace_hint";
+}
+// Hint libraries take the lowest free namespace when inserted, so a later fixed
+// module can find its namespace already mounted.
+std::string mounted_hint_conflict(const char* what,int ns,const module_list& modules,std::size_t index,const char* remedy) {
+    return std::string(what)+" "+namespace_text(ns)+" conflicts with hint "+modules[index]->manifest.hint+
+        ", which module #"+std::to_string(index)+" mounted there; hint libraries take the lowest free namespace, so "+remedy;
 }
 bool valid_hint(const std::string& hint) {
     auto first=[](unsigned char c){return (c>='a'&&c<='z')||(c>='A'&&c<='Z')||c=='_';};
@@ -271,10 +308,10 @@ public:
         if(typed)validate_arguments("External function",id,signature.param_types,args,signature.hidden_count>0);
         auto result=target->invoke(std::move(env),std::move(args));
         if(!result)
-            throw std::runtime_error("External function "+std::to_string(id)+" returned a null pointer");
+            throw std::runtime_error("External function "+function_id_text(id)+" returned a null pointer");
         const int got=static_cast<int>(result->type);
         if(typed&&signature.return_type!=ANY_VALUE&&got!=signature.return_type)
-            throw std::runtime_error("External function "+std::to_string(id)+
+            throw std::runtime_error("External function "+function_id_text(id)+
                 " return type mismatch: expected "+type_name(signature.return_type)+", got "+type_name(got));
         return result;
     }
@@ -821,7 +858,7 @@ parsed_module parse_raw_module(raw_view root,std::size_t offset) {
             throw std::invalid_argument("Invalid external generic ABI");
         if(!signature.hidden_count&&(signature.return_type==ANY_VALUE||std::find(signature.param_types.begin(),signature.param_types.end(),ANY_VALUE)!=signature.param_types.end()))
             throw std::invalid_argument("External any types require generic contexts");
-        if(!module.extern_signatures.emplace(id,std::move(signature)).second)throw std::invalid_argument("Duplicate external signature id: "+std::to_string(id));
+        if(!module.extern_signatures.emplace(id,std::move(signature)).second)throw std::invalid_argument("Duplicate external signature id: "+function_id_text(id));
     }
     raw_cursor functions(fields.take());
     module.hint=fields.string();
@@ -859,7 +896,7 @@ parsed_module parse_raw_module(raw_view root,std::size_t offset) {
             static_cast<std::size_t>(fn->param_count)+static_cast<std::size_t>(fn->local_count),module.global_count,&module.references,static_cast<std::size_t>(fn->hidden_count)};
         fn->code=parse_raw_expression(body,layout,3);
         const int id=fn->function_id;
-        if(!module.functions.emplace(id,std::move(fn)).second)throw std::invalid_argument("Duplicate function id: "+std::to_string(id));
+        if(!module.functions.emplace(id,std::move(fn)).second)throw std::invalid_argument("Duplicate function id: "+function_id_text(id));
         module.namespaces.insert(namespace_of(id));
     }
     return module;
@@ -951,13 +988,13 @@ std::shared_ptr<function> script::getFunction(int id) {
     if(auto found=functions.find(id);found!=functions.end())return found->second;
     const int ns=namespace_of(id);
     if(ns!=0x0abd&&script_namespaces.contains(ns))
-        throw std::runtime_error("Unknown function id: "+std::to_string(id)+" (script namespace)");
+        throw std::runtime_error("Unknown function id: "+function_id_text(id)+" (script namespace)");
     if(auto target=getiFunction(id)) {
         if(auto signature=extern_signatures.find(id);signature!=extern_signatures.end())
             return std::make_shared<checked_external_function>(std::move(target),signature->second,id,weak_from_this());
         return std::make_shared<checked_external_function>(std::move(target),function_signature{},id,weak_from_this(),false);
     }
-    throw std::runtime_error("Unknown function id: "+std::to_string(id));
+    throw std::runtime_error("Unknown function id: "+function_id_text(id));
 }
 bool script::hasFunction(int id) {
     std::lock_guard<std::recursive_mutex> lock(runtime_mutex());
@@ -1027,18 +1064,22 @@ void script::insert_script(const unsigned char* bytes,std::size_t length) {
         if(original_id==1){module->pre_destroy=fn;continue;}
         const int actual_id=module->manifest.actual_namespace?relocate_id(original_id,*module->manifest.actual_namespace):original_id;
         const int ns=namespace_of(actual_id);
-        if(host_namespaces.contains(ns))throw std::invalid_argument("Script namespace conflicts with registered host executor");
+        if(host_namespaces.contains(ns))throw std::invalid_argument("Script namespace "+namespace_text(ns)+" conflicts with registered host executor");
         if(!module->manifest.actual_namespace) {
-            for(auto& current:modules)if(current->manifest.actual_namespace==ns)throw std::invalid_argument("Fixed namespace conflicts with mounted hint module");
+            for(std::size_t i=0;i<modules.size();++i)if(modules[i]->manifest.actual_namespace==ns)
+                throw std::invalid_argument(mounted_hint_conflict("Fixed namespace",ns,modules,i,
+                    "insert fixed-namespace modules before hint libraries or choose another #namespace"));
             module->fixed_namespaces.insert(ns);
         }
         fn->function_id=actual_id;
-        if(!candidate_functions.emplace(actual_id,fn).second)throw std::invalid_argument("Duplicate function id: "+std::to_string(actual_id));
+        if(!candidate_functions.emplace(actual_id,fn).second)throw std::invalid_argument(duplicate_function_message(actual_id,modules));
         module->definitions.emplace(original_id,std::move(fn));candidate_namespaces.insert(ns);
     }
     if(module->manifest.actual_namespace)candidate_namespaces.insert(*module->manifest.actual_namespace);
-    for(int ns:module->fixed_extern_namespaces)for(auto& current:modules)
-        if(current->manifest.actual_namespace==ns)throw std::invalid_argument("Fixed external namespace conflicts with mounted hint module");
+    for(int ns:module->fixed_extern_namespaces)for(std::size_t i=0;i<modules.size();++i)
+        if(modules[i]->manifest.actual_namespace==ns)
+            throw std::invalid_argument(mounted_hint_conflict("Fixed external namespace",ns,modules,i,
+                "insert this module before hint libraries or import script libraries through #assume_hint"));
     auto candidate_hosts=fixed_host_namespaces;candidate_hosts.insert(module->fixed_extern_namespaces.begin(),module->fixed_extern_namespaces.end());
     auto candidate_globals=baseEnv->variables;candidate_globals.reserve(candidate_globals.size()+parsed.global_count);
     for(std::size_t i=0;i<parsed.global_count;++i)candidate_globals.push_back(nil());
@@ -1076,11 +1117,11 @@ void script::flush() {
                 auto fn=std::dynamic_pointer_cast<ofunction>(target->second);
                 if(!fn||fn->rett!=signature.return_type||fn->param_types!=signature.param_types||
                    fn->hidden_count!=signature.hidden_count||fn->entry_kind!=signature.entry_kind)
-                    throw std::runtime_error("External signature does not match script function: "+std::to_string(id));
+                    throw std::runtime_error("External signature does not match script function: "+function_id_text(id));
             } else if(mapping.contains(namespace_of(original_id))||script_namespaces.contains(namespace_of(id))||namespace_of(id)==0x0fff)
-                throw std::runtime_error("Imported script function is missing: "+std::to_string(id));
+                throw std::runtime_error("Imported script function is missing: "+function_id_text(id));
             auto [entry,added]=bindings.emplace(id,signature);
-            if(!added&&!(entry->second==signature))throw std::runtime_error("Conflicting external signature id: "+std::to_string(id));
+            if(!added&&!(entry->second==signature))throw std::runtime_error("Conflicting external signature id: "+function_id_text(id));
             resolved_externs[index].emplace(id,signature);
         }
         for(auto& reference:module.references) {
@@ -1088,7 +1129,7 @@ void script::flush() {
             if(auto defining=function_modules.find(id);defining!=function_modules.end()&&defining->second!=index)dependencies[index].insert(defining->second);
             if(mapping.contains(namespace_of(reference.original_id))||reference.destructor||reference.factory||reference.placement) {
                 auto target=functions.find(id);
-                if(target==functions.end())throw std::runtime_error("Referenced script function is missing: "+std::to_string(id));
+                if(target==functions.end())throw std::runtime_error("Referenced script function is missing: "+function_id_text(id));
                 if(reference.destructor) {
                     auto fn=std::dynamic_pointer_cast<ofunction>(target->second);
                     if(!fn||fn->rett!=VOID_VALUE||fn->param_types!=std::vector<int>{ADDRESS_VALUE})
@@ -1107,11 +1148,11 @@ void script::flush() {
             }
             if(auto target=functions.find(id);target!=functions.end()) {
                 auto fn=std::dynamic_pointer_cast<ofunction>(target->second);
-                if(!fn||fn->hidden_count!=reference.hidden_count)throw std::runtime_error("Generic context count does not match function: "+std::to_string(id));
+                if(!fn||fn->hidden_count!=reference.hidden_count)throw std::runtime_error("Generic context count does not match function: "+function_id_text(id));
             } else {
                 auto imported=resolved_externs[index].find(id);
                 if(imported!=resolved_externs[index].end()&&imported->second.hidden_count!=reference.hidden_count)
-                    throw std::runtime_error("Generic context count does not match external function: "+std::to_string(id));
+                    throw std::runtime_error("Generic context count does not match external function: "+function_id_text(id));
                 if(reference.hidden_count&&imported==resolved_externs[index].end())
                     throw std::runtime_error("Generic context call requires a matching script import");
             }

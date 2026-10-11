@@ -49,7 +49,7 @@ AST 包含 extern 优先的名称绑定；普通定义的独立 ID 由 body name
 
 编译脚本也接受完整 CLI 命令：`./compile.sh compile-json hello.ast.json -o restored.abd` 从 AST 重建 ABD，并默认生成 `restored.exec.json`，不覆盖输入 AST。`./compile.sh --help` 查看参数；`pack` 和 `unpack` 分别打包与解包文件。
 
-独立程序可直接调用 `bin/azscript-run`（Windows 为 `bin\azscript-run.exe`），也可通过 `run.sh`/`run.cmd` 调用。可选第二个参数是十六进制或十进制函数 ID；该入口只调用无参数函数。可重复使用 `--insert path` 装配库；装配后自动 flush、按依赖顺序执行 onload，再调用入口，最后关闭脚本。
+独立程序可直接调用 `bin/azscript-run`（Windows 为 `bin\azscript-run.exe`），也可通过 `run.sh`/`run.cmd` 调用。可选第二个参数是十六进制或十进制函数 ID；该入口只调用无参数函数。可重复使用 `--insert path` 装配库；装配后自动 flush、按依赖顺序执行 onload，再调用入口，最后关闭脚本。库被拒绝时报告 `AzScript error: Cannot insert <path>: ...`；错误中的函数 ID 以十六进制显示，例如 `0x0fff0001`。独立编译的普通模块在默认 namespace 冲突时的处理见 [hint 链接](HINT_LINKING.md)。
 
 ## 使用数学库
 

@@ -292,6 +292,11 @@ public final class JniRegression {
             fails(IllegalStateException.class, () -> AbdInvoker.invoke(0x12340006));
             fails(IllegalArgumentException.class, () -> AbdInvoker.invoke(0x1234ffff));
             fails(IllegalStateException.class, () -> AbdInvoker.invoke(0x45670000));
+            // Runtime and Java host messages print function IDs as 0x plus the 32-bit pattern.
+            try { AbdInvoker.invoke(0xfedc0001); throw new AssertionError("Expected an unknown function id"); }
+            catch (IllegalStateException error) { equal("Unknown function id: 0xfedc0001", error.getMessage()); }
+            try { Caller.callbackValue(0x89ab0003, new long[0]); throw new AssertionError("Expected an unknown Java function id"); }
+            catch (IllegalArgumentException error) { equal("Unknown Java function id: 0x89ab0003", error.getMessage()); }
             fails(IllegalArgumentException.class, () -> AbdInvoker.invoke(101, 1L));
             fails(IllegalStateException.class, () -> AbdInvoker.invoke(101));
             fails(IllegalArgumentException.class, () -> Caller.call(1, null));

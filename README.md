@@ -177,7 +177,7 @@ script->destroy();
 
 完整示例在 [examples/embedded.cpp](examples/embedded.cpp)，构建目标 `azscript-embed`。外部数据应始终调用带长度的入口。`load_script` 只装载；设置预算、登记宿主及插入库后调用 `flush()`，该过程链接函数并初始化模块。onload 期间宿主回调可以调用已链接函数。
 
-`script->insert_script(bytes.data(), bytes.size())` 可追加模块，成功后须再次 flush。新 exec 将全局变量编码为 `-1、-2…`，参数和局部变量编码为连续非负槽号；全局声明仅保存数量。每个加载的函数记录自己的 `global_offset`，负数引用按 `global_offset + (-v - 1)` 定位，因此多个独立编译的模块可以拥有同名、同编号全局变量。局部帧按调用独立分配，块级析构不变。固定 namespace 的函数 ID 须互不冲突，hint 库由运行时分配实际 namespace；详细格式见 [执行格式与 insert 偏移](compiler/LANGUAGE.md#insert-与模块全局偏移)。
+`script->insert_script(bytes.data(), bytes.size())` 可追加模块，成功后须再次 flush。新 exec 将全局变量编码为 `-1、-2…`，参数和局部变量编码为连续非负槽号；全局声明仅保存数量。每个加载的函数记录自己的 `global_offset`，负数引用按 `global_offset + (-v - 1)` 定位，因此多个独立编译的模块可以拥有同名、同编号全局变量。局部帧按调用独立分配，块级析构不变。固定 namespace 的函数 ID 须互不冲突（独立编译的普通模块在默认 namespace 冲突时见 [hint 链接](docs/HINT_LINKING.md)），hint 库由运行时分配实际 namespace；详细格式见 [执行格式与 insert 偏移](compiler/LANGUAGE.md#insert-与模块全局偏移)。
 
 执行失败抛出标准 C++ 异常，调用者可以捕获；`destroy()` 幂等，执行销毁钩子后释放全局状态。析构时释放拥有的内存，但不自动运行用户钩子。
 
