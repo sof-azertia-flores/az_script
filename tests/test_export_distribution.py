@@ -26,7 +26,7 @@ class DistributionOutputTests(unittest.TestCase):
         self.ast.write_text('{"body":{}}', encoding='utf-8')
 
     def check_output(self, script, version=verifier.EXEC_VERSION):
-        self.executable.write_text(json.dumps({'exec-version': version, 'f': [{'script': script}]}),
+        self.executable.write_text(json.dumps({'exec-version': version, 'debug-files': [], 'f': [{'script': script}]}),
                                    encoding='utf-8')
         verifier._outputs(self.abd, self.ast, self.executable)
 
@@ -39,7 +39,8 @@ class DistributionOutputTests(unittest.TestCase):
         self.check_output([{'t': 1, 'id': 0x12340002, 'param': [script], 'contexts': [context]}])
 
     def test_invalid_controls_report_the_actual_value_and_location(self):
-        for opcode in (None, True, 'return_typed', 38.0, -1, 0, 2, 43):
+        # The first opcode past the registry is unknown.
+        for opcode in (None, True, 'return_typed', 38.0, -1, 0, 2, max(verifier.CONTROL_OPCODES) + 1):
             with self.subTest(opcode=opcode):
                 with self.assertRaises(RuntimeError) as raised:
                     self.check_output([{'t': 0, 'c': opcode}])
@@ -47,8 +48,13 @@ class DistributionOutputTests(unittest.TestCase):
                 self.assertIn(str(self.executable), message)
                 self.assertIn('script[0]', message)
                 self.assertIn(repr(opcode), message)
-        with self.assertRaisesRegex(RuntimeError, 'Expected exec v9'):
-            self.check_output([], version=8)
+        with self.assertRaisesRegex(RuntimeError, f'Expected exec v{verifier.EXEC_VERSION}'):
+            self.check_output([], version=verifier.EXEC_VERSION - 1)
+
+    def test_exec_json_requires_the_debug_file_table(self):
+        self.executable.write_text(json.dumps({'exec-version': verifier.EXEC_VERSION, 'f': []}), encoding='utf-8')
+        with self.assertRaisesRegex(RuntimeError, 'Missing debug-files'):
+            verifier._outputs(self.abd, self.ast, self.executable)
 
     def test_verifier_tracks_the_compiler_format_and_opcode_registry(self):
         source = exporter.ROOT / 'compiler/src/main/java/azertia/script'
@@ -62,6 +68,9 @@ class DistributionOutputTests(unittest.TestCase):
         version = int(re.search(r'\bVERSION\s*=\s*(\d+)', codec).group(1))
         self.assertEqual(verifier.EXEC_VERSION, version,
                          'Update distribution verification when the executable format changes')
+        runtime = (exporter.ROOT / 'interpreter/library.h').read_text(encoding='utf-8')
+        loader = int(re.search(r'\bEXEC_FORMAT_VERSION\s*=\s*(\d+)', runtime).group(1))
+        self.assertEqual(loader, version, 'The C++ loader and the compiler must use one exec format version')
 
     def test_manifest_tracks_exec_and_snapshot_versions_independently(self):
         exporter.write_manifest(self.root, SimpleNamespace(system_java=True, cmake_arg=[]), {}, {}, {})

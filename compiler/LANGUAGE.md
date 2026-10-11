@@ -19,6 +19,8 @@ python3 tools/build_and_test.py --offline
 
 CLI 的 `compile-json` 接受原有的可读代码树；`pack` 和 `unpack` 打包、解包文件。所有路径由参数传入，选项可以写在输入路径之前或之后；`--` 结束选项，其后的路径可以以 `-` 开头。include 先在所在文件的目录中查找，再依次查找每个 `-I dir` / `--include-dir dir`；`./azscript` 包装脚本和发行包的 `compile.sh` / `compile.cmd` 最后查找标准库目录，所以任意位置的调用方都可以写 `#include "math.include.azs"`。该目录由单一路径的系统属性 `azscript.stdlib` 指定，包装脚本会设置它；未设置时发行包的启动器使用包内的 `stdlib/`，不是目录的属性值会被忽略。`-I` 目录不存在、为空或不是目录属于用法错误，输出 `Error: ...` 并以退出码 1 结束。除非指定 `--unrestricted-includes`，include 必须位于主文件目录或上述目录之内，见[预处理](#字符串注释与预处理)。`compile-json` 不接受 include 选项。编译输出不会覆盖输入源码，包括被包含的文件。编译错误和警告的格式见[诊断](#诊断)。
 
+`-g`（适用于 `compile` 和 `compile-json`）在执行文件中加入可选调试记录：源文件名、每个函数的显示名及声明位置，以及运算符、调用和语句的源码位置。调试信息默认关闭，因此默认执行文件不含函数名、类名或文件名。`-g` 不改变指令和行为，可读 AST 在有无 `-g` 时相同；格式见 [Exec 格式的调试记录一节](../docs/EXEC_FORMAT.md)。Java 中使用 `Compiler.compile(tree, diagnostics, true)` 或 `Compiler.compile(tree, true)` 生成调试记录。
+
 ```java
 var script = new azertia.script.GeneraterJson.AzScript();
 var diagnostics = new azertia.script.Diagnostics();
@@ -504,11 +506,11 @@ int functionId(int ns, int position) {
 
 可读 AST 保持 `metadata/ext/abstract/global-variable/body` 结构，并为带签名的宿主函数增加 `extern-signatures`。`global-variable` 先以字符串列出 `#gvar` 名称，再以带位置的 `{"name", "type", "initializer"?}` 对象列出每个带类型全局；`compile-json` 按与源码相同的规则检查并初始化它们。类程序额外保存类定义、字段顺序和成员表达式等编译信息；`compile-json` 会重新执行类型检查与降级。限定的父类调用写作 `{"t":"ctrl","call":"base-call","param":["Base","method",args...]}`，可附带 `type-args`。AST 还保存模块 hint、assume、外部声明、定义名称与实际定义编号；调用绑定与定义位置分开，支持完全相同的 ABD 往返。`abstract` 是 extern 优先的源码名称绑定：有 extern 时保存声明 ID，否则保存定义 ID；hint 库的本地定义仍使用 0000 占位，实际调用的 self-assume 地址在降级时生成。函数定义的独立位置由 `body` 的 namespace 和 `metadata.position/name` 保存；每个签名另保存 `return-type` 与 `param-types`。表达式对象有 `t: "ctrl" | "call"`、`call`、`param`，块是数组。
 
-根节点的 `sources` 表对文件的每次实际展开的包含各有一项，例如 `{"name": "inc/lib.azs", "included-from": {"source": 0, "line": 2, "column": 1}}`；第 0 项是主文件，include 总是指向更早的项，被 `#pragma once` 跳过的 include 没有对应项。表达式对象、函数元数据、类、字段和 extern 签名带有原始文件中的 `_line/_column`，以及所在 `sources` 项的下标 `_file`（为 0 时省略）。函数元数据还以 `_end_line/_end_column` 记录结束的右花括号，加括号的赋值带有 `_parenthesized: true`。字面值和块不带位置，诊断使用最近的带位置祖先。这些字段仅用于诊断，不写入 ABD 指令。compile-json 输入中的 `sources` 可以省略，此时所有位置都属于以输入文件命名的同一文件。位置均为正整数，`_file` 必须是表中的有效下标；该表最多 4097 项，即主文件加 4096 次 include 展开；`sources` 的每项命名一个非空、不超过 4096 个字符且不含控制字符或双向格式字符的文件，include 链最多 64 层。compile-json 在编译前检查这些结构，见[多个错误与退出码](#多个错误与退出码)。
+根节点的 `sources` 表对文件的每次实际展开的包含各有一项，例如 `{"name": "inc/lib.azs", "included-from": {"source": 0, "line": 2, "column": 1}}`；第 0 项是主文件，include 总是指向更早的项，被 `#pragma once` 跳过的 include 没有对应项。表达式对象、函数元数据、类、字段和 extern 签名带有原始文件中的 `_line/_column`，以及所在 `sources` 项的下标 `_file`（为 0 时省略）。函数元数据还以 `_end_line/_end_column` 记录结束的右花括号，加括号的赋值带有 `_parenthesized: true`。字面值和块不带位置，诊断使用最近的带位置祖先。这些字段用于诊断，以及在 `-g` 时生成 exec 调试记录，不写入 ABD 指令。compile-json 输入中的 `sources` 可以省略，此时所有位置都属于以输入文件命名的同一文件。位置均为正整数，`_file` 必须是表中的有效下标；该表最多 4097 项，即主文件加 4096 次 include 展开；`sources` 的每项命名一个非空、不超过 4096 个字符且不含控制字符或双向格式字符的文件，include 链最多 64 层。compile-json 在编译前检查这些结构，见[多个错误与退出码](#多个错误与退出码)。
 
 可读类 AST 保存 `operators` 映射及方法的 `operator-kind`，下标读写和后缀调用使用 `index`、`index-set`、`invoke` 节点，空 buffer 使用 `buffer-new`。compile-json 重新检查类型和降级，保持 ABD 字节一致。
 
-新生成的 exec/ABD 使用 `exec-version: 9`，与源码元数据的 `version` 分开。所有控制指令的 `c` 都为数字；可读 AST 仍保留源码名称、类型和操作名。下表是 exec JSON 检查视图，实际 ABD 的字段顺序及类型见 [Exec v9 二进制格式](../docs/EXEC_FORMAT.md)。
+新生成的 exec/ABD 使用 `exec-version: 10`，与源码元数据的 `version` 分开。所有控制指令的 `c` 都为数字；可读 AST 仍保留源码名称、类型和操作名。下表是 exec JSON 检查视图，实际 ABD 的字段顺序及类型见 [Exec v10 二进制格式](../docs/EXEC_FORMAT.md)。
 
 | exec JSON 指令 | 字段 |
 | --- | --- |
@@ -545,9 +547,9 @@ int functionId(int ns, int position) {
 
 数字变量的编号规则：`gvs` 为全局变量数量；`-1` 指向模块的第一个全局变量，`-2` 指向第二个，以此类推。函数参数占 `0…param-count-1`，局部变量与编译器临时变量随后连续编号；每个函数单独编号，类方法的隐式 `this` 位于参数槽 `0`。变量编号不是 `alloc` 返回的堆地址，裸整数表达式仍为常量；例如 `{"t":0,"c":3,"v":0}` 才表示读取第一个参数/局部槽。
 
-函数检查视图包含 `id/return-type/script/param-count/param-types/local-count/hidden-count/entry-kind`；`local-count` 只计局部和临时槽，不包含参数。每次调用创建独立槽数组，递归和宿主重入不共享局部值。块退出仍按原规则清理对象，并清空该块声明的局部槽，循环下次进入时重新初始化。全局槽总数及单次调用的参数加局部槽数量均不能超过 1,048,576；无效编号、跨越所属模块全局范围及未声明/已退出作用域的访问会被拒绝。
+函数检查视图包含 `id/return-type/script/param-count/param-types/local-count/hidden-count/entry-kind`，使用 `-g` 时另含 `debug` 记录；根的 `debug-files` 列出调试文件，无 `-g` 时为空。`local-count` 只计局部和临时槽，不包含参数。每次调用创建独立槽数组，递归和宿主重入不共享局部值。块退出仍按原规则清理对象，并清空该块声明的局部槽，循环下次进入时重新初始化。全局槽总数及单次调用的参数加局部槽数量均不能超过 1,048,576；无效编号、跨越所属模块全局范围及未声明/已退出作用域的访问会被拒绝。
 
-未声明类型的脚本参数在元数据中使用内部 `any` 类型；无界类型参数也擦除为 any，但只有泛型隐藏上下文非空时才允许 any 返回和 extern any 参数。`entry-kind` 为 0 表示普通入口，1 表示内部入口；上下文不占变量槽。AST 额外保存 `type-parameters`、上界、参数化类型字符串和显式 `type-args`。`param-types` 和 `return-type` 保留供直接 C++/JNI 调用的类型检查；根的 `extern-signatures` 保存宿主边界签名。解释器仅接受 exec v9 裸 stack 文件，不再读取 v8 等旧版本或旧 Map 文件；源码或可读 AST 应重新编译。不识别的版本、opcode、额外/缺失字段、错误字段宽度或超过 128 层的结构在加载时拒绝。JNI 快照版本与 exec 版本独立，本次为 v9。
+未声明类型的脚本参数在元数据中使用内部 `any` 类型；无界类型参数也擦除为 any，但只有泛型隐藏上下文非空时才允许 any 返回和 extern any 参数。`entry-kind` 为 0 表示普通入口，1 表示内部入口；上下文不占变量槽。AST 额外保存 `type-parameters`、上界、参数化类型字符串和显式 `type-args`。`param-types` 和 `return-type` 保留供直接 C++/JNI 调用的类型检查；根的 `extern-signatures` 保存宿主边界签名。解释器仅接受 exec v10 裸 stack 文件，不再读取 v9、v8 等旧版本或旧 Map 文件；源码或可读 AST 应重新编译。不识别的版本、opcode、额外/缺失字段、错误字段宽度或超过 128 层的结构在加载时拒绝。JNI 快照版本与 exec 版本独立，本次为 v9。
 
 ### insert 与模块全局偏移
 

@@ -43,9 +43,11 @@ Compiler launchers prefer bundled runtime/. Without it, install Java 17+ and use
     --ast hello.ast.json --exec-json hello.exec.json
 ```
 
-AST names bind with extern priority; independent definition IDs live in body namespaces and metadata.position/name. Name-based host calls need matching AST output; hint definitions also require the actual mounted namespace. Fixed-main execution needs no debug JSON deployment. ABD is a binary instruction tree, not encryption.
+AST names bind with extern priority; independent definition IDs live in body namespaces and metadata.position/name. Name-based host calls need matching AST output; hint definitions also require the actual mounted namespace. Fixed-main execution needs neither JSON file deployed. ABD is a binary instruction tree, not encryption.
 
-Exec v9 uses numeric opcodes and raw ordered ABD stacks. Exec JSON retains field names for inspection with numeric c; it is not the binary Map layout. Only v9 is accepted; recompile older ABD from source/readable AST. See [binary format](EXEC_FORMAT.en.md).
+Exec v10 uses numeric opcodes and raw ordered ABD stacks. Exec JSON retains field names for inspection with numeric c; it is not the binary Map layout. Only v10 is accepted; recompile older ABD from source/readable AST. See [binary format](EXEC_FORMAT.en.md).
+
+`-g` adds debug records to the executable: source file names, function names and source positions. They are off by default and never change instructions or behavior, but they put function, class and file names into the ABD, so leave `-g` out of builds that should not carry them. A JNI snapshot can be restored only into a build with the same module bytes, so a `-g` build and a build without `-g` do not share snapshots.
 
 Launchers also accept full CLI commands: `./compile.sh compile-json hello.ast.json -o restored.abd` rebuilds ABD and defaults restored.exec.json without overwriting the input AST. Use `./compile.sh --help`; pack/unpack archive/extract files.
 

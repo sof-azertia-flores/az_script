@@ -19,7 +19,7 @@ python3 tools/build_and_test.py
 ./build/native/interpreter/azscript-run build/demo.exec.abd
 ```
 
-The regression script returns 146 and its destruction hook prints done. Optional --ast saves the readable tree and --exec-json the lowered instruction tree for inspection.
+The regression script returns 146 and its destruction hook prints done. Optional --ast saves the readable tree and --exec-json the lowered instruction tree for inspection. `-g` adds debug records (function and file names, source positions) to the executable; they are off by default.
 
 Builds reuse Gradle/Maven caches and download missing pinned dependencies from Maven Central with SHA-256 verification. All output, downloads, and temporary tests live under build/. With populated caches:
 
@@ -213,7 +213,7 @@ Non-library main is 0x0fff0000; ordinary definitions may fix low IDs with :0003,
 - Namespaces 0, 0xfff, and 0xabd are reserved. 0 holds lifecycle hooks and hint-library placeholders and 0xabd runtime built-ins, so `#namespace` rejects both, and compile-json rejects them as an ordinary module's namespace (hint libraries keep their 0000 placeholders); 0xfff is the default namespace of ordinary programs and may be written explicitly. Hosts cannot register in these three or in active script namespaces. Hint mounts allocate available positions. Function IDs retain all 32 bits.
 - Heap/external registry remain process-shared. Java maintains one active script, serializes calls, and allows same-thread callback reentry. Callbacks must not wait for another runtime-calling thread. Multiple C++ scripts still share resources and are not independent security sandboxes.
 - Collection literals, closures, and a complete static type system are not implemented. See the language guide for annotation semantics and the diagnostic format.
-- ABD is a recoverable binary instruction tree, not encryption or guaranteed decompilation protection. Numeric variable slots hide source names only in exec; AST retains them. Sources/debug JSON may be omitted from releases, but secrets must not rely solely on this format.
+- ABD is a recoverable binary instruction tree, not encryption or guaranteed decompilation protection. Numeric variable slots hide source names only in exec; AST retains them. By default an exec carries no function, class or file names; `-g` adds debug records with those names and source positions, so leave it out of releases that should not carry them. Sources, readable ASTs and exec inspection JSON may be omitted from releases, but secrets must not rely solely on this format.
 
 ## Data compatibility
 
@@ -221,7 +221,7 @@ Address tag 0xce200b has exactly eight uint64 little-endian bytes: C++ azertian:
 
 New operations, else, initialization, parameter types, and extern signatures require matching interpreters; recompile source. A runtime cannot recover intended expressions from trees misparsed by historical compilers.
 
-Class pointers/this/raw pointers use address type 7; literal values object type 8; int remains int32. Existing oa/ob/od/ro retain lifetime behavior; new_block/block_address/mv/drop implement literals. Exec v9 uses numeric variables/opcodes and raw fixed stacks, retaining typed containers only for dynamic constants/metadata. See [Exec v9](docs/EXEC_FORMAT.en.md). Only v9 is accepted; recompile older source/AST. Migrate reference-style C x(...) to C * x(...), C y = new C() to C * y = new C(), and reference parameters/fields/returns to C *. JNI accepts only v9 snapshots with address scalars, allocations, object records, cleanup order, globals, module identity, and literal fields.
+Class pointers/this/raw pointers use address type 7; literal values object type 8; int remains int32. Existing oa/ob/od/ro retain lifetime behavior; new_block/block_address/mv/drop implement literals. Exec v10 uses numeric variables/opcodes and raw fixed stacks, retaining typed containers only for dynamic constants/metadata, and carries optional `-g` debug records. See [Exec v10](docs/EXEC_FORMAT.en.md). Only v10 is accepted; recompile older source/AST. Migrate reference-style C x(...) to C * x(...), C y = new C() to C * y = new C(), and reference parameters/fields/returns to C *. JNI accepts only v9 snapshots with address scalars, allocations, object records, cleanup order, globals, module identity, and literal fields.
 
 The compiler also provides owning `buffer<T>` with contiguous direct element slots, deep copies, automatic cleanup, and checked reserve/get/set/push/resize operations. `value_compare<T>` orders basic values; class `+ - * / [] []= ()` declarations lower to ordinary method calls. See the [language guide](compiler/LANGUAGE.en.md). `List`, `Stack`, and `Queue` stay linked lists. `Vector`, `Set`, and `Map` use these primitives for contiguous storage and the default order.
 

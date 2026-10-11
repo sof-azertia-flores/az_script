@@ -83,6 +83,10 @@ public final class JniRegression {
             equal(33, AbdInvoker.invoke(204, manual));
             equal(List.of(), destructed);
         }
+        try { AbdInvoker.loadStatus(new File(work, "objects.exec-v9.snapshot.abd")); throw new AssertionError("exec v9 snapshot module accepted"); }
+        catch (IllegalArgumentException expected) { equal("Snapshot modules use exec v9; expected v10", expected.getMessage()); }
+        try { AbdInvoker.loadStatus(new File(work, "objects.not-exec.snapshot.abd")); throw new AssertionError("non-exec snapshot module accepted"); }
+        catch (IllegalArgumentException expected) { equal("Snapshot module is not an exec module", expected.getMessage()); }
         fails(RuntimeException.class, () -> AbdInvoker.invoke(203, first));
         AbdInvoker.invoke(203, manual);
         equal(List.of(33), destructed);

@@ -15,6 +15,8 @@ namespace azertian {
 inline constexpr int INT_VALUE=0, STRING_VALUE=1, FLOAT_VALUE=2, DOUBLE_VALUE=3,
                      BOOLEAN_VALUE=4, VOID_VALUE=5, ANY_VALUE=6, ADDRESS_VALUE=7, OBJECT_VALUE=8;
 inline constexpr std::size_t MAX_VARIABLE_SLOTS=1048576;
+// The only exec format the loader reads; ExecCodec.VERSION in the compiler matches it.
+inline constexpr int EXEC_FORMAT_VERSION=10;
 class expression; class function; class environment; class variable; class script; struct loaded_module;
 struct slot_block; struct function_frame;
 struct type_context;
@@ -30,6 +32,19 @@ struct type_context {
     std::shared_ptr<const type_context> element;
 };
 struct context_spec;
+// A source position of an exec debug record; file indexes function_debug::files.
+// Line and column are 1-based; a header position of 0:0 is unknown.
+struct source_position {
+    std::uint32_t file=0,line=0,column=0;
+};
+// The optional debug record of a function, read from an exec compiled with -g. It
+// never affects execution: expression::location indexes its locations.
+struct function_debug {
+    std::string name;
+    std::shared_ptr<const std::vector<std::string>> files;
+    source_position header;
+    std::vector<source_position> locations;
+};
 struct function_signature {
     int return_type=VOID_VALUE;
     std::vector<int> param_types;
@@ -109,6 +124,8 @@ public:
     std::size_t global_offset=0;
     std::size_t global_count=0;
     std::vector<int> param_types;
+    // Null without debug info.
+    std::shared_ptr<const function_debug> debug;
     int return_type() override;
     ofunction()=default;
     std::shared_ptr<variable> invoke(std::shared_ptr<environment> env,
@@ -121,6 +138,9 @@ class expression {
 public:
     virtual ~expression()=default;
     int return_type=VOID_VALUE;
+    // 1-based index into the owning function's debug locations; 0 inherits the
+    // position of the enclosing expression.
+    std::uint32_t location=0;
     virtual std::shared_ptr<variable> execute(std::shared_ptr<environment> env)=0;
 };
 class complex_expression : public expression {

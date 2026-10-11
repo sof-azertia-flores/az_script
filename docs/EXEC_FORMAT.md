@@ -1,4 +1,4 @@
-# Exec v9 二进制格式
+# Exec v10 二进制格式
 
 中文 | [English](EXEC_FORMAT.en.md)
 
@@ -7,10 +7,11 @@
 文件本身是一个 ABD frame，其 payload 为固定顺序的根 stack：
 
 ```text
-[ magic="AZSCRIPT", exec_version=9, source_version:int, author:string,
+[ magic="AZSCRIPT", exec_version=10, source_version:int, author:string,
   global_count:int, extensions:AbdMap,
   external_signatures:Stack<Signature>, functions:Stack<Function>,
-  namespace_hint:string, assumptions:Stack<Assumption> ]
+  namespace_hint:string, assumptions:Stack<Assumption>,
+  debug_files:Stack<string> ]
 
 Assumption = [ hint:string, namespace:int ]
 
@@ -18,8 +19,10 @@ Signature = [ function_id:int, return_type:int, parameter_types:Stack<int>,
               hidden_count:int, entry_kind:int ]
 Function  = [ function_id:int, return_type:int, parameter_count:int,
               local_count:int, parameter_types:Stack<int>, body:Expression,
-              hidden_count:int, entry_kind:int ]
+              hidden_count:int, entry_kind:int, has_debug:bool, [debug:FunctionDebug] ]
 ```
+
+`debug_files` 与 `FunctionDebug` 是可选调试记录，见[调试记录](#调试记录-g)；除非使用 `-g` 编译，否则它们为空或不存在。
 
 stack 的成员数量由其 frame 边界确定；固定记录必须恰好包含规定字段，拒绝缺失、额外或宽度错误的字段。扩展元数据的键不固定，保留 `AbdMap`。不同类型的常量使用仅含一个值的 `AbdArray`，保留既有 scalar 标签和精确值类型。函数、签名、参数类型表、表达式列表均不使用 `AbdArray`/`AbdMap` 包装。
 
@@ -73,7 +76,7 @@ stack 的成员数量由其 frame 边界确定；固定记录必须恰好包含�
 
 `cont` 结束当前最内层循环的本轮执行，各层块先完成对象清理，再由循环消费跳转标记。`for` 在编译期降为块与 `wi`，没有独立 opcode：初始化只执行一次，首次跳过步进，后续轮次先步进再判断条件，循环正文具有独立作用域。因此 `continue` 会执行步进，`break` 和 `return` 不执行步进。
 
-`cleanup` 是编译器内部清理指令，debug JSON 的字段为 `v`（正文）、`val`（清理）、`on-error`。先执行正文及其作用域清理；`on_error=true` 时只在失败后执行 finalizer，false 时无论正常结束、跳转或错误都执行。finalizer 不替换正文已有的返回值或跳转；已有错误优先保留，否则传播清理错误。继承构造用它回滚已完成的父类部分，析构用它保证父类随后执行。两个子节点都是普通表达式，类名、继承关系及布局不进入 exec。清理仍受调用和指令预算约束，底层内存释放保持原有兜底保证。不认识新 opcode 的解释器会明确拒绝相应程序。
+`cleanup` 是编译器内部清理指令，检查视图 JSON 的字段为 `v`（正文）、`val`（清理）、`on-error`。先执行正文及其作用域清理；`on_error=true` 时只在失败后执行 finalizer，false 时无论正常结束、跳转或错误都执行。finalizer 不替换正文已有的返回值或跳转；已有错误优先保留，否则传播清理错误。继承构造用它回滚已完成的父类部分，析构用它保证父类随后执行。两个子节点都是普通表达式，类名、继承关系及布局不进入 exec 指令。清理仍受调用和指令预算约束，底层内存释放保持原有兜底保证。不认识新 opcode 的解释器会明确拒绝相应程序。
 
 ## 字面量对象（opcode 32–35）
 
@@ -88,7 +91,7 @@ stack 的成员数量由其 frame 边界确定；固定记录必须恰好包含�
 
 ## 泛型操作上下文（opcode 36–39）
 
-`hidden_count` 是函数接收的操作上下文数量，独立于显式参数和变量槽。`entry_kind` 为 0 表示普通入口，1 表示编译器内部入口。debug JSON 使用 `hidden-count`、`entry-kind`，解码时即使为零也会输出。生命周期钩子的隐藏上下文数量必须为零。公开 C++/JNI 调用不提供隐藏上下文，宿主须调用包裹泛型实现的普通非泛型函数；反射也仅接受隐藏上下文为零的普通入口。泛型 extern 须链接到脚本实现，不能由原生或 Java 回调实现。
+`hidden_count` 是函数接收的操作上下文数量，独立于显式参数和变量槽。`entry_kind` 为 0 表示普通入口，1 表示编译器内部入口。检查视图 JSON 使用 `hidden-count`、`entry-kind`，解码时即使为零也会输出。生命周期钩子的隐藏上下文数量必须为零。公开 C++/JNI 调用不提供隐藏上下文，宿主须调用包裹泛型实现的普通非泛型函数；反射也仅接受隐藏上下文为零的普通入口。泛型 extern 须链接到脚本实现，不能由原生或 Java 回调实现。
 
 上下文只描述 ABI 操作，不包含类名、类布局、约束或原生指针。每个上下文使用裸 stack：
 
@@ -100,11 +103,11 @@ Fixed     = [ 1, abi:int, kind:int, width:int,
               has_element:bool, [element:Context] ]
 ```
 
-debug JSON 的引用为 `{"ref":0}`；固定上下文包含 `abi`、`kind`、`width`、`contexts`、`placement-contexts`，另有可选 `factory`、`placement`、`element`。引用索引须小于所属函数 hidden_count，内嵌引用同样检查。kind 0 对应 scalar ABI 0–5，kind 1 原始 address ABI 7，kind 2 类指针 ABI 7，kind 3 类值 ABI 8，kind 4 buffer ABI 8；ABI 6 不合法。void 仅用于反射返回，不能成为元素或泛型实参。除类值外 width 均为 1；类值为含继承字段的直接 slot 数（1…1048576），不保存字段布局或类名。
+检查视图 JSON 的引用为 `{"ref":0}`；固定上下文包含 `abi`、`kind`、`width`、`contexts`、`placement-contexts`，另有可选 `factory`、`placement`、`element`。引用索引须小于所属函数 hidden_count，内嵌引用同样检查。kind 0 对应 scalar ABI 0–5，kind 1 原始 address ABI 7，kind 2 类指针 ABI 7，kind 3 类值 ABI 8，kind 4 buffer ABI 8；ABI 6 不合法。void 仅用于反射返回，不能成为元素或泛型实参。除类值外 width 均为 1；类值为含继承字段的直接 slot 数（1…1048576），不保存字段布局或类名。
 
 只有 kind 3 允许工厂或原地构造入口，各 ID 缺省时对应子列表必须为空。工厂是无显式参数、返回 object 的脚本函数；原地构造是内部 `void(address)` 脚本函数，各自的隐藏数量须匹配绑定的子上下文。两者都可缺省，仅请求缺失的默认构造操作时运行失败。kind 4 必须有一个 element 上下文，width 为 1，无工厂或原地构造入口。建立此上下文或空 buffer 不默认构造元素。
 
-CALL 根据当前帧绑定 `contexts` 后调用目标，上下文数量须与目标隐藏数量相等。`ob` 将已绑定上下文与析构一起捕获，使后续析构不依赖创建帧；没有析构时列表必须为空。`context_abi` 返回绑定的 ABI 编号；`context_default` 产生基础类型零值/空值、空地址、调用工厂创建对象或建立空 buffer。`return_typed` 检查绑定 ABI，并按对象值或类指针分别执行返回及所有权转移，原始 address 保持普通地址返回语义；`check_type` 检查实际值的 ABI 后返回该值。后两者 debug 字段为 `v`、`context`，前两者为 `context`。
+CALL 根据当前帧绑定 `contexts` 后调用目标，上下文数量须与目标隐藏数量相等。`ob` 将已绑定上下文与析构一起捕获，使后续析构不依赖创建帧；没有析构时列表必须为空。`context_abi` 返回绑定的 ABI 编号；`context_default` 产生基础类型零值/空值、空地址、调用工厂创建对象或建立空 buffer。`return_typed` 检查绑定 ABI，并按对象值或类指针分别执行返回及所有权转移，原始 address 保持普通地址返回语义；`check_type` 检查实际值的 ABI 后返回该值。后两者的检查视图字段为 `v`、`context`，前两者为 `context`。
 
 上下文记录及子列表 stack 均计入 128 层物理 ABD 限制，隐藏数量和上下文列表继续受槽数量上限约束。链接除擦除签名外还检查隐藏数量和入口种类，仅重定位明确的工厂/函数引用。绑定后的上下文是不可变运行时数据。
 
@@ -112,37 +115,56 @@ JNI 快照 v9 递归保存对象已绑定的析构上下文，包括 ABI、kind�
 
 ## 缓冲区与比较（opcode 40–42）
 
-`buffer_new` 用已绑定的元素上下文创建空的拥有型 OBJECT_VALUE，debug JSON 字段为 `context`。`buffer_op` 的 debug 字段为 `op`、`v`、`args`；操作 0…6 分别是 length、capacity、reserve、get、set、push、resize，实参数量依次为 0、0、1、1、2、1、1。先借用并求值一次接收者，再从左到右求值并保存实参。get 产生值副本。buffer 不是可由原始地址/调整块大小接口操作的普通类块，这些接口不能绕过其生命周期规则。
+`buffer_new` 用已绑定的元素上下文创建空的拥有型 OBJECT_VALUE，检查视图 JSON 字段为 `context`。`buffer_op` 的检查视图字段为 `op`、`v`、`args`；操作 0…6 分别是 length、capacity、reserve、get、set、push、resize，实参数量依次为 0、0、1、1、2、1、1。先借用并求值一次接收者，再从左到右求值并保存实参。get 产生值副本。buffer 不是可由原始地址/调整块大小接口操作的普通类块，这些接口不能绕过其生命周期规则。
 
 每个 buffer 拥有 capacity × stride 的连续 slots。类元素是覆盖 N 个直接 slots 的独立对象视图；其余元素各占一个 slot，嵌套拥有值独立分配。只有成功初始化的元素计入 length。扩容提交移动 slots，不执行用户代码，并使旧视图 ID 失效；缩短及清理逆序销毁。复制保留容量并递归复制拥有值。buffer 赋值先准备候选，再销毁并替换旧值，即使旧清理抛错也完成切换；若回调销毁目标则清理候选并停止。元素 set 保留逐字段赋值的基本异常保证。操作保活存储，拒绝重入修改；销毁请求延迟到操作退出，继续前检测失效。批量工作计入执行预算，错误路径保留已有错误并完成底层释放。
 
-`value_compare` 的 debug 字段为 `context`、`v1`、`v2`，结果恰为 -1/0/1。支持非 void 标量、address 和类指针上下文，拒绝类值/buffer 和非有限浮点数；字符串按无符号 UTF-8 字节比较，正负零相等。两个操作数从左到右各求值一次。类运算符降为普通 CALL，执行文件不保存运算符元数据。
+`value_compare` 的检查视图字段为 `context`、`v1`、`v2`，结果恰为 -1/0/1。支持非 void 标量、address 和类指针上下文，拒绝类值/buffer 和非有限浮点数；字符串按无符号 UTF-8 字节比较，正负零相等。两个操作数从左到右各求值一次。类运算符降为普通 CALL，执行文件不保存运算符元数据。
 
 快照 v9 增加 width、原地构造绑定和递归元素上下文。buffer 对象记录另含 `buffer:true`、`element`、`length`、`capacity`，`slots` 仅编码存活的逻辑元素。类元素使用对象视图 ID 及析构/上下文/字段记录，因此底层字段只保存一次，不编码空余容量。恢复先预检容量预算，在临时状态中校验长度/容量/步长、标签、唯一 ID、嵌套和全部函数绑定，用新 ID 重建连续存储与视图并改写已保存的地址，全部通过后才替换旧状态；操作中和过渡状态不能保存。一次快照内全部 buffer 的 capacity × stride 累计不得超过 1,048,576 slots，超出此持久化预算的保存或恢复在分配存储前失败。运行时每块容量和 64 MiB 文件上限仍适用。状态替换不执行旧状态的用户析构。
 
 ## 类型编号与常量
 
-函数签名与 `declared_type` 的类型编号为 int=0、string=1、float=2、double=3、boolean=4、void=5、any=6、address=7、object=8。参数和变量不能为 void；未标注类型的脚本参数/变量使用 any。仅当 `hidden_count > 0` 时允许 any 返回和 any 外部参数，用于泛型擦除；源码 extern 声明仍须明确标注类型。debug JSON 可省略 any 的 `declared-type`。类指针、`C (*)` 参数、隐式 this 以及指针工厂的返回值擦除为 address（`C (*)` 实参为字面量对象时，调用方先用 `block_address` 取地址）；字面量对象的参数、返回、变量类型为 object。地址不会放宽 int 参数的类型检查。这些编号与 ABD 标量标签属于不同的编码层；对象值没有常量表示。
+函数签名与 `declared_type` 的类型编号为 int=0、string=1、float=2、double=3、boolean=4、void=5、any=6、address=7、object=8。参数和变量不能为 void；未标注类型的脚本参数/变量使用 any。仅当 `hidden_count > 0` 时允许 any 返回和 any 外部参数，用于泛型擦除；源码 extern 声明仍须明确标注类型。检查视图 JSON 可省略 any 的 `declared-type`。类指针、`C (*)` 参数、隐式 this 以及指针工厂的返回值擦除为 address（`C (*)` 实参为字面量对象时，调用方先用 `block_address` 取地址）；字面量对象的参数、返回、变量类型为 object。地址不会放宽 int 参数的类型检查。这些编号与 ABD 标量标签属于不同的编码层；对象值没有常量表示。
 
 常量的 ABD 标签为 int=`0x3`、string=`0x1`、float=`0xce867`、double=`0xce1066`、boolean=`0xd00`、address=`0xce200b`；void 为 `0xce200a` 标签的单字节 `ff`。浮点常量必须有限，字符串须为有效 UTF-8，布尔编码严格为 0/1。地址 payload 必须恰好 8 字节，完整保留无符号高位；例如最大地址为八个 `ff`。exec JSON 中地址常量表示为 `{"address":"18446744073709551615"}`，空地址为 `{"address":"0"}`，二进制仍使用 opcode 0 加带标签的单元素数组，不添加地址专用 opcode。常量不接受集合或其他 byte array。
 
 `oa` 的基地址、`ob/od/ro` 的对象值、内置内存接口的指针及 `alloc` 的结果要求 address。字段偏移、分配数量、函数 ID、类型号和变量槽号仍为四字节整数。`add/minus` 对 address 和 int32 执行经 uint64 边界检查的偏移运算；比较两个地址时使用无符号顺序，不把地址转成 double 或 int32。普通 `r` 不触发对象所有权转移。
 
-一元正号已在编译期消除，没有独立 opcode。原来所有 `c` 字符串均由表中整数替代；debug JSON 的调用 `t=1` 和块数组表示保留，二进制统一通过 opcode 0/1/2 区分常量、块和调用。
+一元正号已在编译期消除，没有独立 opcode。原来所有 `c` 字符串均由表中整数替代；检查视图 JSON 的调用 `t=1` 和块数组表示保留，二进制统一通过 opcode 0/1/2 区分常量、块和调用。
 
 变量编号规则：参数和局部槽为连续非负数，全局为 -1、-2……。每个加载函数保存所属模块的全局偏移，实际下标为 `global_offset + (-int64(slot) - 1)`。文件不保存宿主加载时才知道的 offset。参数、返回值、外部函数类型和块级生命周期规则保持不变。
 
-读取器只接受此 v9 裸 stack 格式，通过首个 frame 的 magic 和紧随其后的版本识别。包括 v8 在内的旧执行版本、旧 Map 执行文件和未知版本直接拒绝，已有源码或可读 AST 必须重新编译。原有 64 MiB 文件上限、128 层 ABD 嵌套限制、变量槽和调用预算继续适用；紧凑格式不得绕过嵌套检查。JNI 快照仅接受 v9，地址标量、堆分配起点、对象登记和自动清理顺序均保留完整 uint64 值；长度、数量和函数 ID 仍用既有整数表示。快照把堆和全局中的字面量对象保存为 `{object, has destructor, [destructor], destructor contexts, slots}` 映射，恢复时分配新 id 并改写指向已保存对象的地址；指向未保存对象的地址保持原值，其 id 被永久停用。脚本字节作为不透明数据保存及校验，不再读取旧快照。
+读取器只接受此 v10 裸 stack 格式，通过首个 frame 的 magic 和紧随其后的版本识别。包括 v9、v8 在内的旧执行版本、旧 Map 执行文件和未知版本直接拒绝，错误信息给出期望版本，已有源码或可读 AST 必须重新编译。原有 64 MiB 文件上限、128 层 ABD 嵌套限制、变量槽和调用预算继续适用；紧凑格式不得绕过嵌套检查。JNI 快照版本独立于 exec 版本，仍为 9；JNI 仅接受 v9 快照，拒绝模块不是 exec v10 的快照；地址标量、堆分配起点、对象登记和自动清理顺序均保留完整 uint64 值；长度、数量和函数 ID 仍用既有整数表示。快照把堆和全局中的字面量对象保存为 `{object, has destructor, [destructor], destructor contexts, slots}` 映射，恢复时分配新 id 并改写指向已保存对象的地址；指向未保存对象的地址保持原值，其 id 被永久停用。脚本字节作为不透明数据保存及校验，不再读取旧快照。
 
-物理容器深度从根 stack 的第 1 层开始计算，函数列表第 2 层、函数记录第 3 层、函数体第 4 层。嵌套表达式各加一层，块内语句列表、调用实参列表以及常量的单元素数组各另加一层。扩展元数据从第 2 层开始计算内部 Map/Array 嵌套；裸 stack 不会绕过 128 层上限。
+物理容器深度从根 stack 的第 1 层开始计算，函数列表第 2 层、函数记录第 3 层、函数体第 4 层。嵌套表达式各加一层，块内语句列表、调用实参列表以及常量的单元素数组各另加一层。扩展元数据从第 2 层开始计算内部 Map/Array 嵌套。调试文件名位于第 3 层，函数调试记录位于第 4 层，其字段位于第 5 层，位置整数位于第 6 层。裸 stack 不会绕过 128 层上限。
+
+## 调试记录（`-g`）
+
+调试信息可选，默认不生成。`compile -g`、`compile-json -g`（Java API 为 `Compiler.compile(tree, true)`）填写 `debug_files`，并为每个函数生成一条调试记录；不加 `-g` 时 `debug_files` 为空，所有 `has_debug` 为 false。调试记录不具有执行语义：执行、链接、重定位、预算和反射均不使用它，`flush()` 不改写任何调试字段，同一函数在有无 `-g` 时的指令完全相同。解释器校验这些记录并随函数保存。
+
+```text
+FunctionDebug = [ name:string, file:int, line:int, column:int, locations:Stack<int> ]
+```
+
+- `debug_files` 按顺序保存可读 AST `sources` 表中互不相同的名称，即诊断中显示的文件标签：相对所属 include 根目录、以 `/` 分隔的路径，主文件为不含目录的文件名，源码字符串为 `<source>`。各项非空且互不相同，最多 1,048,576 项。
+- `name` 是函数的显示名：普通函数为源码名称，方法为 `C::m`，构造和析构为 `C::C`、`C::~C`，运算符为 `C::operator+`（`-`、`*`、`/`、`[]`、`[]=`、`()` 同理），编译器生成的工厂为 `<new C>`、`<scoped C>`、`<value C>` 或 `<placement C>`。
+- `file`、`line`、`column` 指向函数声明，编译器生成的类函数指向类声明。`file` 是 `debug_files` 的下标；line 与 column 同为 0（未知）或同为正数。
+- `locations` 是由 `(node, file, line, column)` 四元组平铺而成的 int stack。node 按线路字段顺序对 `body` 中的表达式 stack 做先序编号：函数体为 0 号，每个常量、块、调用和 opcode 表达式进入时取下一个编号；上下文及其他字段不编号。node 严格递增且小于函数体的节点数，`file` 是 `debug_files` 的下标，line 与 column 从 1 开始（column 与编译诊断一致，按 UTF-16 码元计数）。没有条目的节点使用最近的有位置祖先节点的位置。编译器在运算符、调用和语句的源码记号处记录位置，不记录常量和变量读取，并省略与最近有位置祖先位置相同的节点。
+
+读取器拒绝以下情况：名称或文件为空、不是合法 UTF-8，或包含 C0、DEL、C1 控制字符、U+2028/U+2029 或双向格式字符（U+061C、U+200E、U+200F、U+202A–U+202E、U+2066–U+2069）；文件重复；`has_debug` 为 true 却没有恰好一条记录；记录字段数不为五；locations 不是完整的四元组；node 未递增或超出函数体；文件下标超出 `debug_files`；位置的行或列小于 1；声明位置的行、列只有一个为 0。编译器把显示名中的此类字符替换为 U+FFFD，因此源码名称不会生成无效记录。
+
+检查视图的根总是包含 `debug-files`（字符串数组，无 `-g` 时为空）。有调试记录的函数另含 `debug`：`{"name":…, "file":…, "line":…, "column":…, "locations":["node:file:line:column", …]}`，每个位置使用规范十进制。
+
+调试记录会把函数名、类名和文件名写入执行文件，且每个位置占 32 字节；不希望发行包携带这些信息时不要使用 `-g`。JNI 快照逐字节比较模块，因此 `-g` 构建保存的快照不能恢复到不加 `-g` 编译的同一程序中，反之亦然。
 
 
 ## 模块链接
 
-根记录恰好十个字段。`namespace_hint` 为空字符串表示固定 namespace 模块；非空则是大小写敏感的 hint 名称。debug JSON 对应键为 `namespace-hint`（字符串）、`assume-hints`（`{"hint":名称,"namespace":整数}` 数组）。每条 assumption 的 namespace 必须在 1…65535，排除 `0x0abd` 和 `0x0fff`；hint 与 namespace 一一对应，不得重复冲突。hint 名为 ASCII 标识符（字母或下划线开头）；非空 namespace_hint 必须在 assumptions 中包含自身。
+根记录恰好十一个字段。`namespace_hint` 为空字符串表示固定 namespace 模块；非空则是大小写敏感的 hint 名称。检查视图 JSON 对应键为 `namespace-hint`（字符串）、`assume-hints`（`{"hint":名称,"namespace":整数}` 数组）。每条 assumption 的 namespace 必须在 1…65535，排除 `0x0abd` 和 `0x0fff`；hint 与 namespace 一一对应，不得重复冲突。hint 名为 ASCII 标识符（字母或下划线开头）；非空 namespace_hint 必须在 assumptions 中包含自身。
 
-hint 模块只定义占位 namespace 0000 下的函数，0/1 为模块初始化/销毁钩子，其余普通函数在装载时迁移。固定 namespace 模块的普通函数不得占用自身 assume 的 namespace。类名及布局不进入本格式，签名保持擦除后的基础类型。
+hint 模块只定义占位 namespace 0000 下的函数，0/1 为模块初始化/销毁钩子，其余普通函数在装载时迁移。固定 namespace 模块的普通函数不得占用自身 assume 的 namespace。类名及布局不进入指令，签名保持擦除后的基础类型。使用 `-g` 时调试记录携带显示名（可能含类名），但执行和链接都不读取它。
 
 `flush()` 按所属模块的 assume 表重定位 CALL 的函数 ID、ob 的析构 ID 及上下文中的默认工厂和原地构造 ID（含元素上下文），并校验所有 hint 导入对应的函数及签名。普通整数、堆地址和变量槽不重定位。消除 assumption 只发生在完整链接验证成功之后。has_destructor=false 时没有析构 ID 字段；true 时保留完整32位位模式，包括 `0xffffffff`，不再使用 -1 哨兵。析构仍须指向合法的 `void(address)` 脚本函数，生命周期、main 和内置保留 ID 规则继续生效。
 
-旧 exec v8 及更早版本、旧 Map 执行文件和旧 JNI 快照不再读取。所有库和宿主应配套更新。
+旧 exec v9 及更早版本、旧 Map 执行文件和旧 JNI 快照不再读取。所有库和宿主应配套更新。

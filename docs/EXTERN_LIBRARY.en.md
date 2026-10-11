@@ -100,6 +100,6 @@ In a source checkout, `AZSCRIPT_INCLUDE`, `AZSCRIPT_LIBDIR`, and `AZSCRIPT_SIGN_
 
 ## Owning buffers at the host boundary
 
-Exec v9 represents `buffer<T>` using OBJECT_VALUE with a distinct storage category; it is not an address or a normal resizable class block. Rebuild C++ integrations and plugins against the matching runtime. Raw block resize/address APIs cannot resize a buffer or an inline element view. Script wrappers using get/set/push/resize preserve element ownership and type checks; JNI does not directly marshal OBJECT_VALUE. Element pointers retained from this expire on growth, removal, or whole-buffer replacement.
+Exec v10 represents `buffer<T>` using OBJECT_VALUE with a distinct storage category; it is not an address or a normal resizable class block. Rebuild C++ integrations and plugins against the matching runtime. Raw block resize/address APIs cannot resize a buffer or an inline element view. Script wrappers using get/set/push/resize preserve element ownership and type checks; JNI does not directly marshal OBJECT_VALUE. Element pointers retained from this expire on growth, removal, or whole-buffer replacement.
 
 Class operators lower to ordinary methods and need no native operator ABI. Default scalar comparison uses value_compare; custom comparators may be ordinary AZS functions dispatched through existing reflection. Reflection still rejects internal or unbound generic entries, so expose ordinary wrappers when needed.

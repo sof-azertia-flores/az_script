@@ -15,7 +15,7 @@ from typing import Dict, List, Optional
 
 WINDOWS = sys.platform == "win32"
 EXECUTABLE_SUFFIX = ".exe" if WINDOWS else ""
-EXEC_VERSION = 9
+EXEC_VERSION = 10
 # Constants, blocks and calls use other JSON representations (wire opcodes 0–2).
 # The unit suite checks this set against the compiler's opcode registry.
 CONTROL_OPCODES = frozenset(range(3, 43))
@@ -87,6 +87,7 @@ def _outputs(abd: Path, ast: Path, executable_json: Path) -> None:
         if path == executable_json:
             _require(decoded.get("exec-version") == EXEC_VERSION,
                      f"Expected exec v{EXEC_VERSION} output in {path}")
+            _require(isinstance(decoded.get("debug-files"), list), f"Missing debug-files table in {path}")
             _control_opcodes(decoded["f"], f"{path}:f")
 
 
@@ -239,6 +240,27 @@ def verify(package: Path, java: Optional[Path] = None) -> Dict[str, object]:
         _require((cwd / "roundtrip/from ast.exec.json").is_file(), "compile-json omitted exec JSON")
         _require(default_ast.read_bytes() == ast_bytes, "compile-json overwrote the input AST")
         passed("AST roundtrip is byte-identical and preserves its input")
+
+        # Debug records are opt-in: -g adds names and positions without changing instructions.
+        default_view = json.loads(default_exec.read_text(encoding="utf-8"))
+        _require(default_view["debug-files"] == [] and all("debug" not in f for f in default_view["f"]),
+                 "The default executable carries debug records")
+        _run([compiler, source, "-o", "debug output/hello.abd", "-g"], cwd, compiler_environment)
+        debug_abd = cwd / "debug output/hello.abd"
+        _outputs(debug_abd, cwd / "debug output/hello.ast.json", cwd / "debug output/hello.exec.json")
+        debug_view = json.loads((cwd / "debug output/hello.exec.json").read_text(encoding="utf-8"))
+        _require(debug_view["debug-files"] == ["hello world.azs"], f"Unexpected debug files: {debug_view['debug-files']!r}")
+        _require([f["debug"]["name"] for f in debug_view["f"]] == ["main"] and debug_view["f"][0]["debug"]["line"] > 0,
+                 "-g did not add a located debug record for main")
+        _require([{k: v for k, v in f.items() if k != "debug"} for f in debug_view["f"]] == default_view["f"],
+                 "-g changed the instructions")
+        _run([compiler, "compile-json", cwd / "debug output/hello.ast.json", "-o", "debug output/roundtrip.abd", "-g"], cwd,
+             compiler_environment)
+        _require((cwd / "debug output/roundtrip.abd").read_bytes() == debug_abd.read_bytes(),
+                 "Source to AST to ABD roundtrip with -g changed executable bytes")
+        result = _run([runner, debug_abd], cwd, environment)
+        _require(result.stdout.splitlines() == ["Hello, AzScript!", "42"], f"-g changed the program output: {result.stdout!r}")
+        passed("opt-in -g debug records keep instructions, outputs and the AST roundtrip")
 
         broken_source = source_directory / "invalid source.azs"
         broken_source.write_text("int main() { return missing_name; }\n", encoding="utf-8")
@@ -449,7 +471,7 @@ int main() {
         _outputs(modern_abd, modern_ast, modern_json)
         modern_view = json.loads(modern_json.read_text(encoding="utf-8"))
         _require(set(range(36, 43)) <= _control_opcodes(modern_view["f"], str(modern_json)),
-                 "Generic/buffer probe must exercise operation contexts and all v9 buffer instructions")
+                 f"Generic/buffer probe must exercise operation contexts and all exec v{EXEC_VERSION} buffer instructions")
         modern_roundtrip = modern_abd.with_name("features.roundtrip.abd")
         _run([compiler, "compile-json", modern_ast, "-o", modern_roundtrip], cwd, compiler_environment)
         _require(modern_abd.read_bytes() == modern_roundtrip.read_bytes(),

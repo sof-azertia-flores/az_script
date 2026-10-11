@@ -11,7 +11,7 @@ class AddressCodecTest {
     private ExecProgram program() {
         ExecProgram program = new ExecProgram();
         program.put("author", "address codec regression"); program.put("version", 1);
-        program.put("exec-version", ExecCodec.VERSION); program.put("gvs", 0);
+        program.put("exec-version", ExecCodec.VERSION); program.put("gvs", 0); program.put("debug-files", new AcsArray());
         program.put("namespace-hint", ""); program.put("assume-hints", new AcsArray());
         AcsObject ext = new AcsObject(); ext.put("address", new AcsAddress(-1L)); program.put("ext", ext);
         AcsArray types = new AcsArray(); types.acsa.add(new AcsIntegerElement(7));
@@ -41,7 +41,7 @@ class AddressCodecTest {
 
     @Test void addressesKeepTheirDistinctTypeAndAllUnsignedBits() {
         ExecProgram program = program(); AbdValue payload = program.toValue();
-        assertEquals(9, AbdBasicType.abd2int(payload.getAsAss().values.get(1)));
+        assertEquals(ExecCodec.VERSION, AbdBasicType.abd2int(payload.getAsAss().values.get(1)));
         AcsObject decoded = ExecCodec.decode(payload);
         assertEquals(program.toJson(), decoded.toJson());
         assertArrayEquals(payload.toAbdFormat(), decoded.toValue().toAbdFormat());
@@ -69,8 +69,10 @@ class AddressCodecTest {
                     AbdBasicType.int2Abd(AcsAddress.TYPE), new AbdValue(new byte[width])));
             assertThrows(IllegalArgumentException.class, () -> ExecCodec.decode(malformedExtension.toAbd()));
         }
-        var old = valid.getAsAss(); old.values.set(1, AbdBasicType.int2Abd(5));
-        assertThrows(IllegalArgumentException.class, () -> ExecCodec.decode(old.toAbd()));
+        for (int version : new int[]{5, 9, ExecCodec.VERSION + 1}) {
+            var old = valid.getAsAss(); old.values.set(1, AbdBasicType.int2Abd(version));
+            assertThrows(IllegalArgumentException.class, () -> ExecCodec.decode(old.toAbd()));
+        }
     }
 
     @Test void addressesNeverReplaceIntegerSlotsCountsOrTypeCodes() {

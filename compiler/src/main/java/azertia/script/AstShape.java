@@ -288,10 +288,7 @@ final class AstShape {
         return null;
     }
     /** A control, line separator or bidirectional formatting character, which could forge or reorder a diagnostic line. */
-    private static boolean unsafe(char c) {
-        return Character.isISOControl(c) || c == 0x2028 || c == 0x2029 || c == 0x061c || c == 0x200e || c == 0x200f
-                || c >= 0x202a && c <= 0x202e || c >= 0x2066 && c <= 0x2069;
-    }
+    private static boolean unsafe(char c) { return SourceRules.unsafeDisplayCharacter(c); }
     /** Input text for a message: unsafe and format characters and unpaired surrogates become backslash-u hexadecimal escapes. */
     static String printable(String text) {
         StringBuilder out = new StringBuilder(text.length());

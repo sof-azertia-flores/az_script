@@ -30,7 +30,7 @@ class BufferCodecTest {
     }
     private ExecProgram program(AcsElement body) {
         ExecProgram program=new ExecProgram();program.put("author","buffer codec");program.put("version",1);
-        program.put("exec-version",9);program.put("gvs",0);program.put("ext",new AcsObject());
+        program.put("exec-version",ExecCodec.VERSION);program.put("gvs",0);program.put("debug-files",array());program.put("ext",new AcsObject());
         program.put("namespace-hint","");program.put("assume-hints",array());program.put("extern-signatures",array());
         AcsObject function=new AcsObject();function.put("id",0x22220002);function.put("return-type",5);
         function.put("param-count",0);function.put("local-count",0);function.put("param-types",array());
@@ -45,7 +45,7 @@ class BufferCodecTest {
         return program.getAsAss().values.get(7).getAsAss().values.get(0).getAsAss().values.get(5).getAsAss().values.get(1);
     }
 
-    @Test void v9ContextsAndBufferOpcodesRoundTripExactWidths() {
+    @Test void contextsAndBufferOpcodesRoundTripExactWidths() {
         AcsObject object=context(8,3,3);object.put("factory",0x22220003);object.put("contexts",array(reference(0)));
         object.put("placement",0x22220004);object.put("placement-contexts",array(buffer(context(7,2,1))));
         AcsArray body=array(operation(ExecOpcodes.BUFFER_NEW,object));
@@ -53,7 +53,7 @@ class BufferCodecTest {
         AcsObject compare=operation(ExecOpcodes.VALUE_COMPARE,buffer(object));compare.put("v1",1);compare.put("v2",2);body.acsa.add(compare);
         ExecProgram original=program(body);AbdValue encoded=original.toValue();AcsObject decoded=ExecCodec.decode(encoded);
         assertEquals(original.toJson(),decoded.toJson());assertArrayEquals(encoded.toAbdFormat(),decoded.toValue().toAbdFormat());
-        assertEquals(9,AbdBasicType.abd2int(encoded.getAsAss().values.get(1)));
+        assertEquals(ExecCodec.VERSION,AbdBasicType.abd2int(encoded.getAsAss().values.get(1)));
         assertEquals(11,wireContext(program(operation(ExecOpcodes.BUFFER_NEW,object)).toValue()).getAsAss().values.size());
         assertEquals(10,wireContext(program(operation(ExecOpcodes.BUFFER_NEW,buffer(context(0,0,1)))).toValue()).getAsAss().values.size());
         for(int op=40;op<=42;++op)assertEquals(op,ExecOpcodes.code(ExecOpcodes.name(op)));

@@ -88,7 +88,7 @@ class CompilerTest {
                 + "int main(){return helper(3,\"__func_param0\");}");
         tree.getAsJsonObject("metadata").addProperty("version", 29);
         JsonObject compiled = Compiler.compile(tree).toJson().getAsJsonObject();
-        assertEquals(9, compiled.get("exec-version").getAsInt());
+        assertEquals(ExecCodec.VERSION, compiled.get("exec-version").getAsInt());
         assertEquals(29, compiled.get("version").getAsInt(), "source version is not the executable format version");
         assertTrue(compiled.get("gvs").getAsJsonPrimitive().isNumber());
         assertEquals(2, compiled.get("gvs").getAsInt());
@@ -862,11 +862,13 @@ class CompilerTest {
         assertInstanceOf(ExecProgram.class, compiled);
         assertThrows(IllegalArgumentException.class, compiled::typeValue);
         AbdValue payload = compiled.toValue(); var root = payload.getAsAss().values;
-        assertEquals(10, root.size()); assertEquals("AZSCRIPT", AbdBasicType.abd2str(root.get(0)));
-        assertEquals(9, AbdBasicType.abd2int(root.get(1)));
+        assertEquals(11, root.size()); assertEquals("AZSCRIPT", AbdBasicType.abd2str(root.get(0)));
+        assertEquals(ExecCodec.VERSION, AbdBasicType.abd2int(root.get(1)));
+        assertEquals(0, root.get(10).getAsAss().values.size(), "no debug files without -g");
         var functionList = root.get(7).getAsAss().values;
         assertEquals(1, functionList.size()); var function = functionList.get(0).getAsAss().values;
-        assertEquals(8, function.size()); assertEquals(0x0fff0000, AbdBasicType.abd2int(function.get(0)));
+        assertEquals(9, function.size()); assertEquals(0x0fff0000, AbdBasicType.abd2int(function.get(0)));
+        assertFalse(AbdBasicType.abd2bol(function.get(8)), "no debug record without -g");
         assertEquals(0, AbdBasicType.abd2int(function.get(6)));
         assertEquals(0, AbdBasicType.abd2int(function.get(7)));
         var block = function.get(5).getAsAss().values;
@@ -887,6 +889,13 @@ class CompilerTest {
         assertArrayEquals(payload.toAbdFormat(), decoded.toValue().toAbdFormat());
         for(int opcode = 0; opcode <= ExecOpcodes.VALUE_COMPARE; opcode++)
             assertEquals(opcode, ExecOpcodes.code(ExecOpcodes.name(opcode)));
+        // -g appends a debug record to each function and fills the debug file table; instructions stay the same.
+        var debugRoot = Compiler.compile(newTree("int main(){return 1+2;}"), true).toValue().getAsAss().values;
+        assertEquals(11, debugRoot.size()); assertEquals(1, debugRoot.get(10).getAsAss().values.size());
+        var debugFunction = debugRoot.get(7).getAsAss().values.get(0).getAsAss().values;
+        assertEquals(10, debugFunction.size()); assertTrue(AbdBasicType.abd2bol(debugFunction.get(8)));
+        assertEquals(5, debugFunction.get(9).getAsAss().values.size());
+        assertArrayEquals(function.get(5).toAbdFormat(), debugFunction.get(5).toAbdFormat());
     }
     @Test void compactExecPreservesScalarTypesAndDynamicExtensionMetadata() throws Exception {
         AcsObject compiled = Compiler.compile(newTree("void main(){}"));

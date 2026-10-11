@@ -60,7 +60,7 @@ def main():
             assert result.returncode == 0 and not result.stderr, (name, 'AST rebuild', result.stdout, result.stderr)
             assert abd.read_bytes() == rebuilt.read_bytes(), (name, 'AST roundtrip differs')
             tree = json.loads(executable.read_text(encoding='utf-8'))
-            assert tree['exec-version'] == 9, (name, tree.get('exec-version'))
+            assert tree['exec-version'] == 10, (name, tree.get('exec-version'))
             assert 'classes' not in tree and 'operators' not in tree, name
             return abd, json.loads(ast.read_text(encoding='utf-8')), tree
 

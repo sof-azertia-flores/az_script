@@ -315,6 +315,21 @@ def main():
     candidate = copy.deepcopy(object_snapshot)
     candidate['snapshot version'] = 4
     bad_objects.append(candidate)
+    # Module bytes of another exec version are named as such before the byte comparison.
+    candidate = copy.deepcopy(object_snapshot)
+    module_bytes = bytearray(candidate['module manifest'][0]['bytes'])
+    assert module_bytes[8:16] == b'AZSCRIPT' and struct.unpack_from('<i', module_bytes, 20)[0] == 10
+    struct.pack_into('<i', module_bytes, 20, 9)
+    candidate['module manifest'][0]['bytes'] = bytes(module_bytes)
+    write_abd(work / 'objects.exec-v9.snapshot.abd', candidate)
+    bad_objects.append(candidate)
+    # Module bytes without the AZSCRIPT header are not an exec module at all.
+    candidate = copy.deepcopy(object_snapshot)
+    module_bytes = bytearray(candidate['module manifest'][0]['bytes'])
+    module_bytes[8:16] = b'AZSCRIPX'
+    candidate['module manifest'][0]['bytes'] = bytes(module_bytes)
+    write_abd(work / 'objects.not-exec.snapshot.abd', candidate)
+    bad_objects.append(candidate)
     candidate = copy.deepcopy(object_snapshot)
     candidate['snapshot version'] = 7
     bad_objects.append(candidate)
@@ -333,7 +348,7 @@ def main():
         write_abd(work / f'objects.invalid-{i}.snapshot.abd', candidate)
 
     # Globals use negative slot ids and local/parameter variables non-negative
-    # ids. write_abd emits only fixed-record exec v9 for all program fixtures.
+    # ids. write_abd emits only fixed-record exec v10 for all program fixtures.
     def numeric_expression(value):
         if isinstance(value, list):
             return [numeric_expression(item) for item in value]
@@ -344,7 +359,7 @@ def main():
             return converted
         return value
 
-    numeric_fixture = {'exec-version': 9, 'gvs': 5, 'f': []}
+    numeric_fixture = {'exec-version': 10, 'gvs': 5, 'f': []}
     for original in object_fixture['f']:
         converted = copy.deepcopy(original)
         converted['local-count'] = 1 if original['id'] in (201, 202, 208) else 0

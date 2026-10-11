@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Independent exec-v9 wire checks, malformed inputs, source execution and JNI."""
+"""Independent exec-v10 wire checks, debug records, malformed inputs, source execution and JNI."""
 import argparse
 from dataclasses import dataclass
 import json
 import os
 from pathlib import Path
+import re
 import struct
 import subprocess
 import tempfile
@@ -23,6 +24,22 @@ OP_NAMES = {3: 'v', 4: 'vd', 5: 'vs', 6: 'm', 7: 'r', 8: 'ro', 9: 'oa',
             32: 'new_block', 33: 'block_address', 34: 'mv', 35: 'drop',
             36: 'context_abi', 37: 'context_default', 38: 'return_typed', 39: 'check_type',
             40: 'buffer_new', 41: 'buffer_op', 42: 'value_compare'}
+EXEC_VERSION = 10
+
+
+def registry_opcodes():
+    """Read the compiler's dense opcode registry, so a new opcode cannot hide behind a stale local table."""
+    registry = (ROOT / 'compiler/src/main/java/azertia/script/ExecOpcodes.java').read_text(encoding='utf-8')
+    names = re.findall(r'"([^"\\]+)"', re.search(r'String\[\]\s+NAMES\s*=\s*\{([^}]+)\}', registry).group(1))
+    assert names[:3] == ['constant', 'block', 'call'], names[:3]
+    return dict(enumerate(names))
+
+
+REGISTRY = registry_opcodes()
+assert OP_NAMES == {code: name for code, name in REGISTRY.items() if code >= 3}, \
+    'Update OP_NAMES and the independent reader when the compiler opcode registry changes'
+# The registry is dense, so the first unassigned opcode follows the last one.
+LAST_OPCODE = max(REGISTRY)
 
 
 def integer(value):
@@ -149,14 +166,25 @@ def returning(value=None):
     return expression(7, b'\0') if value is None else expression(7, b'\1', value)
 
 
-def function(body, ident=MAIN, return_type=0, params=(), locals_count=0, hidden_count=0, entry_kind=0):
-    return stack(integer(ident), integer(return_type), integer(len(params)),
-                 integer(locals_count), stack(*(integer(kind) for kind in params)), body, integer(hidden_count), integer(entry_kind))
+def debug_record(name, file=0, line=0, column=0, locations=()):
+    """[name, file, line, column, flat (node, file, line, column) int stack]."""
+    return stack(name.encode('utf-8') if isinstance(name, str) else name, integer(file), integer(line), integer(column),
+                 stack(*(integer(part) for quad in locations for part in quad)))
 
 
-def module(functions, globals_count=0, signatures=()):
-    return [b'AZSCRIPT', integer(9), integer(2), b'independent wire fixture',
-            integer(globals_count), typed_encode({})[1], stack(*signatures), stack(*functions), b'', b'']
+def function(body, ident=MAIN, return_type=0, params=(), locals_count=0, hidden_count=0, entry_kind=0, debug=None):
+    fields = [integer(ident), integer(return_type), integer(len(params)), integer(locals_count),
+              stack(*(integer(kind) for kind in params)), body, integer(hidden_count), integer(entry_kind),
+              bytes([debug is not None])]
+    if debug is not None:
+        fields.append(debug)
+    return stack(*fields)
+
+
+def module(functions, globals_count=0, signatures=(), debug_files=()):
+    return [b'AZSCRIPT', integer(EXEC_VERSION), integer(2), b'independent wire fixture',
+            integer(globals_count), typed_encode({})[1], stack(*signatures), stack(*functions), b'', b'',
+            stack(*(name.encode('utf-8') for name in debug_files))]
 
 
 def encode_context(value):
@@ -246,7 +274,7 @@ def encode_compact_expression(value):
 
 
 def encode_compact_module(program):
-    """Encode fixtures expressed as readable dictionaries into only v9 wire."""
+    """Encode fixtures expressed as readable dictionaries into only exec v10 wire."""
     global_names = program.get('gvs', [])
     numeric = isinstance(global_names, int)
     global_count = global_names if numeric else len(global_names)
@@ -277,14 +305,18 @@ def encode_compact_module(program):
             return result
 
         body = lower(entry['script'])
+        debug = entry.get('debug')
+        if debug is not None:
+            debug = debug_record(debug['name'], debug['file'], debug['line'], debug['column'],
+                                 [tuple(int(part) for part in item.split(':')) for item in debug['locations']])
         functions.append(function(encode_compact_expression(body), entry['id'], entry['return-type'], params,
                                   entry.get('local-count', len(local_names)),
-                                  entry.get('hidden-count', 0), entry.get('entry-kind', 0)))
+                                  entry.get('hidden-count', 0), entry.get('entry-kind', 0), debug))
     signatures = [stack(integer(entry['id']), integer(entry['return-type']),
                         stack(*(integer(kind) for kind in entry['param-types'])),
                         integer(entry.get('hidden-count', 0)), integer(entry.get('entry-kind', 0)))
                   for entry in program.get('extern-signatures', [])]
-    fields = module(functions, global_count, signatures)
+    fields = module(functions, global_count, signatures, program.get('debug-files', []))
     fields[2] = integer(program.get('version', 2))
     fields[3] = program.get('author', '').encode('utf-8')
     fields[5] = typed_encode(program.get('ext', {}))[1]
@@ -300,6 +332,8 @@ class WireReader:
         self.opcodes = set()
         self.scalars = []
         self.optional = {'initializer': set(), 'return': set(), 'else': set()}
+        # Expression stacks of the function being read, in pre-order (contexts take no number).
+        self.nodes = []
 
     def context(self, payload):
         fields = frames(payload)
@@ -327,10 +361,17 @@ class WireReader:
         return [self.context(item) for item in frames(payload)]
 
     def expression(self, payload):
+        node = len(self.nodes)
+        self.nodes.append(None)
+        result = self.expression_body(payload)
+        self.nodes[node] = result
+        return result
+
+    def expression_body(self, payload):
         fields = frames(payload)
         assert fields
         opcode = int_value(fields.pop(0))
-        assert 0 <= opcode <= 42, opcode
+        assert 0 <= opcode <= LAST_OPCODE, opcode
         self.opcodes.add(opcode)
         if opcode == 0:
             assert len(fields) == 1
@@ -433,13 +474,38 @@ class WireReader:
             assert opcode in (29, 30) and not fields
         return result
 
+    @staticmethod
+    def debug_text(payload):
+        text = payload.decode('utf-8')
+        assert text and not any(ord(c) < 0x20 or 0x7F <= ord(c) <= 0x9F or c in '\u2028\u2029\u061c\u200e\u200f'
+                                or 0x202A <= ord(c) <= 0x202E or 0x2066 <= ord(c) <= 0x2069 for c in text), text
+        return text
+
+    def debug(self, payload, files):
+        fields = frames(payload)
+        assert len(fields) == 5
+        name = self.debug_text(fields[0])
+        file, line, column = (int_value(field) for field in fields[1:4])
+        assert 0 <= file < len(files) and line >= 0 and column >= 0 and (line == 0) == (column == 0)
+        values = [int_value(item) for item in frames(fields[4])]
+        assert len(values) % 4 == 0
+        locations = []
+        for i in range(0, len(values), 4):
+            node, at_file, at_line, at_column = values[i:i + 4]
+            assert (not locations or node > int(locations[-1].split(':')[0])) and 0 <= node < len(self.nodes)
+            assert 0 <= at_file < len(files) and at_line >= 1 and at_column >= 1
+            locations.append(f'{node}:{at_file}:{at_line}:{at_column}')
+        return {'name': name, 'file': file, 'line': line, 'column': column, 'locations': locations}
+
     def read(self, data):
         file_fields = frames(data)
         assert len(file_fields) == 1, 'file must contain one root frame'
         fields = frames(file_fields[0])
-        assert len(fields) == 10 and fields[0] == b'AZSCRIPT'
-        assert int_value(fields[1]) == 9
-        legacy = {'exec-version': 9, 'version': int_value(fields[2]),
+        assert len(fields) == 11 and fields[0] == b'AZSCRIPT'
+        assert int_value(fields[1]) == EXEC_VERSION
+        files = [self.debug_text(item) for item in frames(fields[10])]
+        assert len(set(files)) == len(files)
+        legacy = {'exec-version': EXEC_VERSION, 'version': int_value(fields[2]),
                   'author': fields[3].decode('utf-8'), 'gvs': int_value(fields[4]),
                   'ext': typed_decode(MAP, fields[5]), 'extern-signatures': [], 'f': [],
                   'namespace-hint': fields[8].decode('utf-8'), 'assume-hints': []}
@@ -453,15 +519,23 @@ class WireReader:
             legacy['extern-signatures'].append({'id': int_value(signature[0]), 'return-type': int_value(signature[1]),
                 'param-types': [int_value(item) for item in frames(signature[2])],
                 'hidden-count': int_value(signature[3]), 'entry-kind': int_value(signature[4])})
+        self.functions = []
         for payload in frames(fields[7]):
             entry = frames(payload)
-            assert len(entry) == 8
+            assert len(entry) in (9, 10)
             parameters = [int_value(item) for item in frames(entry[4])]
             assert int_value(entry[2]) == len(parameters)
-            legacy['f'].append({'id': int_value(entry[0]), 'return-type': int_value(entry[1]),
+            self.nodes = []
+            value = {'id': int_value(entry[0]), 'return-type': int_value(entry[1]),
                 'param-count': int_value(entry[2]), 'local-count': int_value(entry[3]),
                 'param-types': parameters, 'script': self.expression(entry[5]),
-                'hidden-count': int_value(entry[6]), 'entry-kind': int_value(entry[7])})
+                'hidden-count': int_value(entry[6]), 'entry-kind': int_value(entry[7])}
+            assert len(entry) == 9 + bool_value(entry[8])
+            if len(entry) == 10:
+                value['debug'] = self.debug(entry[9], files)
+            self.functions.append((value, self.nodes))
+            legacy['f'].append(value)
+        legacy['debug-files'] = files
         return legacy
 
 
@@ -521,21 +595,22 @@ def main():
                 assert result.stdout == expected, (command, result.stdout, expected, result.stderr)
             return result
 
-        def compile_source(name, source):
+        def compile_source(name, source, options=()):
             src, abd, ast, executable = [work / (name + suffix) for suffix in ('.azs', '.abd', '.ast.json', '.exec.json')]
             src.write_text(source, encoding='utf-8')
             compiler = ['java', '-cp', args.classpath, 'azertia.Main']
-            run(compiler + ['compile', src, '-o', abd, '--ast', ast, '--exec-json', executable])
+            run(compiler + ['compile', src, '-o', abd, '--ast', ast, '--exec-json', executable, *options])
             roundtrip = work / (name + '.roundtrip.abd')
-            run(compiler + ['compile-json', ast, '-o', roundtrip])
+            run(compiler + ['compile-json', ast, '-o', roundtrip, *options])
             assert abd.read_bytes() == roundtrip.read_bytes(), 'readable AST roundtrip'
             debug = json.loads(executable.read_text(encoding='utf-8'))
-            assert debug['exec-version'] == 9
+            assert debug['exec-version'] == EXEC_VERSION
+            assert ('-g' in options) == bool(debug['debug-files']) == all('debug' in item for item in debug['f'])
 
             def inspect(value):
                 if isinstance(value, dict):
                     if value.get('t') == 0 and 'c' in value:
-                        assert type(value['c']) is int and 3 <= value['c'] <= 42, value
+                        assert type(value['c']) is int and 3 <= value['c'] <= LAST_OPCODE, value
                     for item in value.values():
                         inspect(item)
                 elif isinstance(value, list):
@@ -561,6 +636,25 @@ def main():
                                                    'hidden-count': 0, 'entry-kind': 0}]
         assert [(f['id'], f['param-count'], f['local-count']) for f in legacy['f']] == [
             (f['id'], f['param-count'], f['local-count']) for f in debug['f']]
+        assert legacy['debug-files'] == [] and not any('debug' in f for f in legacy['f'])
+
+        # -g appends debug records; instructions and behavior stay the same.
+        located, _, located_json = compile_source('coverage-debug', SOURCE, ['-g'])
+        located_reader = WireReader()
+        located_legacy = located_reader.read(located.read_bytes())
+        assert encode_compact_module(located_legacy) == located.read_bytes(), 'independent debug record reconstruction'
+        assert located_legacy['debug-files'] == located_json['debug-files'] == ['coverage-debug.azs']
+        assert [f['debug'] for f in located_legacy['f']] == [f['debug'] for f in located_json['f']]
+        assert [{k: v for k, v in f.items() if k != 'debug'} for f in located_legacy['f']] == legacy['f']
+        names = {f['debug']['name'] for f in located_legacy['f']}
+        assert {'main', 'empty', 'Box::Box', 'Box::~Box', 'Box::self', 'Box::get', 'Pair::Pair', '<scoped Box>'} <= names, names
+        division_line = next(number for number, text in enumerate(SOURCE.split('\n'), 1) if 'a/b' in text)
+        division_column = SOURCE.split('\n')[division_line - 1].index('a/b') + 2
+        main_function, main_nodes = next(item for item in located_reader.functions if item[0]['id'] == MAIN)
+        divisions = [main_nodes[int(item.split(':')[0])] for item in main_function['debug']['locations']
+                     if item.split(':')[2:] == [str(division_line), str(division_column)]]
+        assert any(isinstance(node, dict) and node.get('c') == 'divide' for node in divisions), divisions
+        run([args.runner, located], EXPECTED)
         # Parsing every instruction as a fixed record proves keys/tags are not
         # embedded in the instruction structures, even when string literals exist.
         run([args.runner, abd], EXPECTED)
@@ -597,7 +691,7 @@ def main():
         execute_wire('independent-void-return', module([function(block(returning()), return_type=5)]), expected='')
 
         mutations = [('root-missing', minimum[:-1]), ('root-extra', minimum + [b''])]
-        for index, value, label in [(0, b'AZSCRIPX', 'magic'), (1, integer(5), 'version'), (1, integer(6), 'address-only-version'), (1, integer(7), 'literal-only-version'), (1, integer(8), 'previous-version'),
+        for index, value, label in [(0, b'AZSCRIPX', 'magic'), (1, integer(5), 'version'), (1, integer(6), 'address-only-version'), (1, integer(7), 'literal-only-version'), (1, integer(8), 'v8-version'), (1, integer(9), 'previous-version'),
                 (1, b'\4', 'version-width'), (2, b'\2', 'source-version-width'),
                 (4, integer(-1), 'negative-globals'), (4, integer(2**31 - 1), 'huge-globals'),
                 (4, b'\0', 'global-width'), (5, b'\1', 'extension-frame'),
@@ -625,12 +719,54 @@ def main():
             changed = minimum.copy()
             changed[6] = stack(signature)
             mutations.append((label, changed))
+        # Debug files and records: [has_debug, [name, file, line, column, quads]], nodes 0 block, 1 return, 2 constant.
+        files = stack(b'f.azs')
+        good_debug = debug_record('main', 0, 1, 5, [(1, 0, 1, 7)])
+        changed = minimum.copy()
+        changed[7] = stack(function(block(returning(constant(42))), debug=good_debug))
+        changed[10] = files
+        execute_wire('debug-valid', changed, expected='42\n')
+        for label, debug_files, record in [
+                ('debug-file-empty', stack(b''), None), ('debug-file-control', stack(b'a\nb'), None),
+                ('debug-file-c1', stack('a\u0085'.encode('utf-8')), None), ('debug-file-bidi', stack('a\u202e'.encode('utf-8')), None),
+                ('debug-file-duplicate', stack(b'a', b'a'), None), ('debug-file-utf8', stack(b'\xff'), None),
+                ('debug-file-width', b'\0', None),
+                ('debug-without-files', b'', good_debug),
+                ('debug-record-short', files, stack(b'main', integer(0), integer(1), integer(5))),
+                ('debug-record-long', files, stack(b'main', integer(0), integer(1), integer(5), b'', b'')),
+                ('debug-quads-partial', files, stack(b'main', integer(0), integer(1), integer(5), stack(integer(1), integer(0), integer(1)))),
+                ('debug-node-count', files, debug_record('main', 0, 1, 5, [(3, 0, 1, 1)])),
+                ('debug-node-decreasing', files, debug_record('main', 0, 1, 5, [(2, 0, 1, 1), (1, 0, 1, 1)])),
+                ('debug-node-repeated', files, debug_record('main', 0, 1, 5, [(1, 0, 1, 1), (1, 0, 1, 2)])),
+                ('debug-node-negative', files, debug_record('main', 0, 1, 5, [(-1, 0, 1, 1)])),
+                ('debug-location-file', files, debug_record('main', 0, 1, 5, [(1, 1, 1, 1)])),
+                ('debug-location-line', files, debug_record('main', 0, 1, 5, [(1, 0, 0, 1)])),
+                ('debug-location-column', files, debug_record('main', 0, 1, 5, [(1, 0, 1, 0)])),
+                ('debug-header-file', files, debug_record('main', 1, 1, 5)),
+                ('debug-header-partial', files, debug_record('main', 0, 0, 1)),
+                ('debug-header-negative', files, debug_record('main', 0, -1, -1)),
+                ('debug-name-empty', files, debug_record('')),
+                ('debug-name-control', files, debug_record('a\x1b')),
+                ('debug-name-utf8', files, debug_record(b'\xc0\x80'))]:
+            changed = minimum.copy()
+            changed[10] = debug_files
+            if record is not None:
+                changed[7] = stack(function(block(returning(constant(42))), debug=record))
+            mutations.append((label, changed))
+        record_fields = frames(function(block(returning(constant(42))), debug=good_debug))
+        for label, entry in [('debug-flag-without-record', record_fields[:9]),
+                             ('debug-record-without-flag', record_fields[:8] + [b'\0'] + record_fields[9:]),
+                             ('debug-flag-width', record_fields[:8] + [b'\2'])]:
+            changed = minimum.copy()
+            changed[7] = stack(stack(*entry))
+            changed[10] = files
+            mutations.append((label, changed))
         for label, changed in mutations:
             execute_wire(label, changed, invalid=True)
 
         bad_expressions = {
             'empty-expression': b'', 'opcode-width': stack(b'\0'),
-            'unknown-opcode': expression(43), 'negative-opcode': expression(-1),
+            'unknown-opcode': expression(LAST_OPCODE + 1), 'negative-opcode': expression(-1),
             'new-block-missing': expression(32), 'new-block-empty': expression(32, integer(0)),
             'new-block-width': expression(32, b'\0'), 'block-address-extra': expression(33, constant(0), constant(0)),
             'object-move-global': expression(34, integer(-1)), 'object-move-outside': expression(34, integer(0)),
@@ -703,6 +839,8 @@ void main(){}
 '''
             native, tree, _ = compile_source('jni', jni_source)
             other, _, _ = compile_source('jni-other', jni_source.replace('Compact JNI', 'Different JNI'))
+            # The same program with debug records is other module bytes, so a snapshot cannot cross builds either way.
+            located_jni, _, _ = compile_source('jni-debug', jni_source, ['-g'])
             WireReader().read(native.read_bytes())
             java = work / 'CompactSnapshot.java'
             java.write_text('''import azertia.AbdInvoker;
@@ -732,6 +870,22 @@ public class CompactSnapshot {
    AbdInvoker.flush();
    try {AbdInvoker.loadStatus(saved);throw new AssertionError("different opaque code accepted");}
    catch(IllegalArgumentException expected) {}
+   AbdInvoker.destroyScript();
+   AbdInvoker.loadScript(new File(args[7]));
+   AbdInvoker.flush();
+   try {AbdInvoker.loadStatus(saved);throw new AssertionError("snapshot restored into a build with debug records");}
+   catch(IllegalArgumentException expected) {
+    if(!expected.getMessage().contains("Snapshot module manifest differs")) throw new AssertionError(expected.getMessage());
+   }
+   File debugSaved=new File(args[8]);
+   if(!AbdInvoker.saveStatus(debugSaved)) throw new AssertionError("save from the build with debug records");
+   AbdInvoker.destroyScript();
+   AbdInvoker.loadScript(new File(args[0]));
+   AbdInvoker.flush();
+   try {AbdInvoker.loadStatus(debugSaved);throw new AssertionError("debug snapshot restored into a build without debug records");}
+   catch(IllegalArgumentException expected) {
+    if(!expected.getMessage().contains("Snapshot module manifest differs")) throw new AssertionError(expected.getMessage());
+   }
    System.out.println("Compact JNI snapshot passed");
   } finally {AbdInvoker.close();}
  }
@@ -740,7 +894,8 @@ public class CompactSnapshot {
             saved = work / 'opaque.snapshot.abd'
             ids = [int(tree['abstract'][name], 16) for name in ('set', 'get', 'make', 'inspect')]
             run(['java', '-Xcheck:jni', '-Dazertia.native.library=' + str(args.library.resolve()),
-                 '-cp', os.pathsep.join((str(work), str(args.bridge))), 'CompactSnapshot', native, saved, other, *ids],
+                 '-cp', os.pathsep.join((str(work), str(args.bridge))), 'CompactSnapshot', native, saved, other, *ids, located_jni,
+                 work / 'debug.snapshot.abd'],
                 'Compact JNI snapshot passed\n')
             snapshot = typed_decode(MAP, frames(saved.read_bytes())[0])
             assert snapshot['snapshot version'].value() == 9

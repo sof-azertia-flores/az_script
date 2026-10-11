@@ -2,7 +2,7 @@
 
 [中文](HINT_LINKING.md) | English
 
-AzScript libraries compile independently, receive a namespace when loaded, and link through explicit `flush()`. Classes remain compile-time structures: executables contain slot addresses, ordinary function references, and destructor IDs, but no class names, field names, or layout tables. The shared class declaration is the cross-module class contract. See [Exec v9](EXEC_FORMAT.en.md) for the binary contract.
+AzScript libraries compile independently, receive a namespace when loaded, and link through explicit `flush()`. Classes remain compile-time structures: executable instructions contain slot addresses, ordinary function references, and destructor IDs, but no class names, field names, or layout tables. Only the optional debug records of a `-g` build carry function display names such as `Point::get`, and linking never reads them. The shared class declaration is the cross-module class contract. See [Exec v10](EXEC_FORMAT.en.md) for the binary contract.
 
 ## Declarations and numbering
 

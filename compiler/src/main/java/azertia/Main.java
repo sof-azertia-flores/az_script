@@ -34,9 +34,10 @@ public class Main {
             "-I", "-I", "--include-dir", "-I");
     /**
      * {@code --debug-compiler} prints the stack trace of an internal compiler error;
-     * {@code --unrestricted-includes} allows absolute includes and includes outside the include roots.
+     * {@code --unrestricted-includes} allows absolute includes and includes outside the include roots;
+     * {@code -g} adds exec debug records.
      */
-    private static final Set<String> FLAG_OPTIONS = Set.of("--debug-compiler", "--unrestricted-includes");
+    private static final Set<String> FLAG_OPTIONS = Set.of("--debug-compiler", "--unrestricted-includes", "-g");
     /** The system property naming the standard library directory, searched after every {@code -I} directory. */
     public static final String STDLIB_PROPERTY = "azscript.stdlib";
     /** Warning options other than {@code -W<name>} and {@code -Wno-<name>}. */
@@ -55,6 +56,8 @@ public class Main {
                                    int maxErrors, List<String> warnings, List<Path> includeDirectories) {
         /** Whether {@code --unrestricted-includes} was given. */
         public boolean unrestrictedIncludes() { return flags.contains("--unrestricted-includes"); }
+        /** Whether {@code -g} was given: the exec then carries function and file names and source positions. */
+        public boolean debugInfo() { return flags.contains("-g"); }
         /** The ABD output: {@code -o}, or the source name with {@code .exec.abd} beside it. */
         public Path outputOrDefault() {
             if (output != null) return output;
@@ -166,7 +169,7 @@ public class Main {
                 StringBuilder warnings = new StringBuilder();
                 for (Diagnostics.Warning warning : Diagnostics.WARNINGS)
                     warnings.append(String.format("\n  %-20s %s (%s)", warning.name(), warning.description(), warning.enabledByDefault() ? "on" : "off"));
-                out.println("AzScript compiler\n  compile <source.azs> [-o output.abd] [--ast tree.json] [--exec-json instructions.json] [-I dir]... [--unrestricted-includes]\n  compile-json <tree.json> [-o output.abd] [--exec-json instructions.json]\n  pack <output.abd> <file-or-directory>...\n  unpack <archive.abd> <new-or-empty-directory>\nCompile options:\n  --max-errors N     stop after N errors (default " + Diagnostics.DEFAULT_MAX_ERRORS + ", 0 for no limit)\n  --debug-compiler   print the stack trace of an internal compiler error\n  -I dir, --include-dir dir\n                     search dir for includes; repeatable\n  --unrestricted-includes\n                     allow absolute includes and includes outside the include roots\n  -Wall              enable every warning\n  -W<name>           enable one warning; -Wno-<name> disables it, also after -Wall\n  -w                 suppress all warnings\n  -Werror            report warnings as errors\nWarnings (default state):" + warnings + "\nIncludes are searched in the including file's directory, then in each -I directory in order, then in the\nstandard library directory of the ./azscript wrapper or the distribution. They must stay inside the main\nfile's directory or one of those directories.\nOptions may precede or follow the input path; -- ends the options. Diagnostics are written to stderr as\nfile:line:column: error: message, or warning: message [-W<name>]. The exit status is 1 when compilation fails\nand 2 for an internal compiler error; warnings alone do not fail it.");
+                out.println("AzScript compiler\n  compile <source.azs> [-o output.abd] [--ast tree.json] [--exec-json instructions.json] [-g] [-I dir]... [--unrestricted-includes]\n  compile-json <tree.json> [-o output.abd] [--exec-json instructions.json] [-g]\n  pack <output.abd> <file-or-directory>...\n  unpack <archive.abd> <new-or-empty-directory>\nCompile options:\n  -g                 add debug records: function and file names and source positions\n  --max-errors N     stop after N errors (default " + Diagnostics.DEFAULT_MAX_ERRORS + ", 0 for no limit)\n  --debug-compiler   print the stack trace of an internal compiler error\n  -I dir, --include-dir dir\n                     search dir for includes; repeatable\n  --unrestricted-includes\n                     allow absolute includes and includes outside the include roots\n  -Wall              enable every warning\n  -W<name>           enable one warning; -Wno-<name> disables it, also after -Wall\n  -w                 suppress all warnings\n  -Werror            report warnings as errors\nWarnings (default state):" + warnings + "\nIncludes are searched in the including file's directory, then in each -I directory in order, then in the\nstandard library directory of the ./azscript wrapper or the distribution. They must stay inside the main\nfile's directory or one of those directories.\nOptions may precede or follow the input path; -- ends the options. Diagnostics are written to stderr as\nfile:line:column: error: message, or warning: message [-W<name>]. The exit status is 1 when compilation fails\nand 2 for an internal compiler error; warnings alone do not fail it.");
                 return 0;
             }
             switch (args[0]) {
@@ -192,7 +195,7 @@ public class Main {
                         script.execute(source, diagnostics);
                         ast = script.toObj(); included = script.includedFiles();
                     }
-                    AcsObject compiled = Compiler.compile(ast, diagnostics);
+                    AcsObject compiled = Compiler.compile(ast, diagnostics, arguments.debugInfo());
                     // A successful compilation may still report warnings.
                     for (Diagnostic warning : diagnostics.warnings()) err.println(warning.format());
                     var outputs = new java.util.HashSet<Path>();

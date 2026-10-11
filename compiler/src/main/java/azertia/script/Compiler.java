@@ -110,8 +110,38 @@ public class Compiler {
         final Set<JsonObject> synthesized = Collections.newSetFromMap(new IdentityHashMap<>());
         /** The memo of the running outermost type query (see expressionType), reused by the next query. */
         final TypeQuery typeQuery = new TypeQuery();
+        /**
+         * With debug info: the {@code {file, line, column}} source position of each compiled
+         * object or block, the first (innermost) one recorded winning; null without debug info.
+         */
+        IdentityHashMap<AcsElement,int[]> positions;
+        /** With debug info: the exec debug file table, and the index of each source unit's name in it. */
+        List<String> debugFiles = List.of();
+        int[] unitFiles;
         CompilationState(Diagnostics diagnostics, SourceMap sources, boolean parsed) {
             this.diagnostics = diagnostics; this.sources = sources; this.parsed = parsed; metrics = diagnostics.metrics();
+        }
+        /**
+         * Turns debug info on: the debug file table holds each distinct source unit name,
+         * with unsafe characters replaced, in unit order.
+         */
+        void enableDebugInfo() {
+            positions = new IdentityHashMap<>(); unitFiles = new int[sources.unitCount()];
+            Map<String,Integer> indexes = new LinkedHashMap<>();
+            for (int unit = 0; unit < unitFiles.length; unit++) {
+                String name = SourceRules.debugText(sources.name(unit));
+                Integer index = indexes.putIfAbsent(name, indexes.size());
+                unitFiles[unit] = index == null ? indexes.size() - 1 : index;
+            }
+            debugFiles = List.copyOf(indexes.keySet());
+        }
+        /** The {@code {file, line, column}} debug position of a positioned AST node, or null. */
+        int[] debugPosition(JsonElement node) {
+            if (node == null || !node.isJsonObject()) return null;
+            JsonObject object = node.getAsJsonObject();
+            int line = SourceMap.integer(object.get("_line")), column = SourceMap.integer(object.get("_column"));
+            if (line < 1 || column < 1) return null;
+            return new int[]{unitFiles[sources.unitOf(object)], line, column};
         }
     }
     /**
@@ -549,9 +579,23 @@ public class Compiler {
         // Nested expressions almost always share their function's type scope; set it only when it changes.
         Map<String,Integer> previousScope=TYPE_SCOPE.get();boolean changed=previousScope!=environment.typeScope;
         if(changed)TYPE_SCOPE.set(environment.typeScope);
-        try { return withDepth(1, () -> compileExpressionBody(input, environment)); }
+        try { return recordPosition(input, withDepth(1, () -> compileExpressionBody(input, environment)), environment); }
         catch (RuntimeException error) { throw relocate(error, input, environment); }
         finally {if(changed)TYPE_SCOPE.set(previousScope);}
+    }
+    /**
+     * With debug info, records the source position of a compiled object or block.
+     * Constants and variable reads are not recorded: at run time they cannot fail
+     * apart from the node that uses them, whose position they inherit.
+     */
+    private static AcsElement recordPosition(JsonElement input, AcsElement result, LogicEnvironment environment) {
+        CompilationState state = environment.state();
+        if (state.positions == null || !(result instanceof AcsObject || result instanceof AcsArray)) return result;
+        if (result instanceof AcsObject object && object.mmp.get("t") instanceof AcsIntegerElement kind && kind.s == 0
+                && object.mmp.get("c") instanceof AcsIntegerElement code && code.s == ExecOpcodes.VARIABLE) return result;
+        int[] position = state.debugPosition(input);
+        if (position != null) state.positions.putIfAbsent(result, position);
+        return result;
     }
     private static String message(Throwable error) {
         return error.getMessage() != null ? error.getMessage() : error.getClass().getSimpleName();
@@ -2198,8 +2242,19 @@ public class Compiler {
         for (JsonElement child : object.getAsJsonArray("param")) if (containsBreak(child)) return true;
         return false;
     }
-    /** Compiles a readable AST, reporting up to {@link Diagnostics#DEFAULT_MAX_ERRORS} errors in one {@link CompileException}. */
-    public static AcsObject compile(JsonObject source) { return compile(source, new Diagnostics()); }
+    /**
+     * Compiles a readable AST without debug info, reporting up to
+     * {@link Diagnostics#DEFAULT_MAX_ERRORS} errors in one {@link CompileException}.
+     */
+    public static AcsObject compile(JsonObject source) { return compile(source, new Diagnostics(), false); }
+    /**
+     * Compiles a readable AST; with {@code debugInfo}, as the {@code -g} option gives,
+     * each function gets an exec debug record with its display name and the source
+     * positions of its nodes.
+     */
+    public static AcsObject compile(JsonObject source, boolean debugInfo) { return compile(source, new Diagnostics(), debugInfo); }
+    /** Compiles a readable AST without debug info; see {@link #compile(JsonObject, Diagnostics, boolean)}. */
+    public static AcsObject compile(JsonObject source, Diagnostics diagnostics) { return compile(source, diagnostics, false); }
     /**
      * Compiles a readable AST. Errors are reported as a {@link CompileException}
      * located through the AST's {@code sources} table; an AST without one is named
@@ -2211,8 +2266,13 @@ public class Compiler {
      * <p>The AST's nesting is bounded and its shape is checked before compilation.
      * An unexpected exception is an internal compiler error for an AST parsed with
      * the same collector, and malformed input otherwise.
+     *
+     * <p>With {@code debugInfo}, the exec gets a {@code debug-files} table of the
+     * source names and each function a {@code debug} record (see {@link ExecCodec});
+     * without it the table is empty and no function has a record. Debug info never
+     * changes the instructions.
      */
-    public static AcsObject compile(JsonObject source, Diagnostics diagnostics) {
+    public static AcsObject compile(JsonObject source, Diagnostics diagnostics, boolean debugInfo) {
         boolean parsed = diagnostics.startCompile();
         Map<Integer,ClassInfo> previousLayouts = CLASS_LAYOUTS.get();
         var previousParameters=TYPE_PARAMETERS.get();var previousScope=TYPE_SCOPE.get();var previousDeclarations=CLASS_DECLARATIONS.get();
@@ -2228,6 +2288,7 @@ public class Compiler {
         if (diagnostics.namesInput()) sources.input(diagnostics.defaultFile());
         diagnostics.sources(sources);
         CompilationState state = new CompilationState(diagnostics, sources, parsed);
+        if (debugInfo) state.enableDebugInfo();
         try {
             // Bound nesting and reject cycles first: the shape check walks the whole tree.
             try { TreeLimits.validate(source); }
@@ -2480,7 +2541,49 @@ public class Compiler {
             catch (RuntimeException | StackOverflowError error) { recover(error, function.metadata(), context, global); }
         }
         diagnostics.checkpoint();
-        result.put("f",output);normalizeContexts(result);return result;
+        result.put("f",output);normalizeContexts(result);
+        AcsArray debugFiles = new AcsArray();
+        for (String file : state.debugFiles) debugFiles.acsa.add(new AcsStringElement(file));
+        result.put("debug-files", debugFiles);
+        // Every function compiled, so the outputs are in function order.
+        if (state.positions != null) for (int i = 0; i < functions.size(); i++) {
+            AcsObject compiled = (AcsObject) output.acsa.get(i);
+            compiled.put("debug", debugRecord(functions.get(i), compiled, globals, global));
+        }
+        return result;
+    }
+    /**
+     * The debug record of a compiled function: its display name, the position of its
+     * declaration (the class declaration for a synthesized class function, 0:0 when
+     * unknown) and the positions of its nodes.
+     */
+    private static AcsObject debugRecord(Function function, AcsObject compiled, int globals, LogicEnvironment global) {
+        CompilationState state = global.state(); JsonObject meta = function.metadata();
+        int[] header = state.debugPosition(meta);
+        ClassInfo owner = meta.has("owner-class") ? global.classes.get(meta.get("owner-class").getAsString()) : null;
+        if (header == null && owner != null) header = state.debugPosition(owner.source);
+        if (header == null) header = new int[]{0, 0, 0};
+        AcsObject debug = new AcsObject();
+        debug.put("name", SourceRules.debugText(debugName(function.name())));
+        debug.put("file", header[0]); debug.put("line", header[1]); debug.put("column", header[2]);
+        debug.put("locations", ExecCodec.locations(compiled, globals, state.positions));
+        return debug;
+    }
+    /**
+     * The name a stack trace shows for a function: {@code C::C}, {@code C::~C} and
+     * {@code C::operator+} for class members, and {@code <new C>}, {@code <scoped C>},
+     * {@code <value C>} and {@code <placement C>} for the synthesized factories.
+     */
+    static String debugName(String function) {
+        int separator = function.lastIndexOf("::");
+        if (separator >= 0) {
+            String owner = function.substring(0, separator), member = function.substring(separator + 2);
+            switch (member) {
+                case "<new>", "<scoped>", "<value>", "<placement>" -> { return "<" + member.substring(1, member.length() - 1) + " " + owner + ">"; }
+                default -> { }
+            }
+        }
+        return contextName(function).substring("function ".length());
     }
     private static AcsObject compileFunction(Function function, LogicEnvironment global, String context) {
         LogicEnvironment scope = global.child();scope.counter = new Counter();scope.context = context;scope.returnType = function.returnType();

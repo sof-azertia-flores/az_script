@@ -548,12 +548,29 @@ std::shared_ptr<AbdMap> snapshot() {
     result->put("objects", objects);
     return result;
 }
+// The exec version in a snapshot module's bytes, read from the AZSCRIPT header, or -1.
+int snapshotModuleExecVersion(const ByteArrayValue& code) {
+    const unsigned char* data = code.data;
+    if (!data || code.length < 24 || azertian::b2i(data + 4) != 8 || std::memcmp(data + 8, "AZSCRIPT", 8) != 0 ||
+        azertian::b2i(data + 16) != 4) return -1;
+    return azertian::b2i(data + 20);
+}
 void restoreSnapshot(const std::vector<unsigned char>& bytes) {
     const auto modules = stableManifest();
     auto result = std::make_shared<AbdMap>(std::make_shared<AbdStack>(AbdValue::fromBytes(bytes.data(), bytes.size())));
     if (field<IntAbdValue>(result, "snapshot version")->data != 9)
         throw std::invalid_argument("Unsupported snapshot version; expected v9");
     auto manifest = field<AbdArray>(result, "module manifest");
+    // Exec versions are checked first, so a snapshot of modules from another format names the real cause.
+    for (const auto& value : manifest->values) {
+        auto entry = std::dynamic_pointer_cast<AbdMap>(value);
+        if (!entry) throw std::invalid_argument("Invalid snapshot module manifest entry");
+        const int version = snapshotModuleExecVersion(*field<ByteArrayValue>(entry, "bytes"));
+        if (version < 0) throw std::invalid_argument("Snapshot module is not an exec module");
+        if (version != azertian::EXEC_FORMAT_VERSION)
+            throw std::invalid_argument("Snapshot modules use exec v" + std::to_string(version) + "; expected v" +
+                                        std::to_string(azertian::EXEC_FORMAT_VERSION));
+    }
     if (manifest->values.size() != modules.size()) throw std::invalid_argument("Snapshot module count differs from script");
     for (std::size_t i = 0; i < modules.size(); ++i) {
         auto entry = std::dynamic_pointer_cast<AbdMap>(manifest->values[i]);

@@ -119,10 +119,10 @@ R rc(MV value){return rx(0,{block({value})->toAbdValue()});}
 R rblock(std::initializer_list<R> values){return rx(1,{raw(values)});}
 R rfn(int id,int type,R body,int locals=0,std::initializer_list<int> params={}){
     AbdStack types;for(int type:params)types.vs.push_back(ri(type));
-    return raw({ri(id),ri(type),ri(static_cast<int>(params.size())),ri(locals),types.toAbdValue(),body,ri(0),ri(0)});
+    return raw({ri(id),ri(type),ri(static_cast<int>(params.size())),ri(locals),types.toAbdValue(),body,ri(0),ri(0),rb(false)});
 }
 R rmodule(std::initializer_list<R> functions,int globals=0,R signatures=nullptr){
-    return raw({rs("AZSCRIPT"),ri(9),ri(1),rs("test"),ri(globals),std::make_shared<AbdMap>()->toAbdValue(),signatures?signatures:raw({}),raw(functions),rs(""),raw({})});
+    return raw({rs("AZSCRIPT"),ri(EXEC_FORMAT_VERSION),ri(1),rs("test"),ri(globals),std::make_shared<AbdMap>()->toAbdValue(),signatures?signatures:raw({}),raw(functions),rs(""),raw({}),raw({})});
 }
 R replace_raw(R value,std::size_t field,R replacement){AbdStack fields(value);fields.vs.at(field)=std::move(replacement);return fields.toAbdValue();}
 R append_raw(R value,R extra){AbdStack fields(value);fields.vs.push_back(std::move(extra));return fields.toAbdValue();}
@@ -167,7 +167,7 @@ std::shared_ptr<script> load_raw(R value,bool ready=true){
 }
 void insert_raw(const std::shared_ptr<script>& target,R value,bool ready=true){auto bytes=value->toBytes();target->insert_script(bytes.get(),value->size+4);if(ready)target->flush();}
 // Test fixture authoring retains readable names; only this test encoder resolves
-// them to slots. The interpreter is always given the public raw v9 format.
+// them to slots. The interpreter is always given the public raw exec format.
 int fixture_int(MV value){auto p=std::dynamic_pointer_cast<IntAbdValue>(value);if(!p)throw std::invalid_argument("fixture requires int");return p->data;}
 std::string fixture_string(MV value){auto p=std::dynamic_pointer_cast<StringAbdValue>(value);if(!p)throw std::invalid_argument("fixture requires string");return p->data;}
 A fixture_array(MV value){auto p=std::dynamic_pointer_cast<AbdArray>(value);if(!p)throw std::invalid_argument("fixture requires array");return p;}
@@ -259,9 +259,9 @@ R encode_fixture(M source) {
         if(auto values=entry->get("param-types"))for(auto& type:fixture_array(values)->values)types.vs.push_back(type->toAbdValue());
         else for(int i=0;i<params;++i)types.vs.push_back(ri(ANY_VALUE));
         const int locals=numbered?fixture_int(entry->get("local-count")):encoder.next-params;
-        functions.vs.push_back(raw({entry->get("id")->toAbdValue(),entry->get("return-type")->toAbdValue(),ri(params),ri(locals),types.toAbdValue(),body,ri(0),ri(0)}));
+        functions.vs.push_back(raw({entry->get("id")->toAbdValue(),entry->get("return-type")->toAbdValue(),ri(params),ri(locals),types.toAbdValue(),body,ri(0),ri(0),rb(false)}));
     }
-    return raw({rs("AZSCRIPT"),ri(9),ri(1),rs("fixture"),ri(global_count),std::make_shared<AbdMap>()->toAbdValue(),signatures.toAbdValue(),functions.toAbdValue(),rs(""),raw({})});
+    return raw({rs("AZSCRIPT"),ri(EXEC_FORMAT_VERSION),ri(1),rs("fixture"),ri(global_count),std::make_shared<AbdMap>()->toAbdValue(),signatures.toAbdValue(),functions.toAbdValue(),rs(""),raw({}),raw({})});
 }
 void fixture_names(const std::shared_ptr<script>& target,M source,std::size_t offset=0) {
     if(source->get("exec-version"))return;
@@ -364,7 +364,7 @@ void buffer_tests() {
     },2));
     check(integer(program->invoke(10))==9,"buffer operations borrow their receiver instead of copying it");
     check(integer(program->invoke(13))==42,"generic buffer parameters and return preserve deep value semantics");
-    check(integer(program->invoke(15))==-1&&integer(program->invoke(16))==-1,"value_compare executes via v9 wire");
+    check(integer(program->invoke(15))==-1&&integer(program->invoke(16))==-1,"value_compare executes via exec wire");
     rejects_containing([&]{program->invoke(18);},"requires a class value","block_address cannot expose a buffer address");
     program->invoke(17);check(integer(program->baseEnv->getVariable(-1))==2,
         "push relocates its materialized class argument without an extra copied temporary destructor");
@@ -840,7 +840,7 @@ int main(){try{
             rhint("",{},0,raw({assume("A",1),assume("B",1)})),
             rhint("",{},0,raw({assume("A",1),assume("A",2)})),
             rhint("",{rfn(0x00010002,VOID_VALUE,rblock({}))},0,raw({assume("A",1)}))})
-            rejects([&]{load_raw(malformed,false);},"v9 malformed hint module rejected before mounting");
+            rejects([&]{load_raw(malformed,false);},"exec malformed hint module rejected before mounting");
         rejects([&]{load_raw(rmodule({rfn(10,VOID_VALUE,rx(10,{rc(n(0)),rb(true),ri(0x0fff0000),rb(false)}))}),false);},
                 "main entry is not a valid object destructor");
     }
@@ -974,9 +974,9 @@ int main(){try{
     {
         auto twenty=rc(n(20));auto zero=rc(n(0));
         auto compact=load_raw(rmodule({rfn(10,INT_VALUE,rx(7,{rb(true),rx(12,{twenty,rc(n(22))})}))}));
-        check(integer(compact->invoke(10))==42,"raw v9 directly executes native arithmetic expressions");
+        check(integer(compact->invoke(10))==42,"raw exec directly executes native arithmetic expressions");
         for(int opcode=0;opcode<=42;++opcode)if(opcode!=29&&opcode!=30)
-            rejects([&]{load_raw(rmodule({rfn(10,VOID_VALUE,rx(opcode))}));},"v9 opcode rejects missing fields");
+            rejects([&]{load_raw(rmodule({rfn(10,VOID_VALUE,rx(opcode))}));},"exec opcode rejects missing fields");
         auto byte=[](unsigned char value){return std::make_shared<AbdValue>(&value,1);};
         const unsigned char bad_text[]={0xed,0xa0,0x80};
         const auto invalid_utf8=std::make_shared<AbdValue>(bad_text,3);
@@ -991,9 +991,9 @@ int main(){try{
             rc(std::make_shared<DoubleAbdValue>(std::numeric_limits<double>::infinity())),
             rc(std::make_shared<FloatAbdValue>(std::numeric_limits<float>::quiet_NaN())),
             rx(0,{raw({ri(0xce2009),byte(sentinel)})}),rx(0,{raw({ri(0xce200a),byte(0)})})})
-            rejects([&]{load_raw(rmodule({rfn(10,VOID_VALUE,expression,1)},1));},"v9 malformed expression is rejected");
+            rejects([&]{load_raw(rmodule({rfn(10,VOID_VALUE,expression,1)},1));},"exec malformed expression is rejected");
         auto good_function=rfn(10,VOID_VALUE,rblock({}));auto good_module=rmodule({good_function});
-        for(auto malformed:{replace_raw(good_module,1,ri(3)),replace_raw(good_module,1,ri(4)),replace_raw(good_module,1,ri(5)),replace_raw(good_module,1,byte(4)),
+        for(auto malformed:{replace_raw(good_module,1,ri(3)),replace_raw(good_module,1,ri(4)),replace_raw(good_module,1,ri(5)),replace_raw(good_module,1,ri(9)),replace_raw(good_module,1,byte(4)),
             replace_raw(good_module,2,byte(1)),replace_raw(good_module,3,invalid_utf8),replace_raw(good_module,4,ri(-1)),
             replace_raw(good_module,4,ri(1048577)),append_raw(good_module,ri(0)),
             rmodule({append_raw(good_function,ri(0))}),rmodule({replace_raw(good_function,0,byte(1))}),
@@ -1001,41 +1001,111 @@ int main(){try{
             rmodule({replace_raw(good_function,3,ri(1048577))}),rmodule({replace_raw(good_function,4,raw({ri(INT_VALUE)}))}),
             rmodule({rfn(10,VOID_VALUE,rx(4,{ri(0),ri(0),rb(false)}),0,{INT_VALUE})}),
             rmodule({good_function,good_function}),rmodule({},0,raw({raw({ri(0x01230001),ri(0),raw({}),ri(9)})}))})
-            rejects([&]{load_raw(malformed);},"v9 malformed module or function record rejected");
+            rejects([&]{load_raw(malformed);},"exec malformed module or function record rejected");
         // The new interpreter intentionally rejects the retired Map formats.
         rejects([&]{load_raw(module({fn(10,VOID_VALUE,block({}))})->toAbdValue());},"named Map executable is unsupported");
         rejects([&]{load_raw(slot_module({slot_fn(10,VOID_VALUE,block({}))})->toAbdValue());},"v3 Map executable is unsupported");
         auto constant_null=rx(0,{raw({ri(0xce200a),byte(sentinel)})});
         auto scalar_program=load_raw(rmodule({rfn(10,VOID_VALUE,rx(7,{rb(true),constant_null})),
             rfn(11,STRING_VALUE,rx(7,{rb(true),rc(s(std::string("中文\0",7)))}))}));
-        check(scalar_program->invoke(10)->type==VOID_VALUE,"v9 current void sentinel round-trips");
-        check(value_to_string(scalar_program->invoke(11))==std::string("中文\0",7),"v9 UTF-8 string preserves embedded zero");
+        check(scalar_program->invoke(10)->type==VOID_VALUE,"exec current void sentinel round-trips");
+        check(value_to_string(scalar_program->invoke(11))==std::string("中文\0",7),"exec UTF-8 string preserves embedded zero");
         auto metadata=std::make_shared<AbdMap>();auto child=std::make_shared<AbdMap>();
         child->put("flag",std::make_shared<BoolAbdValue>(true));metadata->put("nested",block({n(3),child}));
         auto metadata_program=load_raw(replace_raw(good_module,5,metadata->toAbdValue()));
-        check(metadata_program->meta->get("nested")!=nullptr,"v9 extensions preserve generic typed nested metadata");
+        check(metadata_program->meta->get("nested")!=nullptr,"exec extensions preserve generic typed nested metadata");
         for(auto extension:{raw({rs("x"),ri(1),invalid_utf8}),raw({rs("x"),ri(3),byte(1)}),
             raw({rs("x"),ri(0x0d00),byte(2)}),raw({rs("x"),ri(0xce2009),raw({})}),
             raw({rs("x"),ri(999),raw({})}),raw({rs("x"),ri(3),ri(1),rs("x"),ri(3),ri(2)})})
-            rejects([&]{load_raw(replace_raw(good_module,5,extension));},"v9 extension metadata validates types and fields");
+            rejects([&]{load_raw(replace_raw(good_module,5,extension));},"exec extension metadata validates types and fields");
         auto chain=rc(n(0));for(int i=0;i<100;++i)chain=rx(12,{chain,rc(n(1))});
         check(integer(load_raw(rmodule({rfn(10,INT_VALUE,rx(7,{rb(true),chain}))}))->invoke(10))==100,
-              "v9 keeps 100-level arithmetic chains executable");
+              "exec keeps 100-level arithmetic chains executable");
         for(int i=0;i<35;++i)chain=rx(12,{chain,rc(n(1))});
-        rejects([&]{load_raw(rmodule({rfn(10,INT_VALUE,rx(7,{rb(true),chain}))}));},"v9 raw stack nesting is bounded");
+        rejects([&]{load_raw(rmodule({rfn(10,INT_VALUE,rx(7,{rb(true),chain}))}));},"exec raw stack nesting is bounded");
         auto deep_metadata=raw({});for(int i=0;i<128;++i)deep_metadata=raw({rs("nested"),ri(2),deep_metadata});
         rejects([&]{load_raw(replace_raw(good_module,5,deep_metadata));},"metadata cannot bypass enclosing module depth");
         auto data=good_module->toBytes();const auto length=static_cast<std::size_t>(good_module->size)+4;
-        rejects([&]{load_script(data.get(),length-1);},"v9 truncated outer frame rejected");
+        rejects([&]{load_script(data.get(),length-1);},"exec truncated outer frame rejected");
         std::vector<unsigned char> trailing(data.get(),data.get()+length);trailing.push_back(0);
-        rejects([&]{load_script(trailing.data(),trailing.size());},"v9 trailing bytes rejected");
-        rejects([&]{load_script(data.get(),64*1024*1024+1);},"v9 file size checked before reading payload");
+        rejects([&]{load_script(trailing.data(),trailing.size());},"exec trailing bytes rejected");
+        rejects([&]{load_script(data.get(),64*1024*1024+1);},"exec file size checked before reading payload");
         auto truncated=std::make_shared<AbdValue>(good_module->data,good_module->size-1);
-        rejects([&]{load_raw(truncated);},"v9 truncated child frame rejected");
+        rejects([&]{load_raw(truncated);},"exec truncated child frame rejected");
         const auto function_count=compact->functions.size();
-        rejects([&]{insert_raw(compact,replace_raw(rmodule({},2),1,ri(99)));},"v9 invalid inserted header rejected");
+        rejects([&]{insert_raw(compact,replace_raw(rmodule({},2),1,ri(99)));},"exec invalid inserted header rejected");
         check(compact->baseEnv->variables.empty()&&compact->functions.size()==function_count&&integer(compact->invoke(10))==42,
-              "invalid v9 insertion preserves the old state");
+              "invalid exec insertion preserves the old state");
+    }
+    {
+        // Debug records follow has_debug: [name, file, line, column, (node, file, line, column) quads];
+        // root field 10 lists the debug files. Nodes are numbered in pre-order: here
+        // 0 return, 1 divide, 2 and 3 the constants.
+        auto with_debug=[](R function,R record){AbdStack fields(function);fields.vs.at(8)=rb(true);fields.vs.push_back(std::move(record));return fields.toAbdValue();};
+        auto quads=[](std::initializer_list<int> values){AbdStack result;for(int value:values)result.vs.push_back(ri(value));return result.toAbdValue();};
+        auto files=[](R module,std::initializer_list<R> names){return replace_raw(module,10,raw(names));};
+        auto record=[&](R name,int file,int line,int column,R locations){return raw({name,ri(file),ri(line),ri(column),locations});};
+        auto byte=[](unsigned char value){return std::make_shared<AbdValue>(&value,1);};
+        auto text=[](const char* value){return std::make_shared<AbdValue>(reinterpret_cast<const unsigned char*>(value),static_cast<int>(std::strlen(value)));};
+        auto body=rx(7,{rb(true),rx(15,{rc(n(10)),rc(n(0))})});
+        auto plain=rfn(10,INT_VALUE,body);
+        auto good=with_debug(plain,record(rs("deep"),0,1,5,quads({1,0,1,24})));
+        auto debug_program=load_raw(files(rmodule({good}),{rs("t.azs")}));
+        auto fn=std::dynamic_pointer_cast<ofunction>(debug_program->getFunction(10));
+        auto returned=fn?std::dynamic_pointer_cast<returnExpression>(fn->code):nullptr;
+        check(fn&&fn->debug&&fn->debug->name=="deep"&&fn->debug->files&&fn->debug->files->size()==1&&fn->debug->files->at(0)=="t.azs"&&
+              fn->debug->header.line==1&&fn->debug->header.column==5&&fn->debug->locations.size()==1&&
+              fn->debug->locations[0].line==1&&fn->debug->locations[0].column==24,"exec debug records are decoded");
+        check(returned&&returned->location==0&&returned->returnType&&returned->returnType->location==1,
+              "debug locations attach to their pre-order body nodes");
+        rejects_message([&]{debug_program->invoke(10);},"Division by zero","debug info does not change execution");
+        auto plain_program=load_raw(rmodule({plain}));
+        check(!std::dynamic_pointer_cast<ofunction>(plain_program->getFunction(10))->debug,"functions without debug records have none");
+        auto unknown=with_debug(plain,record(rs("deep"),0,0,0,quads({})));
+        auto unknown_program=load_raw(files(rmodule({unknown}),{rs("t.azs")}));
+        check(std::dynamic_pointer_cast<ofunction>(unknown_program->getFunction(10))->debug->header.line==0,
+              "an unknown 0:0 header position is accepted");
+        unknown_program->destroy();
+        const unsigned char bad_text[]={0xed,0xa0,0x80};
+        const auto invalid_utf8=std::make_shared<AbdValue>(bad_text,3);
+        auto good_files={rs("t.azs")};
+        for(auto malformed:{
+            files(rmodule({good}),{}),files(rmodule({plain}),{rs("")}),files(rmodule({plain}),{text("a\nb")}),
+            files(rmodule({plain}),{rs("a"),rs("a")}),files(rmodule({plain}),{invalid_utf8}),files(rmodule({plain}),{text("a\xc2\x85")}),
+            files(rmodule({plain}),{text("a\xe2\x80\xae")}),files(rmodule({plain}),{text("a\xe2\x80\xa8")}),files(rmodule({plain}),{text("\x7f")}),
+            files(rmodule({plain}),{ri(1)}),
+            files(rmodule({replace_raw(plain,8,rb(true))}),good_files),files(rmodule({replace_raw(plain,8,byte(2))}),good_files),
+            files(rmodule({append_raw(plain,record(rs("deep"),0,1,5,quads({})))}),good_files),
+            files(rmodule({append_raw(good,ri(0))}),good_files),
+            files(rmodule({with_debug(plain,raw({rs("deep"),ri(0),ri(1),ri(5)}))}),good_files),
+            files(rmodule({with_debug(plain,raw({rs("deep"),ri(0),ri(1),ri(5),quads({}),ri(0)}))}),good_files),
+            files(rmodule({with_debug(plain,record(rs("deep"),0,1,5,quads({1,0,1})))}),good_files),
+            files(rmodule({with_debug(plain,record(rs("deep"),0,1,5,quads({1,0,1,24,2})))}),good_files),
+            files(rmodule({with_debug(plain,record(rs("deep"),0,1,5,quads({4,0,1,1})))}),good_files),
+            files(rmodule({with_debug(plain,record(rs("deep"),0,1,5,quads({2,0,1,1,1,0,1,1})))}),good_files),
+            files(rmodule({with_debug(plain,record(rs("deep"),0,1,5,quads({1,0,1,1,1,0,1,2})))}),good_files),
+            files(rmodule({with_debug(plain,record(rs("deep"),0,1,5,quads({-1,0,1,1})))}),good_files),
+            files(rmodule({with_debug(plain,record(rs("deep"),0,1,5,quads({1,1,1,1})))}),good_files),
+            files(rmodule({with_debug(plain,record(rs("deep"),0,1,5,quads({1,0,0,1})))}),good_files),
+            files(rmodule({with_debug(plain,record(rs("deep"),0,1,5,quads({1,0,1,0})))}),good_files),
+            files(rmodule({with_debug(plain,record(rs("deep"),1,1,5,quads({})))}),good_files),
+            files(rmodule({with_debug(plain,record(rs("deep"),-1,1,5,quads({})))}),good_files),
+            files(rmodule({with_debug(plain,record(rs("deep"),0,0,1,quads({})))}),good_files),
+            files(rmodule({with_debug(plain,record(rs("deep"),0,1,0,quads({})))}),good_files),
+            files(rmodule({with_debug(plain,record(rs("deep"),0,-1,-1,quads({})))}),good_files),
+            files(rmodule({with_debug(plain,record(rs(""),0,1,5,quads({})))}),good_files),
+            files(rmodule({with_debug(plain,record(text("a\x1b"),0,1,5,quads({})))}),good_files),
+            files(rmodule({with_debug(plain,record(invalid_utf8,0,1,5,quads({})))}),good_files),
+            files(rmodule({with_debug(plain,record(rs("deep"),0,1,5,raw({ri(1),ri(0),ri(1),byte(1)})))}),good_files),
+            rmodule({good})})
+            rejects([&]{load_raw(malformed);},"malformed exec debug records and files are rejected");
+        const auto function_count=plain_program->functions.size();
+        rejects([&]{insert_raw(plain_program,files(rmodule({with_debug(rfn(11,INT_VALUE,body),record(rs("deep"),0,1,5,quads({9,0,1,1})))}),{rs("t.azs")}));},
+                "an insert with a debug location past the body is rejected");
+        check(plain_program->functions.size()==function_count&&!plain_program->hasFunction(11),"a rejected debug insert leaves the script unchanged");
+        rejects_message([&]{load_raw(replace_raw(rmodule({plain}),1,ri(9)));},"Unsupported exec version 9; expected exec v10",
+                        "older exec versions are rejected with the expected version");
+        debug_program->destroy();plain_program->destroy();
     }
     {
         auto numeric=load_module(slot_module({

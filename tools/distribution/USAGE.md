@@ -47,7 +47,9 @@ run.cmd examples\hello.exec.abd
 
 AST 包含 extern 优先的名称绑定；普通定义的独立 ID 由 body namespace 与 metadata.position/name 保存。宿主按名称调用时应使用同次编译的 AST，hint 库的定义 ID 还须结合实际挂载 namespace。仅按固定 `main` ID 运行时无需部署这两份 JSON。ABD 是二进制指令树，不是加密格式。
 
-新编译器输出 exec v9：控制指令使用数字 opcode，固定记录按顺序写入裸 ABD stack。`exec.json` 保留字段名便于检查，其 `c` 为数字；它不是二进制文件的 Map 布局。解释器仅接受 v9；旧 ABD 必须从源码或可读 AST 重新编译。完整字段顺序和 opcode 见 [二进制格式](EXEC_FORMAT.md)。
+新编译器输出 exec v10：控制指令使用数字 opcode，固定记录按顺序写入裸 ABD stack。`exec.json` 保留字段名便于检查，其 `c` 为数字；它不是二进制文件的 Map 布局。解释器仅接受 v10；旧 ABD 必须从源码或可读 AST 重新编译。完整字段顺序和 opcode 见 [二进制格式](EXEC_FORMAT.md)。
+
+`-g` 在执行文件中加入调试记录：源文件名、函数名和源码位置。调试记录默认关闭，不改变指令和行为，但会把函数名、类名和文件名写入 ABD，不希望携带这些信息的构建不要使用 `-g`。JNI 快照只能恢复到模块字节相同的构建中，因此 `-g` 构建与不加 `-g` 的构建不能共用快照。
 
 编译脚本也接受完整 CLI 命令：`./compile.sh compile-json hello.ast.json -o restored.abd` 从 AST 重建 ABD，并默认生成 `restored.exec.json`，不覆盖输入 AST。`./compile.sh --help` 查看参数；`pack` 和 `unpack` 分别打包与解包文件。
 

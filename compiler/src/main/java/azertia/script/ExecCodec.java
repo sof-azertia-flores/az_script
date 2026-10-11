@@ -10,12 +10,29 @@ import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
 
-/** Strict fixed-record exec v9 encoder/decoder. Executable roots never use typed maps. */
+/**
+ * Strict fixed-record exec v10 encoder/decoder. Executable roots never use typed maps.
+ * Optional per-function debug records locate body nodes by their pre-order number;
+ * they never affect execution.
+ */
 public final class ExecCodec {
-    public static final int VERSION=9, MAX_BYTES=64*1024*1024, MAX_SLOTS=1_048_576;
+    public static final int VERSION=10, MAX_BYTES=64*1024*1024, MAX_SLOTS=1_048_576;
     public static final String MAGIC="AZSCRIPT";
     private ExecCodec() {}
-    private record Layout(int globals,int parameters,int locals,int hidden) {}
+    private record Layout(int globals,int parameters,int locals,int hidden,Numbering numbering) {}
+    /**
+     * Numbers the expression stacks of one function body in pre-order and wire field
+     * order: the body is node 0, and contexts take no number. With positions, it also
+     * collects the debug locations of the positioned nodes, leaving out a node whose
+     * position equals that of its nearest positioned ancestor.
+     */
+    private static final class Numbering {
+        int next;
+        final Map<AcsElement,int[]> positions;
+        final AcsArray located=new AcsArray();
+        int[] inherited;
+        Numbering(Map<AcsElement,int[]> positions) {this.positions=positions;}
+    }
     private static void depth(int depth) {
         if(depth>128)throw new IllegalArgumentException("Exec ABD nesting exceeds 128 levels");
     }
@@ -62,9 +79,10 @@ public final class ExecCodec {
     }
     private static final KeySpec REFERENCE=KeySpec.of("ref",""),
             FIXED_CONTEXT=KeySpec.of("abi kind","width factory contexts placement placement-contexts element"),
-            PROGRAM=KeySpec.of("author version exec-version gvs ext extern-signatures f namespace-hint assume-hints",""),
+            PROGRAM=KeySpec.of("author version exec-version gvs ext extern-signatures f namespace-hint assume-hints debug-files",""),
             SIGNATURE=KeySpec.of("id return-type param-types","hidden-count entry-kind"),
-            FUNCTION=KeySpec.of("id return-type param-count local-count param-types script","hidden-count entry-kind"),
+            FUNCTION=KeySpec.of("id return-type param-count local-count param-types script","hidden-count entry-kind debug"),
+            DEBUG=KeySpec.of("name file line column locations",""),
             ASSUMPTION=KeySpec.of("hint namespace",""),
             CALL=KeySpec.of("t id param","contexts"),
             OPERAND=KeySpec.of("t c v",""),
@@ -182,6 +200,7 @@ public final class ExecCodec {
         if(!hint.isEmpty())hint(hint);
         if(integer(program,"exec-version")!=VERSION)throw invalid("unsupported exec version");
         int globals=count(integer(program,"gvs"),"global count");
+        List<String> files=debugFiles(program.mmp.get("debug-files"));
         List<AbdValue> signatures=new ArrayList<>(),functions=new ArrayList<>();
         Set<Integer> externalIds=new HashSet<>(),functionIds=new HashSet<>(),namespaces=new HashSet<>(Set.of(0));
         for(AcsElement item:array(program.mmp.get("extern-signatures"),"extern-signatures").acsa) {
@@ -203,8 +222,13 @@ public final class ExecCodec {
             if(type==6&&hidden==0)throw invalid("any return type requires generic contexts");
             if((long)params+locals>MAX_SLOTS)throw invalid("function frame exceeds slot limit");
             if((id==0||id==1)&&(type!=5||params!=0||hidden!=0))throw invalid("invalid lifecycle function signature");
-            functions.add(stack(n(id),n(type),n(params),n(locals),types(function.mmp.get("param-types"),params,false,hidden),
-                    expression(function.mmp.get("script"),new Layout(globals,params,locals,hidden),4),n(hidden),n(entry)));
+            Numbering numbering=new Numbering(null);
+            AbdValue parameterTypes=types(function.mmp.get("param-types"),params,false,hidden);
+            AbdValue body=expression(function.mmp.get("script"),new Layout(globals,params,locals,hidden,numbering),4);
+            List<AbdValue> record=new ArrayList<>(List.of(n(id),n(type),n(params),n(locals),parameterTypes,body,n(hidden),n(entry)));
+            AcsElement debug=function.mmp.get("debug");record.add(b(debug!=null));
+            if(debug!=null)record.add(functionDebug(debug,files,numbering.next));
+            functions.add(stack(record));
         }
         List<AbdValue> assumptions=new ArrayList<>();Set<String> hints=new HashSet<>();Set<Integer> aliases=new HashSet<>();
         for(AcsElement item:array(program.mmp.get("assume-hints"),"assume-hints").acsa) {
@@ -216,8 +240,77 @@ public final class ExecCodec {
             assumptions.add(stack(s(name),n(namespace)));
         }
         if(!hint.isEmpty()&&!hints.contains(hint))throw invalid("hint module must assume itself");
+        List<AbdValue> fileNames=new ArrayList<>();for(String file:files)fileNames.add(s(file));
         return stack(s(MAGIC),n(VERSION),n(integer(program,"version")),s(string(program.mmp.get("author"),"author")),
-                n(globals),extensions(program.mmp.get("ext")),stack(signatures),stack(functions),s(hint),stack(assumptions));
+                n(globals),extensions(program.mmp.get("ext")),stack(signatures),stack(functions),s(hint),stack(assumptions),stack(fileNames));
+    }
+    /** The root debug file table: distinct valid display names, at most {@link #MAX_SLOTS}. */
+    private static List<String> debugFiles(AcsElement value) {
+        AcsArray array=array(value,"debug-files");count(array.acsa.size(),"debug file count");
+        List<String> files=new ArrayList<>();Set<String> seen=new HashSet<>();
+        for(AcsElement item:array.acsa) {
+            String file=debugText(item,"debug file name");
+            if(!seen.add(file))throw invalid("duplicate debug file name");
+            files.add(file);
+        }
+        return files;
+    }
+    private static String debugText(AcsElement value,String label) {
+        String text=string(value,label),problem=SourceRules.debugTextProblem(text);
+        if(problem!=null)throw invalid(label+" "+problem);
+        return text;
+    }
+    private static int debugFile(int file,List<String> files) {
+        if(file<0||file>=files.size())throw invalid("debug file index outside debug-files");
+        return file;
+    }
+    /**
+     * A function debug record {@code [name, file, line, column, locations]}. The header
+     * position is unknown when line and column are both 0. Locations are a flat int
+     * stack of {@code (node, file, line, column)} quads with strictly increasing nodes
+     * below the body's node count; the inspection view writes each quad as "n:f:l:c".
+     */
+    private static AbdValue functionDebug(AcsElement value,List<String> files,int nodes) {
+        AcsObject debug=object(value,"debug");keys(debug,DEBUG);
+        String name=debugText(debug.mmp.get("name"),"debug name");
+        int file=debugFile(integer(debug,"file"),files),line=integer(debug,"line"),column=integer(debug,"column");
+        if(line<0||column<0||(line==0)!=(column==0))throw invalid("debug header position must be both zero or both positive");
+        AcsArray locations=array(debug.mmp.get("locations"),"debug locations");count(locations.acsa.size(),"debug location count");
+        List<AbdValue> quads=new ArrayList<>();int previous=-1;
+        for(AcsElement item:locations.acsa) {
+            int[] location=location(string(item,"debug location"));
+            if(location[0]<=previous||location[0]>=nodes)throw invalid("debug location nodes must increase and refer to body nodes");
+            debugFile(location[1],files);
+            if(location[2]<1||location[3]<1)throw invalid("debug location line and column must be positive");
+            previous=location[0];for(int part:location)quads.add(n(part));
+        }
+        return stack(s(name),n(file),n(line),n(column),stack(quads));
+    }
+    /** Parses "node:file:line:column" in canonical decimal. */
+    private static int[] location(String text) {
+        String[] parts=text.split(":",-1);
+        if(parts.length!=4)throw invalid("debug location must be node:file:line:column");
+        int[] result=new int[4];
+        for(int i=0;i<4;i++) {
+            String part=parts[i];
+            boolean canonical=!part.isEmpty()&&part.length()<=10&&(part.equals("0")||part.charAt(0)!='0');
+            for(int j=0;canonical&&j<part.length();j++)canonical=part.charAt(j)>='0'&&part.charAt(j)<='9';
+            long number=canonical?Long.parseLong(part):-1;
+            if(number<0||number>Integer.MAX_VALUE)throw invalid("debug location must be node:file:line:column");
+            result[i]=(int)number;
+        }
+        return result;
+    }
+    private static String location(int node,int file,int line,int column) {return node+":"+file+":"+line+":"+column;}
+    /**
+     * The debug locations of a compiled function view, as "node:file:line:column"
+     * strings: {@code positions} maps compiled nodes to {@code {file, line, column}}.
+     */
+    static AcsArray locations(AcsObject function,int globals,Map<AcsElement,int[]> positions) {
+        Numbering numbering=new Numbering(positions);
+        expression(function.mmp.get("script"),new Layout(globals,integer(function,"param-count"),integer(function,"local-count"),
+                optionalInteger(function,"hidden-count",0),numbering),4);
+        return numbering.located;
     }
     private static void hint(String name) {
         if(!SourceRules.isHint(name))throw invalid("invalid hint name");
@@ -235,6 +328,17 @@ public final class ExecCodec {
         throw invalid("constant must be a supported finite scalar or void sentinel");
     }
     private static AbdValue expression(AcsElement value,Layout layout,int level) {
+        Numbering numbering=layout.numbering();int node=numbering.next++;
+        if(numbering.positions==null)return expressionBody(value,layout,level);
+        int[] outer=numbering.inherited,at=numbering.positions.get(value);
+        if(at!=null) {
+            if(!Arrays.equals(at,outer))numbering.located.acsa.add(new AcsStringElement(location(node,at[0],at[1],at[2])));
+            numbering.inherited=at;
+        }
+        try {return expressionBody(value,layout,level);}
+        finally {numbering.inherited=outer;}
+    }
+    private static AbdValue expressionBody(AcsElement value,Layout layout,int level) {
         depth(level);
         if(value instanceof AcsArray block)return stack(n(ExecOpcodes.BLOCK),expressions(block,layout,level+1));
         if(!(value instanceof AcsObject object)) {
@@ -417,9 +521,10 @@ public final class ExecCodec {
         if(value.size()>MAX_BYTES-4)throw invalid("executable exceeds 64 MiB");
         Record root=new Record(value,1);
         if(root.fields.isEmpty()||!Arrays.equals(root.fields.get(0).getData(),MAGIC.getBytes(StandardCharsets.UTF_8))) {
-            throw invalid("expected exec v9 AZSCRIPT header; legacy executable maps are unsupported");
+            throw invalid("expected exec v"+VERSION+" AZSCRIPT header; legacy executable maps are unsupported");
         }
-        root.string();int version=root.integer();if(version!=VERSION)throw invalid("unsupported exec version "+version);
+        root.string();int version=root.integer();
+        if(version!=VERSION)throw invalid("unsupported exec version "+version+"; expected exec v"+VERSION);
         ExecProgram result=new ExecProgram();result.put("author","");result.put("version",root.integer());result.put("exec-version",version);
         result.put("author",root.string());result.put("ext",new AcsObject());result.put("extern-signatures",new AcsArray());
         result.put("gvs",root.integer());result.put("ext",decodeExtensions(root.next()));
@@ -435,7 +540,9 @@ public final class ExecCodec {
             Record function=new Record(item,3);AcsObject view=new AcsObject();view.put("id",function.integer());view.put("return-type",function.integer());
             view.put("param-count",function.integer());view.put("local-count",function.integer());view.put("param-types",decodeTypes(function.next(),4));
             view.put("script",decodeExpression(function.next(),4));view.put("hidden-count",function.integer());
-            view.put("entry-kind",function.integer());function.end();functionView.acsa.add(view);
+            view.put("entry-kind",function.integer());
+            if(function.bool())view.put("debug",decodeDebug(function.next(),4));
+            function.end();functionView.acsa.add(view);
         }
         result.put("namespace-hint",root.string());AcsArray assumptions=new AcsArray();
         Record assumptionRecords=new Record(root.next(),2);
@@ -443,9 +550,21 @@ public final class ExecCodec {
             Record assumption=new Record(item,3);AcsObject view=new AcsObject();view.put("hint",assumption.string());view.put("namespace",assumption.integer());
             assumption.end();assumptions.acsa.add(view);
         }
-        result.put("assume-hints",assumptions);root.end();result.put("f",functionView);
+        result.put("assume-hints",assumptions);AcsArray files=new AcsArray();
+        for(AbdValue item:new Record(root.next(),2).fields)files.acsa.add(new AcsStringElement(utf8(item)));
+        result.put("debug-files",files);root.end();result.put("f",functionView);
         // One schema validator is shared by public inspection-map encoding and binary decoding.
         encode(result);return result;
+    }
+    private static AcsObject decodeDebug(AbdValue value,int level) {
+        Record record=new Record(value,level);AcsObject view=new AcsObject();
+        view.put("name",record.string());view.put("file",record.integer());view.put("line",record.integer());view.put("column",record.integer());
+        Record quads=new Record(record.next(),level+1);record.end();
+        if(quads.fields.size()%4!=0)throw invalid("debug locations must be node:file:line:column quads");
+        AcsArray locations=new AcsArray();
+        while(quads.position<quads.fields.size())
+            locations.acsa.add(new AcsStringElement(location(quads.integer(),quads.integer(),quads.integer(),quads.integer())));
+        view.put("locations",locations);return view;
     }
     public static AcsObject decode(byte[] frame) {
         if(frame.length>MAX_BYTES)throw invalid("executable exceeds 64 MiB");return decode(AbdValue.fromAbd(frame));

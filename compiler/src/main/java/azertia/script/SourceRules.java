@@ -61,6 +61,36 @@ final class SourceRules {
         requireUnreserved(value, description);
     }
 
+    /**
+     * A control (C0, DEL or C1), line or paragraph separator, or bidirectional formatting
+     * character. Source labels and exec debug names never contain one, because it could
+     * forge or reorder a diagnostic or stack-trace line. The C++ loader repeats this rule.
+     */
+    static boolean unsafeDisplayCharacter(char c) {
+        return Character.isISOControl(c) || c == 0x2028 || c == 0x2029 || c == 0x061c || c == 0x200e || c == 0x200f
+                || c >= 0x202a && c <= 0x202e || c >= 0x2066 && c <= 0x2069;
+    }
+    /** Why a name or file of an exec debug record is invalid, or null when it is valid. */
+    static String debugTextProblem(String value) {
+        if (value.isEmpty()) return "is empty";
+        if (!GeneraterJson.wellFormedUtf16(value)) return "contains an unpaired surrogate";
+        for (int i = 0; i < value.length(); i++)
+            if (unsafeDisplayCharacter(value.charAt(i))) return "contains a control, separator or bidirectional formatting character";
+        return null;
+    }
+    /** A display name with every unsafe character and unpaired surrogate replaced by U+FFFD, valid for a debug record. */
+    static String debugText(String value) {
+        if (value.isEmpty()) return "\uFFFD";
+        StringBuilder out = new StringBuilder(value.length());
+        for (int i = 0; i < value.length(); i++) {
+            char c = value.charAt(i);
+            if (Character.isHighSurrogate(c) && i + 1 < value.length() && Character.isLowSurrogate(value.charAt(i + 1))) {
+                out.append(c).append(value.charAt(++i));
+            } else out.append(Character.isSurrogate(c) || unsafeDisplayCharacter(c) ? '\uFFFD' : c);
+        }
+        return out.toString();
+    }
+
     /** A hint name is ASCII only, like the C++ loader's check: {@code [A-Za-z_][A-Za-z0-9_]*}. */
     static boolean isHint(String value) {
         if (value.isEmpty()) return false;

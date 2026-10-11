@@ -67,7 +67,7 @@ def main():
                  {'t': 0, 'c': 'ob', 'v': var(0), 'destructor': BASE + 5, 'manual': False, 'contexts': [{'ref': 0}]}]
     factory = [{'t': 0, 'c': 'vd', 'v': 0, 'declared-type': 8, 'val': {'t': 0, 'c': 'new_block', 'size': 2}},
                call(BASE + 4, block_address(var(0)), contexts=[{'ref': 0}]), {'t': 0, 'c': 'ro', 'r': var(0)}]
-    program = {'exec-version': 9, 'gvs': 5, 'f': [function(0, body, internal=1, locals=1),
+    program = {'exec-version': 10, 'gvs': 5, 'f': [function(0, body, internal=1, locals=1),
         function(BASE + 3, factory, returns=8, hidden=1, internal=1, locals=1),
         function(BASE + 4, placement, params=[7], hidden=1, internal=1),
         function(BASE + 5, [setvar(-3, {'t': 0, 'c': 'add', 'v1': var(-3), 'v2': 1}),

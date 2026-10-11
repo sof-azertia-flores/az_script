@@ -525,7 +525,7 @@ V convert_return(V v,int type) {
     }
     throw std::runtime_error("Function return type mismatch or missing return");
 }
-// v9 records are raw ABD stacks. Views borrow the caller's input only while
+// Exec records are raw ABD stacks. Views borrow the caller's input only while
 // decoding; the resulting native expression tree owns all retained data.
 struct raw_view {
     const unsigned char* data;
@@ -632,10 +632,18 @@ std::shared_ptr<expression> parse_raw_constant(raw_view envelope) {
     }
     return std::make_shared<constantExpression>(std::move(scalar));
 }
+// Pre-order numbers of a function body's expression stacks (the body is node 0,
+// contexts take none), matched against the nodes of its debug record.
+struct node_numbering {
+    std::uint32_t next=0;
+    std::size_t located=0;
+    const std::vector<std::uint32_t>* nodes=nullptr;
+};
 struct raw_function_layout {
     std::size_t parameters,slots,globals;
     std::vector<function_reference>* references;
     std::size_t hidden_count=0;
+    node_numbering* numbering=nullptr;
     void check_slot(int id,bool declaration=false) const {
         if(id<0) {
             if(declaration)throw std::invalid_argument("Cannot declare a negative variable slot");
@@ -695,6 +703,12 @@ template<class T> X raw_binary(X a,X b) {
     auto node=std::make_shared<T>();node->exp1=std::move(a);node->exp2=std::move(b);return node;
 }
 X parse_raw_expression(raw_view view,const raw_function_layout& layout,std::size_t logical_depth) {
+    std::uint32_t location=0;
+    if(auto* numbering=layout.numbering) {
+        const auto node=numbering->next++;
+        if(numbering->nodes&&numbering->located<numbering->nodes->size()&&(*numbering->nodes)[numbering->located]==node)
+            location=static_cast<std::uint32_t>(++numbering->located);
+    }
     raw_cursor fields(view);const int opcode=fields.integer();
     // The old representation counted Map/Array levels, while literal scalars
     // did not introduce a level. Retain that budget as well as raw stack depth.
@@ -822,7 +836,7 @@ X parse_raw_expression(raw_view view,const raw_function_layout& layout,std::size
     }
     default:throw std::invalid_argument("Unknown exec opcode: "+std::to_string(opcode));
     }
-    fields.finish();return result;
+    fields.finish();result->location=location;return result;
 }
 std::vector<int> parse_raw_types(raw_view view,bool script_parameters) {
     raw_cursor fields(view);std::vector<int> result;
@@ -835,10 +849,61 @@ std::vector<int> parse_raw_types(raw_view view,bool script_parameters) {
     }
     return result;
 }
+// Debug names and files are valid UTF-8 without controls (C0, DEL, C1), line or
+// paragraph separators or bidirectional formatting characters, like the compiler's
+// SourceRules.unsafeDisplayCharacter, so they cannot forge a stack-trace line.
+std::string debug_text(raw_cursor& fields,const char* label) {
+    auto text=fields.string();
+    if(text.empty())throw std::invalid_argument(std::string("Empty exec debug ")+label);
+    for(std::size_t i=0;i<text.size();) {
+        const auto first=static_cast<unsigned char>(text[i]);
+        std::uint32_t code;std::size_t length;
+        if(first<0x80){code=first;length=1;}
+        else if(first<0xe0){code=first&0x1fu;length=2;}
+        else if(first<0xf0){code=first&0x0fu;length=3;}
+        else {code=first&0x07u;length=4;}
+        for(std::size_t k=1;k<length;k++)code=(code<<6)|(static_cast<unsigned char>(text[i+k])&0x3fu);
+        i+=length;
+        if(code<0x20||(code>=0x7f&&code<=0x9f)||code==0x2028||code==0x2029||code==0x061c||code==0x200e||code==0x200f||
+           (code>=0x202a&&code<=0x202e)||(code>=0x2066&&code<=0x2069))
+            throw std::invalid_argument(std::string("Exec debug ")+label+" contains a control, separator or bidirectional formatting character");
+    }
+    return text;
+}
+// [name, file, line, column, locations]; locations are (node, file, line, column)
+// quads with strictly increasing nodes. Nodes past the body are rejected after it is parsed.
+std::shared_ptr<function_debug> parse_function_debug(raw_view view,const std::shared_ptr<const std::vector<std::string>>& files,
+        std::vector<std::uint32_t>& nodes) {
+    raw_cursor fields(view);auto debug=std::make_shared<function_debug>();debug->files=files;
+    debug->name=debug_text(fields,"name");
+    const auto file=[&](int value) {
+        if(value<0||static_cast<std::size_t>(value)>=files->size())throw std::invalid_argument("Exec debug file index outside debug files");
+        return static_cast<std::uint32_t>(value);
+    };
+    debug->header.file=file(fields.integer());
+    const int line=fields.integer(),column=fields.integer();
+    if(line<0||column<0||(line==0)!=(column==0))throw std::invalid_argument("Exec debug header position must be both zero or both positive");
+    debug->header.line=static_cast<std::uint32_t>(line);debug->header.column=static_cast<std::uint32_t>(column);
+    raw_cursor quads(fields.take());fields.finish();
+    while(!quads.empty()) {
+        if(debug->locations.size()>=MAX_VARIABLE_SLOTS)throw std::invalid_argument("Too many exec debug locations");
+        const int node=quads.integer();
+        if(quads.empty())throw std::invalid_argument("Exec debug locations must be node, file, line, column quads");
+        source_position position;position.file=file(quads.integer());
+        const int at_line=quads.integer(),at_column=quads.integer();
+        if(node<0||(!nodes.empty()&&static_cast<std::uint32_t>(node)<=nodes.back()))
+            throw std::invalid_argument("Exec debug location nodes must strictly increase");
+        if(at_line<1||at_column<1)throw std::invalid_argument("Exec debug location line and column must be positive");
+        position.line=static_cast<std::uint32_t>(at_line);position.column=static_cast<std::uint32_t>(at_column);
+        nodes.push_back(static_cast<std::uint32_t>(node));debug->locations.push_back(position);
+    }
+    return debug;
+}
 parsed_module parse_raw_module(raw_view root,std::size_t offset) {
     raw_cursor fields(root);parsed_module module;
     if(fields.string()!="AZSCRIPT")throw std::invalid_argument("Invalid exec magic");
-    if(fields.integer()!=9)throw std::invalid_argument("Unsupported exec version");
+    if(const int version=fields.integer();version!=EXEC_FORMAT_VERSION)
+        throw std::invalid_argument("Unsupported exec version "+std::to_string(version)+"; expected exec v"+std::to_string(EXEC_FORMAT_VERSION));
     fields.integer();fields.string(); // Source version/author are non-executable metadata.
     const int globals=fields.integer();
     if(globals<0||static_cast<std::size_t>(globals)>MAX_VARIABLE_SLOTS||offset>MAX_VARIABLE_SLOTS-static_cast<std::size_t>(globals))
@@ -863,7 +928,18 @@ parsed_module parse_raw_module(raw_view root,std::size_t offset) {
     raw_cursor functions(fields.take());
     module.hint=fields.string();
     if(!module.hint.empty()&&!valid_hint(module.hint))throw std::invalid_argument("Invalid namespace hint");
-    raw_cursor assumptions(fields.take());fields.finish();std::set<std::string> hint_names;
+    raw_cursor assumptions(fields.take());
+    auto debug_files=std::make_shared<std::vector<std::string>>();
+    {
+        raw_cursor files(fields.take());std::set<std::string> names;
+        while(!files.empty()) {
+            if(debug_files->size()>=MAX_VARIABLE_SLOTS)throw std::invalid_argument("Too many exec debug files");
+            auto name=debug_text(files,"file name");
+            if(!names.insert(name).second)throw std::invalid_argument("Duplicate exec debug file name");
+            debug_files->push_back(std::move(name));
+        }
+    }
+    fields.finish();std::set<std::string> hint_names;
     while(!assumptions.empty()) {
         raw_cursor record(assumptions.take());auto hint=record.string();const int ns=record.integer();record.finish();
         if(!valid_hint(hint)||ns<=0||ns>0xffff||ns==0x0abd||ns==0x0fff)throw std::invalid_argument("Invalid namespace assumption");
@@ -885,16 +961,22 @@ parsed_module parse_raw_module(raw_view root,std::size_t offset) {
            static_cast<std::size_t>(fn->local_count)>MAX_VARIABLE_SLOTS-static_cast<std::size_t>(fn->param_count))
             throw std::invalid_argument("Invalid function variable count");
         fn->param_types=parse_raw_types(entry.take(),true);
-        auto body=entry.take();fn->hidden_count=entry.integer();fn->entry_kind=entry.integer();entry.finish();
+        auto body=entry.take();fn->hidden_count=entry.integer();fn->entry_kind=entry.integer();
+        std::vector<std::uint32_t> located;
+        if(entry.boolean())fn->debug=parse_function_debug(entry.take(),debug_files,located);
+        entry.finish();
         if(fn->hidden_count<0||static_cast<std::size_t>(fn->hidden_count)>MAX_VARIABLE_SLOTS||fn->entry_kind<0||fn->entry_kind>1)
             throw std::invalid_argument("Invalid function generic ABI");
         if(fn->rett==ANY_VALUE&&!fn->hidden_count)throw std::invalid_argument("Any return requires generic contexts");
         if(fn->param_types.size()!=static_cast<std::size_t>(fn->param_count))throw std::invalid_argument("param-count and param-types disagree");
         if((fn->function_id==0||fn->function_id==1)&&(fn->rett!=VOID_VALUE||fn->param_count!=0||fn->hidden_count!=0))
             throw std::invalid_argument("Lifecycle function must return void and take no parameters");
+        node_numbering numbering;numbering.nodes=&located;
         const raw_function_layout layout{static_cast<std::size_t>(fn->param_count),
-            static_cast<std::size_t>(fn->param_count)+static_cast<std::size_t>(fn->local_count),module.global_count,&module.references,static_cast<std::size_t>(fn->hidden_count)};
+            static_cast<std::size_t>(fn->param_count)+static_cast<std::size_t>(fn->local_count),module.global_count,&module.references,
+            static_cast<std::size_t>(fn->hidden_count),&numbering};
         fn->code=parse_raw_expression(body,layout,3);
+        if(numbering.located!=located.size())throw std::invalid_argument("Exec debug location refers to a missing body node");
         const int id=fn->function_id;
         if(!module.functions.emplace(id,std::move(fn)).second)throw std::invalid_argument("Duplicate function id: "+function_id_text(id));
         module.namespaces.insert(namespace_of(id));
@@ -910,7 +992,7 @@ parsed_module decode_module(const unsigned char* bytes,std::size_t length,std::s
         const auto first=fields.take();
         if(first.size==8&&std::memcmp(first.data,"AZSCRIPT",8)==0)return parse_raw_module(root,offset);
     }
-    throw std::invalid_argument("Unsupported script format: expected raw exec v9");
+    throw std::invalid_argument("Unsupported script format: expected raw exec v"+std::to_string(EXEC_FORMAT_VERSION));
 }
 }
 std::recursive_mutex& runtime_mutex(){static std::recursive_mutex m;return m;}
