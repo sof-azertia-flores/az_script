@@ -41,6 +41,12 @@ class CompilerScalingTest {
         for (int i = 0; i < n; i++) source.append("  g").append(i).append(" = ").append(i % 7).append(";\n");
         return source.append("  return 0;\n}\n").toString();
     }
+    /** Typed globals, each initialized from the previous one in the onload prologue. */
+    static String typedGlobals(int n) {
+        StringBuilder source = new StringBuilder("int g0 = 1;\n");
+        for (int i = 1; i < n; i++) source.append("int g").append(i).append(" = g").append(i - 1).append(" + ").append(i % 7).append(";\n");
+        return source.append("int main() { return g").append(n - 1).append(" % 100; }\n").toString();
+    }
     static String classes(int n) {
         StringBuilder source = new StringBuilder();
         for (int i = 0; i < n; i++)
@@ -103,6 +109,7 @@ class CompilerScalingTest {
     @Test void statementsOfOneFunction() throws Exception { assertLinear(CompilerScalingTest::statements, 2_500); }
     @Test void functions() throws Exception { assertLinear(CompilerScalingTest::functions, 1_000); }
     @Test void globalVariables() throws Exception { assertLinear(CompilerScalingTest::globals, 1_000); }
+    @Test void typedGlobalVariables() throws Exception { assertLinear(CompilerScalingTest::typedGlobals, 1_000); }
     @Test void classesAndTheirFactories() throws Exception { assertLinear(CompilerScalingTest::classes, 250); }
     @Test void fieldsOfOneClass() throws Exception { assertLinear(CompilerScalingTest::fields, 500); }
     @Test void externDeclarations() throws Exception { assertLinear(CompilerScalingTest::externs, 500); }

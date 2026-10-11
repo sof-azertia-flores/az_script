@@ -92,7 +92,23 @@ final class AstShape {
             declarationKinds(signature, path);
         }
         JsonArray globals = array(root, "global-variable", top, false);
-        if (globals != null) for (int i = 0; i < globals.size(); i++) stringElement(globals.get(i), top.key("global-variable").index(i));
+        boolean typed = false;
+        if (globals != null) for (int i = 0; i < globals.size(); i++) {
+            // A #gvar global is a bare name; a typed declaration is {name, type, initializer?} with a position.
+            // The #gvar names come first, so they keep the first global slots.
+            Pointer path = top.key("global-variable").index(i);
+            if (!globals.get(i).isJsonObject()) {
+                if (typed) error(path, "#gvar names must precede typed globals");
+                else stringElement(globals.get(i), path);
+                continue;
+            }
+            typed = true;
+            JsonObject global = globals.get(i).getAsJsonObject();
+            positions(global, path);
+            string(global, "name", path, true);
+            string(global, "type", path, true);
+            if (global.has("initializer")) node(global.get("initializer"), path.key("initializer"));
+        }
         JsonObject body = object(root, "body", top, true);
         if (body != null) for (var namespace : body.entrySet()) {
             Pointer namespacePath = top.key("body").key(namespace.getKey());

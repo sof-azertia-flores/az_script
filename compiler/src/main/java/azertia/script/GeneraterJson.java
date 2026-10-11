@@ -67,6 +67,11 @@ public class GeneraterJson {
         public Map<String,Integer> assumeHints = new LinkedHashMap<>();
         private boolean namespaceDeclared;
         public List<String> globalVariables = new ArrayList<>();
+        /**
+         * Typed global declarations {@code T g;} or {@code T g = e;} in source order, as AST
+         * entries {name, type, initializer?, positions}; they follow the untyped #gvar names.
+         */
+        public List<JsonObject> typedGlobals = new ArrayList<>();
         public List<AzFunction> functions = new ArrayList<>();
         public JsonArray classes = new JsonArray();
         public Map<String,ExternSignature> externSignatures = new LinkedHashMap<>();
@@ -254,7 +259,7 @@ public class GeneraterJson {
             } finally { parser = null; }
         }
         private void reset() {
-            name2Id.clear(); exts.clear(); globalVariables.clear(); functions.clear();
+            name2Id.clear(); exts.clear(); globalVariables.clear(); typedGlobals.clear(); functions.clear();
             externSignatures.clear(); tmpoVars.clear(); macros.clear();
             classes = new JsonArray();
             author = ""; functionNamespace = SourceRules.DEFAULT_NAMESPACE;
@@ -848,6 +853,7 @@ public class GeneraterJson {
             });
             result.add("extern-signatures", signatures);
             JsonArray globals = new JsonArray(); globalVariables.forEach(globals::add);
+            typedGlobals.forEach(entry -> globals.add(entry.deepCopy()));
             result.add("global-variable", globals);
             JsonObject body = new JsonObject();
             for (AzFunction function : functions) {
@@ -1118,6 +1124,8 @@ public class GeneraterJson {
         private final Map<JsonObject,Token> classTokens = new IdentityHashMap<>();
         private final Map<AzFunction,Token> functionTokens = new IdentityHashMap<>();
         private final Map<ExternSignature,Token> externTokens = new IdentityHashMap<>();
+        /** The name token of every typed global declaration, by name. */
+        private final Map<String,Token> typedGlobalTokens = new HashMap<>();
         private int index;
         private int recursionDepth;
         private int loopDepth;
@@ -1397,6 +1405,7 @@ public class GeneraterJson {
                     if (owner != null) typeParameters.addAll(classTypeParameters.getOrDefault(owner, List.of()));
                     boolean external = match("extern"); JsonArray generic = readTypeParameters();
                     if (!external) external = match("extern");
+                    Token typeStart = current();
                     String first = typeApplication(sourceType(name().text(), true));
                     if (match("::")) {
                         String className = rawClass(first); requireOwnerType(first);
@@ -1411,13 +1420,29 @@ public class GeneraterJson {
                             String member = methodName();
                             parseFunction(rawClass(ownerType), "method", type, member, external, false, generic);
                         } else {
-                            String member = declaredName().text();
-                            parseFunction(null, null, type, member, external, false, generic);
+                            Token member = declaredName();
+                            if (at(";") || at("=")) globalDeclaration(typeStart, type, member, external, generic);
+                            else if (!external && classType(type) && automaticObjectAhead())
+                                throw error(type.endsWith("*") ? "Global objects cannot be automatic; use = new " + type.substring(0, type.length() - 1) + "(...)"
+                                        : "Global " + member.text() + " cannot hold a class value or buffer; declare a pointer", typeStart);
+                            else parseFunction(null, null, type, member.text(), external, false, generic);
                         }
                     }
                 } catch (IllegalArgumentException e) {
                     recover(e, start, Sync.DECLARATION);
                 } finally { typeParameters = outer; }
+            }
+            // A typed global cannot share its name with a function defined or declared anywhere in the unit.
+            for (JsonObject entry : script.typedGlobals) {
+                String name = entry.get("name").getAsString(); Token at = typedGlobalTokens.get(name);
+                AzFunction definition = definitions.get(name); ExternSignature declaration = script.externSignatures.get(name);
+                diagnostics.metrics().tableProbes++;
+                if (definition != null)
+                    report(error("Global " + name + " conflicts with function " + name, at, null, noteAt(functionLocation(definition), "previous definition is here")));
+                else if (declaration != null)
+                    report(error("Global " + name + " conflicts with function " + name, at, null,
+                            externTokens.containsKey(declaration) ? noteAt(externTokens.get(declaration), "previous declaration is here") : List.of()));
+                else if (Compiler.isBuiltinName(name)) report(error("Global " + name + " conflicts with built-in function " + name, at));
             }
             diagnostics.checkpoint(); // parsing
             // The compiler validates class layouts, so source and compile-json report the same located errors.
@@ -1439,6 +1464,13 @@ public class GeneraterJson {
                     catch (TreeLimits.LimitExceeded e) { throw error(e.getMessage(), functionLocation(function), context, List.of()); }
                 }
             }
+            for (JsonObject entry : script.typedGlobals) {
+                try { TreeLimits.validate(entry); }
+                catch (TreeLimits.LimitExceeded e) {
+                    String name = entry.get("name").getAsString();
+                    throw error(e.getMessage(), located(e.anchor(), typedGlobalTokens.get(name)), "global " + name, List.of());
+                }
+            }
             for (JsonElement item : script.classes) {
                 JsonObject definition = item.getAsJsonObject(); String name = definition.get("name").getAsString();
                 try { TreeLimits.validate(definition); }
@@ -1447,6 +1479,54 @@ public class GeneraterJson {
                             (e.anchor() == definition ? "class " : "initializer of class ") + name, List.of());
                 }
             }
+        }
+        /**
+         * A typed global {@code T g;} or {@code T g = e;}. The compiler checks the type and
+         * initializes the global in the module's onload: defaults first, then initializers in order.
+         */
+        private void globalDeclaration(Token start, String type, Token nameToken, boolean external, JsonArray generic) {
+            String name = nameToken.text();
+            if (external) throw error("Globals cannot be extern", start);
+            if (!generic.isEmpty()) throw error("Globals cannot declare type parameters", start);
+            if (type.equals("void")) throw error("Global " + name + " cannot have type void", start);
+            if (SourceRules.LIFECYCLE_HOOKS.contains(name)) throw error("Global " + name + " conflicts with lifecycle function " + name, nameToken);
+            diagnostics.metrics().tableProbes++;
+            if (script.globalDirectives.containsKey(name)) {
+                // Directives are collected before parsing; the error goes to whichever declaration comes second.
+                Token directive = directive(script.globalDirectives.get(name), nameToken);
+                boolean sameUnit = directive.unit() == nameToken.unit();
+                boolean later = sameUnit && (directive.line() > nameToken.line() || directive.line() == nameToken.line() && directive.column() > nameToken.column());
+                if (later) throw error("Duplicate global variable: " + name, directive, null, noteAt(nameToken, "previous declaration is here"));
+                throw error("Duplicate global variable: " + name, nameToken, null,
+                        noteAt(directive, sameUnit ? "previous declaration is here" : "other declaration is here"));
+            }
+            Token previous = typedGlobalTokens.get(name);
+            if (previous != null)
+                throw error(duplicate("Duplicate global variable: " + name, previous, nameToken), nameToken, null,
+                        noteAt(previous, "previous declaration is here"));
+            JsonObject entry = new JsonObject(); entry.addProperty("name", name); entry.addProperty("type", type);
+            position(entry, start.unit(), start.line(), start.column());
+            if (match("=")) entry.add("initializer", expression());
+            if (!match(";")) throw error("Expected ';' after global declaration");
+            typedGlobalTokens.put(name, nameToken); script.typedGlobals.add(entry);
+        }
+        /**
+         * "T g(...)" is an automatic object declaration, not a function, when ';' follows ')'
+         * and the parentheses do not open a typed parameter list such as "(int x)".
+         */
+        private boolean automaticObjectAhead() {
+            if (!at("(")) return false;
+            if (index + 2 >= tokens.size()) return false;
+            Token first = tokens.get(index + 1), second = tokens.get(index + 2);
+            if (knownType(first.text()) && (second.identifier() || second.text().equals("*") || second.text().equals("<"))) return false;
+            int depth = 0;
+            for (int i = index; i < tokens.size(); i++) {
+                String text = tokens.get(i).text();
+                if (text.equals("(")) depth++;
+                else if (text.equals(")") && --depth == 0) return tokens.get(i + 1).text().equals(";");
+                else if (text.equals("{") || text.equals("<eof>")) return false;
+            }
+            return false;
         }
         /** Index of the :: after a complete owner type, or -1 for an ordinary identifier. */
         private int classOwnerEnd(int start) {

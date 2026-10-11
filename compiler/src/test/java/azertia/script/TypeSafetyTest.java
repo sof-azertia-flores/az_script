@@ -330,4 +330,160 @@ class TypeSafetyTest {
         assertEquals("<source>:1:1: error: Invalid hint name: a-b", failure("#namespace_hint a-b\nint main(){return 0;}").getMessage());
         assertEquals("<source>:1:1: error: Invalid hint name: \u00e9", failure("#assume_hint é 1234\nint main(){return 0;}").getMessage());
     }
+    private static JsonObject exec(JsonObject tree) { return Compiler.compile(tree).toJson().getAsJsonObject(); }
+    private static JsonObject execFunction(JsonObject exec, int id) {
+        return exec.getAsJsonArray("f").asList().stream().map(JsonElement::getAsJsonObject)
+                .filter(function -> function.get("id").getAsInt() == id).findFirst().orElseThrow(() -> new AssertionError("Missing function " + id));
+    }
+    /** The global slot a statement of the exec JSON assigns, or 0 when it is not a global assignment. */
+    private static int assignedGlobal(JsonElement statement) {
+        JsonObject object = statement.getAsJsonObject();
+        return object.get("t").getAsInt() == 0 && object.get("c").getAsInt() == ExecOpcodes.code("vs") ? Math.min(0, object.get("v").getAsInt()) : 0;
+    }
+
+    @Test void typedGlobalsGetDefaultsThenInitializersBeforeTheOnloadBody() throws Exception {
+        String classes = "class P{int x;P(int n){x=n;}}\n";
+        JsonObject tree = tree("#gvar legacy\n" + classes + "int total;\nP * head = new P(total + 3);\nstring label = \"n\";\n"
+                + "double ratio;\nfloat f = 1.5f;\nboolean on;\naddress raw;\n"
+                + "void __script_onload(){legacy=1;total=7;}\nint main(){return head.x+total;}\n");
+        // #gvar names come first in the AST and take the first slots; typed entries follow in source order.
+        JsonArray globals = tree.getAsJsonArray("global-variable");
+        assertEquals("legacy", globals.get(0).getAsString());
+        assertEquals("head", globals.get(2).getAsJsonObject().get("name").getAsString());
+        assertEquals("P*", globals.get(2).getAsJsonObject().get("type").getAsString());
+        assertEquals(4, globals.get(2).getAsJsonObject().get("_line").getAsInt());
+        assertFalse(globals.get(1).getAsJsonObject().has("initializer"));
+        JsonObject compiled = exec(tree);
+        assertEquals(8, compiled.get("gvs").getAsInt());
+        JsonArray onload = execFunction(compiled, 0).getAsJsonArray("script");
+        // Defaults for -2..-8 in declaration order, then the three initializers, then the body.
+        int[] expected = {-2, -3, -4, -5, -6, -7, -8, -3, -4, -6, -1, -2};
+        assertEquals(expected.length, onload.size(), onload::toString);
+        for (int i = 0; i < expected.length; i++) assertEquals(expected[i], assignedGlobal(onload.get(i)), onload::toString);
+        assertEquals(List.of("0", "{\"address\":\"0\"}", "\"\"", "0.0", "0.0", "false", "{\"address\":\"0\"}"),
+                onload.asList().subList(0, 7).stream().map(statement -> statement.getAsJsonObject().get("val").toString()).toList());
+        assertEquals("1.5", onload.get(9).getAsJsonObject().get("val").toString());
+        // The body keeps its own top level: no extra block wraps it.
+        assertEquals(7, onload.get(11).getAsJsonObject().get("val").getAsInt());
+        assertArrayEquals(bytes(tree), bytes(JsonParser.parseString(tree.toString()).getAsJsonObject()));
+        // Without a user onload, function 0 is synthesized; untyped-only modules are unchanged.
+        JsonObject synthesized = exec(tree(classes + "P * head;\nint count = 2;\nint main(){return count;}\n"));
+        JsonObject added = execFunction(synthesized, 0);
+        assertEquals(5, added.get("return-type").getAsInt());
+        assertEquals(3, added.getAsJsonArray("script").size());
+        assertTrue(exec(tree("#gvar g\nint main(){return 0;}\n")).getAsJsonArray("f").asList().stream()
+                .noneMatch(function -> function.getAsJsonObject().get("id").getAsInt() == 0));
+        // An initializer reads globals declared before it and calls functions; it runs in its own scope.
+        assertDoesNotThrow(() -> bytes(tree("int seed(){return 4;}\nint a = seed();\nint b = a * 2;\n"
+                + "void __script_onload(){int a=1;print(a);}\nint main(){return b;}\n")));
+    }
+
+    @Test void typedGlobalsAreTypedEverywhere() throws Exception {
+        String base = "class A{int x;}\nclass B : A{int y;}\n";
+        assertDoesNotThrow(() -> bytes(tree(base + "A * a = new B();\nB * b;\nvoid keep(A* p){a=p;}\n"
+                + "int main(){b=new B();keep(b);a.x=3;int n=a.x;A* copy=a;delete b;a=null;return n;}\n")));
+        record Case(String source, String message) {}
+        for (Case item : List.of(
+                new Case(base + "A * a;\nint main(){B* b=a;return 0;}\n", "<source>:4:12: error: in function main: Initializer for b expected B *, got A *"),
+                new Case("int n;\nint main(){n=\"x\";return n;}\n", "<source>:2:13: error: in function main: Assignment to n expected int, got string"),
+                new Case("int n = 1.5;\nint main(){return n;}\n", "<source>:1:1: error: in global n: Initializer for global n expected int, got double"),
+                new Case("string s = f();\nvoid f(){}\nint main(){return 0;}\n", "<source>:1:1: error: in global s: Initializer for global s cannot use a void value"),
+                new Case("int n = missing;\nint main(){return n;}\n", "<source>:1:9: error: in global n: Unknown variable: missing")))
+            assertEquals(item.message(), failure(item.source()).getMessage(), item.source());
+    }
+
+    @Test void everyBadInitializerAndTheOnloadBodyAreReportedTogether() {
+        // Each initializer recovers on its own, so a bad one hides neither later initializers nor the onload body.
+        String source = "int f(){return \"x\";}\nint a = \"x\";\nint b = \"y\";\nvoid __script_onload(){int q = \"z\";}\nint main(){return \"w\";}\n";
+        assertEquals(List.of(
+                "<source>:1:9: error: in function f: return expected int, got string",
+                "<source>:2:1: error: in global a: Initializer for global a expected int, got string",
+                "<source>:3:1: error: in global b: Initializer for global b expected int, got string",
+                "<source>:4:24: error: in function __script_onload: Initializer for q expected int, got string",
+                "<source>:5:12: error: in function main: return expected int, got string"), failure(source).getMessage().lines().toList());
+    }
+
+    @Test void typedGlobalDeclarationsAreRejectedWithLocations() {
+        String classes = "class P{int x;P(int n){x=n;}}\n", main = "\nint main(){return 0;}\n";
+        record Case(String source, String message) {}
+        for (Case item : List.of(
+                new Case(classes + "P g;" + main, "<source>:2:1: error: in global g: Global g cannot hold a class value or buffer; declare a pointer"),
+                new Case(classes + "P g(1);" + main, "<source>:2:1: error: Global g cannot hold a class value or buffer; declare a pointer"),
+                new Case(classes + "P * g(1);" + main, "<source>:2:1: error: Global objects cannot be automatic; use = new P(...)"),
+                // A prototype is not an automatic object; prototypes stay unsupported.
+                new Case(classes + "P * f(int x);\nP * f(int x){return new P(x);}" + main, "<source>:2:13: error: Expected '{', found ';'"),
+                new Case("buffer<int> g;" + main, "<source>:1:1: error: in global g: Global g cannot hold a class value or buffer; declare a pointer"),
+                new Case("extern int g;" + main, "<source>:1:8: error: Globals cannot be extern"),
+                new Case("<T> T g;" + main, "<source>:1:5: error: Globals cannot declare type parameters"),
+                new Case("void g;" + main, "<source>:1:1: error: Global g cannot have type void"),
+                new Case("int g = 1" + main, "<source>:2:1: error: Expected ';' after global declaration"),
+                new Case("int print;" + main, "<source>:1:5: error: Global print conflicts with built-in function print"),
+                // The compiler may add the onload, so the lifecycle hook names are never globals.
+                new Case("int __script_onload = 5;" + main, "<source>:1:5: error: Global __script_onload conflicts with lifecycle function __script_onload"),
+                new Case("int __script_pre_destroy;" + main, "<source>:1:5: error: Global __script_pre_destroy conflicts with lifecycle function __script_pre_destroy"),
+                new Case("int ok = 1;\n#gvar __script_onload" + main,
+                        "<source>:1:1: error: in global __script_onload: Global __script_onload conflicts with function __script_onload")))
+            assertEquals(item.message(), failure(item.source()).getMessage(), item.source());
+        record Noted(String source, String message, String note) {}
+        for (Noted item : List.of(
+                new Noted("#gvar g\nint g;" + main, "<source>:2:5: error: Duplicate global variable: g", "<source>:1:1: note: previous declaration is here"),
+                // The error goes to the second declaration, even when the #gvar directive comes second.
+                new Noted("int g;\n#gvar g" + main, "<source>:2:1: error: Duplicate global variable: g", "<source>:1:5: note: previous declaration is here"),
+                new Noted("int g;\nstring g;" + main, "<source>:2:8: error: Duplicate global variable: g", "<source>:1:5: note: previous declaration is here"),
+                new Noted("int g;\nint g(){return 1;}" + main, "<source>:1:5: error: Global g conflicts with function g", "<source>:2:6: note: previous definition is here"),
+                new Noted("int f(){return 1;}\nint f = 2;" + main, "<source>:2:5: error: Global f conflicts with function f", "<source>:1:6: note: previous definition is here"),
+                new Noted("extern int g():12340001;\nint g;" + main, "<source>:2:5: error: Global g conflicts with function g", "<source>:1:13: note: previous declaration is here"))) {
+            String message = failure(item.source()).getMessage();
+            assertEquals(List.of(item.message(), item.note()), message.lines().toList(), item.source());
+        }
+        // A pointer-returning function shares the "P * g(" prefix but still parses.
+        assertDoesNotThrow(() -> bytes(tree(classes + "P * make(int n){return new P(n);}\nP * other(n){return new P(1);}\nP * shared;\n"
+                + "int main(){P* p=make(2);P* q=other(1);shared=p;int r=shared.x+q.x;delete p;delete q;return r;}\n")));
+    }
+
+    @Test void compileJsonChecksTypedGlobalsWithTheSameRules() throws Exception {
+        JsonObject tree = tree("<T> extern T pick(T):12340001;\nclass P{int x;}\nint count = 1;\nP * head;\nint main(){return count;}\n");
+        assertDoesNotThrow(() -> bytes(tree));
+        Function<Consumer<JsonObject>, String> message = edit -> rejected(tree, edit).getMessage();
+        java.util.function.BiFunction<JsonObject, Integer, JsonObject> entry = (copy, index) -> copy.getAsJsonArray("global-variable").get(index).getAsJsonObject();
+        // The extern's type parameter is out of scope for a global.
+        assertEquals("<source>:3:1: error: in global count: Unknown type: T", message.apply(copy -> entry.apply(copy, 0).addProperty("type", "T")));
+        assertEquals("<source>:4:1: error: in global head: Global head cannot hold a class value or buffer; declare a pointer",
+                message.apply(copy -> entry.apply(copy, 1).addProperty("type", "P")));
+        assertEquals("<source>:4:1: error: in global head: Global head cannot hold a class value or buffer; declare a pointer",
+                message.apply(copy -> entry.apply(copy, 1).addProperty("type", "buffer<int>")));
+        assertEquals("<source>:3:1: error: in global count: void is not a concrete value type", message.apply(copy -> entry.apply(copy, 0).addProperty("type", "void")));
+        assertEquals("<source>:3:1: error: in global count: any is not a concrete value type", message.apply(copy -> entry.apply(copy, 0).addProperty("type", "any")));
+        assertEquals("<source>:4:1: error: in global count: Duplicate global variable: count", message.apply(copy -> entry.apply(copy, 1).addProperty("name", "count")));
+        assertEquals("<source>:3:1: error: in global main: Global main conflicts with function main", message.apply(copy -> entry.apply(copy, 0).addProperty("name", "main")));
+        assertEquals("<source>:3:1: error: in global pick: Global pick conflicts with function pick", message.apply(copy -> entry.apply(copy, 0).addProperty("name", "pick")));
+        assertEquals("<source>:3:1: error: in global any: 'any' is a reserved word and cannot be used as a global name",
+                message.apply(copy -> entry.apply(copy, 0).addProperty("name", "any")));
+        assertEquals("<source>:3:1: error: in global count: Initializer for global count expected int, got string",
+                message.apply(copy -> entry.apply(copy, 0).addProperty("initializer", "x")));
+        assertEquals("<source>:3:1: error: in global __script_onload: Global __script_onload conflicts with lifecycle function __script_onload",
+                message.apply(copy -> entry.apply(copy, 0).addProperty("name", "__script_onload")));
+        // Malformed entries are shape errors with a JSON pointer; #gvar names precede typed entries.
+        assertEquals("<source>: error: Malformed script JSON at /global-variable/2: #gvar names must precede typed globals",
+                message.apply(copy -> copy.getAsJsonArray("global-variable").add("count")));
+        assertEquals("<source>: error: Malformed script JSON at /global-variable/1/type: required field is missing",
+                message.apply(copy -> entry.apply(copy, 1).remove("type")));
+        assertEquals("<source>: error: Malformed script JSON at /global-variable/0/name: expected a string, got 3",
+                message.apply(copy -> entry.apply(copy, 0).addProperty("name", 3)));
+        // A function other than 0 named __script_onload cannot host the initialization.
+        assertEquals("<source>:5:9: error: in function __script_onload: Typed globals are initialized in function 0x00000000, but __script_onload has another ID",
+                message.apply(copy -> {
+                    function(copy, "main").getAsJsonObject("metadata").addProperty("name", "__script_onload");
+                    JsonObject ids = copy.getAsJsonObject("abstract"); ids.add("__script_onload", ids.remove("main"));
+                }));
+    }
+
+    @Test void hintLibrariesCanHoldGenericPointerGlobals() throws Exception {
+        JsonObject tree = tree("#namespace_hint BOXES\nclass Box<T>{T value;}\nBox<int>* box = new Box<int>();\n"
+                + "int read():0002{return box.value;}\nvoid write(int n):0003{box.value=n;}\nvoid __script_pre_destroy(){delete box;}\n");
+        byte[] compiled = bytes(tree);
+        assertArrayEquals(compiled, bytes(JsonParser.parseString(tree.toString()).getAsJsonObject()));
+        JsonObject onload = execFunction(exec(tree), 0);
+        assertEquals(2, onload.getAsJsonArray("script").size());
+    }
 }

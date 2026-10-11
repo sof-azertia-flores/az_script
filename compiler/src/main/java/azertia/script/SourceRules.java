@@ -26,6 +26,8 @@ final class SourceRules {
         RESERVED_WORDS = Set.copyOf(words);
     }
 
+    /** The lifecycle hooks; a typed global cannot take their names, since the compiler may add the onload. */
+    static final Set<String> LIFECYCLE_HOOKS = Set.of("__script_onload", "__script_pre_destroy");
     /** Lifecycle hooks of every module and the placeholders of hint libraries. */
     static final int LIFECYCLE_NAMESPACE = 0;
     /** Runtime built-ins. */

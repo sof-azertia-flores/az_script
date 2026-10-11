@@ -1001,6 +1001,25 @@ public class Compiler {
                 try { return compileInstruction(params.get(0).getAsJsonObject(), initialization); }
                 catch (RuntimeException error) { throw relocate(error, source, initialization); }
             }
+            case "#global-initialize" -> {
+                requireTrusted(source, environment); arity(call, params, 2, 2);
+                // A typed global is initialized in the module's onload, in a scope of its own:
+                // onload locals cannot shadow it and its errors name the global.
+                String name = string(params.get(0), "Global name");
+                LogicEnvironment initialization = environment.root().child();
+                initialization.context = "global " + name;
+                initialization.returnType = AsTypes.VOID_VALUE; initialization.counter = environment.counter;
+                try {
+                    JsonElement value = params.get(1);
+                    rejectVoidValue("Initializer for global " + name, value, initialization);
+                    requireKnownExact("Initializer for global " + name, initialization.getVariable(name).type, expressionType(value, initialization));
+                    JsonObject assignment = node("varset", params.get(0), value); copyPosition(source, assignment, initialization);
+                    return compileInstruction(assignment, initialization);
+                }
+                // Each initializer is a global item of its own: report it and go on with the next one and the
+                // onload body; the checkpoint after the function phase still stops the compilation.
+                catch (RuntimeException error) { recover(relocate(error, source, initialization), source, initialization.context, initialization); return new AcsArray(); }
+            }
             case "#cleanup" -> {
                 requireTrusted(source, environment); arity(call, params, 3, 3);
                 result.put("c", ExecOpcodes.code("cleanup"));
@@ -1969,6 +1988,50 @@ public class Compiler {
         Map<Integer,Integer> substitution=substitutions(ancestor(receiver,declaration));
         return new Signature(function.id(),substitute(function.returnType(),substitution),function.paramTypes().stream().map(t->substitute(t,substitution)).toList(),true);
     }
+    /** A typed global declaration of the AST; {@code declaration} locates it and holds its initializer. */
+    private record TypedGlobal(String name, int type, JsonObject declaration) {}
+    private static final String ONLOAD = "__script_onload";
+    /**
+     * Initializes typed globals at the start of the module's onload (function 0),
+     * synthesized when the module has none: every typed global first gets its type's
+     * default, then the explicit initializers run in declaration order, then the
+     * onload body. The statements are spliced into the body's top-level list, so the
+     * body is not nested any deeper. A module without typed globals is unchanged.
+     */
+    private static void addGlobalInitialization(List<Function> functions, LogicEnvironment global, List<TypedGlobal> typedGlobals) {
+        if (typedGlobals.isEmpty()) return;
+        JsonArray prologue = new JsonArray();
+        for (TypedGlobal typed : typedGlobals) prologue.add(globalInitializer(global, typed, defaultValue(typed.type())));
+        for (TypedGlobal typed : typedGlobals)
+            if (typed.declaration().has("initializer")) prologue.add(globalInitializer(global, typed, typed.declaration().get("initializer")));
+        for (int i = 0; i < functions.size(); i++) {
+            Function onload = functions.get(i);
+            if (onload.id() != 0) continue;
+            if (onload.script().isJsonArray()) prologue.addAll(onload.script().getAsJsonArray()); else prologue.add(onload.script());
+            functions.set(i, new Function(onload.id(), onload.name(), onload.returnType(), onload.paramTypes(), onload.metadata(), prologue));
+            return;
+        }
+        if (global.abs.containsKey(ONLOAD)) {
+            JsonObject anchor = functions.stream().filter(function -> function.name().equals(ONLOAD)).map(Function::metadata)
+                    .findFirst().orElse(typedGlobals.get(0).declaration());
+            recover(new IllegalArgumentException("Typed globals are initialized in function " + Diagnostic.hexId(0) + ", but " + ONLOAD + " has another ID"),
+                    anchor, contextName(ONLOAD), global);
+            return;
+        }
+        // A #gvar cannot share its name with the synthesized onload either.
+        if (global.local(ONLOAD) != null) {
+            recover(new IllegalArgumentException("Global " + ONLOAD + " conflicts with function " + ONLOAD), typedGlobals.get(0).declaration(), "global " + ONLOAD, global);
+            return;
+        }
+        JsonObject metadata = new JsonObject(); metadata.addProperty("name", ONLOAD);
+        metadata.add("param", new JsonArray()); metadata.add("param-types", new JsonArray());
+        Function onload = new Function(0, ONLOAD, AsTypes.VOID_VALUE, List.of(), metadata, prologue);
+        functions.add(onload); global.abs.put(ONLOAD, 0); global.namedSignatures.put(ONLOAD, onload.signature());
+    }
+    private static JsonObject globalInitializer(LogicEnvironment global, TypedGlobal typed, JsonElement value) {
+        JsonObject result = internal(global, "#global-initialize", new JsonPrimitive(typed.name()), value);
+        copyPosition(typed.declaration(), result, global); return result;
+    }
     private static void registerCompilerFunction(LogicEnvironment global, String name, int id, int returns, List<Integer> types) {
         global.abs.put(name, id); global.arities.put(id, types.size()); global.functionReturnTypes.put(id, returns);
         global.scriptSignatures.put(id, new Signature(id, returns, types, true));
@@ -2309,15 +2372,30 @@ public class Compiler {
                 recover(new IllegalArgumentException("Function mapping disagrees with declaration: " + entry.getKey()), anchor, contextName(entry.getKey()), global);
         }
         diagnostics.checkpoint();
-        int globals = 0;
+        // Global types never see the type parameters of the last extern or definition read above.
+        TYPE_SCOPE.set(Map.of());
+        int globals = 0; List<TypedGlobal> typedGlobals = new ArrayList<>();
         if (source.has("global-variable")) for (JsonElement item : source.getAsJsonArray("global-variable")) {
-            String name = string(item, "Global name");
+            // A #gvar global is a bare name; a typed declaration is an object.
+            JsonObject entry = item.isJsonObject() ? item.getAsJsonObject() : null;
+            String name = string(entry == null ? item : entry.get("name"), "Global name");
             try {
                 validateSourceName(name, "global name");
                 if (global.classes.containsKey(name)) throw new IllegalArgumentException("Global name conflicts with class: " + name);
+                int type = AsTypes.ANY_VALUE;
+                if (entry != null) {
+                    diagnostics.metrics().tableProbes += 2;
+                    if (global.local(name) != null) throw new IllegalArgumentException("Duplicate global variable: " + name);
+                    if (SourceRules.LIFECYCLE_HOOKS.contains(name)) throw new IllegalArgumentException("Global " + name + " conflicts with lifecycle function " + name);
+                    if (global.abs.containsKey(name))
+                        throw new IllegalArgumentException("Global " + name + " conflicts with " + (isBuiltinName(name) ? "built-in function " : "function ") + name);
+                    type = valueType(string(entry.get("type"), "Global type"), true);
+                    if (isOwnedValue(type)) throw new IllegalArgumentException("Global " + name + " cannot hold a class value or buffer; declare a pointer");
+                }
                 if (globals >= MAX_VARIABLE_SLOTS) throw new IllegalArgumentException("Program exceeds global variable slot limit");
-                global.define(name, -(++globals));
-            } catch (RuntimeException error) { recover(error, null, "global " + name, global); }
+                global.define(name, -(++globals), type);
+                if (entry != null) typedGlobals.add(new TypedGlobal(name, type, entry));
+            } catch (RuntimeException error) { recover(error, entry, "global " + name, global); }
         }
         diagnostics.checkpoint();
         result.put("gvs", globals);
@@ -2327,12 +2405,14 @@ public class Compiler {
                     : Objects.equals(assumptions.get(hint), imported >>> 16);
             if (self) ids.add((global.moduleNamespace << 16) | (imported & 0xffff));
         }
-        TYPE_SCOPE.set(Map.of());
         addClassFactories(functions, ids, global, declarations);
         for(Function function:functions) {
             if(isFactory(function.name())||function.metadata().has("function-kind")&&function.metadata().get("function-kind").getAsString().equals("destructor")&&global.classes.get(function.metadata().get("owner-class").getAsString()).synthesizedDestructor)
                 global.namedSignatures.put(function.name(),function.signature());
         }
+        try { addGlobalInitialization(functions, global, typedGlobals); }
+        catch (RuntimeException error) { recover(error, null, null, global); }
+        diagnostics.checkpoint();
         Set<Integer> fixedNamespaces = new HashSet<>(Set.of(SourceRules.LIFECYCLE_NAMESPACE, SourceRules.RUNTIME_NAMESPACE, SourceRules.DEFAULT_NAMESPACE));
         if (hint.isEmpty()) {fixedNamespaces.add(global.moduleNamespace); for (Function function : functions) fixedNamespaces.add(function.id() >>> 16);}
         for (int namespace : assumptions.values()) if (fixedNamespaces.contains(namespace))

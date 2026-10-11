@@ -59,9 +59,9 @@ int main() {
 void __script_pre_destroy() { print("done"); }
 ```
 
-函数返回类型支持 `void/int/string/float/double/boolean/address` 和已声明的类名，`bool` 是 `boolean` 的别名。支持前向引用、递归与任意嵌套函数调用；普通函数位于顶层，成员方法可在类体或使用 `ClassName::method` 在类外定义。参数可以写 `a,b` 或 `int a,int b`，对象参数须显式写类名（`C p` 按值复制，`C * p` 传指针）。局部变量也可写 `int x = 2`；带显式基础类型的局部变量必须同时给出初始化值。显式参数和局部类型参与编译期检查；无类型参数、`var`、`def` 和全局变量保持动态类型。函数返回类型还会由解释器验证。
+函数返回类型支持 `void/int/string/float/double/boolean/address` 和已声明的类名，`bool` 是 `boolean` 的别名。支持前向引用、递归与任意嵌套函数调用；普通函数位于顶层，成员方法可在类体或使用 `ClassName::method` 在类外定义。参数可以写 `a,b` 或 `int a,int b`，对象参数须显式写类名（`C p` 按值复制，`C * p` 传指针）。局部变量也可写 `int x = 2`；带显式基础类型的局部变量必须同时给出初始化值。显式参数和局部类型参与编译期检查；无类型参数、`var`、`def` 和 `#gvar` 全局保持动态类型，带类型的全局与带类型的局部变量一样检查。函数返回类型还会由解释器验证。
 
-块 `{}` 创建词法作用域，允许内层同名变量遮蔽外层；同一作用域重复声明报错。局部编号在整个函数内唯一，避免先前子块和兄弟块编号冲突。变量必须先声明，访问已结束作用域内的变量会编译失败。全局变量用 `#gvar` 声明，通常在 `__script_onload` 中初始化。函数参数按值传递，脚本函数调用会检查参数数量。
+块 `{}` 创建词法作用域，允许内层同名变量遮蔽外层；同一作用域重复声明报错。局部编号在整个函数内唯一，避免先前子块和兄弟块编号冲突。变量必须先声明，访问已结束作用域内的变量会编译失败。全局变量见[下文](#全局变量)。函数参数按值传递，脚本函数调用会检查参数数量。
 
 非 hint 程序保持 `__script_onload = 0`、`main = 0x0fff0000`、`__script_pre_destroy = 1`；钩子必须是无参数 `void` 函数。普通函数默认位于 `0xfff`，`#namespace 1234` 支持 1～4 位十六进制（源码中的 namespace 和函数 ID 可带 `0x` 前缀及任意个前导零，如 `#namespace 0x0005151`、`:00000000abcd`；AST 始终写成不带前缀的十六进制，`compile-json` 只接受不超过字段宽度的纯十六进制数字，namespace 为 4 位，完整 ID 为 8 位），`#namespace fff` 显式写出默认 namespace，生成的编号与省略时相同，但仍计入唯一的 namespace 指令。namespace `0000` 保留给生命周期钩子和 hint 库占位，`0abd` 保留给运行时内置函数，`#namespace` 使用这两个值时编译报错；`compile-json` 同样拒绝 `function-namespace` 为 0 的非 hint AST，以及 0000 中除生命周期函数 0/1 以外的普通定义。函数定义可写 `int add(int a,int b):0003 {return a+b;}` 固定低16位编号；先预留显式编号再分配自动编号，固定入口不能用后缀改变编号。自动编号可能随源码改变，宿主应使用同次编译的 AST 映射。需要稳定的公开 ID 时，只在共享头文件的 extern 声明中写一次完整 ID；本模块（hint 库为其自身假定的 namespace）中的实现省略编号即可继承该编号，见 [hint 链接](../docs/HINT_LINKING.md)。
 
@@ -90,6 +90,22 @@ void __script_pre_destroy() { print("done"); }
 外部函数统一写作 `extern int custom_call(string, double):12340001;`，参数名可省略，类型必须明确；零参数写 `extern void notify():12340002;`，`void` 不能作为参数类型。ID 支持完整32位十六进制位模式，也支持 `0x` 前缀。旧 `#extern` 不再接受。声明可绑定宿主函数或 hint 库；同名 extern 与定义签名一致时可共存，调用优先绑定 extern。宿主必须用相同 ID 注册；保留 namespace 0000、0abd、0fff 及活动脚本 namespace 不能被宿主占用。
 
 外部函数调用采用精确类型契约，不进行数值隐式转换：声明为 `double` 的参数不能接收 `int` 或 `float`。编译器会检查参数数量和能确定的表达式类型，并把外部函数返回类型继续用于嵌套调用检查；无法确定类型的动态值用于带签名参数时也会拒绝，需先通过显式类型声明让契约清楚。ABD 携带同一签名，解释器会在调用回调前再次检查真实参数，并在回调返回后立即检查真实返回类型，因此错误的宿主实现不会把不匹配值带入后续脚本。内置函数由编译器预声明，不能由脚本函数、`extern` 或手写 AST 覆盖；直接调用宿主函数须使用带签名的 `extern`；按 ID 反射调用的规则见下文。
+
+### 全局变量
+
+```text
+class Node { int value; Node(int v) { value = v; } }
+int total;                      // 初始为 0
+string label = "items";
+Node * head = new Node(total + 1);
+#gvar legacy                    // 无类型（any）
+```
+
+顶层的 `T name;` 或 `T name = expression;` 声明带类型的全局变量。T 可以是标量类型、`address` 或类指针（如 `Node *`、`Box<int> *`）。带类型全局在每次使用时都像带类型的局部变量一样检查，因此 `head.value` 可以使用，`head = 3` 编译失败。类的值和 buffer 不能作为全局（`Global g cannot hold a class value or buffer; declare a pointer`），`void`、`extern` 以及带类型参数的声明也不行。`Node * g(1);` 报告 `Global objects cannot be automatic; use = new Node(...)`；返回指针的函数（如 `Node * make(int v) { ... }`）照常解析。带类型全局不能与函数、内置函数、类或其他全局同名，也不能使用生命周期钩子的名称（`__script_onload`、`__script_pre_destroy`）。
+
+带类型全局在模块 flush 时于 onload（函数 0，即 `__script_onload`；模块没有时由编译器添加）中初始化：先把每个带类型全局设为其类型的默认值（`0`、`0.0f`、`0.0`、`false`、`""`，address 和指针为 `null`），再按声明顺序执行显式初始化表达式，最后执行 onload 正文。初始化表达式可以调用函数、读取任何全局；在它之后声明的全局仍是默认值。初始化表达式的错误会指明所属全局，如 `in global total: Initializer for global total expected int, got string`。初始化表达式在 onload 内执行，归这次调用所有的存储不会比它活得更久：`alloc()` 得到的块或返回给初始化表达式的自动对象在 onload 返回时释放，全局随之悬空；需要由全局保存的存储请用 `new`、`make_free` 或 `mem_send_up`。模块的带类型全局在其自身 onload 开始前为 void；其他模块可以通过循环依赖观察到这一点，也可以在更早初始化的模块动态调用本模块时观察到（例如在其 onload 中使用 `reflect_invoke_function`）。此时读取它，在运行时检查类型之处（例如由函数返回）会报错，但 `print`、字符串拼接以及复制到无类型变量会静默接受 void（打印为 `null`）。
+
+`#gvar name` 仍是无类型写法：这类全局是动态的 `any`：不能保存类的值或 buffer，不能访问成员，在赋值前为 void，通常在 onload 中赋值。AST 先列出 `#gvar` 名称（compile-json 拒绝出现在带类型条目之后的名称），它们占用最前面的全局槽，带类型全局按声明顺序随后。
 
 ## 类、字面量对象与指针
 
@@ -484,7 +500,7 @@ int functionId(int ns, int position) {
 
 ## AST 与 ABD 契约
 
-可读 AST 保持 `metadata/ext/abstract/global-variable/body` 结构，并为带签名的宿主函数增加 `extern-signatures`。类程序额外保存类定义、字段顺序和成员表达式等编译信息；`compile-json` 会重新执行类型检查与降级。AST 还保存模块 hint、assume、外部声明、定义名称与实际定义编号；调用绑定与定义位置分开，支持完全相同的 ABD 往返。`abstract` 是 extern 优先的源码名称绑定：有 extern 时保存声明 ID，否则保存定义 ID；hint 库的本地定义仍使用 0000 占位，实际调用的 self-assume 地址在降级时生成。函数定义的独立位置由 `body` 的 namespace 和 `metadata.position/name` 保存；每个签名另保存 `return-type` 与 `param-types`。表达式对象有 `t: "ctrl" | "call"`、`call`、`param`，块是数组。
+可读 AST 保持 `metadata/ext/abstract/global-variable/body` 结构，并为带签名的宿主函数增加 `extern-signatures`。`global-variable` 先以字符串列出 `#gvar` 名称，再以带位置的 `{"name", "type", "initializer"?}` 对象列出每个带类型全局；`compile-json` 按与源码相同的规则检查并初始化它们。类程序额外保存类定义、字段顺序和成员表达式等编译信息；`compile-json` 会重新执行类型检查与降级。AST 还保存模块 hint、assume、外部声明、定义名称与实际定义编号；调用绑定与定义位置分开，支持完全相同的 ABD 往返。`abstract` 是 extern 优先的源码名称绑定：有 extern 时保存声明 ID，否则保存定义 ID；hint 库的本地定义仍使用 0000 占位，实际调用的 self-assume 地址在降级时生成。函数定义的独立位置由 `body` 的 namespace 和 `metadata.position/name` 保存；每个签名另保存 `return-type` 与 `param-types`。表达式对象有 `t: "ctrl" | "call"`、`call`、`param`，块是数组。
 
 根节点的 `sources` 表对文件的每次实际展开的包含各有一项，例如 `{"name": "inc/lib.azs", "included-from": {"source": 0, "line": 2, "column": 1}}`；第 0 项是主文件，include 总是指向更早的项，被 `#pragma once` 跳过的 include 没有对应项。表达式对象、函数元数据、类、字段和 extern 签名带有原始文件中的 `_line/_column`，以及所在 `sources` 项的下标 `_file`（为 0 时省略）。函数元数据还以 `_end_line/_end_column` 记录结束的右花括号，加括号的赋值带有 `_parenthesized: true`。字面值和块不带位置，诊断使用最近的带位置祖先。这些字段仅用于诊断，不写入 ABD 指令。compile-json 输入中的 `sources` 可以省略，此时所有位置都属于以输入文件命名的同一文件。位置均为正整数，`_file` 必须是表中的有效下标；该表最多 4097 项，即主文件加 4096 次 include 展开；`sources` 的每项命名一个非空、不超过 4096 个字符且不含控制字符或双向格式字符的文件，include 链最多 64 层。compile-json 在编译前检查这些结构，见[多个错误与退出码](#多个错误与退出码)。
 
