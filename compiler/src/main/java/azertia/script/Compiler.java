@@ -90,7 +90,11 @@ public class Compiler {
     static final class CompilationState {
         final Diagnostics diagnostics;
         final SourceMap sources;
-        CompilationState(Diagnostics diagnostics, SourceMap sources) { this.diagnostics = diagnostics; this.sources = sources; }
+        /** Whether the in-process parser produced the AST, which makes unexpected exceptions internal compiler errors. */
+        final boolean parsed;
+        CompilationState(Diagnostics diagnostics, SourceMap sources, boolean parsed) {
+            this.diagnostics = diagnostics; this.sources = sources; this.parsed = parsed;
+        }
     }
     public static class LogicEnvironment {
         public LogicEnvironment parent;
@@ -108,7 +112,7 @@ public class Compiler {
         private Map<String,Integer> typeScope = Map.of();
         private List<Integer> typeParameters = List.of();
         private Counter counter = new Counter();
-        /** Root only: diagnostics and the source table; a bare environment names its source {@code <expression>}. */
+        /** Root only: diagnostics and the source table; a bare environment stops at the first error and names its source {@code <expression>}. */
         private CompilationState state;
         /** Diagnostic context such as "function main", or null outside a function. */
         private String context;
@@ -127,7 +131,7 @@ public class Compiler {
         LogicEnvironment root() { return parent == null ? this : parent.root(); }
         CompilationState state() {
             LogicEnvironment root = root();
-            if (root.state == null) root.state = new CompilationState(new Diagnostics(), SourceMap.single("<expression>"));
+            if (root.state == null) root.state = new CompilationState(Diagnostics.failFast(), SourceMap.single("<expression>"), false);
             return root.state;
         }
         public int getFunctionId(String name) {
@@ -205,7 +209,7 @@ public class Compiler {
             Integer known=values.get(input);if(known!=null)return known;
             int result;
             // A failing query names the innermost positioned subexpression, e.g. the unknown variable.
-            try{result=expressionTypeUncached(input,environment);}catch(IllegalArgumentException error){throw relocate(error,input,environment);}
+            try{result=expressionTypeUncached(input,environment);}catch(RuntimeException error){throw relocate(error,input,environment);}
             values.put(input,result);return result;
         } finally {if(outer)TYPE_QUERY.remove();}
     }
@@ -432,31 +436,58 @@ public class Compiler {
     public static AcsElement compileExpression(JsonElement input, LogicEnvironment environment) {
         Map<String,Integer> previousScope=TYPE_SCOPE.get();TYPE_SCOPE.set(environment.typeScope);
         try { return withDepth(1, () -> compileExpressionBody(input, environment)); }
-        catch (IllegalArgumentException error) { throw relocate(error, input, environment); }
+        catch (RuntimeException error) { throw relocate(error, input, environment); }
         finally {TYPE_SCOPE.set(previousScope);}
     }
-    private static String message(RuntimeException error) {
+    private static String message(Throwable error) {
         return error.getMessage() != null ? error.getMessage() : error.getClass().getSimpleName();
     }
     /**
-     * Locates a deliberate error at a positioned node. An error that is already
-     * located passes through, and an unpositioned node leaves the error to the
-     * nearest positioned ancestor.
+     * Locates an error at a positioned node. An error that is already located passes
+     * through, and an unpositioned node leaves the error to the nearest positioned
+     * ancestor. An unexpected exception is classified at the innermost positioned node.
      */
-    private static IllegalArgumentException relocate(IllegalArgumentException error, JsonElement node, LogicEnvironment environment) {
+    private static RuntimeException relocate(RuntimeException error, JsonElement node, LogicEnvironment environment) {
         if (error instanceof CompileException || node == null || !node.isJsonObject()) return error;
         SourceMap sources = environment.state().sources;
         if (sources.position(node.getAsJsonObject()) == null) return error;
+        if (!Diagnostics.userError(error)) return unexpected(error, node.getAsJsonObject(), environment.context, environment.state());
         return new CompileException(sources.error(node.getAsJsonObject(), environment.context, message(error)), error);
     }
     /** Locates an error at a declaration, or at the main file when the declaration has no position. */
-    private static CompileException locate(IllegalArgumentException error, JsonObject anchor, String context, LogicEnvironment environment) {
+    private static CompileException locate(Throwable error, JsonObject anchor, String context, LogicEnvironment environment) {
         if (error instanceof CompileException compiled) return compiled;
+        if (!Diagnostics.userError(error)) return unexpected(error, anchor, context, environment.state());
         return new CompileException(environment.state().sources.error(anchor, context, message(error)), error);
     }
+    /**
+     * Reports an error of one function, class or global item and returns, so the
+     * compiler continues with the next one; a fatal error, the error limit or a
+     * fail-fast collector ends the compilation instead.
+     */
+    private static void recover(Throwable error, JsonObject anchor, String context, LogicEnvironment environment) {
+        environment.state().diagnostics.report(locate(error, anchor, context, environment));
+    }
+    /**
+     * An exception the compiler did not raise deliberately. For a program parsed in
+     * this process it is an internal compiler error. For an AST supplied as JSON it
+     * is most likely input the shape check does not cover, so it is reported as
+     * malformed input near the innermost positioned node. Either way it is fatal.
+     */
+    static CompileException unexpected(Throwable error, JsonObject anchor, String context, CompilationState state) {
+        SourceMap sources = state.sources;
+        Diagnostic.Position near = anchor == null ? null : sources.position(anchor);
+        Diagnostic diagnostic;
+        if (state.parsed) {
+            List<Diagnostic> notes = near == null ? List.of() : sources.includeNotes(sources.unitOf(anchor));
+            diagnostic = Diagnostic.internalError(near != null ? near : Diagnostic.Position.file(sources.inputName()), context, error, notes);
+            if (near != null) diagnostic = diagnostic.inUnit(sources.unitOf(anchor));
+        } else diagnostic = sources.error(context, "Malformed script JSON" + (near == null ? "" : " near " + near));
+        return new CompileException(List.of(diagnostic), error, true);
+    }
     /** A layout error of a declared class, located at the given node of its declaration. */
-    private static IllegalArgumentException classError(ClassInfo info, JsonObject anchor, IllegalArgumentException error) {
-        if (error instanceof CompileException || info.sources == null) return error;
+    private static RuntimeException classError(ClassInfo info, JsonObject anchor, RuntimeException error) {
+        if (error instanceof CompileException || info.sources == null || !Diagnostics.userError(error)) return error;
         return new CompileException(info.sources.error(anchor, "class " + info.name, message(error)), error);
     }
     /** Copies a node's original position onto a node the compiler synthesized from it. */
@@ -673,6 +704,7 @@ public class Compiler {
                 JsonObject member = params.get(0).getAsJsonObject();
                 if (!isControl(member) || !string(member.get("call"), "Member target").equals("member"))
                     throw new IllegalArgumentException("Member assignment needs a field target");
+                arity("member", parameters(member), 2, 2);
                 requireWritableReceiver(parameters(member).get(0),environment);
                 Field field = memberField(parameters(member), environment);
                 requireKnownExact("Assignment to member " + field.name(), field.type(), expressionType(params.get(1), environment));
@@ -776,7 +808,7 @@ public class Compiler {
                 initialization.returnType = AsTypes.VOID_VALUE; initialization.counter = environment.counter;
                 initialization.define("this", 0, classInfo(environment.ownerClass, environment).pointerType);
                 try { return compileInstruction(params.get(0).getAsJsonObject(), initialization); }
-                catch (IllegalArgumentException error) { throw relocate(error, source, initialization); }
+                catch (RuntimeException error) { throw relocate(error, source, initialization); }
             }
             case "#cleanup" -> {
                 requireTrusted(source, environment); arity(call, params, 3, 3);
@@ -1401,7 +1433,10 @@ public class Compiler {
         ClassInfo view=new ClassInfo();view.declaration=declaration;view.arguments=List.copyOf(arguments);
         view.name=declaration.name+"<"+String.join(",",arguments.stream().map(Compiler::typeName).toList())+">";
         allocateClass(view);CLASS_APPLICATIONS.get().put(key,view);
-        checkBounds(declaration.arguments,arguments);
+        // Cached first, so a recursive bound can name this application; a failed
+        // check uncaches it, so a later function reports the same error again.
+        try { checkBounds(declaration.arguments,arguments); }
+        catch (RuntimeException error) { CLASS_APPLICATIONS.get().remove(key); throw error; }
         return view;
     }
     private static Map<Integer,Integer> substitutions(ClassInfo info) {
@@ -1464,9 +1499,11 @@ public class Compiler {
      */
     private static void layoutStep(ClassInfo info, boolean prepare) {
         try { if (prepare) prepareLayout(info); else finishLayout(info); }
-        catch (IllegalArgumentException error) { throw info == info.declaration ? classError(info, info.source, error) : error; }
+        catch (RuntimeException error) { throw info == info.declaration ? classError(info, info.source, error) : error; }
     }
     private static void prepareLayout(ClassInfo info) {
+            // A failed layout may be retried by another class or function; start over each time.
+            info.ownFields.clear();info.ownMethods.clear();info.ownOperators.clear();
             if(info!=info.declaration) {
                 ClassInfo original=info.declaration;Map<Integer,Integer> substitutions=substitutions(info);
                 info.constructor=original.constructor;info.destructor=original.destructor;info.cleanupDestructor=original.cleanupDestructor;
@@ -1490,7 +1527,7 @@ public class Compiler {
                         if(type==AsTypes.VOID_VALUE||type==AsTypes.ANY_VALUE||isFlexibleClass(type))throw new IllegalArgumentException("Field requires a concrete type");
                         int line=Math.max(0,SourceMap.integer(field.get("_line")));
                         info.ownFields.add(new Field(info.name,name,type,field.get("initializer"),line>0&&info.sources!=null?info.sources.unitOf(field):0,line,line>0?Math.max(0,SourceMap.integer(field.get("_column"))):0));
-                    } catch (IllegalArgumentException error) { throw classError(info, field, error); }
+                    } catch (RuntimeException error) { throw classError(info, field, error); }
                 }
                 info.constructor=string(definition.get("constructor"),"Constructor function");
                 if(!info.constructor.equals(info.name+"::<ctor>"))throw new IllegalArgumentException("Invalid constructor mapping for "+info.name);
@@ -1517,6 +1554,7 @@ public class Compiler {
             }
     }
     private static void finishLayout(ClassInfo info) {
+            info.fields.clear();info.visibleFields.clear();info.methods.clear();info.operators.clear();
             if(info.base!=null){info.fields.addAll(info.base.fields);info.visibleFields.putAll(info.base.visibleFields);info.methods.putAll(info.base.methods);info.operators.putAll(info.base.operators);}
             for(Field field:info.ownFields){info.fields.add(field);info.visibleFields.put(field.name(),field);info.methods.remove(field.name());}
             info.ownMethods.forEach((name,method)->{info.methods.put(name,method);info.visibleFields.remove(name);});
@@ -1526,17 +1564,24 @@ public class Compiler {
             info.cleanupDestructor=info.destructor!=null?info.destructor:info.base==null?null:info.base.cleanupDestructor;
             info.ready=true;
     }
+    /**
+     * Declares, parameterizes and lays out the classes. Each step reports the errors
+     * of every class and stops before the next step when any class failed, since
+     * later steps resolve the types the earlier ones declare.
+     */
     private static void readClasses(JsonObject source,LogicEnvironment environment) {
         if(!source.has("classes"))return;
+        Diagnostics diagnostics=environment.state().diagnostics;
         for(JsonElement element:source.getAsJsonArray("classes")) {
             JsonObject definition=element.getAsJsonObject();ClassInfo info=new ClassInfo();
             try {
                 info.name=string(definition.get("name"),"Class name");validateSourceName(info.name,"class name");
                 if(isBuiltinName(info.name)||environment.classes.containsKey(info.name))throw new IllegalArgumentException("Duplicate or reserved class: "+info.name);
-            } catch (IllegalArgumentException error) { throw locate(error, definition, info.name == null ? null : "class " + info.name, environment); }
+            } catch (RuntimeException error) { recover(error, definition, info.name == null ? null : "class " + info.name, environment); continue; }
             info.declaration=info;info.source=definition;info.sources=environment.state().sources;allocateClass(info);
             environment.classes.put(info.name,info);CLASS_DECLARATIONS.get().put(info.name,info);
         }
+        diagnostics.checkpoint();
         // Collect every class's parameter names before resolving bounds, so a bound
         // can name a later generic class just like any other forward class type.
         for(ClassInfo info:environment.classes.values()) try {
@@ -1547,7 +1592,8 @@ public class Compiler {
                 int id=-100-TYPE_PARAMETERS.get().size();TYPE_PARAMETERS.get().put(id,new TypeParameter(name,AsTypes.ANY_VALUE));info.typeScope.put(name,id);parameters.add(id);
             }
             info.arguments=List.copyOf(parameters);
-        } catch (IllegalArgumentException error) { throw locate(error, info.source, "class " + info.name, environment); }
+        } catch (RuntimeException error) { recover(error, info.source, "class " + info.name, environment); }
+        diagnostics.checkpoint();
         for(ClassInfo info:environment.classes.values()) try {
             Map<String,Integer> earlier=new LinkedHashMap<>();int index=0;
             if(info.source.has("type-parameters"))for(JsonElement element:info.source.getAsJsonArray("type-parameters")) {
@@ -1556,22 +1602,26 @@ public class Compiler {
                 if(parameter.has("bound")&&!isClass(bound))throw new IllegalArgumentException("A type parameter bound must be a class value or pointer");
                 TYPE_PARAMETERS.get().put(id,new TypeParameter(name,bound));earlier.put(name,id);
             }
-        } catch (IllegalArgumentException error) { throw locate(error, info.source, "class " + info.name, environment); }
+        } catch (RuntimeException error) { recover(error, info.source, "class " + info.name, environment); }
+        diagnostics.checkpoint();
         // Applications created while collecting forward bounds saw provisional
         // bounds. Validate them once every declaration has its final contract.
         for(ClassInfo application:new ArrayList<>(CLASS_APPLICATIONS.get().values())) {
             try { checkBounds(application.declaration.arguments,application.arguments); }
-            catch (IllegalArgumentException error) { throw locate(error, application.declaration.source, "class " + application.name, environment); }
+            catch (RuntimeException error) { recover(error, application.declaration.source, "class " + application.name, environment); }
         }
+        diagnostics.checkpoint();
         for(ClassInfo info:environment.classes.values()) {
             try { ensureLayout(info); }
-            catch (IllegalArgumentException error) { throw locate(error, info.source, "class " + info.name, environment); }
+            catch (RuntimeException error) { recover(error, info.source, "class " + info.name, environment); }
         }
+        diagnostics.checkpoint();
         Map<ClassInfo,Integer> nesting=new HashMap<>();
         for(ClassInfo info:environment.classes.values()) {
             try { valueNesting(info,nesting,new HashSet<>()); }
-            catch (IllegalArgumentException error) { throw locate(error, info.source, "class " + info.name, environment); }
+            catch (RuntimeException error) { recover(error, info.source, "class " + info.name, environment); }
         }
+        diagnostics.checkpoint();
     }
     /** Literal-object fields are embedded storage, so a class cannot contain itself by value. */
     private static int valueNesting(ClassInfo info, Map<ClassInfo,Integer> known, Set<ClassInfo> visiting) {
@@ -1622,21 +1672,27 @@ public class Compiler {
                 if(!equivalent(getter.paramTypes().get(1),setter.paramTypes().get(1))||!equivalent(getter.returnType(),setter.paramTypes().get(2)))
                     throw new IllegalArgumentException("Index getter and setter types must match: "+info.name);
             }
-        } catch (IllegalArgumentException error) { throw locate(error, info.source, "class " + info.name, global); }
+        } catch (RuntimeException error) { recover(error, info.source, "class " + info.name, global); }
+        Diagnostics diagnostics = global.state().diagnostics;
+        diagnostics.checkpoint();
         for (Function function : functions) try {
             boolean member = function.metadata().has("owner-class") || function.metadata().has("function-kind") || function.name().contains("::");
             if (member && !declaredClassFunctions.contains(function.name())) throw new IllegalArgumentException("Unregistered class function: " + function.name());
             if (member) {
-                ClassInfo owner = global.classes.get(function.metadata().get("owner-class").getAsString());
+                JsonElement ownerName = function.metadata().get("owner-class");
+                ClassInfo owner = ownerName == null ? null : global.classes.get(string(ownerName, "Function owner"));
+                if (owner == null) throw new IllegalArgumentException("Class function has no owner class: " + function.name());
                 String kind = function.name().equals(owner.constructor) ? "constructor" : function.name().equals(owner.destructor) ? "destructor" : "method";
                 validateClassFunction(Map.of(function.name(), function), owner, function.name(), kind);
             }
-        } catch (IllegalArgumentException error) { throw locate(error, function.metadata(), contextName(function.name()), global); }
+        } catch (RuntimeException error) { recover(error, function.metadata(), contextName(function.name()), global); }
         for (Function declaration : declarations.values()) {
             boolean member = declaration.metadata().has("owner-class") || declaration.metadata().has("function-kind") || declaration.name().contains("::");
             if (member && !declaredClassFunctions.contains(declaration.name()))
-                throw locate(new IllegalArgumentException("Unregistered class extern: " + declaration.name()), declaration.metadata(), null, global);
+                recover(new IllegalArgumentException("Unregistered class extern: " + declaration.name()), declaration.metadata(), null, global);
         }
+        // Factories need every class function registered and validated.
+        diagnostics.checkpoint();
         Set<Integer> occupied = new HashSet<>(ids); occupied.addAll(global.abs.values()); occupied.addAll(GeneraterJson.specialNames.values());
         int[] position = {1}; int namespace = global.moduleNamespace << 16;
         java.util.function.Supplier<Integer> nextId = () -> {
@@ -1655,7 +1711,7 @@ public class Compiler {
             List<Integer> types = List.of(info.pointerType);
             functions.add(new Function(id, name, AsTypes.VOID_VALUE, types, metadata, new JsonArray()));
             registerCompilerFunction(global, name, id, AsTypes.VOID_VALUE, types);
-        } catch (IllegalArgumentException error) { throw locate(error, info.source, "class " + info.name, global); }
+        } catch (RuntimeException error) { recover(error, info.source, "class " + info.name, global); }
         for (ClassInfo info : global.classes.values()) try {
             Function constructor = byName.get(info.constructor);
             List<Integer> types = List.copyOf(constructor.paramTypes().subList(1, constructor.paramTypes().size()));
@@ -1696,7 +1752,8 @@ public class Compiler {
                 functions.add(new Function(id,name,AsTypes.VOID_VALUE,List.of(info.pointerType),metadata,body));
                 registerCompilerFunction(global,name,id,AsTypes.VOID_VALUE,List.of(info.pointerType));
             }
-        } catch (IllegalArgumentException error) { throw locate(error, info.source, "class " + info.name, global); }
+        } catch (RuntimeException error) { recover(error, info.source, "class " + info.name, global); }
+        diagnostics.checkpoint();
     }
     private static Signature operatorSignature(ClassInfo receiver,Function function) {
         ClassInfo declaration=CLASS_DECLARATIONS.get().get(function.metadata().get("owner-class").getAsString());
@@ -1846,15 +1903,22 @@ public class Compiler {
         if (!value.matches("[0-9a-fA-F]{1," + digits + "}")) throw new IllegalArgumentException("Invalid " + description + ": " + value);
         return Integer.parseUnsignedInt(value, 16);
     }
+    /** Compiles a readable AST, reporting up to {@link Diagnostics#DEFAULT_MAX_ERRORS} errors in one {@link CompileException}. */
     public static AcsObject compile(JsonObject source) { return compile(source, new Diagnostics()); }
     /**
      * Compiles a readable AST. Errors are reported as a {@link CompileException}
      * located through the AST's {@code sources} table; an AST without one is named
      * after {@link Diagnostics#defaultFile()}, which also names the input in errors
-     * without a source position. A {@code Diagnostics} instance serves one compilation.
+     * without a source position. A {@code Diagnostics} instance serves one
+     * compilation: it may first parse the program with
+     * {@link GeneraterJson.AzScript#execute(java.nio.file.Path, Diagnostics)}.
+     *
+     * <p>The AST's nesting is bounded and its shape is checked before compilation.
+     * An unexpected exception is an internal compiler error for an AST parsed with
+     * the same collector, and malformed input otherwise.
      */
     public static AcsObject compile(JsonObject source, Diagnostics diagnostics) {
-        diagnostics.start();
+        boolean parsed = diagnostics.startCompile();
         Map<Integer,ClassInfo> previousLayouts = CLASS_LAYOUTS.get();
         var previousParameters=TYPE_PARAMETERS.get();var previousScope=TYPE_SCOPE.get();var previousDeclarations=CLASS_DECLARATIONS.get();
         var previousApplications=CLASS_APPLICATIONS.get();var previousFunctions=FUNCTION_SCOPES.get();int previousNext=NEXT_CLASS.get();
@@ -1863,18 +1927,32 @@ public class Compiler {
         BUFFER_ELEMENTS.set(new LinkedHashMap<>());BUFFER_TYPES.set(new LinkedHashMap<>());
         TYPE_SCOPE.set(new LinkedHashMap<>());CLASS_DECLARATIONS.set(new LinkedHashMap<>());CLASS_APPLICATIONS.set(new LinkedHashMap<>());FUNCTION_SCOPES.set(new IdentityHashMap<>());NEXT_CLASS.set(FIRST_CLASS_TYPE);
         SourceMap sources = SourceMap.single(diagnostics.defaultFile());
+        // A malformed sources table is reported by the shape check; positions then name the default file.
+        try { sources = SourceMap.fromJson(source.get("sources"), diagnostics.defaultFile()); }
+        catch (IllegalArgumentException malformed) { /* reported below */ }
+        if (diagnostics.namesInput()) sources.input(diagnostics.defaultFile());
+        diagnostics.sources(sources);
+        CompilationState state = new CompilationState(diagnostics, sources, parsed);
         try {
-            sources = SourceMap.fromJson(source.get("sources"), diagnostics.defaultFile());
-            if (diagnostics.namesInput()) sources.input(diagnostics.defaultFile());
-            TreeLimits.validate(source);
-            return compileProgram(source, new CompilationState(diagnostics, sources));
+            // Bound nesting and reject cycles first: the shape check walks the whole tree.
+            try { TreeLimits.validate(source); }
+            catch (TreeLimits.LimitExceeded e) { diagnostics.report(new CompileException(List.of(sources.error(e.anchor(), null, e.getMessage())), e, true)); }
+            for (String problem : AstShape.validate(source)) {
+                // The in-process parser never produces a malformed AST; if it did, that is a compiler bug.
+                Diagnostic diagnostic = sources.error(null, problem);
+                if (parsed) diagnostic = new Diagnostic(diagnostic.severity(), null, diagnostic.position(), null, "internal compiler error: " + problem,
+                        List.of(Diagnostic.note(null, "this is a compiler bug; rerun with --debug-compiler for a stack trace")), true);
+                diagnostics.report(new CompileException(diagnostic));
+            }
+            diagnostics.checkpoint();
+            AcsObject result = compileProgram(source, state);
+            diagnostics.checkpoint();
+            return result;
         }
         catch (CompileException e) { throw diagnostics.record(e); }
-        catch (TreeLimits.LimitExceeded e) { throw diagnostics.record(new CompileException(sources.error(e.anchor(), null, e.getMessage()), e)); }
-        catch (IllegalArgumentException e) { throw diagnostics.record(new CompileException(sources.error(null, message(e)), e)); }
-        catch (RuntimeException e) {
-            throw diagnostics.record(new CompileException(sources.error(null,
-                    "Malformed script JSON: required metadata, body or expression field is missing or invalid"), e));
+        catch (RuntimeException | StackOverflowError e) {
+            // A deliberate error outside the per-item recovery names the input; anything else is unexpected.
+            throw diagnostics.record(Diagnostics.userError(e) ? new CompileException(sources.error(null, message(e)), e) : unexpected(e, null, null, state));
         }
         finally { CLASS_LAYOUTS.set(previousLayouts);TYPE_PARAMETERS.set(previousParameters);TYPE_SCOPE.set(previousScope);CLASS_DECLARATIONS.set(previousDeclarations);CLASS_APPLICATIONS.set(previousApplications);FUNCTION_SCOPES.set(previousFunctions);NEXT_CLASS.set(previousNext);BUFFER_ELEMENTS.set(previousBufferElements);BUFFER_TYPES.set(previousBufferTypes); }
     }
@@ -1894,17 +1972,28 @@ public class Compiler {
     private static void hintName(String name) {
         if (!name.matches("[A-Za-z_][A-Za-z0-9_]*")) throw new IllegalArgumentException("Invalid hint name: " + name);
     }
+    /**
+     * Lowers a shape-checked AST. Each global loop reports the errors of every item
+     * and ends with a barrier, and function bodies are checked one by one, so
+     * independent errors are reported together without cascading into later phases.
+     */
     private static AcsObject compileProgram(JsonObject source, CompilationState state) {
         AcsObject result = new ExecProgram(); JsonObject metadata = source.getAsJsonObject("metadata");
+        LogicEnvironment global = new LogicEnvironment(); global.state = state;
+        Diagnostics diagnostics = state.diagnostics;
         result.put("author", metadata.has("author") ? string(metadata.get("author"), "Author") : "");
         result.put("version", metadata.has("version") ? metadata.get("version").getAsInt() : 2); result.put("exec-version", ExecCodec.VERSION);
         AcsObject extension = new AcsObject();
-        if (source.has("ext")) for (var entry : source.getAsJsonObject("ext").entrySet()) extension.put(entry.getKey(), string(entry.getValue(), "Extension value"));
+        if (source.has("ext")) for (var entry : source.getAsJsonObject("ext").entrySet()) {
+            try { extension.put(entry.getKey(), string(entry.getValue(), "Extension value")); }
+            catch (RuntimeException error) { recover(error, null, null, global); }
+        }
         result.put("ext", extension);
         String hint = source.has("namespace-hint") ? string(source.get("namespace-hint"), "Namespace hint") : "";
-        if (!hint.isEmpty()) hintName(hint);
+        try { if (!hint.isEmpty()) hintName(hint); }
+        catch (RuntimeException error) { recover(error, null, null, global); }
         Map<String,Integer> assumptions = new LinkedHashMap<>();
-        if (source.has("assume-hints")) for (JsonElement item : source.getAsJsonArray("assume-hints")) {
+        if (source.has("assume-hints")) for (JsonElement item : source.getAsJsonArray("assume-hints")) try {
             JsonObject assumption = item.getAsJsonObject(); String name = string(assumption.get("hint"), "Assumed hint"); hintName(name);
             int namespace = assumption.get("namespace").getAsBigDecimal().intValueExact();
             if (namespace < 1 || namespace > 0xffff || namespace == 0xabd || namespace == 0xfff)
@@ -1913,22 +2002,25 @@ public class Compiler {
             if (existing != null && existing != namespace || existing == null && assumptions.containsValue(namespace))
                 throw new IllegalArgumentException("Conflicting hint or assumed namespace");
             assumptions.put(name, namespace);
-        }
-        LogicEnvironment global = new LogicEnvironment(); global.state = state;
+        } catch (RuntimeException error) { recover(error, null, null, global); }
+        diagnostics.checkpoint();
         addDefaultIds(global.abs); addBuiltinSignatures(global); readClasses(source, global);
         global.moduleNamespace = metadata.has("function-namespace") ? metadata.get("function-namespace").getAsBigDecimal().intValueExact() : hint.isEmpty() ? 0xfff : 0;
         if (global.moduleNamespace < 0 || global.moduleNamespace > 0xffff || global.moduleNamespace == 0xabd || !hint.isEmpty() && global.moduleNamespace != 0)
-            throw new IllegalArgumentException("Invalid function namespace");
+            recover(new IllegalArgumentException("Invalid function namespace"), null, null, global);
         Map<String,Integer> abstractIds = new LinkedHashMap<>();
-        if (source.has("abstract")) for (var entry : source.getAsJsonObject("abstract").entrySet()) {
+        if (source.has("abstract")) for (var entry : source.getAsJsonObject("abstract").entrySet()) try {
             if (isBuiltinName(entry.getKey()) || global.classes.containsKey(entry.getKey())) throw new IllegalArgumentException("Reserved function name: " + entry.getKey());
             int id = hexId(string(entry.getValue(), "Function ID"), 8, "function ID");
             if ((id >>> 16) == 0xabd) throw new IllegalArgumentException("Abstract function cannot use the runtime namespace");
             abstractIds.put(entry.getKey(), id);
-        }
+        } catch (RuntimeException error) { recover(error, null, null, global); }
+        diagnostics.checkpoint();
         List<Function> functions = new ArrayList<>(); Map<String,Function> definitions = new LinkedHashMap<>(); Set<Integer> ids = new HashSet<>();
         for (var namespace : source.getAsJsonObject("body").entrySet()) {
-            int namespaceId = hexId(namespace.getKey(), 4, "namespace") << 16;
+            int namespaceId;
+            try { namespaceId = hexId(namespace.getKey(), 4, "namespace") << 16; }
+            catch (RuntimeException error) { recover(error, null, null, global); continue; }
             for (var entry : namespace.getValue().getAsJsonObject().entrySet()) {
                 JsonObject function = entry.getValue().getAsJsonObject(), meta = function.getAsJsonObject("metadata");
                 String name = null;
@@ -1951,14 +2043,16 @@ public class Compiler {
                 if (definitions.putIfAbsent(name, value) != null) throw new IllegalArgumentException("Duplicate function definition: " + name);
                 functions.add(value); global.abs.put(name, id);
                 global.namedSignatures.put(name, value.signature());
-                } catch (IllegalArgumentException error) { throw locate(error, meta, name == null ? null : contextName(name), global); }
+                } catch (RuntimeException error) { recover(error, meta, name == null ? null : contextName(name), global); }
             }
         }
+        diagnostics.checkpoint();
         Map<String,Function> declarations = new LinkedHashMap<>(); Map<Integer,Signature> importIds = new LinkedHashMap<>();
         if (source.has("extern-signatures")) for (var entry : source.getAsJsonObject("extern-signatures").entrySet()) {
             String name = entry.getKey(); JsonObject declaration = entry.getValue().getAsJsonObject();
             try {
-            Integer id = declaration.has("id") ? hexId(string(declaration.get("id"), "External ID"), 8, "external ID") : abstractIds.get(name);
+            // Boxed in both branches, so a missing mapping is reported below instead of failing to unbox.
+            Integer id = declaration.has("id") ? Integer.valueOf(hexId(string(declaration.get("id"), "External ID"), 8, "external ID")) : abstractIds.get(name);
             if (id == null) throw new IllegalArgumentException("External signature has no abstract mapping: " + name);
             if (isBuiltinName(name) || global.classes.containsKey(name) || (id >>> 16) == 0xabd || GeneraterJson.specialNames.containsValue(id))
                 throw new IllegalArgumentException("Reserved external function: " + name);
@@ -1981,17 +2075,18 @@ public class Compiler {
             meta.add("param", paramNames);FUNCTION_SCOPES.get().put(meta,functionScope(declaration));
             declarations.put(name, new Function(id, name, returns, params, meta, JsonNull.INSTANCE));
             global.abs.put(name, id); global.namedSignatures.put(name, signature);
-            } catch (IllegalArgumentException error) { throw locate(error, declaration, null, global); }
+            } catch (RuntimeException error) { recover(error, declaration, null, global); }
         }
+        diagnostics.checkpoint();
         for (var entry : abstractIds.entrySet()) {
             Function definition = definitions.get(entry.getKey()), declaration = declarations.get(entry.getKey());
             JsonObject anchor = declaration != null ? declaration.metadata() : definition != null ? definition.metadata() : null;
             if (definition == null && declaration == null)
-                throw locate(new IllegalArgumentException("Missing external signature for " + entry.getKey()), null, null, global);
-            int expected = declaration != null ? declaration.id() : definition.id();
-            if (entry.getValue() != expected)
-                throw locate(new IllegalArgumentException("Function mapping disagrees with declaration: " + entry.getKey()), anchor, contextName(entry.getKey()), global);
+                recover(new IllegalArgumentException("Missing external signature for " + entry.getKey()), null, null, global);
+            else if (entry.getValue() != (declaration != null ? declaration.id() : definition.id()))
+                recover(new IllegalArgumentException("Function mapping disagrees with declaration: " + entry.getKey()), anchor, contextName(entry.getKey()), global);
         }
+        diagnostics.checkpoint();
         int globals = 0;
         if (source.has("global-variable")) for (JsonElement item : source.getAsJsonArray("global-variable")) {
             String name = string(item, "Global name");
@@ -1999,8 +2094,9 @@ public class Compiler {
                 if (global.classes.containsKey(name)) throw new IllegalArgumentException("Global name conflicts with class: " + name);
                 if (globals >= MAX_VARIABLE_SLOTS) throw new IllegalArgumentException("Program exceeds global variable slot limit");
                 global.define(name, -(++globals));
-            } catch (IllegalArgumentException error) { throw locate(error, null, "global " + name, global); }
+            } catch (RuntimeException error) { recover(error, null, "global " + name, global); }
         }
+        diagnostics.checkpoint();
         result.put("gvs", globals);
         // Imported self slots are reserved even if this module does not define them.
         for (int imported : importIds.keySet()) {
@@ -2016,7 +2112,9 @@ public class Compiler {
         }
         Set<Integer> fixedNamespaces = new HashSet<>(Set.of(0, 0xabd, 0xfff));
         if (hint.isEmpty()) {fixedNamespaces.add(global.moduleNamespace); for (Function function : functions) fixedNamespaces.add(function.id() >>> 16);}
-        for (int namespace : assumptions.values()) if (fixedNamespaces.contains(namespace)) throw new IllegalArgumentException("Assumed namespace overlaps a fixed function namespace");
+        for (int namespace : assumptions.values()) if (fixedNamespaces.contains(namespace))
+            recover(new IllegalArgumentException("Assumed namespace overlaps a fixed function namespace"), null, null, global);
+        diagnostics.checkpoint();
         if (!hint.isEmpty() && !assumptions.containsKey(hint)) {
             Set<Integer> occupied = new HashSet<>(fixedNamespaces); occupied.addAll(assumptions.values());
             for (int id : importIds.keySet()) occupied.add(id >>> 16);
@@ -2047,32 +2145,34 @@ public class Compiler {
         AcsArray output = new AcsArray();
         for (Function function : functions) {
             String context = contextName(function.name());
-            if (function.returnType() != AsTypes.VOID_VALUE && canCompleteNormally(function.script())) {
-                // Reported at the closing brace that execution can reach.
-                JsonObject meta = function.metadata(); Diagnostic.Position end = state.sources.position(meta, "_end_line", "_end_column");
-                String text = "non-void function can reach the end of its body without returning a value";
-                throw new CompileException(end == null ? state.sources.error(meta, context, text)
-                        : Diagnostic.error(end, context, text, state.sources.includeNotes(state.sources.unitOf(meta))));
-            }
-            LogicEnvironment scope = global.child();scope.counter = new Counter();scope.context = context;scope.returnType = function.returnType();
-            scope.typeScope=function.typeScope();scope.typeParameters=function.typeParameters();TYPE_SCOPE.set(scope.typeScope);
-            if (function.metadata().has("owner-class")) scope.ownerClass = string(function.metadata().get("owner-class"), "Function owner");
-            int parameter = 0; AcsArray parameterTypes = new AcsArray();
-            try {
-                for (JsonElement name : function.metadata().getAsJsonArray("param")) {
-                    if (parameter >= MAX_VARIABLE_SLOTS) throw new IllegalArgumentException("Function frame exceeds variable slot limit");
-                    int parameterType = function.paramTypes().get(parameter);
-                    scope.define(string(name,"Parameter name"),parameter++,isFlexibleClass(parameterType) ? pointerOf(parameterType) : parameterType);parameterTypes.acsa.add(new AcsIntegerElement(abiType(parameterType)));
-                }
-            } catch (IllegalArgumentException error) { throw locate(error, function.metadata(), context, global); }
-            scope.counter.next = parameter; AcsObject compiled = new AcsObject();compiled.put("id",function.id());compiled.put("return-type",abiType(scope.returnType));
-            compiled.put("param-count",parameter);compiled.put("param-types",parameterTypes);compiled.put("hidden-count",scope.typeParameters.size());compiled.put("entry-kind",function.internal()?1:0);
-            try {
-                AcsElement body = compileExpression(classFunctionBody(function, global), scope);
-                compiled.put("script",body);
-            } catch (IllegalArgumentException error) { throw locate(error, function.metadata(), context, global); }
-            compiled.put("local-count",scope.counter.next-parameter);output.acsa.add(compiled);
+            try { output.acsa.add(compileFunction(function, global, context)); }
+            // A failing body ends only its own function; the next one is checked on its own.
+            catch (RuntimeException | StackOverflowError error) { recover(error, function.metadata(), context, global); }
         }
+        diagnostics.checkpoint();
         result.put("f",output);normalizeContexts(result);return result;
+    }
+    private static AcsObject compileFunction(Function function, LogicEnvironment global, String context) {
+        LogicEnvironment scope = global.child();scope.counter = new Counter();scope.context = context;scope.returnType = function.returnType();
+        scope.typeScope=function.typeScope();scope.typeParameters=function.typeParameters();TYPE_SCOPE.set(scope.typeScope);
+        if (function.metadata().has("owner-class")) scope.ownerClass = string(function.metadata().get("owner-class"), "Function owner");
+        int parameter = 0; AcsArray parameterTypes = new AcsArray();
+        for (JsonElement name : function.metadata().getAsJsonArray("param")) {
+            if (parameter >= MAX_VARIABLE_SLOTS) throw new IllegalArgumentException("Function frame exceeds variable slot limit");
+            int parameterType = function.paramTypes().get(parameter);
+            scope.define(string(name,"Parameter name"),parameter++,isFlexibleClass(parameterType) ? pointerOf(parameterType) : parameterType);parameterTypes.acsa.add(new AcsIntegerElement(abiType(parameterType)));
+        }
+        scope.counter.next = parameter; AcsObject compiled = new AcsObject();compiled.put("id",function.id());compiled.put("return-type",abiType(scope.returnType));
+        compiled.put("param-count",parameter);compiled.put("param-types",parameterTypes);compiled.put("hidden-count",scope.typeParameters.size());compiled.put("entry-kind",function.internal()?1:0);
+        compiled.put("script",compileExpression(classFunctionBody(function, global), scope));
+        if (function.returnType() != AsTypes.VOID_VALUE && canCompleteNormally(function.script())) {
+            // Reported at the closing brace that execution can reach.
+            CompilationState state = global.state(); JsonObject meta = function.metadata();
+            Diagnostic.Position end = state.sources.position(meta, "_end_line", "_end_column");
+            String text = "non-void function can reach the end of its body without returning a value";
+            throw new CompileException(end == null ? state.sources.error(meta, context, text)
+                    : Diagnostic.error(end, context, text, state.sources.includeNotes(state.sources.unitOf(meta))).inUnit(state.sources.unitOf(meta)));
+        }
+        compiled.put("local-count",scope.counter.next-parameter);return compiled;
     }
 }

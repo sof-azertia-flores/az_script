@@ -30,16 +30,19 @@ public class Main {
      * value, mapped to their canonical spelling, and value-less flags.
      */
     private static final Map<String,String> VALUE_OPTIONS = Map.of(
-            "-o", "-o", "--output", "-o", "--ast", "--ast", "--exec-json", "--exec-json");
-    private static final Set<String> FLAG_OPTIONS = Set.of();
+            "-o", "-o", "--output", "-o", "--ast", "--ast", "--exec-json", "--exec-json", "--max-errors", "--max-errors");
+    /** {@code --debug-compiler} prints the stack trace of an internal compiler error. */
+    private static final Set<String> FLAG_OPTIONS = Set.of("--debug-compiler");
     private static final Pattern GSON_POSITION = Pattern.compile("(?s)^(?:[\\w.$]+(?:Exception|Error): )?(.*?) at line (\\d+) column (\\d+)(?: path .*)?$");
 
     /**
      * Parsed {@code compile}/{@code compile-json} arguments. Options may appear before
      * or after the input path, and {@code --} ends them so a path may begin with '-';
-     * unset outputs are null and {@code flags} holds the given flags.
+     * unset outputs are null, {@code flags} holds the given flags and {@code maxErrors}
+     * is the error limit ({@link Diagnostics#DEFAULT_MAX_ERRORS} unless given, 0 for none).
      */
-    public record CompileArguments(String command, Path source, Path output, Path astOutput, Path execOutput, Set<String> flags) {
+    public record CompileArguments(String command, Path source, Path output, Path astOutput, Path execOutput, Set<String> flags,
+                                   int maxErrors) {
         /** The ABD output: {@code -o}, or the source name with {@code .exec.abd} beside it. */
         public Path outputOrDefault() {
             if (output != null) return output;
@@ -52,28 +55,42 @@ public class Main {
         if (args.isEmpty() || !args.get(0).equals("compile") && !args.get(0).equals("compile-json"))
             throw new IllegalArgumentException("Expected compile or compile-json");
         Path source = null;
-        Map<String,Path> values = new HashMap<>();
+        Map<String,String> values = new HashMap<>();
         Set<String> flags = new LinkedHashSet<>();
         boolean operands = false;
         for (int i = 1; i < args.size(); i++) {
             String argument = args.get(i), option = VALUE_OPTIONS.get(argument);
             if (operands) {
                 if (source != null) throw new IllegalArgumentException("Unexpected argument: " + argument);
-                source = Path.of(argument);
+                source = path(argument);
             } else if (argument.equals("--")) {
                 operands = true;
             } else if (option != null) {
                 if (i + 1 >= args.size()) throw new IllegalArgumentException("Missing value for " + argument);
-                values.put(option, Path.of(args.get(++i)));
+                values.put(option, args.get(++i));
             } else if (FLAG_OPTIONS.contains(argument)) {
                 flags.add(argument);
             } else if (argument.startsWith("-") && argument.length() > 1) {
                 throw new IllegalArgumentException("Unknown option: " + argument);
-            } else if (source == null) source = Path.of(argument);
+            } else if (source == null) source = path(argument);
             else throw new IllegalArgumentException("Unexpected argument: " + argument);
         }
         if (source == null) throw new IllegalArgumentException("Missing input path");
-        return new CompileArguments(args.get(0), source, values.get("-o"), values.get("--ast"), values.get("--exec-json"), Set.copyOf(flags));
+        int maxErrors = Diagnostics.DEFAULT_MAX_ERRORS;
+        if (values.containsKey("--max-errors")) {
+            String limit = values.get("--max-errors");
+            try { maxErrors = limit.matches("[0-9]+") ? Integer.parseInt(limit) : -1; }
+            catch (NumberFormatException e) { maxErrors = -1; }
+            if (maxErrors < 0) throw new IllegalArgumentException("--max-errors expects a non-negative integer, got " + limit);
+        }
+        return new CompileArguments(args.get(0), source, path(values.get("-o")), path(values.get("--ast")), path(values.get("--exec-json")),
+                Set.copyOf(flags), maxErrors);
+    }
+    /** A command-line path; one the platform cannot represent, e.g. with a NUL character, is a usage error. */
+    private static Path path(String value) {
+        if (value == null) return null;
+        try { return Path.of(value); }
+        catch (InvalidPathException e) { throw new IllegalArgumentException("Invalid path: " + e.getMessage()); }
     }
 
     public static void main(String[] args) {
@@ -81,9 +98,10 @@ public class Main {
         if (status != 0) System.exit(status);
     }
     public static int run(String[] args, PrintStream out, PrintStream err) {
+        boolean debug = false;
         try {
             if (args.length == 0 || args[0].equals("--help") || args[0].equals("help")) {
-                out.println("AzScript compiler\n  compile <source.azs> [-o output.abd] [--ast tree.json] [--exec-json instructions.json]\n  compile-json <tree.json> [-o output.abd] [--exec-json instructions.json]\n  pack <output.abd> <file-or-directory>...\n  unpack <archive.abd> <new-or-empty-directory>\nOptions may precede or follow the input path; -- ends the options. Diagnostics are written to stderr as\nfile:line:column: error: message; the exit status is 1 when compilation fails.");
+                out.println("AzScript compiler\n  compile <source.azs> [-o output.abd] [--ast tree.json] [--exec-json instructions.json]\n  compile-json <tree.json> [-o output.abd] [--exec-json instructions.json]\n  pack <output.abd> <file-or-directory>...\n  unpack <archive.abd> <new-or-empty-directory>\nCompile options:\n  --max-errors N     stop after N errors (default " + Diagnostics.DEFAULT_MAX_ERRORS + ", 0 for no limit)\n  --debug-compiler   print the stack trace of an internal compiler error\nOptions may precede or follow the input path; -- ends the options. Diagnostics are written to stderr as\nfile:line:column: error: message. The exit status is 1 when compilation fails and 2 for an internal compiler error.");
                 return 0;
             }
             switch (args[0]) {
@@ -91,13 +109,15 @@ public class Main {
                     CompileArguments arguments = parseCompileArguments(Arrays.asList(args));
                     Path source = arguments.source(), output = arguments.outputOrDefault();
                     Path astOutput = arguments.astOutput(), execOutput = arguments.execOutput();
+                    debug = arguments.flags().contains("--debug-compiler");
                     com.google.gson.JsonObject ast;
-                    Diagnostics diagnostics = new Diagnostics();
+                    // One collector serves the parse and the compilation, which marks the AST as the parser's own.
+                    Diagnostics diagnostics = new Diagnostics().maxErrors(arguments.maxErrors());
                     if (args[0].equals("compile-json")) {
                         String label = source.getFileName() == null ? source.toString() : source.getFileName().toString();
                         diagnostics.defaultFile(label);
                         ast = readTree(source, label);
-                    } else ast = parse(source).toObj();
+                    } else ast = parse(source, diagnostics).toObj();
                     AcsObject compiled = Compiler.compile(ast, diagnostics);
                     Path normalizedSource = source.toAbsolutePath().normalize();
                     var outputs = new java.util.HashSet<Path>();
@@ -126,17 +146,33 @@ public class Main {
             }
             return 0;
         } catch (CompileException e) {
-            report(e, err); return 1;
+            report(e, err);
+            if (debug && e.getCause() != null && !Diagnostics.userError(e.getCause())) e.getCause().printStackTrace(err);
+            return e.internal() ? 2 : 1;
         } catch (IOException | IllegalArgumentException | JsonParseException e) {
+            // The compiler classifies its own exceptions, so these come from arguments, files, pack or unpack.
             err.println("Error: " + e.getMessage()); return 1;
+        } catch (RuntimeException | StackOverflowError e) {
+            return internal(e, debug, err);
         }
     }
-    /** Prints every diagnostic of a failed compilation, then a summary line. */
+    /** An exception escaping the compiler's own classification, e.g. while writing outputs. */
+    private static int internal(Throwable error, boolean debug, PrintStream err) {
+        report(new CompileException(Diagnostic.internalError(null, null, error, List.of()), error), err);
+        if (debug) error.printStackTrace(err);
+        return 2;
+    }
+    /**
+     * Prints every diagnostic of a failed compilation, then a summary line:
+     * {@code Error: compilation failed: N error(s)[, M warning(s)]}, or
+     * {@code Error: compilation failed: internal compiler error}.
+     */
     public static void report(CompileException failure, PrintStream err) {
         for (Diagnostic diagnostic : failure.diagnostics()) err.println(diagnostic.format());
         long errors = failure.diagnostics().stream().filter(Diagnostic::isError).count();
         long warnings = failure.diagnostics().stream().filter(d -> d.severity() == Diagnostic.Severity.WARNING).count();
-        err.println("Error: compilation failed: " + count(errors, "error") + (warnings == 0 ? "" : ", " + count(warnings, "warning")));
+        err.println("Error: compilation failed: " + (failure.internal() ? "internal compiler error"
+                : count(errors, "error") + (warnings == 0 ? "" : ", " + count(warnings, "warning"))));
     }
     private static String count(long value, String noun) { return value + " " + noun + (value == 1 ? "" : "s"); }
     /** Reads a compile-json input; malformed JSON is reported at its line and column. */
@@ -165,8 +201,8 @@ public class Main {
     private static CompileException fileError(String label, String message) {
         return new CompileException(Diagnostic.error(Diagnostic.Position.file(label), message));
     }
-    private static GeneraterJson.AzScript parse(Path source) throws IOException {
-        var script = new GeneraterJson.AzScript(); script.execute(source); return script;
+    private static GeneraterJson.AzScript parse(Path source, Diagnostics diagnostics) throws IOException {
+        var script = new GeneraterJson.AzScript(); script.execute(source, diagnostics); return script;
     }
     private static void write(Path target, byte[] bytes) throws IOException {
         Path path = target.toAbsolutePath().normalize();

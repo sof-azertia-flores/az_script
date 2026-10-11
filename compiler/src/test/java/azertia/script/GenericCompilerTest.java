@@ -7,12 +7,13 @@ import java.util.*;
 import static org.junit.jupiter.api.Assertions.*;
 
 class GenericCompilerTest {
-    private JsonObject ast(String source) throws Exception {
-        var parser = new GeneraterJson.AzScript(); parser.execute(source); return parser.toObj();
-    }
+    /** Parses and compiles with one collector, so a compiler bug fails the test instead of passing as a rejection. */
     private JsonObject compile(String source) throws Exception {
-        JsonObject tree = ast(source);
-        AcsObject first = Compiler.compile(tree), again = Compiler.compile(JsonParser.parseString(tree.toString()).getAsJsonObject());
+        var diagnostics = new Diagnostics(); var parser = new GeneraterJson.AzScript();
+        JsonObject tree; AcsObject first;
+        try { parser.execute(source, diagnostics); tree = parser.toObj(); first = Compiler.compile(tree, diagnostics); }
+        catch (CompileException error) { assertFalse(error.internal(), error::getMessage); throw error; }
+        AcsObject again = Compiler.compile(JsonParser.parseString(tree.toString()).getAsJsonObject());
         assertArrayEquals(first.toValue().getData(), again.toValue().getData());
         return first.toJson().getAsJsonObject();
     }

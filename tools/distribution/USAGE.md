@@ -28,7 +28,7 @@ run.cmd examples\hello.exec.abd
 
 默认在源文件旁边生成三份产物：`hello.exec.abd` 可执行文件、`hello.ast.json` 可读语法树和 `hello.exec.json` 降级后的指令树。`-o` 指定 ABD 输出位置，`--ast` 和 `--exec-json` 可分别指定两个 JSON 的位置。`hello.azs` 输出 `Hello, AzScript!` 和主函数返回值 `42`。解释器将非 `void` 返回值打印到标准输出，成功执行的进程退出码为 `0`，并不把脚本的整数返回值当作进程退出码。执行失败返回非零值并向标准错误输出诊断。
 
-编译错误以 `文件:行:列: error: 消息` 写到标准错误，位置指向原始文件，包括被包含的头文件和宏的使用位置；随后的 `note:` 行给出 include 链。编译失败时最后输出 `Error: compilation failed: 1 error`，退出码为 `1`，不生成任何产物。选项可以写在源文件路径之前或之后；`--` 结束选项，用于以 `-` 开头的源文件路径。格式详见[语言说明](LANGUAGE.md#诊断)。
+编译错误以 `文件:行:列: error: 消息` 写到标准错误，位置指向原始文件，包括被包含的头文件和宏的使用位置；随后的 `note:` 行给出 include 链。彼此独立的错误会一并报告，默认最多 20 个；`--max-errors N` 修改上限（0 表示不限）。编译失败时最后输出汇总行，例如 `Error: compilation failed: 2 errors`，退出码为 `1`，不生成任何产物。退出码 `2` 表示内部编译器错误，即编译器自身的缺陷；`--debug-compiler` 会在报告中附上 Java 堆栈。选项可以写在源文件路径之前或之后；`--` 结束选项，用于以 `-` 开头的源文件路径。格式详见[语言说明](LANGUAGE.md#诊断)。
 
 使用 `-o output/demo.abd` 或 `-o output/demo.exec.abd` 时，两个 JSON 默认分别为 `output/demo.ast.json` 和 `output/demo.exec.json`；显式 `--ast`、`--exec-json` 各自覆盖默认位置。
 

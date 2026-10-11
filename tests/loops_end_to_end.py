@@ -42,8 +42,8 @@ def main():
             result = run(command + ['compile', source_path, '-o', binary,
                                     '--ast', ast, '--exec-json', instructions])
             if error:
-                assert result.returncode != 0 and error in result.stderr, (name, result.stderr)
-                assert 'Exception in thread' not in result.stderr, (name, result.stderr)
+                assert result.returncode == 1 and error in result.stderr, (name, result.stderr)
+                assert 'Exception in thread' not in result.stderr and 'internal compiler error' not in result.stderr, (name, result.stderr)
                 checks += 1
                 return
             assert result.returncode == 0, (name, result.stderr)
@@ -165,7 +165,7 @@ def main():
             path = work / (name + '.json')
             path.write_text(json.dumps(forged))
             result = run(command + ['compile-json', path, '-o', work / (name + '.abd')])
-            assert result.returncode != 0 and error in result.stderr, (name, result.stderr)
+            assert result.returncode == 1 and error in result.stderr, (name, result.stderr)
             checks += 1
 
         malformed = work / 'continue-extra.abd'

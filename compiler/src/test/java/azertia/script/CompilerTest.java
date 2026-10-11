@@ -17,9 +17,13 @@ import static org.junit.jupiter.api.Assertions.*;
 
 class CompilerTest {
     @TempDir Path temporary;
+    /** Parses and compiles with one collector, so a compiler bug fails the test instead of passing as a rejection. */
     private JsonObject compile(String source) throws Exception {
-        var script = new GeneraterJson.AzScript(); script.execute(source);
-        return Compiler.compile(script.toObj()).toJson().getAsJsonObject();
+        var diagnostics = new Diagnostics(); var script = new GeneraterJson.AzScript();
+        try {
+            script.execute(source, diagnostics);
+            return Compiler.compile(script.toObj(), diagnostics).toJson().getAsJsonObject();
+        } catch (CompileException error) { assertFalse(error.internal(), error::getMessage); throw error; }
     }
     private JsonObject main(String source) throws Exception {
         for (JsonElement function : compile(source).getAsJsonArray("f"))
@@ -382,7 +386,7 @@ class CompilerTest {
             var reserved = new GeneraterJson.AzScript(); reserved.execute("void main(){}");
             JsonObject reservedTree = reserved.toObj();
             reservedTree.getAsJsonObject("abstract").addProperty(builtin, "ccf0001");
-            assertThrows(IllegalArgumentException.class, () -> Compiler.compile(reservedTree), builtin);
+            assertRejected(reservedTree, builtin);
         }
         assertThrows(IllegalArgumentException.class, () -> compile(
                 "#unknown_directive ignored\nvoid main(){}"));
@@ -391,13 +395,13 @@ class CompilerTest {
         var forgedRuntime = new GeneraterJson.AzScript(); forgedRuntime.execute("void main(){}");
         JsonObject forgedRuntimeTree = forgedRuntime.toObj();
         forgedRuntimeTree.getAsJsonObject("abstract").addProperty("hidden", "abd0000");
-        assertThrows(IllegalArgumentException.class, () -> Compiler.compile(forgedRuntimeTree));
+        assertRejected(forgedRuntimeTree);
         var forgedAlias = new GeneraterJson.AzScript();
         forgedAlias.execute("int helper(){return 1;} int main(){return helper();}");
         JsonObject forgedAliasTree = forgedAlias.toObj();
         String helperId = forgedAliasTree.getAsJsonObject("abstract").get("helper").getAsString();
         forgedAliasTree.getAsJsonObject("abstract").addProperty("helper_again", helperId);
-        assertThrows(IllegalArgumentException.class, () -> Compiler.compile(forgedAliasTree));
+        assertRejected(forgedAliasTree);
         for (String invalidBuiltinCall : new String[]{
                 "void main(){print();}", "void main(){print(1,2);}", "void main(){getDepth(1);}",
                 "void main(){mem_free(\"x\");}", "void main(){alloc(\"x\");}",
@@ -500,7 +504,7 @@ class CompilerTest {
             Path source = temporary.resolve("invalid.json"); Files.writeString(source, content);
             var bytes = new ByteArrayOutputStream(); var errors = new PrintStream(bytes);
             assertEquals(1, Main.run(new String[]{"compile-json", source.toString()}, errors, errors));
-            assertTrue(bytes.toString().matches("(?s)invalid\\.json(:\\d+:\\d+)?: error: .*\\RError: compilation failed: 1 error\\R"), bytes::toString);
+            assertTrue(bytes.toString().matches("(?s)invalid\\.json(:\\d+:\\d+)?: error: .*\\RError: compilation failed: \\d+ errors?\\R"), bytes::toString);
             assertFalse(Files.exists(temporary.resolve("invalid.exec.abd")));
         }
     }
@@ -520,7 +524,7 @@ class CompilerTest {
         var script = new GeneraterJson.AzScript(); script.execute("int main(){return 1;}");
         var tree = script.toObj();
         tree.getAsJsonObject("body").getAsJsonObject("fff").getAsJsonObject("_funcfff0000").add("script", deepExpression);
-        assertThrows(IllegalArgumentException.class, () -> Compiler.compile(tree));
+        assertRejected(tree);
         assertEquals(1, main("int main(){return 1;}").getAsJsonArray("script").get(0).getAsJsonObject().get("r").getAsInt());
         Path json = temporary.resolve("deep.json"); Files.writeString(json, "[".repeat(2000) + "1" + "]".repeat(2000));
         var errors = new PrintStream(new ByteArrayOutputStream());
@@ -645,6 +649,13 @@ class CompilerTest {
                 "class P{int x;}void main(){P p;print(p==0);}"})
             assertThrows(IllegalArgumentException.class, () -> compile(invalid), invalid);
     }
+    /** A forged AST is rejected as an error in the program, never as an internal or unexpected compiler failure. */
+    private static CompileException assertRejected(JsonObject tree, String... label) {
+        CompileException error = assertThrows(CompileException.class, () -> Compiler.compile(tree), String.join(" ", label));
+        assertFalse(error.internal(), error::getMessage);
+        assertFalse(error.getMessage().contains("Malformed script JSON near"), error::getMessage);
+        return error;
+    }
     private JsonObject newTree(String source) throws Exception {
         var script = new GeneraterJson.AzScript(); script.execute(source); return script.toObj();
     }
@@ -673,22 +684,22 @@ class CompilerTest {
         JsonObject original = newTree("class P{int x;int get(){return x;}}void main(){P p;}");
         JsonObject forged = original.deepCopy();
         forged.getAsJsonArray("classes").get(0).getAsJsonObject().getAsJsonArray("fields").get(0).getAsJsonObject().addProperty("type", "any");
-        assertThrows(IllegalArgumentException.class, () -> Compiler.compile(forged));
+        assertRejected(forged);
         JsonObject wrongMapping = original.deepCopy();
         wrongMapping.getAsJsonArray("classes").get(0).getAsJsonObject().getAsJsonObject("methods").addProperty("get", "main");
-        assertThrows(IllegalArgumentException.class, () -> Compiler.compile(wrongMapping));
+        assertRejected(wrongMapping);
         JsonObject forgedInstruction = original.deepCopy();
         JsonArray body = forgedInstruction.getAsJsonObject("body").getAsJsonObject("fff").getAsJsonObject("_funcfff0000").getAsJsonArray("script");
         body.add(JsonParser.parseString("{\"t\":\"ctrl\",\"call\":\"#allocate\",\"param\":[\"P\"]}"));
-        assertThrows(IllegalArgumentException.class, () -> Compiler.compile(forgedInstruction));
+        assertRejected(forgedInstruction);
         JsonObject wrongThis = original.deepCopy();
         String getId = wrongThis.getAsJsonObject("abstract").get("P::get").getAsString();
         wrongThis.getAsJsonObject("body").getAsJsonObject("fff").getAsJsonObject("_func" + getId)
                 .getAsJsonObject("metadata").getAsJsonArray("param-types").set(0, new JsonPrimitive("int"));
-        assertThrows(IllegalArgumentException.class, () -> Compiler.compile(wrongThis));
+        assertRejected(wrongThis);
         JsonObject conflictingName = original.deepCopy();
         conflictingName.getAsJsonObject("abstract").addProperty("P", "fff0000");
-        assertThrows(IllegalArgumentException.class, () -> Compiler.compile(conflictingName));
+        assertRejected(conflictingName);
     }
     @Test void standaloneExpressionEntryAndClassStateRemainReusable() throws Exception {
         var script = new GeneraterJson.AzScript();
@@ -704,7 +715,7 @@ class CompilerTest {
         JsonObject withoutClass = script.toObj();
         JsonArray body = withoutClass.getAsJsonObject("body").getAsJsonObject("fff").getAsJsonObject("_funcfff0000").getAsJsonArray("script");
         body.add(JsonParser.parseString("{\"t\":\"ctrl\",\"call\":\"vardef\",\"param\":[\"p\",0],\"declared-type\":\"P\"}"));
-        assertThrows(IllegalArgumentException.class, () -> Compiler.compile(withoutClass));
+        assertRejected(withoutClass);
         assertDoesNotThrow(() -> compile("int main(){return 1;}"));
     }
     @Test void memberLoweringCountsAdditionalAbdAddressContainers() throws Exception {
@@ -726,7 +737,7 @@ class CompilerTest {
             JsonObject tree = newTree("class P{int x;}void main(){P p;}");
             tree.getAsJsonObject("body").getAsJsonObject("fff").getAsJsonObject("_funcfff0000").getAsJsonArray("script")
                     .add(JsonParser.parseString("{\"t\":\"ctrl\",\"call\":\"mov\",\"param\":[" + target + ",\"wrong\"]}"));
-            assertThrows(IllegalArgumentException.class, () -> Compiler.compile(tree));
+            assertRejected(tree);
         }
     }
     @Test void methodsNamedAfterMemoryBuiltinsCannotCaptureCompilerGeneratedOperations() throws Exception {
@@ -837,10 +848,10 @@ class CompilerTest {
         assertArrayEquals(bytes, ExecCodec.decode(compiled.toValue()).toValue().toAbdFormat());
         JsonObject cycle = tree.deepCopy();
         cycle.getAsJsonArray("classes").get(0).getAsJsonObject().addProperty("base", "B");
-        assertThrows(IllegalArgumentException.class, () -> Compiler.compile(cycle));
+        assertRejected(cycle);
         JsonObject unknown = tree.deepCopy();
         unknown.getAsJsonArray("classes").get(1).getAsJsonObject().addProperty("base", "Missing");
-        assertThrows(IllegalArgumentException.class, () -> Compiler.compile(unknown));
+        assertRejected(unknown);
     }
     @Test void compactExecRejectsMalformedRecordsTypesWidthsAndLegacyMaps() throws Exception {
         AbdValue program = Compiler.compile(newTree("void main(){}")).toValue();
@@ -912,7 +923,7 @@ class CompilerTest {
         JsonObject tree = newTree("string main(){return \"x\";}");
         tree.getAsJsonObject("body").getAsJsonObject("fff").getAsJsonObject("_funcfff0000")
                 .getAsJsonArray("script").get(0).getAsJsonObject().getAsJsonArray("param").set(0, new JsonPrimitive("\ud800"));
-        assertThrows(IllegalArgumentException.class, () -> Compiler.compile(tree));
+        assertRejected(tree);
     }
     @Test void macrosDoNotExpandInsideNumericLiteralSuffixes() throws Exception {
         for (String source : new String[]{

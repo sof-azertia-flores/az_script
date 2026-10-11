@@ -139,13 +139,13 @@ public final class SourceMap {
     /** An error at an original position with its include notes, then its macro notes. */
     Diagnostic error(int unit, int line, int column, int macro, String context, String message) {
         List<Diagnostic> notes = includeNotes(unit); notes.addAll(macroNotes(macro, unit));
-        return Diagnostic.error(position(unit, line, column), context, message, notes);
+        return Diagnostic.error(position(unit, line, column), context, message, notes).inUnit(unit);
     }
     /** Names the compiled input in file-level errors instead of the main unit, e.g. the compile-json file. */
     SourceMap input(String name) { input = name; return this; }
     /** A file-level error, for an error without a source position: it names the compiled input. */
     Diagnostic error(String context, String message) {
-        return Diagnostic.error(Diagnostic.Position.file(input != null ? input : name(0)), context, message, List.of());
+        return Diagnostic.error(Diagnostic.Position.file(inputName()), context, message, List.of());
     }
 
     /** The unit of a positioned AST node; a missing or invalid {@code _file} means the main unit. */
@@ -165,8 +165,10 @@ public final class SourceMap {
     Diagnostic error(JsonObject node, String context, String message) {
         Diagnostic.Position at = position(node);
         if (at == null) return error(context, message);
-        return Diagnostic.error(at, context, message, includeNotes(unitOf(node)));
+        return Diagnostic.error(at, context, message, includeNotes(unitOf(node))).inUnit(unitOf(node));
     }
+    /** The name of the compiled input for file-level errors. */
+    String inputName() { return input != null ? input : name(0); }
     /** A non-negative int stored in a JSON number, or -1. Never throws on malformed input. */
     static int integer(JsonElement value) {
         if (value == null || !value.isJsonPrimitive() || !value.getAsJsonPrimitive().isNumber()) return -1;
@@ -201,6 +203,9 @@ public final class SourceMap {
             JsonElement name = entry.getAsJsonObject().get("name");
             if (name == null || !name.isJsonPrimitive() || !name.getAsJsonPrimitive().isString() || name.getAsString().isBlank())
                 throw new IllegalArgumentException("sources[" + i + "].name must be a non-empty string");
+            // Names are printed in diagnostics, so an unsafe one must not label any error.
+            if (AstShape.sourceNameProblem(name.getAsString()) != null)
+                throw new IllegalArgumentException("sources[" + i + "].name: " + AstShape.sourceNameProblem(name.getAsString()));
             int parent = -1, line = 0, column = 0;
             JsonElement from = entry.getAsJsonObject().get("included-from");
             if (from != null) {

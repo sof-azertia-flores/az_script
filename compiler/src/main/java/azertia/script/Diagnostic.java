@@ -36,11 +36,18 @@ public final class Diagnostic {
     private final String context;
     private final List<Diagnostic> notes;
     private final boolean internal;
+    /** Source unit of the position, which orders diagnostics in translation order; -1 when unknown. */
+    private final int unit;
 
     public Diagnostic(Severity severity, String code, Position position, String context, String message,
                       List<Diagnostic> notes, boolean internal) {
+        this(severity, code, position, context, message, notes, internal, -1);
+    }
+    private Diagnostic(Severity severity, String code, Position position, String context, String message,
+                       List<Diagnostic> notes, boolean internal, int unit) {
         this.severity = severity == null ? Severity.ERROR : severity; this.code = code; this.position = position; this.context = context;
         this.message = message == null ? "" : message; this.notes = List.copyOf(notes == null ? List.of() : notes); this.internal = internal;
+        this.unit = unit;
     }
     public static Diagnostic error(Position position, String context, String message, List<Diagnostic> notes) {
         return new Diagnostic(Severity.ERROR, null, position, context, message, notes, false);
@@ -48,6 +55,22 @@ public final class Diagnostic {
     public static Diagnostic error(Position position, String message) { return error(position, null, message, List.of()); }
     public static Diagnostic note(Position position, String message) {
         return new Diagnostic(Severity.NOTE, null, position, null, message, List.of(), false);
+    }
+    /**
+     * An internal compiler error: an unexpected exception of the compiler itself, as
+     * opposed to an error in the compiled program. It carries a note asking for a bug report.
+     */
+    public static Diagnostic internalError(Position position, String context, Throwable cause, List<Diagnostic> notes) {
+        List<Diagnostic> all = new ArrayList<>(notes == null ? List.of() : notes);
+        all.add(note(null, "this is a compiler bug; rerun with --debug-compiler for a stack trace"));
+        return new Diagnostic(Severity.ERROR, null, position, context, "internal compiler error: " + describe(cause), all, true);
+    }
+    /** {@code SimpleName: first message line} of an unexpected exception. */
+    static String describe(Throwable cause) {
+        if (cause == null) return "unknown failure";
+        String name = cause.getClass().getSimpleName().isEmpty() ? cause.getClass().getName() : cause.getClass().getSimpleName();
+        String message = cause.getMessage() == null ? "" : cause.getMessage().lines().findFirst().orElse("");
+        return message.isBlank() ? name : name + ": " + message;
     }
 
     public Severity severity() { return severity; }
@@ -60,12 +83,17 @@ public final class Diagnostic {
     public List<Diagnostic> notes() { return notes; }
     public boolean internal() { return internal; }
     public boolean isError() { return severity == Severity.ERROR; }
+    int unit() { return unit; }
+    /** A copy whose position lies in the given source unit. */
+    Diagnostic inUnit(int unit) {
+        return new Diagnostic(severity, code, position, context, message, notes, internal, unit);
+    }
 
     /** A copy with additional notes appended. */
     public Diagnostic withNotes(List<Diagnostic> extra) {
         if (extra.isEmpty()) return this;
         List<Diagnostic> all = new ArrayList<>(notes); all.addAll(extra);
-        return new Diagnostic(severity, code, position, context, message, all, internal);
+        return new Diagnostic(severity, code, position, context, message, all, internal, unit);
     }
 
     /** This diagnostic and its notes, one line each. */

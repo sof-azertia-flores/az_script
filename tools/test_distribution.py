@@ -223,7 +223,11 @@ def verify(package: Path, java: Optional[Path] = None) -> Dict[str, object]:
         _run([compiler, "-dash.azs"], cwd, compiler_environment, succeeds=False)
         _run([compiler, "--", "-dash.azs"], cwd, compiler_environment)
         _outputs(cwd / "-dash.exec.abd", cwd / "-dash.ast.json", cwd / "-dash.exec.json")
-        passed("explicit AST and executable JSON locations, options before the source and --")
+        # Trailing diagnostic options keep the default outputs.
+        _run([compiler, source, "-o", "flags/last.abd", "--max-errors", "5", "--debug-compiler"], cwd,
+             compiler_environment)
+        _outputs(cwd / "flags/last.abd", cwd / "flags/last.ast.json", cwd / "flags/last.exec.json")
+        passed("explicit AST and executable JSON locations, options before the source, -- and diagnostic flags")
 
         ast_bytes = default_ast.read_bytes()
         _run([compiler, "compile-json", default_ast, "-o", "roundtrip/from ast.abd"], cwd,
@@ -241,6 +245,20 @@ def verify(package: Path, java: Optional[Path] = None) -> Dict[str, object]:
                      "invalid source.azs:1:21: error: in function main: Unknown variable: missing_name",
                      "Error: compilation failed: 1 error"],
                  f"Compile errors are not reported as located diagnostics: {broken.stderr!r}")
+        _require(broken.returncode == 1, f"A compile error must exit with status 1, got {broken.returncode}")
+        # Independent errors are reported together, up to --max-errors.
+        broken_source.write_text("int f() { return 1 +; }\nint main() { return 0 +; }\n", encoding="utf-8")
+        several = _run([compiler, broken_source], cwd, compiler_environment, succeeds=False)
+        _require(several.stderr.splitlines() == [
+                     "invalid source.azs:1:21: error: Expected expression, found ';'",
+                     "invalid source.azs:2:24: error: Expected expression, found ';'",
+                     "Error: compilation failed: 2 errors"],
+                 f"Independent compile errors are not reported together: {several.stderr!r}")
+        limited = _run([compiler, broken_source, "--max-errors", "1"], cwd, compiler_environment, succeeds=False)
+        _require(limited.stderr.splitlines() == [
+                     "invalid source.azs:1:21: error: Expected expression, found ';'",
+                     "Error: compilation failed: 1 error"],
+                 f"--max-errors 1 did not stop at the first error: {limited.stderr!r}")
         _run([compiler, source, "-o"], cwd, compiler_environment, succeeds=False)
         _run([compiler, source, "-o", source], cwd, compiler_environment, succeeds=False)
         _require(source.read_bytes() == original_source, "Rejected output alias changed source")

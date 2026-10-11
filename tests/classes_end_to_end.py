@@ -47,7 +47,7 @@ def main():
                 assert again.returncode == 0, (name, again.stdout, again.stderr)
                 assert abd.read_bytes() == recompiled.read_bytes(), (name, 'AST roundtrip differs')
                 return abd, json.loads(instructions.read_text(encoding='utf-8'))
-            assert result.returncode != 0 and 'Error:' in result.stderr, (name, result.stdout, result.stderr)
+            assert result.returncode == 1 and 'Error:' in result.stderr and 'internal compiler error' not in result.stderr, (name, result.stdout, result.stderr)
             assert 'Exception in thread' not in result.stderr, (name, result.stderr)
             return None, None
 

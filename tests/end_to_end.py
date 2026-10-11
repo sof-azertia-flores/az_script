@@ -123,6 +123,23 @@ def main():
                                         'with-include.azs:2:1: note: in file included from here\n'),syntax.stderr
         assert not (work/'broken.abd').exists()
         checks+=3
+        # Independent errors are reported together and --max-errors limits them.
+        multiple=work/'multiple.azs'
+        multiple.write_text('int f(){\n  string s = 1;\n  return 0;\n}\nint main(){\n  return missing;\n}\n',encoding='utf-8')
+        several=compiler('compile',multiple,'-o',work/'multiple.abd',success=False)
+        assert several.returncode==1 and several.stderr==('multiple.azs:2:3: error: in function f: Initializer for s expected string, got int\n'
+                                                          'multiple.azs:6:10: error: in function main: Unknown variable: missing\n'
+                                                          'Error: compilation failed: 2 errors\n'),several.stderr
+        first=compiler('compile',multiple,'--max-errors','1','-o',work/'multiple.abd',success=False)
+        assert first.stderr==several.stderr.split('\n')[0]+'\nError: compilation failed: 1 error\n',first.stderr
+        # A malformed compile-json field is named by its JSON path, never by a raw Java message.
+        main_meta=next(item for namespace in tree['body'].values() for item in namespace.values() if item['metadata']['name']=='main')['metadata']
+        main_meta['position']='abc'
+        (work/'position.ast.json').write_text(json.dumps(tree),encoding='utf-8')
+        malformed=compiler('compile-json',work/'position.ast.json','-o',work/'position.abd',success=False)
+        assert malformed.returncode==1 and malformed.stderr.startswith('position.ast.json: error: Malformed script JSON at /body/fff/_funcfff0000/metadata/position: expected an integer, got "abc"\n'),malformed.stderr
+        assert 'Character a is neither' not in malformed.stderr and 'Exception' not in malformed.stderr,malformed.stderr
+        checks+=3
         original=ROOT/'compiler/examples/parser-regressions.azs'
         binary=work/'regressions.abd';ast=work/'ast.json';instructions=work/'instructions.json'
         compiler('compile',original,'-o',binary,'--ast',ast,'--exec-json',instructions)

@@ -44,7 +44,7 @@ def main():
             abd, ast, executable = [work / (name + extension) for extension in ('.abd', '.ast.json', '.exec.json')]
             result = command(compiler + ['compile', source_path, '-o', abd, '--ast', ast, '--exec-json', executable])
             if not valid:
-                assert result.returncode != 0 and 'Error:' in result.stderr, (name, result.stdout, result.stderr)
+                assert result.returncode == 1 and 'Error:' in result.stderr and 'internal compiler error' not in result.stderr, (name, result.stdout, result.stderr)
                 assert 'Exception in thread' not in result.stderr, (name, result.stderr)
                 return None
             assert result.returncode == 0, (name, result.stdout, result.stderr)

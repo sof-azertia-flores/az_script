@@ -2,6 +2,7 @@ package azertia.script;
 
 import azertia.Main;
 import com.google.gson.*;
+import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import azertia.binary.complexBinary.AcsArray;
@@ -209,7 +210,7 @@ class DiagnosticsTest {
         assertEquals("tree.json: error: in global P: Global name conflicts with class: P", assertThrows(CompileException.class,
                 () -> Compiler.compile(tree, new Diagnostics().defaultFile("tree.json"))).getMessage());
         JsonObject noMetadata = tree(main); noMetadata.remove("metadata");
-        assertEquals("tree.json: error: Malformed script JSON: required metadata, body or expression field is missing or invalid",
+        assertEquals("tree.json: error: Malformed script JSON at /metadata: required field is missing",
                 assertThrows(CompileException.class, () -> Compiler.compile(noMetadata, new Diagnostics().defaultFile("tree.json"))).getMessage());
         JsonObject positioned = tree(main);
         function(positioned, "main").getAsJsonArray("script").get(0).getAsJsonObject().getAsJsonArray("param").set(0, JsonParser.parseString("{\"t\":\"ctrl\",\"call\":\"var\",\"param\":[\"missing\"],\"_line\":3,\"_column\":10}"));
@@ -279,8 +280,8 @@ class DiagnosticsTest {
                 assertThrows(CompileException.class, () -> Compiler.compile(tree)).getMessage());
         JsonObject sources = tree("int main(){return 1;}");
         sources.add("sources", JsonParser.parseString("[{\"name\":\"a.azs\"},{\"name\":\"b.azs\",\"included-from\":{\"source\":1,\"line\":1,\"column\":1}}]"));
-        String message = assertThrows(CompileException.class, () -> Compiler.compile(sources)).getMessage();
-        assertTrue(message.startsWith("<source>: error: sources[1].included-from"), message);
+        assertEquals("<source>: error: Malformed script JSON at /sources/1/included-from/source: expected an earlier source index, got 1",
+                assertThrows(CompileException.class, () -> Compiler.compile(sources)).getMessage());
         // An AST without a sources table is named after the default file, for example the compile-json input.
         JsonObject anonymous = tree("int main(){\n  return missing;\n}");
         anonymous.remove("sources");
@@ -380,6 +381,343 @@ class DiagnosticsTest {
         assertEquals("Missing input path", assertThrows(IllegalArgumentException.class,
                 () -> Main.parseCompileArguments(List.of("compile", "--"))).getMessage());
         assertThrows(IllegalArgumentException.class, () -> Main.parseCompileArguments(List.of("pack", "x")));
+    }
+
+    private static List<String> errorLines(CompileException error) {
+        return error.errors().stream().map(diagnostic -> diagnostic.format().lines().findFirst().orElseThrow()).toList();
+    }
+    private static void removeFunction(JsonObject tree, String name) {
+        tree.getAsJsonObject("abstract").remove(name);
+        for (JsonElement namespace : tree.getAsJsonObject("body").asMap().values())
+            namespace.getAsJsonObject().entrySet().removeIf(entry -> entry.getValue().getAsJsonObject()
+                    .getAsJsonObject("metadata").get("name").getAsString().equals(name));
+    }
+    /** Runs the CLI on a thread with a small stack, so deep but valid nesting overflows it. */
+    private static int runOnSmallStack(StringBuilder output, String... args) throws InterruptedException {
+        var bytes = new ByteArrayOutputStream(); var stream = new PrintStream(bytes, true, StandardCharsets.UTF_8);
+        int[] status = {-1};
+        Thread thread = new Thread(null, () -> status[0] = Main.run(args, stream, stream), "small-stack", 16 << 10);
+        thread.start(); thread.join();
+        output.append(bytes.toString(StandardCharsets.UTF_8).replace("\r\n", "\n"));
+        return status[0];
+    }
+
+    @Test void independentErrorsInSeveralFunctionsAreReportedTogether() throws Exception {
+        write("inc/lib.azs", "// line 1\nint helper(int a) {\n  return a + 1;\n}\nint broken(int a) {\n  string s = a;\n  return 0;\n}\n");
+        Path main = write("d3.azs", "// line 1\n#include \"inc/lib.azs\"\nint main() {\n  string q = 5;\n  return 0;\n}\n");
+        CompileException error = failure(main);
+        assertEquals("inc/lib.azs:6:3: error: in function broken: Initializer for s expected string, got int\n"
+                + "d3.azs:2:1: note: in file included from here\n"
+                + "d3.azs:4:3: error: in function main: Initializer for q expected string, got int", error.getMessage());
+        assertEquals(2, error.errors().size());
+        // Lifecycle functions are stored after the module's functions; errors still follow the source order.
+        assertEquals(List.of("<source>:2:3: error: in function a: Initializer for s expected string, got int",
+                        "<source>:5:25: error: in function __script_onload: Initializer for s expected string, got int",
+                        "<source>:8:3: error: in function b: Initializer for s expected string, got int"),
+                errorLines(failure("int a(){\n  string s = 1;\n  return 0;\n}\nvoid __script_onload(){ string s = 2; }\nvoid main(){}\nint b(){\n  string s = 3;\n  return 0;\n}\n")));
+        // A function with an error does not hide a missing return elsewhere, and later phases wait for earlier ones.
+        assertEquals(List.of("<source>:1:16: error: in function f: Unknown variable: missing",
+                        "<source>:2:9: error: in function g: non-void function can reach the end of its body without returning a value"),
+                errorLines(failure("int f(){return missing;}\nint g(){}\nint main(){return 0;}\n")));
+    }
+
+    @Test void parserRecoversAtTheNextStatementMemberAndDeclaration() {
+        String source = "int f() {\n  int a = g(1, 2;\n  return 1;\n}\n"
+                + "int h() { return 1 +; }\n"
+                + "int k() {\n  if (true) return 1; else return +;\n  for (int i = 0 i < 3; i++) { }\n  int z = ;\n  return 2;\n}\n"
+                + "int m(int x { return 1; }\n"
+                + "class P {\n  int x;\n  int y = ;\n  int get() { return x +; }\n  int z;\n}\n"
+                + "int main() { return 0 }\n";
+        assertEquals(List.of("<source>:2:17: error: Expected ')', found ';'",
+                        "<source>:5:21: error: Expected expression, found ';'",
+                        "<source>:7:36: error: Expected expression, found ';'",
+                        "<source>:8:18: error: Expected ';' after statement",
+                        "<source>:9:11: error: Expected expression, found ';'",
+                        "<source>:12:13: error: Expected ')', found '{'",
+                        "<source>:15:11: error: Expected expression, found ';'",
+                        "<source>:16:25: error: Expected expression, found ';'"),
+                errorLines(failure(source)));
+        // An unclosed '(' in a declaration does not swallow the next declaration's error.
+        assertEquals(List.of("<source>:1:13: error: Expected ')', found '{'", "<source>:2:18: error: Expected expression, found '*'"),
+                errorLines(failure("int f(int x { return (1; }\nint g() { return *; }\nint main() { return 0; }\n")));
+        // An error after a whole declaration, such as a duplicate definition or a conflicting extern, skips nothing.
+        assertEquals(List.of("<source>:2:6: error: Duplicate function definition: f", "<source>:3:32: error: Expected expression, found ';'"),
+                errorLines(failure("int f() { return 1; }\nint f() { return 2; }\nint g() { int a = 1; return a +; }\nint main() { return 0; }\n")));
+        assertEquals(List.of("<source>:2:13: error: Conflicting extern declaration: h", "<source>:3:26: error: Expected expression, found ';'"),
+                errorLines(failure("extern int h(int a):beef0001;\nextern int h(int a):beef0002;\nclass Q { int x; int y = ; }\nint main() { return 0; }\n")));
+        assertEquals(List.of("<source>:3:11: error: Duplicate function definition: P::get", "<source>:4:16: error: Expected expression, found '*'"),
+                errorLines(failure("class P{int x;}\nint P::get(){return x;}\nint P::get(){return 1;}\nint g(){return *;}\nint main(){return 0;}\n")));
+        // The next declaration may fail at its first token, right after the duplicate.
+        assertEquals(List.of("<source>:2:6: error: Duplicate function definition: f", "<source>:3:1: error: Expected identifier"),
+                errorLines(failure("int f(){return 1;}\nint f(){return 2;}\n5;\nint main(){return 0;}\n")));
+        // A failed if statement skips its else branch as well, also after a branch without braces.
+        assertEquals(List.of("<source>:3:12: error: Expected expression, found ')'", "<source>:4:14: error: Expected expression, found ')'"),
+                errorLines(failure("int main() {\n  int a = 0;\n  if (a == ) a = 1; else a = 2;\n  while (a < ) a = a + 1;\n  return a;\n}\n")));
+        assertEquals(List.of("<source>:3:15: error: Expected expression, found ')'", "<source>:4:7: error: Expected expression, found ';'"),
+                errorLines(failure("int main() {\n  int a = 0;\n  while (a == ) if (a) a = 1; else a = 2;\n  a = ;\n  return a;\n}\n")));
+        // Cascades at the same token are suppressed: one unterminated block, not one per nesting level.
+        assertEquals(List.of("<source>:4:1: error: Unterminated block"),
+                errorLines(failure("void main() {\n  if (true) {\n    int x = 1;\n")));
+        // Nesting limits stop parsing at once.
+        CompileException nesting = failure("int f(){return " + "(".repeat(400) + "1;}\nint g(){return *;}\n");
+        assertEquals(1, nesting.errors().size());
+        assertTrue(nesting.getMessage().contains("Syntax nesting exceeds 320 levels"), nesting.getMessage());
+    }
+
+    @Test void lexerAndPreprocessorReportEveryError() throws Exception {
+        assertEquals(List.of("<source>:1:13: error: Unexpected character: @", "<source>:1:15: error: Unexpected character: #"),
+                errorLines(failure("void main(){@;#;}")));
+        // A supplementary or invisible character is one error, printed as its code point.
+        assertEquals(List.of("<source>:1:13: error: Unexpected character: U+1F600", "<source>:1:16: error: Unexpected character: U+202E"),
+                errorLines(failure("void main(){\uD83D\uDE00;\u202E;}")));
+        // A broken string or number is skipped by itself.
+        assertEquals(List.of("<source>:2:14: error: Unknown string escape: \\q", "<source>:3:11: error: Invalid numeric exponent",
+                        "<source>:4:11: error: Invalid numeric suffix", "<source>:5:14: error: Newline in string literal",
+                        "<source>:6:11: error: Unexpected character: @"),
+                errorLines(failure("void main(){\n  string a = \"\\q x\" + \"y\";\n  int b = 1e;\n  int c = 2x;\n  string d = \"open\n  int e = @;\n}\n")));
+        // A failed #ifdef opens an inactive branch, so its #else and #endif still match.
+        write("inc/broken.azs", "#bogus\n");
+        Path main = write("pre.azs", "#bogus\n#ifdef\nint broken(\n#else\n#endif\n#include \"nothere.azs\"\n#include \"inc/broken.azs\"\n#define BAD + *\n#undef\nint main(){return 0;}\n");
+        assertEquals("pre.azs:1:1: error: Unknown preprocessor directive: #bogus\n"
+                + "pre.azs:2:1: error: Missing condition argument\n"
+                + "pre.azs:6:1: error: Cannot open include file \"nothere.azs\": file not found\n"
+                + "inc/broken.azs:1:1: error: Unknown preprocessor directive: #bogus\n"
+                + "pre.azs:7:1: note: in file included from here\n"
+                + "pre.azs:9:1: error: Invalid identifier: ", failure(main).getMessage());
+        // Preprocessing errors stop before lexing, and lexing errors before parsing.
+        assertEquals(List.of("<source>:1:1: error: Unknown preprocessor directive: #bogus"), errorLines(failure("#bogus\nvoid main(){@;}\n")));
+        assertEquals(List.of("<source>:1:13: error: Unexpected character: @"), errorLines(failure("void main(){@;}\nint f(){return *;}\n")));
+    }
+
+    @Test void classErrorsAreReportedPerClassWithBarriersBetweenPhases() throws Exception {
+        JsonObject tree = tree("class A{int x;}\nclass B{int y;}\nvoid main(){}");
+        removeFunction(tree, "A::<ctor>"); removeFunction(tree, "B::<ctor>");
+        CompileException missing = assertThrows(CompileException.class, () -> Compiler.compile(tree));
+        assertEquals(List.of("<source>:1:7: error: in class A: Missing class function: A::<ctor>",
+                "<source>:2:7: error: in class B: Missing class function: B::<ctor>"), errorLines(missing));
+        assertFalse(missing.internal());
+        // A layout error stops before the class functions are checked.
+        JsonObject layout = tree("class A{int x;}\nclass B{\n  int y;\n}\nvoid main(){}");
+        removeFunction(layout, "A::<ctor>");
+        layout.getAsJsonArray("classes").get(1).getAsJsonObject().getAsJsonArray("fields").get(0).getAsJsonObject().addProperty("type", "Missing");
+        CompileException barrier = assertThrows(CompileException.class, () -> Compiler.compile(layout));
+        assertEquals(List.of("<source>:3:3: error: in class B: Unknown type: Missing"), errorLines(barrier));
+        // Two invalid classes from source: both reported, and no function body is checked.
+        assertEquals(List.of("<source>:1:7: error: in class P: A type parameter bound must be a class value or pointer",
+                        "<source>:2:7: error: in class Q: A type parameter bound must be a class value or pointer"),
+                errorLines(failure("class P<T extends int>{T x;}\nclass Q<U extends string>{U y;}\nint main(){return missing;}\n")));
+        // The parser recovers at the next class member.
+        assertEquals(List.of("<source>:1:20: error: Duplicate class member: P.x", "<source>:2:20: error: Duplicate class member: Q.y"),
+                errorLines(failure("class P{int x;int x;}\nclass Q{int y;int y;}\nint main(){return missing;}\n")));
+    }
+
+    @Test void errorLimitStopsWithANote() throws Exception {
+        String statements = "void main(){\n" + "  int a = ;\n".repeat(30) + "}\n";
+        CompileException capped = failure(statements);
+        assertEquals(Diagnostics.DEFAULT_MAX_ERRORS, capped.errors().size());
+        List<Diagnostic> all = capped.diagnostics();
+        assertEquals("note: too many errors emitted (limit 20); stopping", all.get(all.size() - 1).format());
+        assertTrue(capped.getMessage().endsWith("\nnote: too many errors emitted (limit 20); stopping"), capped.getMessage());
+        var script = new GeneraterJson.AzScript();
+        assertEquals(List.of("<source>:2:11: error: Expected expression, found ';'"), errorLines(assertThrows(CompileException.class,
+                () -> script.execute(statements, new Diagnostics().maxErrors(1)))));
+        assertEquals(30, assertThrows(CompileException.class, () -> script.execute(statements, new Diagnostics().maxErrors(0))).errors().size());
+        // Exactly as many errors as the limit end the phase without the note.
+        CompileException exact = assertThrows(CompileException.class, () -> script.execute(statements, new Diagnostics().maxErrors(30)));
+        assertEquals(30, exact.diagnostics().size());
+        // Function bodies count against the same limit.
+        StringBuilder functions = new StringBuilder();
+        for (int i = 0; i < 25; i++) functions.append("int f").append(i).append("(){ string s = ").append(i).append("; return 0; }\n");
+        CompileException semantic = failure(functions + "int main(){return 0;}\n");
+        assertEquals(20, semantic.errors().size());
+        assertTrue(semantic.getMessage().startsWith("<source>:1:11: error: in function f0: "), semantic.getMessage());
+        assertThrows(IllegalArgumentException.class, () -> new Diagnostics().maxErrors(-1));
+        assertFalse(Diagnostics.failFast().recovering());
+    }
+
+    @Test void commandLineReportsSeveralErrorsAndStopsAtTheLimit() throws Exception {
+        write("inc/c.azs", "int f(){\n  return \"s\";\n}\n");
+        write("inc/b.azs", "// b\n#include \"c.azs\"\n");
+        Path main = write("a.azs", "#include \"inc/b.azs\"\nint main(){\n  string s = 1;\n  return f();\n}\n");
+        String all = run("compile", main.toString(), "-o", temporary.resolve("a.abd").toString()).replace("\r\n", "\n");
+        assertEquals("inc/c.azs:2:3: error: in function f: return expected int, got string\n"
+                + "inc/b.azs:2:1: note: in file included from here\n"
+                + "a.azs:1:1: note: in file included from here\n"
+                + "a.azs:3:3: error: in function main: Initializer for s expected string, got int\n"
+                + "Error: compilation failed: 2 errors\n", all);
+        // --max-errors 1 prints the first error with its whole include chain.
+        assertEquals("inc/c.azs:2:3: error: in function f: return expected int, got string\n"
+                + "inc/b.azs:2:1: note: in file included from here\n"
+                + "a.azs:1:1: note: in file included from here\n"
+                + "Error: compilation failed: 1 error\n", run("compile", "--max-errors", "1", main.toString()).replace("\r\n", "\n"));
+        assertFalse(Files.exists(temporary.resolve("a.abd")));
+        var bytes = new ByteArrayOutputStream(); var stream = new PrintStream(bytes, true, StandardCharsets.UTF_8);
+        assertEquals(1, Main.run(new String[]{"compile", main.toString()}, stream, stream));
+        Path good = write("good.azs", "int main(){return 0;}\n");
+        assertEquals(0, Main.run(new String[]{"compile", good.toString(), "--max-errors", "0", "-o", temporary.resolve("good.abd").toString()}, stream, stream));
+        assertEquals(1, Main.run(new String[]{"compile", good.toString(), "--max-errors", "x"}, stream, stream));
+        assertEquals("Error: --max-errors expects a non-negative integer, got -2\n", run("compile", good.toString(), "--max-errors", "-2").replace("\r\n", "\n"));
+        assertEquals(5, Main.parseCompileArguments(List.of("compile", "x.azs", "--max-errors", "5")).maxErrors());
+        assertEquals(Diagnostics.DEFAULT_MAX_ERRORS, Main.parseCompileArguments(List.of("compile", "x.azs")).maxErrors());
+        assertTrue(Main.parseCompileArguments(List.of("compile", "--debug-compiler", "x.azs")).flags().contains("--debug-compiler"));
+        // Paths the platform cannot represent are usage errors with status 1, not internal errors.
+        for (String[] args : List.of(new String[]{"compile", "a\0b.azs"}, new String[]{"compile", good.toString(), "-o", "o\0.abd"},
+                new String[]{"compile-json", "t\0.json"}, new String[]{"pack", "out\0.abd", good.toString()})) {
+            var output = new ByteArrayOutputStream(); var printer = new PrintStream(output, true, StandardCharsets.UTF_8);
+            assertEquals(1, Main.run(args, printer, printer), String.join(" ", args));
+            String text = output.toString(StandardCharsets.UTF_8);
+            assertTrue(text.startsWith("Error: ") && text.contains("Nul character not allowed") && !text.contains("internal compiler error"), text);
+        }
+        assertThrows(IllegalArgumentException.class, () -> Main.parseCompileArguments(List.of("compile", "a\0b.azs")));
+    }
+
+    @Test void sourceAndIncludeFileNamesMustBePrintable() throws Exception {
+        // Diagnostics print file names, so a control character in one could forge an output line.
+        Path control;
+        try { control = write("a\u0001b.azs", "int main(){return 0;}\n"); }
+        catch (InvalidPathException | IOException unsupported) {
+            Assumptions.abort("The file system cannot name a file with a control character"); return;
+        }
+        String problem = "a source name cannot contain control or bidirectional formatting characters";
+        assertEquals("Invalid source file name: " + problem, assertThrows(IllegalArgumentException.class,
+                () -> new GeneraterJson.AzScript().execute(control)).getMessage());
+        assertEquals("Error: Invalid source file name: " + problem + "\n", run("compile", control.toString(), "-o", temporary.resolve("c.abd").toString()).replace("\r\n", "\n"));
+        Path main = write("names.azs", "#include \"a\u0001b.azs\"\nint main(){return 0;}\n");
+        assertEquals("names.azs:1:1: error: Invalid include file name: " + problem, failure(main).getMessage());
+    }
+
+    @Test void compileJsonInputErrorsNameTheirJsonPath() throws Exception {
+        JsonObject base = tree("int main(){print(\"hi \"+1);return 3;}");
+        String main = "/body/fff/_funcfff0000";
+        record Case(String name, String expected, java.util.function.Consumer<JsonObject> edit) {}
+        List<Case> cases = List.of(
+                new Case("pos-str", main + "/metadata/position: expected an integer, got \"abc\"",
+                        tree -> function(tree, "main").getAsJsonObject("metadata").addProperty("position", "abc")),
+                new Case("param-int", main + "/metadata/param: expected an array, got 5",
+                        tree -> function(tree, "main").getAsJsonObject("metadata").addProperty("param", 5)),
+                new Case("param-string", main + "/script/0/param: expected an array, got \"x\"",
+                        tree -> function(tree, "main").getAsJsonArray("script").get(0).getAsJsonObject().addProperty("param", "x")),
+                new Case("var-object", main + "/script/1/param/0/t: required field is missing",
+                        tree -> function(tree, "main").getAsJsonArray("script").get(1).getAsJsonObject().getAsJsonArray("param")
+                                .set(0, JsonParser.parseString("{\"t\":\"ctrl\",\"call\":\"var\",\"param\":[{\"a\":1}]}").getAsJsonObject().getAsJsonArray("param").get(0))),
+                new Case("no-body", "/body: required field is missing", tree -> tree.remove("body")),
+                new Case("line-string", main + "/script/0/_line: expected a positive integer, got \"x\"",
+                        tree -> function(tree, "main").getAsJsonArray("script").get(0).getAsJsonObject().addProperty("_line", "x")),
+                new Case("file-range", main + "/script/0/_file: source index 3 is outside the sources table (1 entry)",
+                        tree -> function(tree, "main").getAsJsonArray("script").get(0).getAsJsonObject().addProperty("_file", 3)),
+                new Case("cyclic-sources", "/sources/1/included-from/source: expected an earlier source index, got 1",
+                        tree -> tree.add("sources", JsonParser.parseString("[{\"name\":\"a.azs\"},{\"name\":\"b.azs\",\"included-from\":{\"source\":1,\"line\":1,\"column\":1}}]"))),
+                new Case("compound", main + "/script/0/compound: expected true, got false",
+                        tree -> function(tree, "main").getAsJsonArray("script").get(0).getAsJsonObject().addProperty("compound", false)),
+                new Case("var-name", main + "/script/1/param/0: expected a string, got an object",
+                        tree -> function(tree, "main").getAsJsonArray("script").set(1, JsonParser.parseString("{\"t\":\"ctrl\",\"call\":\"var\",\"param\":[{\"a\":1}]}"))),
+                new Case("member-set", main + "/script/0/param/0: expected an object, got 1",
+                        tree -> function(tree, "main").getAsJsonArray("script").set(0, JsonParser.parseString("{\"t\":\"ctrl\",\"call\":\"member-set\",\"param\":[1,2]}"))),
+                new Case("object-new", main + "/script/0/param: object-new needs a type name",
+                        tree -> function(tree, "main").getAsJsonArray("script").set(0, JsonParser.parseString("{\"t\":\"ctrl\",\"call\":\"object-new\"}"))),
+                new Case("bidi-name", "/sources/0/name: a source name cannot contain control or bidirectional formatting characters",
+                        tree -> tree.add("sources", JsonParser.parseString("[{\"name\":\"a" + (char) 0x202e + "b.azs\"}]"))),
+                // Keys are printed escaped, so input text cannot forge or reorder a diagnostic line.
+                new Case("unsafe-key", "/ext/a\\u000aevil.azs:1:1: error: forged\\u202e: expected a string, got 5",
+                        tree -> tree.getAsJsonObject("ext").addProperty("a\nevil.azs:1:1: error: forged" + (char) 0x202e, 5)),
+                new Case("unsafe-value", main + "/metadata/position: expected an integer, got \"x\\u2028\\u202e\"",
+                        tree -> function(tree, "main").getAsJsonObject("metadata").addProperty("position", "x" + (char) 0x2028 + (char) 0x202e)),
+                new Case("class-methods", "/classes/0/methods: required field is missing",
+                        tree -> tree.add("classes", JsonParser.parseString("[{\"name\":\"A\",\"fields\":[{\"name\":\"x\",\"type\":\"int\"}],\"constructor\":\"A::<ctor>\"}]"))));
+        for (Case item : cases) {
+            JsonObject tree = base.deepCopy(); item.edit().accept(tree);
+            Path json = write(item.name() + ".json", tree.toString());
+            String output = run("compile-json", json.toString(), "-o", temporary.resolve(item.name() + ".abd").toString()).replace("\r\n", "\n");
+            assertTrue(output.startsWith(item.name() + ".json: error: Malformed script JSON at " + item.expected() + "\n"), output);
+            assertTrue(output.endsWith("\nError: compilation failed: " + output.lines().filter(line -> line.contains(": error: ")).count()
+                    + (output.lines().filter(line -> line.contains(": error: ")).count() == 1 ? " error\n" : " errors\n")), output);
+            assertFalse(output.contains("internal") || output.contains("Character a is neither") || output.contains("Exception"), output);
+        }
+        // Deliberate compiler errors on forged trees keep their own messages.
+        JsonObject missingConstructor = base.deepCopy();
+        missingConstructor.add("classes", JsonParser.parseString("[{\"name\":\"A\",\"fields\":[{\"name\":\"x\",\"type\":\"int\"}],\"methods\":{},\"constructor\":\"A::<ctor>\"}]"));
+        assertEquals("tree.json: error: in class A: Missing class function: A::<ctor>", assertThrows(CompileException.class,
+                () -> Compiler.compile(missingConstructor, new Diagnostics().defaultFile("tree.json"))).getMessage());
+        JsonObject internalOperation = base.deepCopy();
+        function(internalOperation, "main").add("script", JsonParser.parseString("{\"t\":\"ctrl\",\"call\":\"#allocate\",\"param\":[\"X\"]}"));
+        assertEquals("<source>:1:9: error: in function main: Internal compiler operation is not allowed in source AST", assertThrows(CompileException.class,
+                () -> Compiler.compile(internalOperation, new Diagnostics().defaultFile("tree.json"))).getMessage());
+        // A class function without its owner class is a deliberate error, not a failure inside the compiler,
+        // also when an extern declaration registers the class function.
+        JsonObject ownerless = tree("class A{int x;}\nvoid main(){}");
+        function(ownerless, "A::<ctor>").getAsJsonObject("metadata").remove("owner-class");
+        assertEquals("<source>:1:7: error: in class A: Function owner must be a string", assertThrows(CompileException.class,
+                () -> Compiler.compile(ownerless, new Diagnostics().defaultFile("tree.json"))).getMessage());
+        JsonObject hinted = tree("#namespace_hint LIB\n#assume_hint LIB abcd\nclass P {\n  int x;\n  extern P(int v):abcd0002;\n}\nP::P(int v):0002 { this.x = v; }\n");
+        function(hinted, "P::<ctor>").getAsJsonObject("metadata").remove("owner-class");
+        CompileException noOwner = assertThrows(CompileException.class, () -> Compiler.compile(hinted, new Diagnostics().defaultFile("tree.json")));
+        assertEquals("<source>:7:5: error: in function P::P: Class function has no owner class: P::<ctor>", noOwner.getMessage());
+        assertFalse(noOwner.internal());
+        // An extern signature without an ID needs an abstract mapping.
+        JsonObject unmapped = tree("extern int h(int a):beef0001;\nint main(){return h(1);}\n");
+        unmapped.getAsJsonObject("abstract").remove("h"); unmapped.getAsJsonObject("extern-signatures").getAsJsonObject("h").remove("id");
+        assertEquals("<source>:1:13: error: External signature has no abstract mapping: h", assertThrows(CompileException.class,
+                () -> Compiler.compile(unmapped, new Diagnostics().defaultFile("tree.json"))).getMessage());
+        // A rejected source name never labels an error, also through the library API without a default file.
+        JsonObject unsafeName = base.deepCopy();
+        unsafeName.add("sources", JsonParser.parseString("[{\"name\":\"evil\\u202etxt.azs\\nfake.azs:1:1: error: injected\"}]"));
+        assertEquals("<source>: error: Malformed script JSON at /sources/0/name: a source name cannot contain control or bidirectional formatting characters",
+                assertThrows(CompileException.class, () -> Compiler.compile(unsafeName)).getMessage());
+        // Numbers beyond Gson's limits fail as malformed input, never as an internal error.
+        Path huge = write("huge.json", base.toString().replace("\"hi \",1", "\"hi \",1e20000"));
+        var bytes = new ByteArrayOutputStream(); var stream = new PrintStream(bytes, true, StandardCharsets.UTF_8);
+        assertEquals(1, Main.run(new String[]{"compile-json", huge.toString(), "-o", temporary.resolve("huge.abd").toString()}, stream, stream));
+        assertTrue(bytes.toString(StandardCharsets.UTF_8).startsWith("huge.json: error: Malformed script JSON at " + main
+                + "/script/0/param/0/param/1: number is outside the supported range: 1e20000"), bytes::toString);
+    }
+
+    @Test void parsedProgramsAlwaysPassTheShapeCheck() throws Exception {
+        // Any expression may be a receiver; the compiler rejects these by type, not as malformed ASTs.
+        for (String statement : List.of("int a = \"abc\".x;", "int b = \"abc\"[0];", "\"abc\"[0] = 1;", "\"abc\".x = 2;",
+                "return \"abc\".f(1);", "int c = 1(2);", "var e = true[1];", "null[0] = 1;", "var f = {1;}.x;")) {
+            var script = new GeneraterJson.AzScript(); Diagnostics diagnostics = new Diagnostics();
+            script.execute("int main(){\n  " + statement + "\n  return 0;\n}\n", diagnostics);
+            CompileException error = assertThrows(CompileException.class, () -> Compiler.compile(script.toObj(), diagnostics), statement);
+            assertFalse(error.internal(), error::getMessage);
+            assertTrue(error.getMessage().startsWith("<source>:2:") && error.getMessage().contains("Member access requires a known class type"),
+                    error::getMessage);
+        }
+    }
+
+    @Test void unexpectedExceptionsAreInternalErrorsOrMalformedInput() throws Exception {
+        assertTrue(Diagnostics.userError(new IllegalArgumentException("x")));
+        assertTrue(Diagnostics.userError(new TreeLimits.LimitExceeded("x", 1, 1)));
+        assertTrue(Diagnostics.userError(new CompileException(Diagnostic.error(null, "x"))));
+        assertFalse(Diagnostics.userError(new NumberFormatException("x")));
+        assertFalse(Diagnostics.userError(new NullPointerException()));
+        assertFalse(Diagnostics.userError(new IllegalStateException()));
+        assertFalse(Diagnostics.userError(new StackOverflowError()));
+        assertFalse(Diagnostics.userError(new CompileException(Diagnostic.internalError(null, null, new NullPointerException(), List.of()))));
+        // An unexpected exception at a node: an internal error for a parsed program, malformed input for a supplied AST.
+        JsonObject node = JsonParser.parseString("{\"t\":\"ctrl\",\"call\":\"var\",\"param\":[\"x\"],\"_file\":1,\"_line\":3,\"_column\":10}").getAsJsonObject();
+        SourceMap sources = SourceMap.fromJson(JsonParser.parseString("[{\"name\":\"main.azs\"},{\"name\":\"inc/lib.azs\",\"included-from\":{\"source\":0,\"line\":2,\"column\":1}}]"), "<source>").input("tree.json");
+        NullPointerException cause = new NullPointerException("boom");
+        CompileException internal = Compiler.unexpected(cause, node, "function main", new Compiler.CompilationState(new Diagnostics(), sources, true));
+        assertEquals("inc/lib.azs:3:10: error: in function main: internal compiler error: NullPointerException: boom\n"
+                + "main.azs:2:1: note: in file included from here\n"
+                + "note: this is a compiler bug; rerun with --debug-compiler for a stack trace", internal.getMessage());
+        assertTrue(internal.internal() && internal.fatal());
+        assertSame(cause, internal.getCause());
+        CompileException malformed = Compiler.unexpected(cause, node, "function main", new Compiler.CompilationState(new Diagnostics(), sources, false));
+        assertEquals("tree.json: error: in function main: Malformed script JSON near inc/lib.azs:3:10", malformed.getMessage());
+        assertTrue(malformed.fatal() && !malformed.internal());
+        // A stack overflow while compiling a parsed program is an internal compiler error with exit status 2.
+        Path deep = write("deep.azs", "int main(){\n  return " + "(".repeat(150) + "1" + ")".repeat(150) + ";\n}\n");
+        StringBuilder output = new StringBuilder();
+        int status = runOnSmallStack(output, "compile", deep.toString(), "-o", temporary.resolve("deep.abd").toString());
+        assertEquals(2, status, output::toString);
+        assertTrue(output.toString().matches("(?s)deep\\.azs(:\\d+:\\d+)?: error: internal compiler error: StackOverflowError\n"
+                + "note: this is a compiler bug; rerun with --debug-compiler for a stack trace\n"
+                + "Error: compilation failed: internal compiler error\n"), output::toString);
+        StringBuilder debug = new StringBuilder();
+        assertEquals(2, runOnSmallStack(debug, "compile", deep.toString(), "--debug-compiler", "-o", temporary.resolve("deep.abd").toString()));
+        assertTrue(debug.toString().contains("\njava.lang.StackOverflowError") && debug.toString().contains("\tat "), debug::toString);
+        assertFalse(Files.exists(temporary.resolve("deep.abd")));
     }
 
     @Test void diagnosticsFormatAndHexIds() {

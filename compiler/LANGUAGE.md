@@ -21,10 +21,11 @@ CLI 的 `compile-json` 接受原有的可读代码树；`pack` 和 `unpack` 打�
 
 ```java
 var script = new azertia.script.GeneraterJson.AzScript();
+var diagnostics = new azertia.script.Diagnostics();
 try {
-    script.execute(java.nio.file.Path.of("example.azs"));
+    script.execute(java.nio.file.Path.of("example.azs"), diagnostics);
     var jsonTree = script.toObj();
-    var instructions = azertia.script.Compiler.compile(jsonTree);
+    var instructions = azertia.script.Compiler.compile(jsonTree, diagnostics);
     byte[] executable = instructions.toValue().toAbdFormat();
 } catch (azertia.script.CompileException error) {
     error.diagnostics().forEach(diagnostic -> System.err.println(diagnostic.format()));
@@ -328,14 +329,24 @@ Error: compilation failed: 1 error
 
 - 被包含文件中的错误之后，每层外围 `#include` 各有一行 `note: in file included from here`，由内向外排列。
 - 宏展开产生的记号上的词法或语法错误报告在宏的使用位置，随后一行 `note: in expansion of macro 'NAME' defined here` 指向其 `#define`；`#define` 位于另一文件时，还附上该文件的 include 链。展开代码中的语义错误报告在宏的使用位置，不附此注释。展开之后的记号保持各自的列号。
-- 预处理错误指向指令的 `#`；未闭合的条件报告在其起始指令，未结束的注释报告在注释开始处。找不到 include 文件时提示 `Cannot open include file "x.azs": file not found`；include 循环会列出相关文件。
+- 预处理错误指向指令的 `#`；未闭合的条件报告在其起始指令，未结束的注释报告在注释开始处。找不到 include 文件时提示 `Cannot open include file "x.azs": file not found`；include 循环会列出相关文件。源文件和被包含文件的名称不能含有控制字符或双向格式字符，因为诊断会输出这些名称（`Invalid source file name` / `Invalid include file name`）。
 - 上下文指出外围声明：`function main`、`function C::m`、构造与析构函数的 `function C::C` 和 `function C::~C`、`function C::operator[]`、`initializer of class P`、`class P` 或 `global g`。没有源码位置的错误（例如手写 AST 的格式错误）只给出输入文件名：`compile` 为源文件，`compile-json` 为 JSON 文件。
 - 从源码编译时，重复的函数、类、函数 ID 以及冲突的 extern 声明附带 `previous definition is here` 或 `previous declaration is here` 注释；同一头文件被读取两次造成的重复定义还会提示添加 include guard。函数 ID 按 8 位十六进制显示，例如 `0x0fff0005`。
 - 非 void 函数可能不经 `return` 走到末尾时，错误报告在其结束的右花括号处。
 
 文件名对主文件使用其文件名，对被包含文件使用相对主文件目录、以 `/` 分隔的路径；`execute(String)` 使用 `<source>`，单独编译的表达式使用 `<expression>`。这些名称保存在 AST 的 `sources` 表中，所以同一程序的 `compile` 与 `compile-json` 输出完全相同的带位置诊断。`compile-json` 将格式错误的 JSON 报告在其行列，没有 `sources` 表的 AST 以 JSON 文件名命名。
 
-编译在第一个错误处停止。CLI 随后输出汇总行 `Error: compilation failed: 1 error`，不写出任何输出文件，退出码为 1；未知选项等用法错误输出 `Error: 消息`。Java 调用方得到同样诊断的 `azertia.script.CompileException`，它是 `IllegalArgumentException`，`diagnostics()` 列出各条诊断，消息即其文本。
+#### 多个错误与退出码
+
+一次编译会一并报告彼此独立的错误。编译分阶段进行：预处理、词法分析、语法分析、语法分析后的类布局、extern 声明与函数 ID 检查、AST 结构检查、全局声明（类、extern、abstract 映射和全局变量）以及函数体。在一个阶段内，编译器出错后会恢复：预处理器从下一条指令或下一行继续，语法分析从下一个声明、类成员或语句继续，检查器从下一个类、全局项或函数继续。某一阶段报告了错误时编译随即结束，后续阶段不会处理有误的输入；例如存在语法错误时，程序其他位置的类型错误不会报告。每个阶段内的错误按源码顺序列出，被包含文件的错误位于其 `#include` 处。语法、AST、include 与宏的嵌套及长度上限，以及内部编译器错误，会立即停止编译。
+
+默认最多报告 20 个错误；`--max-errors N` 修改上限，`0` 表示不限，`1` 表示在第一个错误处停止。若之后还有错误，列表以 `note: too many errors emitted (limit 20); stopping` 结尾。CLI 随后输出汇总行，例如 `Error: compilation failed: 2 errors`，不写出任何输出文件。退出码：成功为 0，程序或命令行有错误为 1，内部编译器错误为 2；未知选项等用法错误输出 `Error: 消息`。
+
+内部编译器错误指编译器自身而非程序的故障，例如编译从源码解析的程序时出现意外的 Java 异常。其文本为 `internal compiler error: StackOverflowError`（异常及其消息），随后是 `note: this is a compiler bug; rerun with --debug-compiler for a stack trace`，最后的汇总行为 `Error: compilation failed: internal compiler error`。`--debug-compiler` 还会输出 Java 堆栈。
+
+`compile-json` 先检查 AST 的结构：必需字段、编译器读取的 JSON 类型、位置、`sources` 表以及数值范围。每处违例都针对 JSON 文件报告并给出 JSON 指针，例如 `tree.json: error: Malformed script JSON at /body/fff/_funcfff0000/metadata/position: expected an integer, got "abc"`。此类 AST 引起的意外故障报告为最近带位置节点处的 `Malformed script JSON near main.azs:3:10`，退出码为 1；`--debug-compiler` 输出底层异常。
+
+Java 调用方得到同样诊断的 `azertia.script.CompileException`，它是 `IllegalArgumentException`，`diagnostics()` 列出各条诊断，消息即其文本，`internal()` 表示是否为内部编译器错误。`AzScript.execute(...)` 与 `Compiler.compile(...)` 默认最多报告 20 个错误。请像本文开头的示例那样向两个步骤传入同一个 `azertia.script.Diagnostics`：只有这样，已解析程序上的意外故障才归为内部编译器错误；以其他实例编译的 AST 按外部提供的 JSON 处理。修改上限时配置该实例，例如 `new Diagnostics().maxErrors(0)`。一个实例只服务一次编译；`Diagnostics.failFast()` 在第一个错误处停止。通过 `Compiler.compileExpression` 单独编译的表达式在第一个错误处停止。
 
 ## 泛型
 
@@ -444,7 +455,7 @@ int functionId(int ns, int position) {
 
 可读 AST 保持 `metadata/ext/abstract/global-variable/body` 结构，并为带签名的宿主函数增加 `extern-signatures`。类程序额外保存类定义、字段顺序和成员表达式等编译信息；`compile-json` 会重新执行类型检查与降级。AST 还保存模块 hint、assume、外部声明、定义名称与实际定义编号；调用绑定与定义位置分开，支持完全相同的 ABD 往返。`abstract` 是 extern 优先的源码名称绑定：有 extern 时保存声明 ID，否则保存定义 ID；hint 库的本地定义仍使用 0000 占位，实际调用的 self-assume 地址在降级时生成。函数定义的独立位置由 `body` 的 namespace 和 `metadata.position/name` 保存；每个签名另保存 `return-type` 与 `param-types`。表达式对象有 `t: "ctrl" | "call"`、`call`、`param`，块是数组。
 
-根节点的 `sources` 表对文件的每次包含各有一项，例如 `{"name": "inc/lib.azs", "included-from": {"source": 0, "line": 2, "column": 1}}`；第 0 项是主文件，include 总是指向更早的项。表达式对象、函数元数据、类、字段和 extern 签名带有原始文件中的 `_line/_column`，以及所在 `sources` 项的下标 `_file`（为 0 时省略）。函数元数据还以 `_end_line/_end_column` 记录结束的右花括号，加括号的赋值带有 `_parenthesized: true`。字面值和块不带位置，诊断使用最近的带位置祖先。这些字段仅用于诊断，不写入 ABD 指令。compile-json 输入中的 `sources` 可以省略，此时所有位置都属于以输入文件命名的同一文件。
+根节点的 `sources` 表对文件的每次包含各有一项，例如 `{"name": "inc/lib.azs", "included-from": {"source": 0, "line": 2, "column": 1}}`；第 0 项是主文件，include 总是指向更早的项。表达式对象、函数元数据、类、字段和 extern 签名带有原始文件中的 `_line/_column`，以及所在 `sources` 项的下标 `_file`（为 0 时省略）。函数元数据还以 `_end_line/_end_column` 记录结束的右花括号，加括号的赋值带有 `_parenthesized: true`。字面值和块不带位置，诊断使用最近的带位置祖先。这些字段仅用于诊断，不写入 ABD 指令。compile-json 输入中的 `sources` 可以省略，此时所有位置都属于以输入文件命名的同一文件。位置均为正整数，`_file` 必须是表中的有效下标；`sources` 的每项命名一个非空、且不含控制字符或双向格式字符的文件，include 链最多 64 层。compile-json 在编译前检查这些结构，见[多个错误与退出码](#多个错误与退出码)。
 
 可读类 AST 保存 `operators` 映射及方法的 `operator-kind`，下标读写和后缀调用使用 `index`、`index-set`、`invoke` 节点，空 buffer 使用 `buffer-new`。compile-json 重新检查类型和降级，保持 ABD 字节一致。
 
