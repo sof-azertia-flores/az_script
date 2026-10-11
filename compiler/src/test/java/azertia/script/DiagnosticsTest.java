@@ -672,6 +672,14 @@ class DiagnosticsTest {
         assertEquals(1, Main.run(new String[]{"compile-json", huge.toString(), "-o", temporary.resolve("huge.abd").toString()}, stream, stream));
         assertTrue(bytes.toString(StandardCharsets.UTF_8).startsWith("huge.json: error: Malformed script JSON at " + main
                 + "/script/0/param/0/param/1: number is outside the supported range: 1e20000"), bytes::toString);
+        // A tree built in memory can hold non-finite numbers, which have no JSON spelling.
+        for (Number value : List.<Number>of(Double.NaN, Double.POSITIVE_INFINITY, Float.NaN)) {
+            JsonObject nonFinite = base.deepCopy();
+            function(nonFinite, "main").getAsJsonArray("script").get(0).getAsJsonObject().getAsJsonArray("param").get(0)
+                    .getAsJsonObject().getAsJsonArray("param").set(1, new JsonPrimitive(value));
+            assertEquals("<source>: error: Malformed script JSON at " + main + "/script/0/param/0/param/1: number is outside the supported range: "
+                    + value, assertThrows(CompileException.class, () -> Compiler.compile(nonFinite)).getMessage());
+        }
     }
 
     @Test void parsedProgramsAlwaysPassTheShapeCheck() throws Exception {

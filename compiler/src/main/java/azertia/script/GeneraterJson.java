@@ -373,7 +373,9 @@ public class GeneraterJson {
                                     case "author" -> author = arg;
                                     case "gvar" -> {
                                         identifier(arg);
-                                        if (globalVariables.contains(arg)) throw new IllegalArgumentException("Duplicate global variable: " + arg);
+                                        // globalDirectives has a key for every #gvar, so this check is a hash lookup.
+                                        diagnostics.metrics().tableProbes++;
+                                        if (globalDirectives.containsKey(arg)) throw new IllegalArgumentException("Duplicate global variable: " + arg);
                                         globalVariables.add(arg); globalDirectives.put(arg, directive);
                                     }
                                     case "namespace" -> {
@@ -804,7 +806,7 @@ public class GeneraterJson {
                         appendLimited(out, expand(macro.value(), false, expanding, depth + 1, null).text());
                         expanding.remove(word);
                     } else appendLimited(out, word);
-                } else { appendLimited(out, String.valueOf(c)); i++; }
+                } else { appendLimited(out, c); i++; }
             }
             if (out.length() > MAX_MACRO_EXPANSION_CHARS)
                 throw new LimitError("Macro expansion exceeds " + MAX_MACRO_EXPANSION_CHARS + " characters on one line");
@@ -812,6 +814,11 @@ public class GeneraterJson {
         }
         private static void appendLimited(StringBuilder out, String value) {
             if (value.length() > MAX_MACRO_EXPANSION_CHARS - out.length())
+                throw new LimitError("Macro expansion exceeds " + MAX_MACRO_EXPANSION_CHARS + " characters on one line");
+            out.append(value);
+        }
+        private static void appendLimited(StringBuilder out, char value) {
+            if (out.length() >= MAX_MACRO_EXPANSION_CHARS)
                 throw new LimitError("Macro expansion exceeds " + MAX_MACRO_EXPANSION_CHARS + " characters on one line");
             out.append(value);
         }
@@ -960,6 +967,7 @@ public class GeneraterJson {
             SourceMap.Origin origin = map.resolve(l, c);
             diagnostics.report(new CompileException(map.error(origin.unit(), origin.line(), origin.column(), origin.macro(), null, message)).stopping());
         }
+        private static final Set<String> TWO_CHARACTER_OPERATORS = Set.of("==", "!=", "<=", ">=", "&&", "||", "+=", "-=", "*=", "/=", "%=", "++", "--", "::");
         List<Token> scan() {
             List<Token> tokens = new ArrayList<>();
             while (offset < source.length()) {
@@ -995,7 +1003,7 @@ public class GeneraterJson {
                     tokens.add(token(text, literal, l, col, true));
                 } else {
                     String two = "" + c + peek(1);
-                    if (Set.of("==", "!=", "<=", ">=", "&&", "||", "+=", "-=", "*=", "/=", "%=", "++", "--", "::").contains(two)) {
+                    if (TWO_CHARACTER_OPERATORS.contains(two)) {
                         take(); take(); tokens.add(token(two, null, l, col, false));
                     } else if (c == ':') {
                         take(); tokens.add(token(":", null, l, col, false));
@@ -1134,6 +1142,8 @@ public class GeneraterJson {
         private int loopDepth;
         private int nextFunctionPosition = 1;
         private final Set<String> classNames = new LinkedHashSet<>();
+        /** The first definition of every class in {@code script.classes}, by name. */
+        private final Map<String,JsonObject> declaredClasses = new HashMap<>();
         private final Map<String,List<String>> classTypeParameters = new LinkedHashMap<>();
         private Set<String> typeParameters = new LinkedHashSet<>();
         Parser(String source, SourceMap map, AzScript script, Diagnostics diagnostics) {
@@ -1143,6 +1153,7 @@ public class GeneraterJson {
             for (JsonElement item : script.classes) {
                 JsonObject declaration = item.getAsJsonObject(); String name = declaration.get("name").getAsString();
                 classNames.add(name); classTypeParameters.put(name, parameterNames(declaration.getAsJsonArray("type-parameters")));
+                declaredClasses.putIfAbsent(name, declaration);
             }
             for (int i = 0; i + 1 < tokens.size(); i++) {
                 if (tokens.get(i).text().equals("class") && tokens.get(i + 1).identifier()) {
@@ -1639,18 +1650,21 @@ public class GeneraterJson {
                 }
                 function.explicitPosition = function.id & 0xffff;
             }
+            // IDs an automatic one must avoid besides the used ones: lifecycle IDs and every extern ID.
+            Set<Integer> taken = new HashSet<>(specialNames.values());
             for (ExternSignature imported : script.externSignatures.values()) {
                 boolean selfImport = script.namespaceHint.isEmpty() ? (imported.id >>> 16) == script.functionNamespace
                         : Objects.equals(script.assumeHints.get(script.namespaceHint), imported.id >>> 16);
                 if (selfImport) used.add((script.functionNamespace << 16) | (imported.id & 0xffff));
+                taken.add(imported.id);
             }
             for (AzFunction function : script.functions) {
                 if (function.explicitPosition == null) {
                     do {
                         if (nextFunctionPosition > 0xffff) throw error("Namespace has no free function IDs", functionLocation(function));
                         function.id = (script.functionNamespace << 16) | nextFunctionPosition++;
-                    } while (used.contains(function.id) || specialNames.containsValue(function.id)
-                            || script.externSignatures.values().stream().anyMatch(ext -> ext.id == function.id));
+                        diagnostics.metrics().idProbes++; diagnostics.metrics().tableProbes += 2;
+                    } while (used.contains(function.id) || taken.contains(function.id));
                     used.add(function.id);
                 }
                 if ((function.id == 0 || function.id == 1) && (!function.returnType.equals("void") || !function.params.isEmpty()))
@@ -1663,7 +1677,7 @@ public class GeneraterJson {
             Token classToken = name(); String className = classToken.text();
             try { identifier(className); } catch (CompileException e) { throw e; } catch (IllegalArgumentException e) { throw error(e.getMessage(), classToken); }
             if (TYPES.contains(className) || Compiler.isBuiltinName(className) || definitions.containsKey(className)
-                    || script.externSignatures.containsKey(className) || script.globalVariables.contains(className)) {
+                    || script.externSignatures.containsKey(className) || script.globalDirectives.containsKey(className)) {
                 List<Diagnostic> notes = new ArrayList<>();
                 if (definitions.containsKey(className)) notes.addAll(noteAt(functionLocation(definitions.get(className)), "previous definition is here"));
                 else if (script.externSignatures.containsKey(className) && externTokens.containsKey(script.externSignatures.get(className)))
@@ -1672,12 +1686,12 @@ public class GeneraterJson {
                     notes.addAll(noteAt(directive(script.globalDirectives.get(className), classToken), "previous declaration is here"));
                 throw error("Duplicate or reserved class name: " + className, classToken, notes);
             }
-            for (JsonElement item : script.classes)
-                if (item.getAsJsonObject().get("name").getAsString().equals(className)) {
-                    Token first = classLocation(item.getAsJsonObject());
-                    throw error(duplicate("Duplicate class: " + className, first, classToken), classToken,
-                            noteAt(first, "previous definition is here"));
-                }
+            JsonObject previous = declaredClasses.get(className); diagnostics.metrics().tableProbes++;
+            if (previous != null) {
+                Token first = classLocation(previous);
+                throw error(duplicate("Duplicate class: " + className, first, classToken), classToken,
+                        noteAt(first, "previous definition is here"));
+            }
             Set<String> outer = typeParameters; typeParameters = new LinkedHashSet<>(outer);
             try {
             JsonObject definition = new JsonObject(); definition.addProperty("name", className);
@@ -1695,6 +1709,7 @@ public class GeneraterJson {
             }
             JsonArray fields = new JsonArray(); JsonObject methods = new JsonObject(), operators = new JsonObject();
             definition.add("fields", fields); definition.add("methods", methods); script.classes.add(definition);
+            declaredClasses.put(className, definition);
             Set<String> members = new HashSet<>(); boolean constructor = false, destructor = false;
             expect("{");
             while (!at("}")) {
@@ -1789,6 +1804,7 @@ public class GeneraterJson {
             Token location=current();functionTokens.put(function,location);
             function.file=location.unit();function.line=location.line();function.column=location.column();
             if(owner!=null){function.params.add("this");function.paramTypes.add(selfType(owner)+"*");}
+            Set<String> parameterNames=new HashSet<>(function.params);
             expect("(");
             if(!at(")"))do {
                 String parameter=name().text(),parameterType="any";
@@ -1802,7 +1818,8 @@ public class GeneraterJson {
                     } else parameterType=pointerSuffix(parameterType);
                     parameter=external&&(at(",")||at(")"))?"<argument:"+function.params.size()+">":declaredName().text();
                 } else if(external)throw error("External parameters require explicit types");
-                if(function.params.contains(parameter))throw error("Duplicate parameter: "+parameter);
+                diagnostics.metrics().tableProbes++;
+                if(!parameterNames.add(parameter))throw error("Duplicate parameter: "+parameter);
                 function.params.add(parameter);function.paramTypes.add(parameterType);
             }while(match(","));
             expect(")");
@@ -1995,9 +2012,11 @@ public class GeneraterJson {
             enterRecursion();
             try { return assignmentBody(); } finally { recursionDepth--; }
         }
+        private static final Set<String> ASSIGNMENT_OPERATORS = Set.of("=", "+=", "-=", "*=", "/=", "%="),
+                ASSIGNMENT_CALLS = Set.of("varset", "member-set", "index-set", "mov");
         private JsonElement assignmentBody() {
             JsonElement left = binary(0);
-            if (Set.of("=", "+=", "-=", "*=", "/=", "%=").contains(current().text())) {
+            if (ASSIGNMENT_OPERATORS.contains(current().text())) {
                 Token operator = advance();
                 JsonObject target = left.isJsonObject() ? left.getAsJsonObject() : null;
                 boolean variable = target != null && target.get("t").getAsString().equals("ctrl")
@@ -2126,7 +2145,7 @@ public class GeneraterJson {
             if (match("(")) {
                 JsonElement value = expression(); expect(")");
                 // Diagnostic-only marker: a parenthesized assignment is an intentional value.
-                if (value.isJsonObject() && Set.of("varset", "member-set", "index-set", "mov").contains(value.getAsJsonObject().get("call").getAsString()))
+                if (value.isJsonObject() && ASSIGNMENT_CALLS.contains(value.getAsJsonObject().get("call").getAsString()))
                     value.getAsJsonObject().addProperty("_parenthesized", true);
                 return value;
             }

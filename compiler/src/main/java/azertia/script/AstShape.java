@@ -27,7 +27,27 @@ final class AstShape {
     static final int MAX_SOURCES = TreeLimits.MAX_INCLUDES + 1;
     private static final String[] POSITIVE_POSITIONS = {"_line", "_column", "_end_line", "_end_column"};
 
-    private record Pending(JsonElement node, String path) {}
+    /**
+     * A JSON pointer: a member name or an array index below a parent. Most nodes are
+     * valid, so the pointer is spelled out only when a violation is reported at it.
+     */
+    private static final class Pointer {
+        static final Pointer ROOT = new Pointer(null, null, 0);
+        private final Pointer parent;
+        private final String key;
+        private final int index;
+        private Pointer(Pointer parent, String key, int index) { this.parent = parent; this.key = key; this.index = index; }
+        Pointer key(String name) { return new Pointer(this, name, 0); }
+        Pointer index(int position) { return new Pointer(this, null, position); }
+        @Override public String toString() {
+            Deque<Pointer> chain = new ArrayDeque<>();
+            for (Pointer pointer = this; pointer.parent != null; pointer = pointer.parent) chain.push(pointer);
+            StringBuilder text = new StringBuilder();
+            for (Pointer pointer : chain) text.append('/').append(pointer.key != null ? escape(pointer.key) : String.valueOf(pointer.index));
+            return text.toString();
+        }
+    }
+    private record Pending(JsonElement node, Pointer path) {}
     private final List<String> errors = new ArrayList<>();
     private final Deque<Pending> nodes = new ArrayDeque<>();
     private int units = 1;
@@ -40,26 +60,29 @@ final class AstShape {
     }
 
     private void root(JsonObject root) {
-        if (root.has("sources")) sources(root.get("sources"), "/sources");
-        JsonObject metadata = object(root, "metadata", "", true);
+        Pointer top = Pointer.ROOT;
+        if (root.has("sources")) sources(root.get("sources"), top.key("sources"));
+        JsonObject metadata = object(root, "metadata", top, true);
         if (metadata != null) {
-            string(metadata, "author", "/metadata", false);
-            integer(metadata, "version", "/metadata", false);
-            integer(metadata, "function-namespace", "/metadata", false);
+            Pointer meta = top.key("metadata");
+            string(metadata, "author", meta, false);
+            integer(metadata, "version", meta, false);
+            integer(metadata, "function-namespace", meta, false);
         }
-        string(root, "namespace-hint", "", false);
-        JsonArray assumptions = array(root, "assume-hints", "", false);
+        string(root, "namespace-hint", top, false);
+        JsonArray assumptions = array(root, "assume-hints", top, false);
         if (assumptions != null) for (int i = 0; i < assumptions.size(); i++) {
-            JsonObject assumption = element(assumptions.get(i), "/assume-hints/" + i);
+            Pointer path = top.key("assume-hints").index(i);
+            JsonObject assumption = element(assumptions.get(i), path);
             if (assumption == null) continue;
-            string(assumption, "hint", "/assume-hints/" + i, true);
-            integer(assumption, "namespace", "/assume-hints/" + i, true);
+            string(assumption, "hint", path, true);
+            integer(assumption, "namespace", path, true);
         }
-        strings(object(root, "ext", "", false), "/ext");
-        strings(object(root, "abstract", "", false), "/abstract");
-        JsonObject externs = object(root, "extern-signatures", "", false);
+        strings(object(root, "ext", top, false), top.key("ext"));
+        strings(object(root, "abstract", top, false), top.key("abstract"));
+        JsonObject externs = object(root, "extern-signatures", top, false);
         if (externs != null) for (var entry : externs.entrySet()) {
-            String path = "/extern-signatures/" + escape(entry.getKey());
+            Pointer path = top.key("extern-signatures").key(entry.getKey());
             JsonObject signature = element(entry.getValue(), path);
             if (signature == null) continue;
             positions(signature, path);
@@ -68,24 +91,24 @@ final class AstShape {
             stringArray(signature, "param-types", path, true);
             declarationKinds(signature, path);
         }
-        JsonArray globals = array(root, "global-variable", "", false);
-        if (globals != null) for (int i = 0; i < globals.size(); i++) stringElement(globals.get(i), "/global-variable/" + i);
-        JsonObject body = object(root, "body", "", true);
+        JsonArray globals = array(root, "global-variable", top, false);
+        if (globals != null) for (int i = 0; i < globals.size(); i++) stringElement(globals.get(i), top.key("global-variable").index(i));
+        JsonObject body = object(root, "body", top, true);
         if (body != null) for (var namespace : body.entrySet()) {
-            String namespacePath = "/body/" + escape(namespace.getKey());
+            Pointer namespacePath = top.key("body").key(namespace.getKey());
             JsonObject functions = element(namespace.getValue(), namespacePath);
-            if (functions != null) for (var entry : functions.entrySet()) function(entry.getValue(), namespacePath + "/" + escape(entry.getKey()));
+            if (functions != null) for (var entry : functions.entrySet()) function(entry.getValue(), namespacePath.key(entry.getKey()));
         }
-        JsonArray classes = array(root, "classes", "", false);
-        if (classes != null) for (int i = 0; i < classes.size(); i++) definition(classes.get(i), "/classes/" + i);
+        JsonArray classes = array(root, "classes", top, false);
+        if (classes != null) for (int i = 0; i < classes.size(); i++) definition(classes.get(i), top.key("classes").index(i));
     }
 
-    private void function(JsonElement value, String path) {
+    private void function(JsonElement value, Pointer path) {
         JsonObject function = element(value, path);
         if (function == null) return;
         JsonObject metadata = object(function, "metadata", path, true);
         if (metadata != null) {
-            String meta = path + "/metadata";
+            Pointer meta = path.key("metadata");
             positions(metadata, meta);
             string(metadata, "name", meta, false);
             integer(metadata, "position", meta, true);
@@ -95,29 +118,30 @@ final class AstShape {
             declarationKinds(metadata, meta);
             string(metadata, "base-initializer", meta, false);
             JsonArray baseArguments = array(metadata, "base-args", meta, false);
-            if (baseArguments != null) node(baseArguments, meta + "/base-args");
+            if (baseArguments != null) node(baseArguments, meta.key("base-args"));
         }
-        if (!function.has("script")) missing(path + "/script");
-        else node(function.get("script"), path + "/script");
+        if (!function.has("script")) missing(path.key("script"));
+        else node(function.get("script"), path.key("script"));
     }
     /** Fields shared by function metadata and extern signatures. */
-    private void declarationKinds(JsonObject declaration, String path) {
+    private void declarationKinds(JsonObject declaration, Pointer path) {
         string(declaration, "owner-class", path, false);
         string(declaration, "function-kind", path, false);
         string(declaration, "operator-kind", path, false);
         typeParameters(declaration, path);
     }
-    private void typeParameters(JsonObject declaration, String path) {
+    private void typeParameters(JsonObject declaration, Pointer path) {
         JsonArray parameters = array(declaration, "type-parameters", path, false);
         if (parameters == null) return;
         for (int i = 0; i < parameters.size(); i++) {
-            JsonObject parameter = element(parameters.get(i), path + "/type-parameters/" + i);
+            Pointer parameterPath = path.key("type-parameters").index(i);
+            JsonObject parameter = element(parameters.get(i), parameterPath);
             if (parameter == null) continue;
-            string(parameter, "name", path + "/type-parameters/" + i, true);
-            string(parameter, "bound", path + "/type-parameters/" + i, false);
+            string(parameter, "name", parameterPath, true);
+            string(parameter, "bound", parameterPath, false);
         }
     }
-    private void definition(JsonElement value, String path) {
+    private void definition(JsonElement value, Pointer path) {
         JsonObject definition = element(value, path);
         if (definition == null) return;
         positions(definition, path);
@@ -127,32 +151,32 @@ final class AstShape {
         string(definition, "base", path, false);
         typeParameters(definition, path);
         JsonObject methods = object(definition, "methods", path, true);
-        strings(methods, path + "/methods");
-        strings(object(definition, "operators", path, false), path + "/operators");
+        strings(methods, path.key("methods"));
+        strings(object(definition, "operators", path, false), path.key("operators"));
         JsonArray fields = array(definition, "fields", path, true);
         if (fields != null) for (int i = 0; i < fields.size(); i++) {
-            String fieldPath = path + "/fields/" + i;
+            Pointer fieldPath = path.key("fields").index(i);
             JsonObject field = element(fields.get(i), fieldPath);
             if (field == null) continue;
             positions(field, fieldPath);
             string(field, "name", fieldPath, true);
             string(field, "type", fieldPath, true);
-            if (field.has("initializer")) node(field.get("initializer"), fieldPath + "/initializer");
+            if (field.has("initializer")) node(field.get("initializer"), fieldPath.key("initializer"));
         }
     }
 
     /** Checks an expression, statement or block and everything below it, without recursion. */
-    private void node(JsonElement value, String path) { nodes.push(new Pending(value, path)); drainNodes(); }
+    private void node(JsonElement value, Pointer path) { nodes.push(new Pending(value, path)); drainNodes(); }
     private void drainNodes() {
         while (!nodes.isEmpty()) {
-            Pending pending = nodes.pop(); JsonElement value = pending.node(); String path = pending.path();
+            Pending pending = nodes.pop(); JsonElement value = pending.node(); Pointer path = pending.path();
             // Null is reported by the compiler as a value error at its context.
             if (value == null || value.isJsonNull()) continue;
             if (value.isJsonPrimitive()) { number(value.getAsJsonPrimitive(), path); continue; }
             List<Pending> children = new ArrayList<>();
             if (value.isJsonArray()) {
                 JsonArray block = value.getAsJsonArray();
-                for (int i = 0; i < block.size(); i++) children.add(new Pending(block.get(i), path + "/" + i));
+                for (int i = 0; i < block.size(); i++) children.add(new Pending(block.get(i), path.index(i)));
             } else {
                 JsonObject node = value.getAsJsonObject();
                 positions(node, path);
@@ -164,12 +188,13 @@ final class AstShape {
                 literalTrue(node, "_parenthesized", path);
                 JsonArray params = array(node, "param", path, false);
                 // A missing param list is an empty one.
-                if (call != null && (params != null || !node.has("param"))) operands(call, params != null ? params : new JsonArray(), path + "/param");
+                Pointer paramPath = path.key("param");
+                if (call != null && (params != null || !node.has("param"))) operands(call, params != null ? params : new JsonArray(), paramPath);
                 // A name operand is a string, never an expression node.
                 Set<Integer> names = call == null ? Set.of() : NAME_OPERANDS.getOrDefault(call, Set.of());
                 if (params != null) for (int i = 0; i < params.size(); i++) {
-                    if (names.contains(i)) stringElement(params.get(i), path + "/param/" + i);
-                    else children.add(new Pending(params.get(i), path + "/param/" + i));
+                    if (names.contains(i)) stringElement(params.get(i), paramPath.index(i));
+                    else children.add(new Pending(params.get(i), paramPath.index(i)));
                 }
             }
             // Keep document order: the first child is checked first.
@@ -185,23 +210,23 @@ final class AstShape {
      * receiver may be any expression, e.g. the literal in {@code "abc".x}, which the
      * compiler rejects by type; only the field target of a member assignment is an object.
      */
-    private void operands(String call, JsonArray params, String path) {
+    private void operands(String call, JsonArray params, Pointer path) {
         switch (call) {
             case "member-set" -> {
-                if (params.size() > 0 && !params.get(0).isJsonObject()) error(path + "/0", "expected an object, got " + describe(params.get(0)));
+                if (params.size() > 0 && !params.get(0).isJsonObject()) error(path.index(0), "expected an object, got " + describe(params.get(0)));
             }
             case "member-call" -> {
                 if (params.size() < 2) error(path, call + " needs a receiver and a member name");
             }
             case "object-new", "object-value", "buffer-new" -> {
                 if (params.isEmpty()) error(path, call + " needs a type name");
-                else stringElement(params.get(0), path + "/0");
+                else stringElement(params.get(0), path.index(0));
             }
             default -> {}
         }
     }
 
-    private void sources(JsonElement value, String path) {
+    private void sources(JsonElement value, Pointer path) {
         if (!value.isJsonArray()) { error(path, "expected an array, got " + describe(value)); return; }
         JsonArray entries = value.getAsJsonArray();
         if (entries.isEmpty()) { error(path, "expected at least the main source"); return; }
@@ -209,14 +234,14 @@ final class AstShape {
         if (units > MAX_SOURCES) { error(path, "expected at most " + MAX_SOURCES + " sources, got " + units); return; }
         int[] depth = new int[entries.size()];
         for (int i = 0; i < entries.size(); i++) {
-            String entryPath = path + "/" + i;
+            Pointer entryPath = path.index(i);
             JsonObject entry = element(entries.get(i), entryPath);
             if (entry == null) continue;
             String name = string(entry, "name", entryPath, true);
             String problem = name == null ? null : sourceNameProblem(name);
-            if (problem != null) error(entryPath + "/name", problem);
+            if (problem != null) error(entryPath.key("name"), problem);
             if (!entry.has("included-from")) continue;
-            String fromPath = entryPath + "/included-from";
+            Pointer fromPath = entryPath.key("included-from");
             if (i == 0) { error(fromPath, "the main source cannot be included"); continue; }
             JsonObject from = object(entry, "included-from", entryPath, true);
             if (from == null) continue;
@@ -225,7 +250,7 @@ final class AstShape {
             positive(from, "column", fromPath, true);
             if (parent == null) continue;
             // A parent always precedes its unit, which keeps include chains acyclic.
-            if (parent < 0 || parent >= i) { error(fromPath + "/source", "expected an earlier source index, got " + parent); continue; }
+            if (parent < 0 || parent >= i) { error(fromPath.key("source"), "expected an earlier source index, got " + parent); continue; }
             depth[i] = depth[parent] + 1;
             if (depth[i] > MAX_INCLUDE_CHAIN) error(fromPath, "the include chain exceeds " + MAX_INCLUDE_CHAIN + " levels");
         }
@@ -261,83 +286,87 @@ final class AstShape {
         return out.toString();
     }
 
-    private void positions(JsonObject object, String path) {
+    private void positions(JsonObject object, Pointer path) {
         for (String key : POSITIVE_POSITIONS) positive(object, key, path, false);
         Integer file = integer(object, "_file", path, false);
         if (file != null && (file < 0 || file >= units))
-            error(path + "/_file", "source index " + file + " is outside the sources table (" + units + (units == 1 ? " entry)" : " entries)"));
+            error(path.key("_file"), "source index " + file + " is outside the sources table (" + units + (units == 1 ? " entry)" : " entries)"));
     }
-    private void number(JsonPrimitive value, String path) {
+    private void number(JsonPrimitive value, Pointer path) {
         if (!value.isNumber()) return;
-        // Gson rejects numbers whose exponent or length exceeds its limits.
+        // Integers, finite floats and BigDecimals always fit; NaN, an infinity and text numbers
+        // whose exponent or length exceeds Gson's limits fail the conversion below.
+        Number stored = value.getAsNumber();
+        if (stored instanceof Integer || stored instanceof Long || stored instanceof BigDecimal) return;
+        if ((stored instanceof Float || stored instanceof Double) && Double.isFinite(stored.doubleValue())) return;
         try { value.getAsBigDecimal(); }
         catch (NumberFormatException e) { error(path, "number is outside the supported range: " + printable(abbreviate(value.getAsString()))); }
     }
 
-    private JsonObject element(JsonElement value, String path) {
+    private JsonObject element(JsonElement value, Pointer path) {
         if (value != null && value.isJsonObject()) return value.getAsJsonObject();
         error(path, "expected an object, got " + describe(value)); return null;
     }
-    private void stringElement(JsonElement value, String path) {
+    private void stringElement(JsonElement value, Pointer path) {
         if (value == null || !value.isJsonPrimitive() || !value.getAsJsonPrimitive().isString())
             error(path, "expected a string, got " + describe(value));
     }
-    private JsonObject object(JsonObject parent, String key, String path, boolean required) {
+    private JsonObject object(JsonObject parent, String key, Pointer path, boolean required) {
         JsonElement value = field(parent, key, path, required);
-        return value == null ? null : element(value, path + "/" + escape(key));
+        return value == null ? null : element(value, path.key(key));
     }
-    private JsonArray array(JsonObject parent, String key, String path, boolean required) {
+    private JsonArray array(JsonObject parent, String key, Pointer path, boolean required) {
         JsonElement value = field(parent, key, path, required);
         if (value == null) return null;
         if (value.isJsonArray()) return value.getAsJsonArray();
-        error(path + "/" + escape(key), "expected an array, got " + describe(value)); return null;
+        error(path.key(key), "expected an array, got " + describe(value)); return null;
     }
-    private String string(JsonObject parent, String key, String path, boolean required) {
+    private String string(JsonObject parent, String key, Pointer path, boolean required) {
         JsonElement value = field(parent, key, path, required);
         if (value == null) return null;
         if (value.isJsonPrimitive() && value.getAsJsonPrimitive().isString()) return value.getAsString();
-        error(path + "/" + escape(key), "expected a string, got " + describe(value)); return null;
+        error(path.key(key), "expected a string, got " + describe(value)); return null;
     }
-    private void stringArray(JsonObject parent, String key, String path, boolean required) {
+    private void stringArray(JsonObject parent, String key, Pointer path, boolean required) {
         JsonArray values = array(parent, key, path, required);
-        if (values != null) for (int i = 0; i < values.size(); i++) stringElement(values.get(i), path + "/" + escape(key) + "/" + i);
+        if (values != null) for (int i = 0; i < values.size(); i++) stringElement(values.get(i), path.key(key).index(i));
     }
     /** Every member of an object is a string, e.g. ext, abstract and method mappings. */
-    private void strings(JsonObject object, String path) {
-        if (object != null) for (var entry : object.entrySet()) stringElement(entry.getValue(), path + "/" + escape(entry.getKey()));
+    private void strings(JsonObject object, Pointer path) {
+        if (object != null) for (var entry : object.entrySet()) stringElement(entry.getValue(), path.key(entry.getKey()));
     }
-    private Integer integer(JsonObject parent, String key, String path, boolean required) {
+    private Integer integer(JsonObject parent, String key, Pointer path, boolean required) {
         JsonElement value = field(parent, key, path, required);
         if (value == null) return null;
         if (value.isJsonPrimitive() && value.getAsJsonPrimitive().isNumber()) {
-            try { BigDecimal number = value.getAsBigDecimal(); return number.intValueExact(); }
-            catch (NumberFormatException | ArithmeticException e) { /* reported below */ }
+            Integer exact = SourceMap.exactInt(value.getAsJsonPrimitive());
+            if (exact != null) return exact;
         }
-        error(path + "/" + escape(key), "expected an integer, got " + describe(value)); return null;
+        error(path.key(key), "expected an integer, got " + describe(value)); return null;
     }
-    private void positive(JsonObject parent, String key, String path, boolean required) {
+    private void positive(JsonObject parent, String key, Pointer path, boolean required) {
         JsonElement value = field(parent, key, path, required);
         if (value == null) return;
         if (value.isJsonPrimitive() && value.getAsJsonPrimitive().isNumber()) {
-            try { if (value.getAsBigDecimal().intValueExact() > 0) return; }
-            catch (NumberFormatException | ArithmeticException e) { /* reported below */ }
+            Integer exact = SourceMap.exactInt(value.getAsJsonPrimitive());
+            if (exact != null && exact > 0) return;
         }
-        error(path + "/" + escape(key), "expected a positive integer, got " + describe(value));
+        error(path.key(key), "expected a positive integer, got " + describe(value));
     }
     /** Marker fields are either absent or literally true. */
-    private void literalTrue(JsonObject parent, String key, String path) {
+    private void literalTrue(JsonObject parent, String key, Pointer path) {
         JsonElement value = parent.get(key);
         if (value != null && !(value.isJsonPrimitive() && value.getAsJsonPrimitive().isBoolean() && value.getAsBoolean()))
-            error(path + "/" + escape(key), "expected true, got " + describe(value));
+            error(path.key(key), "expected true, got " + describe(value));
     }
-    private JsonElement field(JsonObject parent, String key, String path, boolean required) {
+    private JsonElement field(JsonObject parent, String key, Pointer path, boolean required) {
         JsonElement value = parent.get(key);
-        if (value == null && required) missing(path + "/" + escape(key));
+        if (value == null && required) missing(path.key(key));
         return value;
     }
 
-    private void missing(String path) { error(path, "required field is missing"); }
-    private void error(String path, String message) { errors.add("Malformed script JSON at " + path + ": " + message); }
+    private void missing(Pointer path) { error(path, "required field is missing"); }
+    private void error(Pointer path, String message) { errors.add("Malformed script JSON at " + path + ": " + message); }
     /** One JSON-pointer reference token, made printable. */
     private static String escape(String key) { return printable(key.replace("~", "~0").replace("/", "~1")); }
     private static String describe(JsonElement value) {

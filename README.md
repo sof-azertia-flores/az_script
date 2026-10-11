@@ -32,6 +32,8 @@ python3 tools/build_and_test.py --offline --sanitize
 
 `--sanitize` 对原生数据层、解释器和编译执行链启用 AddressSanitizer/UndefinedBehaviorSanitizer；JNI 使用普通构建配合 JVM 的 `-Xcheck:jni` 验证。只构建可使用 `--skip-tests`；不需要 JNI 可使用 `--skip-jni`。
 
+`CompilerScalingTest` 检查编译工作量随程序规模线性增长：它比较生成程序与其八倍规模版本的确定性操作计数，覆盖大量局部变量、语句、函数、全局变量、类、字段、extern 或参数。构建后可运行 `python3 tools/bench_compiler.py`，在这类程序上测量编译耗时，最大到单个作用域 32,000 个局部变量或 20,000 个函数；它是可选基准，不属于验证流程。
+
 三个 Java 模块也配置为根 Gradle 多模块工程，可以执行 `gradle build`；完整跨语言验证以以上 Python 入口为准。原始模块的旧 Gradle wrapper 保留作历史文件，建议使用根工程或统一入口。
 
 ## 导出完整发行包

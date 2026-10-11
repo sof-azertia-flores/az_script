@@ -7,8 +7,9 @@ import java.util.*;
 
 /** Resolves symbols and lowers the readable JSON AST to numeric-slot ABD instructions. */
 public class Compiler {
-    private static final ThreadLocal<Integer> EXPRESSION_DEPTH = ThreadLocal.withInitial(() -> 0);
-    private static final ThreadLocal<Integer> TYPE_DEPTH = ThreadLocal.withInitial(() -> 0);
+    // Mutable holders: the depth changes at every node, and updating a holder avoids a ThreadLocal.set each time.
+    private static final ThreadLocal<int[]> EXPRESSION_DEPTH = ThreadLocal.withInitial(() -> new int[1]);
+    private static final ThreadLocal<int[]> TYPE_DEPTH = ThreadLocal.withInitial(() -> new int[1]);
     private static final int NULL_TYPE = -2, FIRST_CLASS_TYPE = 100;
     private static final int MAX_VARIABLE_SLOTS = 1_048_576, MAX_VALUE_NESTING = 64;
     private static final ThreadLocal<Map<Integer,ClassInfo>> CLASS_LAYOUTS = ThreadLocal.withInitial(LinkedHashMap::new);
@@ -38,9 +39,13 @@ public class Compiler {
             new BuiltinSpec("reflect_invoke_function", 0x0abd0008, AsTypes.ANY_VALUE, List.of()),
             new BuiltinSpec("reflect_get_hint_namespace", 0x0abd0009, AsTypes.INT_VALUE, List.of(AsTypes.STRING_VALUE)),
             new BuiltinSpec("reflect_hint_loaded", 0x0abd000a, AsTypes.BOOLEAN_VALUE, List.of(AsTypes.STRING_VALUE)));
-    public static boolean isBuiltinName(String name) {
-        return name.equals("value_compare") || name.equals("buffer") || BUILTINS.stream().anyMatch(spec -> spec.name().equals(name));
+    private static final Set<String> BUILTIN_NAMES = builtinNames();
+    private static Set<String> builtinNames() {
+        Set<String> names = new HashSet<>(Set.of("value_compare", "buffer"));
+        for (BuiltinSpec spec : BUILTINS) names.add(spec.name());
+        return Set.copyOf(names);
     }
+    public static boolean isBuiltinName(String name) { return BUILTIN_NAMES.contains(name); }
     public static void addDefaultIds(Map<String,Integer> map) {
         for (BuiltinSpec spec : BUILTINS) map.putIfAbsent(spec.name(), spec.id());
     }
@@ -78,6 +83,8 @@ public class Compiler {
         final List<Field> ownFields = new ArrayList<>();
         final List<Field> fields = new ArrayList<>();
         final Map<String,Field> visibleFields = new LinkedHashMap<>();
+        /** The slot offset of every visible field in {@link #fields}. */
+        final Map<String,Integer> fieldOffsets = new HashMap<>();
         final Map<String,String> ownMethods = new LinkedHashMap<>();
         final Map<String,String> methods = new LinkedHashMap<>();
         final Map<String,String> ownOperators = new LinkedHashMap<>();
@@ -93,6 +100,7 @@ public class Compiler {
     static final class CompilationState {
         final Diagnostics diagnostics;
         final SourceMap sources;
+        final CompilerMetrics metrics;
         /** Whether the in-process parser produced the AST, which makes unexpected exceptions internal compiler errors. */
         final boolean parsed;
         /**
@@ -100,23 +108,64 @@ public class Compiler {
          * are reported only at positioned nodes of the compiled AST, never at these.
          */
         final Set<JsonObject> synthesized = Collections.newSetFromMap(new IdentityHashMap<>());
+        /** The memo of the running outermost type query (see expressionType), reused by the next query. */
+        final TypeQuery typeQuery = new TypeQuery();
         CompilationState(Diagnostics diagnostics, SourceMap sources, boolean parsed) {
-            this.diagnostics = diagnostics; this.sources = sources; this.parsed = parsed;
+            this.diagnostics = diagnostics; this.sources = sources; this.parsed = parsed; metrics = diagnostics.metrics();
+        }
+    }
+    /**
+     * Expression types memoized during one outermost type query, for its environment.
+     * A query normally stays in one environment; others get maps of their own.
+     */
+    private static final class TypeQuery {
+        /** Larger memos are dropped after their query, so clearing never costs more than a small table. */
+        private static final int REUSED_ENTRIES = 64;
+        int depth;
+        private LogicEnvironment environment;
+        private IdentityHashMap<JsonElement,Integer> types = new IdentityHashMap<>();
+        private IdentityHashMap<LogicEnvironment,IdentityHashMap<JsonElement,Integer>> others;
+        IdentityHashMap<JsonElement,Integer> types(LogicEnvironment scope) {
+            if (environment == null) environment = scope;
+            if (environment == scope) return types;
+            if (others == null) others = new IdentityHashMap<>();
+            return others.computeIfAbsent(scope, ignored -> new IdentityHashMap<>());
+        }
+        /** Ends the outermost query: later declarations can change lexical lookup. */
+        void finish() {
+            environment = null; others = null;
+            if (types.size() > REUSED_ENTRIES) types = new IdentityHashMap<>(); else if (!types.isEmpty()) types.clear();
         }
     }
     public static class LogicEnvironment {
         public LogicEnvironment parent;
+        /**
+         * The variables of this scope in declaration order. Lookups use an index of
+         * this list: change it through {@code define} or by appending variables. An
+         * appended variable, or a replacement list, is indexed under the aliases it has
+         * then at the next lookup in this scope. Replacing or removing entries and
+         * changing the aliases of an indexed variable are not supported: a lookup then
+         * never returns a variable that has left the list or lost the alias, but can
+         * miss a name added that way.
+         */
         public List<LogicVariable> vars = new ArrayList<>();
         public Map<String,Integer> abs = new LinkedHashMap<>();
-        private final Map<Integer,Integer> arities = new HashMap<>();
-        private final Map<Integer,Integer> functionReturnTypes = new HashMap<>();
-        private final Map<Integer,Signature> externSignatures = new LinkedHashMap<>();
-        private final Map<Integer,Signature> scriptSignatures = new LinkedHashMap<>();
-        private final Map<Integer,Signature> builtinSignatures = new LinkedHashMap<>();
-        private final Map<String,Signature> namedSignatures = new LinkedHashMap<>();
-        private final Map<String,ClassInfo> classes = new LinkedHashMap<>();
-        private final Set<JsonObject> trustedNodes = Collections.newSetFromMap(new IdentityHashMap<>());
-        private final Map<JsonObject,ClassInfo> callOwners = new IdentityHashMap<>();
+        // Tables only the root fills; a child scope shares the root's instead of allocating its own.
+        private final Map<Integer,Integer> arities;
+        private final Map<Integer,Integer> functionReturnTypes;
+        private final Map<Integer,Signature> externSignatures;
+        private final Map<Integer,Signature> scriptSignatures;
+        private final Map<Integer,Signature> builtinSignatures;
+        private final Map<String,Signature> namedSignatures;
+        private final Map<String,ClassInfo> classes;
+        private final Set<JsonObject> trustedNodes;
+        private final Map<JsonObject,ClassInfo> callOwners;
+        /** The positions in {@link #vars} by alias, the list they index and how many of its entries. */
+        private final Map<String,Integer> index = new HashMap<>();
+        private List<LogicVariable> indexedList;
+        private int indexed;
+        /** The outermost environment, cached; null until a scope with a parent first needs it. */
+        private LogicEnvironment root;
         private Map<String,Integer> typeScope = Map.of();
         private List<Integer> typeParameters = List.of();
         private Counter counter = new Counter();
@@ -128,15 +177,34 @@ public class Compiler {
         private int loopDepth;
         private String ownerClass;
         private int moduleNamespace = 0xfff;
+        public LogicEnvironment() {
+            arities = new HashMap<>(); functionReturnTypes = new HashMap<>(); externSignatures = new LinkedHashMap<>();
+            scriptSignatures = new LinkedHashMap<>(); builtinSignatures = new LinkedHashMap<>(); namedSignatures = new LinkedHashMap<>();
+            classes = new LinkedHashMap<>(); trustedNodes = Collections.newSetFromMap(new IdentityHashMap<>()); callOwners = new IdentityHashMap<>();
+        }
+        private LogicEnvironment(LogicEnvironment root) {
+            arities = root.arities; functionReturnTypes = root.functionReturnTypes; externSignatures = root.externSignatures;
+            scriptSignatures = root.scriptSignatures; builtinSignatures = root.builtinSignatures; namedSignatures = root.namedSignatures;
+            classes = root.classes; trustedNodes = root.trustedNodes; callOwners = root.callOwners; this.root = root;
+        }
         LogicEnvironment child() {
-            LogicEnvironment child = new LogicEnvironment(); child.parent = this; child.counter = counter;
+            LogicEnvironment child = new LogicEnvironment(root()); child.parent = this; child.counter = counter;
             child.context = context; child.returnType = returnType; child.loopDepth = loopDepth; child.ownerClass = ownerClass;
             child.typeScope = typeScope; child.typeParameters = typeParameters; return child;
         }
         LogicEnvironment loopChild() {
             LogicEnvironment child = child(); child.loopDepth++; return child;
         }
-        LogicEnvironment root() { return parent == null ? this : parent.root(); }
+        LogicEnvironment root() {
+            if (parent == null) return this;
+            if (root == null) {
+                // A parent assigned outside child(); the chain is walked once.
+                LogicEnvironment cursor = parent;
+                while (cursor.parent != null) cursor = cursor.parent;
+                root = cursor;
+            }
+            return root;
+        }
         CompilationState state() {
             LogicEnvironment root = root();
             if (root.state == null) root.state = new CompilationState(Diagnostics.failFast(), SourceMap.single("<expression>"), false);
@@ -147,31 +215,53 @@ public class Compiler {
             if (id != null) return id;
             throw new IllegalArgumentException("Unknown function: " + name);
         }
+        /** The variable of this scope with an alias, without marking it used. */
+        private LogicVariable local(String alias) {
+            if (indexedList != vars || indexed != vars.size()) reindex();
+            Integer position = index.get(alias);
+            if (position == null) return null;
+            LogicVariable variable = position < vars.size() ? vars.get(position) : null;
+            if (variable != null && variable.alias.contains(alias)) return variable;
+            // An entry was replaced or lost the alias outside define().
+            reindex(); position = index.get(alias);
+            return position == null ? null : vars.get(position);
+        }
+        /** Indexes vars after a change outside define(); the first variable with an alias keeps it. */
+        private void reindex() {
+            index.clear();
+            for (int i = 0; i < vars.size(); i++) for (String name : vars.get(i).alias) index.putIfAbsent(name, i);
+            indexedList = vars; indexed = vars.size();
+        }
         // Every lookup is a use of the variable for the unused-variable warning.
         public LogicVariable getVariable(String name) {
-            for (LogicVariable variable : vars) if (variable.alias.contains(name)) { variable.used = true; return variable; }
-            if (parent != null) return parent.getVariable(name);
-            throw new IllegalArgumentException("Unknown variable: " + name);
+            LogicVariable variable = findVariable(name);
+            if (variable == null) throw new IllegalArgumentException("Unknown variable: " + name);
+            return variable;
         }
-        private LogicVariable findVariable(String name) {
-            for (LogicVariable variable : vars) if (variable.alias.contains(name)) { variable.used = true; return variable; }
-            return parent == null ? null : parent.findVariable(name);
-        }
-        private LogicVariable findLexicalVariable(String name) {
-            if (parent == null) return null;
-            for (LogicVariable variable : vars) if (variable.alias.contains(name)) { variable.used = true; return variable; }
-            return parent.findLexicalVariable(name);
+        /** The innermost variable with this name, the globals of the root included. */
+        private LogicVariable findVariable(String name) { return lookup(name, true); }
+        /** The innermost local variable with this name; the root's globals are not lexical. */
+        private LogicVariable findLexicalVariable(String name) { return lookup(name, false); }
+        private LogicVariable lookup(String name, boolean globals) {
+            int probes = 0; LogicVariable found = null;
+            for (LogicEnvironment scope = this; scope != null && (globals || scope.parent != null); scope = scope.parent) {
+                probes++;
+                found = scope.local(name);
+                if (found != null) { found.used = true; break; }
+            }
+            state().metrics.scopeProbes += probes;
+            return found;
         }
         private LogicVariable define(String alias, int slot) {
             return define(alias, slot, AsTypes.ANY_VALUE);
         }
         private LogicVariable define(String alias, int slot, int type) {
             if (alias.isBlank()) throw new IllegalArgumentException("Variable name cannot be empty");
-            for (LogicVariable variable : vars) if (variable.alias.contains(alias))
-                throw new IllegalArgumentException("Duplicate variable in the same scope: " + alias);
+            state().metrics.scopeProbes++;
+            if (local(alias) != null) throw new IllegalArgumentException("Duplicate variable in the same scope: " + alias);
             LogicVariable variable = new LogicVariable(); variable.name = alias; variable.slot = slot; variable.type = type;
             variable.alias.add(alias);
-            vars.add(variable); return variable;
+            index.put(alias, vars.size()); vars.add(variable); indexed++; return variable;
         }
     }
     private static JsonArray parameters(JsonObject object) {
@@ -189,9 +279,16 @@ public class Compiler {
             throw new IllegalArgumentException(field + " must be a string");
         return element.getAsString();
     }
+    /** Whether a JSON number is written as an integer, {@code [+-]?[0-9]+}, rather than with a fraction or exponent. */
+    private static boolean integerLiteral(String text) {
+        int start = !text.isEmpty() && (text.charAt(0) == '+' || text.charAt(0) == '-') ? 1 : 0;
+        if (start == text.length()) return false;
+        for (int i = start; i < text.length(); i++) if (text.charAt(i) < '0' || text.charAt(i) > '9') return false;
+        return true;
+    }
     private static AcsElement number(JsonElement element) {
         BigDecimal value = element.getAsBigDecimal();
-        if (element.getAsString().matches("[+-]?[0-9]+")) {
+        if (integerLiteral(element.getAsString())) {
             try { return new AcsIntegerElement(value.intValueExact()); }
             catch (ArithmeticException e) { throw new IllegalArgumentException("Integer literal is outside signed 32-bit range: " + value); }
         }
@@ -204,23 +301,22 @@ public class Compiler {
         if (value.isString()) return AsTypes.STRING_VALUE;
         if (value.isBoolean()) return AsTypes.BOOLEAN_VALUE;
         if (value.isNumber())
-            return value.getAsString().matches("[+-]?[0-9]+") ? AsTypes.INT_VALUE : AsTypes.DOUBLE_VALUE;
+            return integerLiteral(value.getAsString()) ? AsTypes.INT_VALUE : AsTypes.DOUBLE_VALUE;
         return AsTypes.ANY_VALUE;
     }
     // Operator selection and signature inference may revisit the same operands.
     // Cache only during one query: later declarations can change lexical lookup.
-    private static final ThreadLocal<IdentityHashMap<LogicEnvironment, IdentityHashMap<JsonElement,Integer>>> TYPE_QUERY = new ThreadLocal<>();
     private static int expressionType(JsonElement input, LogicEnvironment environment) {
-        var query=TYPE_QUERY.get();boolean outer=query==null;
-        if(outer){query=new IdentityHashMap<>();TYPE_QUERY.set(query);}
+        CompilationState state=environment.state();TypeQuery query=state.typeQuery;
+        query.depth++;
         try {
-            var values=query.computeIfAbsent(environment,ignored->new IdentityHashMap<>());
+            var values=query.types(environment);
             Integer known=values.get(input);if(known!=null)return known;
-            int result;
+            int result;state.metrics.typeEvaluations++;
             // A failing query names the innermost positioned subexpression, e.g. the unknown variable.
             try{result=expressionTypeUncached(input,environment);}catch(RuntimeException error){throw relocate(error,input,environment);}
             values.put(input,result);return result;
-        } finally {if(outer)TYPE_QUERY.remove();}
+        } finally {if(--query.depth==0)query.finish();}
     }
     private static int expressionTypeUncached(JsonElement input, LogicEnvironment environment) {
         if (input == null || input.isJsonNull()) return AsTypes.VOID_VALUE;
@@ -339,6 +435,7 @@ public class Compiler {
         return false;
     }
     private static boolean equivalent(int first, int second) {
+        if (first == second) return true;
         ArrayDeque<Long> pending = new ArrayDeque<>(); Set<Long> compared = new HashSet<>();
         pending.add(((long)first << 32) | (second & 0xffffffffL));
         while (!pending.isEmpty()) {
@@ -434,19 +531,22 @@ public class Compiler {
      * the enclosing instruction's location instead of failing later in the codec.
      */
     private static <T> T withDepth(int levels, java.util.function.Supplier<T> action) {
-        int depth = EXPRESSION_DEPTH.get();
+        int[] holder = EXPRESSION_DEPTH.get(); int depth = holder[0];
         if (depth + levels + TreeLimits.ABD_LEVELS_ABOVE_FUNCTION_BODY > TreeLimits.MAX_ABD_NESTING)
             throw new IllegalArgumentException("Expression nesting exceeds the ABD limit of "
                     + TreeLimits.MAX_ABD_NESTING + " levels; split the expression or statement");
-        EXPRESSION_DEPTH.set(depth + levels);
+        holder[0] = depth + levels;
         try { return action.get(); }
-        finally { if (depth == 0) EXPRESSION_DEPTH.remove(); else EXPRESSION_DEPTH.set(depth); }
+        finally { holder[0] = depth; }
     }
     public static AcsElement compileExpression(JsonElement input, LogicEnvironment environment) {
-        Map<String,Integer> previousScope=TYPE_SCOPE.get();TYPE_SCOPE.set(environment.typeScope);
+        environment.state().metrics.compiledNodes++;
+        // Nested expressions almost always share their function's type scope; set it only when it changes.
+        Map<String,Integer> previousScope=TYPE_SCOPE.get();boolean changed=previousScope!=environment.typeScope;
+        if(changed)TYPE_SCOPE.set(environment.typeScope);
         try { return withDepth(1, () -> compileExpressionBody(input, environment)); }
         catch (RuntimeException error) { throw relocate(error, input, environment); }
-        finally {TYPE_SCOPE.set(previousScope);}
+        finally {if(changed)TYPE_SCOPE.set(previousScope);}
     }
     private static String message(Throwable error) {
         return error.getMessage() != null ? error.getMessage() : error.getClass().getSimpleName();
@@ -778,7 +878,8 @@ public class Compiler {
                 ClassInfo info = receiverClass(params.get(0), environment);
                 AcsObject address = new AcsObject(); address.put("t", 0); address.put("c", ExecOpcodes.code("oa"));
                 JsonElement receiver = receiverAddress(params.get(0), environment);
-                address.put("v", withDepth(2, () -> compileExpression(receiver, environment))); address.put("offset", info.fields.indexOf(field));
+                address.put("v", withDepth(2, () -> compileExpression(receiver, environment))); address.put("offset", (int) info.fieldOffsets.get(field.name()));
+                environment.state().metrics.tableProbes++;
                 result.put("t", 1); result.put("id", 0x0abd0006);
                 AcsArray args = new AcsArray(); args.acsa.add(address); result.put("param", args);
             }
@@ -1040,10 +1141,10 @@ public class Compiler {
         return result;
     }
     private static int valueType(String type, boolean valueOnly) {
-        int depth=TYPE_DEPTH.get();
+        int[] holder=TYPE_DEPTH.get();int depth=holder[0];
         if(depth>=MAX_VALUE_NESTING)throw new IllegalArgumentException("Type nesting exceeds "+MAX_VALUE_NESTING+" levels");
-        TYPE_DEPTH.set(depth+1);
-        try{return valueTypeBody(type,valueOnly);}finally{if(depth==0)TYPE_DEPTH.remove();else TYPE_DEPTH.set(depth);}
+        holder[0]=depth+1;
+        try{return valueTypeBody(type,valueOnly);}finally{holder[0]=depth;}
     }
     private static int valueTypeBody(String type, boolean valueOnly) {
         type=type.replace(" ","");
@@ -1170,6 +1271,7 @@ public class Compiler {
         if(source.has("type-args"))result.add("type-args",source.get("type-args"));
         return result;
     }
+    private static final Set<String> INDEX_OPERATIONS=Set.of("index","index-set","invoke"),ARITHMETIC_OPERATIONS=Set.of("add","minus","multiply","divide");
     /** Operators are resolved from static types and lower to ordinary member calls. */
     private static JsonObject overloadedCall(JsonObject source,LogicEnvironment environment) {
         String kind=string(source.get("t"),"Instruction t"),operation=string(source.get("call"),"Instruction call");
@@ -1184,13 +1286,13 @@ public class Compiler {
             return null;
         }
         if(!kind.equals("ctrl"))return null;
-        if(Set.of("index","index-set","invoke").contains(operation)) {
+        if(INDEX_OPERATIONS.contains(operation)) {
             arity(operation,params,operation.equals("invoke")?1:operation.equals("index")?2:3,operation.equals("invoke")?Integer.MAX_VALUE:operation.equals("index")?2:3);
             if(operation.equals("index-set"))requireWritableReceiver(params.get(0),environment);
             JsonArray arguments=new JsonArray();for(int i=1;i<params.size();i++)arguments.add(params.get(i));
             return operatorCall(operation.equals("index")?"index-get":operation.equals("index-set")?"index-set":"call",params.get(0),arguments,source,environment);
         }
-        if(Set.of("add","minus","multiply","divide").contains(operation)&&params.size()==2
+        if(ARITHMETIC_OPERATIONS.contains(operation)&&params.size()==2
                 &&isValueClass(typeBound(expressionType(params.get(0),environment))))
             return operatorCall(operation.equals("minus")?"subtract":operation,params.get(0),array(params.get(1)),source,environment);
         return null;
@@ -1474,10 +1576,10 @@ public class Compiler {
         if (name.isEmpty() || !Character.isJavaIdentifierStart(name.charAt(0))) throw new IllegalArgumentException("Invalid " + description + ": " + name);
         for (int i = 1; i < name.length(); i++)
             if (!Character.isJavaIdentifierPart(name.charAt(i))) throw new IllegalArgumentException("Invalid " + description + ": " + name);
-        if (Set.of("class", "extends", "new", "delete", "this", "null", "return", "if", "else", "while", "for", "break", "continue", "public", "private", "protected", "virtual", "var", "def",
-                "int", "float", "double", "string", "boolean", "bool", "void", "any", "address", "buffer", "operator", "true", "false", "extern").contains(name))
-            throw new IllegalArgumentException("Reserved " + description + ": " + name);
+        if (RESERVED_SOURCE_NAMES.contains(name)) throw new IllegalArgumentException("Reserved " + description + ": " + name);
     }
+    private static final Set<String> RESERVED_SOURCE_NAMES = Set.of("class", "extends", "new", "delete", "this", "null", "return", "if", "else", "while", "for", "break", "continue", "public", "private", "protected", "virtual", "var", "def",
+            "int", "float", "double", "string", "boolean", "bool", "void", "any", "address", "buffer", "operator", "true", "false", "extern");
     private static int allocateClass(ClassInfo info) {
         int code = NEXT_CLASS.get(); NEXT_CLASS.set(code + 3);
         if (code > MAX_VARIABLE_SLOTS * 3) throw new IllegalArgumentException("Too many parameterized class types");
@@ -1501,7 +1603,9 @@ public class Compiler {
         return List.copyOf(result);
     }
     private static int resolveType(String name, Map<String,Integer> scope) {
-        Map<String,Integer> previous=TYPE_SCOPE.get();TYPE_SCOPE.set(scope);
+        Map<String,Integer> previous=TYPE_SCOPE.get();
+        if(previous==scope)return valueType(name,false);
+        TYPE_SCOPE.set(scope);
         try{return valueType(name,false);}finally{TYPE_SCOPE.set(previous);}
     }
     private static List<String> typeArguments(String source) {
@@ -1643,10 +1747,10 @@ public class Compiler {
             }
     }
     private static void finishLayout(ClassInfo info) {
-            info.fields.clear();info.visibleFields.clear();info.methods.clear();info.operators.clear();
-            if(info.base!=null){info.fields.addAll(info.base.fields);info.visibleFields.putAll(info.base.visibleFields);info.methods.putAll(info.base.methods);info.operators.putAll(info.base.operators);}
-            for(Field field:info.ownFields){info.fields.add(field);info.visibleFields.put(field.name(),field);info.methods.remove(field.name());}
-            info.ownMethods.forEach((name,method)->{info.methods.put(name,method);info.visibleFields.remove(name);});
+            info.fields.clear();info.visibleFields.clear();info.fieldOffsets.clear();info.methods.clear();info.operators.clear();
+            if(info.base!=null){info.fields.addAll(info.base.fields);info.visibleFields.putAll(info.base.visibleFields);info.fieldOffsets.putAll(info.base.fieldOffsets);info.methods.putAll(info.base.methods);info.operators.putAll(info.base.operators);}
+            for(Field field:info.ownFields){info.fieldOffsets.put(field.name(),info.fields.size());info.fields.add(field);info.visibleFields.put(field.name(),field);info.methods.remove(field.name());}
+            info.ownMethods.forEach((name,method)->{info.methods.put(name,method);info.visibleFields.remove(name);info.fieldOffsets.remove(name);});
             info.operators.putAll(info.ownOperators);
             if(info.fields.isEmpty())throw new IllegalArgumentException("Class "+info.name+" must declare at least one field");
             if(info.fields.size()>MAX_VARIABLE_SLOTS)throw new IllegalArgumentException("Class exceeds object slot limit");
@@ -1785,7 +1889,8 @@ public class Compiler {
         Set<Integer> occupied = new HashSet<>(ids); occupied.addAll(global.abs.values()); occupied.addAll(GeneraterJson.specialNames.values());
         int[] position = {1}; int namespace = global.moduleNamespace << 16;
         java.util.function.Supplier<Integer> nextId = () -> {
-            while (position[0] <= 0xffff && occupied.contains(namespace | position[0])) position[0]++;
+            while (position[0] <= 0xffff && occupied.contains(namespace | position[0])) { position[0]++; global.state().metrics.idProbes++; }
+            global.state().metrics.idProbes++;
             if (position[0] > 0xffff) throw new IllegalArgumentException("No free function ID for class factories");
             int id = namespace | position[0]++; ids.add(id); occupied.add(id); return id;
         };
@@ -1989,7 +2094,12 @@ public class Compiler {
         return false;
     }
     private static int hexId(String value, int digits, String description) {
-        if (!value.matches("[0-9a-fA-F]{1," + digits + "}")) throw new IllegalArgumentException("Invalid " + description + ": " + value);
+        boolean valid = !value.isEmpty() && value.length() <= digits;
+        for (int i = 0; valid && i < value.length(); i++) {
+            char c = value.charAt(i);
+            valid = c >= '0' && c <= '9' || c >= 'a' && c <= 'f' || c >= 'A' && c <= 'F';
+        }
+        if (!valid) throw new IllegalArgumentException("Invalid " + description + ": " + value);
         return Integer.parseUnsignedInt(value, 16);
     }
     /** Compiles a readable AST, reporting up to {@link Diagnostics#DEFAULT_MAX_ERRORS} errors in one {@link CompileException}. */
@@ -2109,6 +2219,9 @@ public class Compiler {
             abstractIds.put(entry.getKey(), id);
         } catch (RuntimeException error) { recover(error, null, null, global); }
         diagnostics.checkpoint();
+        // An unnamed definition takes the first abstract name mapped to its ID.
+        Map<Integer,String> abstractNames = new HashMap<>();
+        abstractIds.forEach((abstractName, abstractId) -> abstractNames.putIfAbsent(abstractId, abstractName));
         List<Function> functions = new ArrayList<>(); Map<String,Function> definitions = new LinkedHashMap<>(); Set<Integer> ids = new HashSet<>();
         for (var namespace : source.getAsJsonObject("body").entrySet()) {
             int namespaceId;
@@ -2127,8 +2240,8 @@ public class Compiler {
                     throw new IllegalArgumentException("Invalid definition namespace: outside hint libraries, namespace 0000 holds only the lifecycle functions "
                             + Diagnostic.hexId(0) + " and " + Diagnostic.hexId(1));
                 if (!ids.add(id)) throw new IllegalArgumentException("Duplicate function ID: " + Diagnostic.hexId(id));
-                name = meta.has("name") ? string(meta.get("name"), "Function name") : abstractIds.entrySet().stream()
-                        .filter(item -> item.getValue() == id).map(Map.Entry::getKey).findFirst().orElse(entry.getKey());
+                name = meta.has("name") ? string(meta.get("name"), "Function name") : abstractNames.getOrDefault(id, entry.getKey());
+                diagnostics.metrics().tableProbes++;
                 if (isBuiltinName(name) || global.classes.containsKey(name)) throw new IllegalArgumentException("Reserved function name: " + name);
                 TYPE_SCOPE.set(functionScope(meta));
                 int declaredReturn = returnType(string(meta.get("return-type"), "Function return type"));

@@ -107,7 +107,8 @@ def main():
             if '@Test' in p.read_text(encoding='utf-8'):
                 rel=p.relative_to(next(parent for parent in p.parents if parent.name=='java'))
                 junit_tests.append('.'.join(rel.with_suffix('').parts))
-        if junit_tests:run(['java','-Djava.io.tmpdir='+str(BUILD/'tmp'),'-cp',test_cp,'JunitRunner',*junit_tests],cwd=ROOT/'compiler')
+        # The 20,000-function scaling guard needs a 1 GiB heap, more than the default on small machines.
+        if junit_tests:run(['java','-Xmx1g','-Djava.io.tmpdir='+str(BUILD/'tmp'),'-cp',test_cp,'JunitRunner',*junit_tests],cwd=ROOT/'compiler')
         run(['java','-cp',test_cp,'azertia.binary.AbdRegression'])
     run(['ctest','--test-dir',native,'--output-on-failure'])
     cpp_fixture=BUILD/'cpp-fixture.abd';java_fixture=BUILD/'java-fixture.abd'

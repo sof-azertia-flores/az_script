@@ -3,6 +3,7 @@ package azertia.script;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
+import com.google.gson.JsonPrimitive;
 import java.nio.file.Path;
 import java.util.*;
 
@@ -174,8 +175,27 @@ public final class SourceMap {
     /** A non-negative int stored in a JSON number, or -1. Never throws on malformed input. */
     static int integer(JsonElement value) {
         if (value == null || !value.isJsonPrimitive() || !value.getAsJsonPrimitive().isNumber()) return -1;
-        try { return Math.max(-1, value.getAsBigDecimal().intValueExact()); }
-        catch (ArithmeticException | NumberFormatException e) { return -1; }
+        Integer exact = exactInt(value.getAsJsonPrimitive());
+        return exact == null ? -1 : Math.max(-1, exact);
+    }
+    /**
+     * The value of a JSON number as {@code getAsBigDecimal().intValueExact()} gives it, or
+     * null when that fails: a fraction, a value outside int32 or a number beyond Gson's
+     * limits. Positions are read for every node, so an int the parser stored and short
+     * decimal text skip the BigDecimal.
+     */
+    static Integer exactInt(JsonPrimitive number) {
+        Number value = number.getAsNumber();
+        if (value instanceof Integer integer) return integer;
+        String text = number.getAsString();
+        int start = text.startsWith("-") ? 1 : 0, length = text.length() - start;
+        if (length > 0 && length <= 9) {
+            boolean digits = true;
+            for (int i = start; digits && i < text.length(); i++) digits = text.charAt(i) >= '0' && text.charAt(i) <= '9';
+            if (digits) return Integer.parseInt(text);
+        }
+        try { return number.getAsBigDecimal().intValueExact(); }
+        catch (ArithmeticException | NumberFormatException e) { return null; }
     }
 
     /** The AST {@code sources} table. */

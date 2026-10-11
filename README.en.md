@@ -30,6 +30,8 @@ python3 tools/build_and_test.py --offline --sanitize
 
 Sanitize enables AddressSanitizer/UndefinedBehaviorSanitizer for native data, interpreter, and compilation/execution tests. JNI uses the ordinary build and JVM -Xcheck:jni. Use --skip-tests for build-only or --skip-jni to omit JNI.
 
+`CompilerScalingTest` checks that compile work grows linearly with program size. It compares deterministic operation counts of generated programs with ones eight times larger: many locals, statements, functions, globals, classes, fields, externs or parameters. After a build, `python3 tools/bench_compiler.py` times the compiler on such programs, up to 32,000 locals in one scope or 20,000 functions; it is an opt-in benchmark outside the validation run.
+
 The three Java modules also form a root Gradle multiproject build (`gradle build`); the Python entry point is authoritative for full cross-language validation. Original module Gradle wrappers remain historical files; prefer the root project or unified entry point.
 
 ## Export a complete distribution

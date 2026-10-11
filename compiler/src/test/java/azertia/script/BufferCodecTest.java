@@ -59,6 +59,14 @@ class BufferCodecTest {
         for(int op=40;op<=42;++op)assertEquals(op,ExecOpcodes.code(ExecOpcodes.name(op)));
     }
 
+    @Test void encodeRejectsUnexpectedAndNullFieldNames() {
+        for(String name:java.util.Arrays.asList("extra",null)) {
+            ExecProgram program=program(array());program.mmp.put(name,new AcsIntegerElement(1));
+            assertEquals("Invalid exec: unexpected field "+name,
+                    assertThrows(IllegalArgumentException.class,()->ExecCodec.encode(program)).getMessage());
+        }
+    }
+
     @Test void contextWidthsPlacementsAndElementRulesAreStrict() {
         AcsObject scalarPlacement=context(0,0,1);scalarPlacement.put("placement",0x22220004);
         AcsObject absentPlacement=context(8,3,2);absentPlacement.put("placement-contexts",array(reference(0)));

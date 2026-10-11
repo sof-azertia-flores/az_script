@@ -35,6 +35,13 @@ public final class Diagnostics {
             new Warning("assign-in-condition", true, "an assignment used directly as an if, while or for condition"),
             new Warning("unreachable-code", true, "a statement after return, break, continue or another statement that never completes"),
             new Warning("unused-variable", false, "a local variable that is declared but never used"));
+    private static final Map<String,Warning> WARNINGS_BY_NAME = warningsByName();
+    private static Map<String,Warning> warningsByName() {
+        Map<String,Warning> result = new HashMap<>();
+        for (Warning warning : WARNINGS) result.put(warning.name(), warning);
+        // Unlike Map.copyOf, a lookup of null finds nothing instead of throwing.
+        return Collections.unmodifiableMap(result);
+    }
     private enum Stage { NEW, PARSING, PARSED, COMPILING }
 
     private final List<Diagnostic> diagnostics = new ArrayList<>();
@@ -48,6 +55,7 @@ public final class Diagnostics {
     private SourceMap sources;
     /** The first unexpected exception, kept as the cause of the final failure. */
     private Throwable unexpected;
+    private final CompilerMetrics metrics = new CompilerMetrics();
 
     /** A collector that stops at the first error. */
     public static Diagnostics failFast() { return new Diagnostics().maxErrors(1); }
@@ -76,7 +84,7 @@ public final class Diagnostics {
     public boolean recovering() { return maxErrors != 1; }
 
     /** Whether the compiler reports a warning of this name. */
-    public static boolean isWarning(String name) { return WARNINGS.stream().anyMatch(warning -> warning.name().equals(name)); }
+    public static boolean isWarning(String name) { return WARNINGS_BY_NAME.containsKey(name); }
     /** Enables or disables one warning, like {@code -W<name>} and {@code -Wno-<name>}; the last choice for a warning wins. */
     public Diagnostics warning(String name, boolean enabled) {
         if (!isWarning(name)) throw new IllegalArgumentException("Unknown warning: " + name);
@@ -91,8 +99,9 @@ public final class Diagnostics {
     public boolean warningsAsErrors() { return warningsAsErrors; }
     /** Whether a warning is reported under the current options. */
     public boolean warningEnabled(String name) {
-        Warning warning = WARNINGS.stream().filter(candidate -> candidate.name().equals(name)).findFirst()
-                .orElseThrow(() -> new IllegalArgumentException("Unknown warning: " + name));
+        // Checked for every block, so the warning is found by name rather than by a scan.
+        Warning warning = WARNINGS_BY_NAME.get(name);
+        if (warning == null) throw new IllegalArgumentException("Unknown warning: " + name);
         if (noWarnings) return false;
         Boolean chosen = warningChoices.get(name);
         return chosen != null ? chosen : allWarnings || warning.enabledByDefault();
@@ -118,6 +127,8 @@ public final class Diagnostics {
     }
     /** The source table that orders diagnostics in translation order. */
     void sources(SourceMap map) { sources = map; }
+    /** The operation counters of the compilation this collector serves. */
+    CompilerMetrics metrics() { return metrics; }
 
     /**
      * Whether a failure is an error in the compiled program: a non-internal

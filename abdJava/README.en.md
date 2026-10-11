@@ -6,7 +6,7 @@ This module compiles with Java 17 and depends on Gson 2.11.0. See the [C++ data-
 
 ## Reading and types
 
-`AbdValue.fromAbd(bytes)` reads exactly one complete frame and rejects trailing garbage. `fromAbd(bytes, offset, length)` reads the first frame in a bounded range, suitable for concatenated frames. `getAsAss()` checks boundaries frame by frame without copying all remaining input for each entry. Both the `AbdValue` constructor and `getData()` copy bytes to prevent implicit external mutation.
+`AbdValue.fromAbd(bytes)` reads exactly one complete frame and rejects trailing garbage. `fromAbd(bytes, offset, length)` reads the first frame in a bounded range, suitable for concatenated frames. `getAsAss()` checks boundaries frame by frame without copying all remaining input for each entry. Both the `AbdValue` constructor and `getData()` copy bytes to prevent implicit external mutation. `size()` returns the payload length without copying the payload. `AbdSimpleStack.toAbd()` writes each member's length prefix and payload straight into the result, and payloads this package builds are not copied again; the wire format is unchanged.
 
 `AcsObject` preserves insertion order. Objects and arrays share type decoding; unknown tags and duplicate keys do not silently disappear. Floating-point encoding is little-endian, matching C++, and preserves negative zero and NaN payloads. `AcsByteArray` / `put(key, byte[])` use the new `0xce200a` tag, supporting empty arrays and leading zeros. Old `0xce2009` values still decode as BigInteger and preserve original input bytes if the numeric value is unchanged. Bytes already discarded by older BigInteger conversion cannot be recovered.
 

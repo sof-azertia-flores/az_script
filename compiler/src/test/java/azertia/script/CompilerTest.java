@@ -1348,4 +1348,25 @@ class CompilerTest {
         assertThrows(IllegalArgumentException.class, () -> compile("extern int f(address):abcd0002;extern int f(int):abcd0002;void main(){}"));
     }
 
+    private static Compiler.LogicVariable variable(String alias, int slot) {
+        var variable = new Compiler.LogicVariable(); variable.name = alias; variable.slot = slot; variable.alias.add(alias); return variable;
+    }
+    @Test void environmentLookupsFollowDirectChangesToItsVariables() {
+        var environment = new Compiler.LogicEnvironment();
+        Compiler.LogicVariable a = variable("a", -1), b = variable("b", -2), c = variable("c", -3);
+        // Variables appended directly are indexed at the next lookup.
+        environment.vars.add(a);
+        assertSame(a, environment.getVariable("a"));
+        environment.vars.add(b);
+        assertSame(b, environment.getVariable("b"));
+        // A replaced entry is never returned.
+        environment.vars.set(0, c);
+        assertEquals("Unknown variable: a", assertThrows(IllegalArgumentException.class, () -> environment.getVariable("a")).getMessage());
+        assertSame(c, environment.getVariable("c"));
+        // A replacement list is indexed too.
+        environment.vars = new ArrayList<>(List.of(a));
+        assertSame(a, environment.getVariable("a"));
+        assertThrows(IllegalArgumentException.class, () -> environment.getVariable("b"));
+    }
+
 }
