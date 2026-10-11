@@ -117,8 +117,10 @@ public final class Diagnostic {
     private void appendLine(StringBuilder text) {
         if (position != null) text.append(position).append(": ");
         text.append(severity.label()).append(": ");
-        if (context != null && !context.isEmpty()) text.append("in ").append(context).append(": ");
-        text.append(message);
+        // A context or message may quote a name from a handwritten AST; escaping keeps a
+        // bidirectional override or an invisible character from reordering or hiding the line.
+        if (context != null && !context.isEmpty()) text.append("in ").append(AstShape.printable(context)).append(": ");
+        text.append(AstShape.printable(message));
         // A warning promoted by -Werror names the option that made it an error.
         if (code != null) text.append(severity == Severity.ERROR ? " [-Werror=" : " [-W").append(code).append(']');
     }

@@ -304,6 +304,38 @@ R class_context(int width,int placement,std::initializer_list<R> contexts={}) {
     return raw({ri(1),ri(OBJECT_VALUE),ri(3),ri(width),rb(false),raw({}),rb(true),ri(placement),raw(contexts),rb(false)});
 }
 R buffer_context(R element){return raw({ri(1),ri(OBJECT_VALUE),ri(4),ri(1),rb(false),raw({}),rb(false),raw({}),rb(true),element});}
+// The loader's hint rule must agree with the compiler's SourceRules.isHint: both
+// read the same cases from tests/hint_names.txt.
+void hint_name_tests() {
+    std::ifstream input(AZSCRIPT_HINT_CASES,std::ios::binary);
+    check(static_cast<bool>(input),"hint-name cases are readable");
+    std::string line;int cases=0;
+    auto hex=[](char c)->int{return c>='0'&&c<='9'?c-'0':c>='a'&&c<='f'?c-'a'+10:c>='A'&&c<='F'?c-'A'+10:-1;};
+    while(std::getline(input,line)) {
+        if(!line.empty()&&line.back()=='\r')line.pop_back();
+        if(line.empty()||line[0]=='#')continue;
+        const auto space=line.find(' ');const std::string verdict=line.substr(0,space);
+        if(space==std::string::npos||(verdict!="valid"&&verdict!="invalid"))throw std::runtime_error("malformed hint case: "+line);
+        const std::string text=line.substr(space+1);std::string name;
+        if(text!="(empty)")for(std::size_t i=0;i<text.size();++i) {
+            if(text[i]!='\\'){name.push_back(text[i]);continue;}
+            if(i+3>=text.size()||text[i+1]!='x'||hex(text[i+2])<0||hex(text[i+3])<0)throw std::runtime_error("malformed hint escape: "+line);
+            name.push_back(static_cast<char>(hex(text[i+2])*16+hex(text[i+3])));i+=3;
+        }
+        // An assumption takes any name; a module hint is only checked when it is not empty.
+        auto loads=[](R module,const char* error){
+            try{load_raw(module,false);return true;}
+            catch(const std::exception& e){if(std::string(e.what()).find(error)==std::string::npos)throw;return false;}
+        };
+        const bool expected=verdict=="valid";
+        if(loads(rhint("",{rfn(2,INT_VALUE,rreturn(rc(n(1))))},0,raw({assume(name,0x1234)})),"Invalid namespace assumption")!=expected)
+            throw std::runtime_error("loader and compiler disagree on assumed hint: "+line);
+        if(!name.empty()&&loads(rhint(name,{rfn(2,INT_VALUE,rreturn(rc(n(1))))}),"Invalid namespace hint")!=expected)
+            throw std::runtime_error("loader and compiler disagree on module hint: "+line);
+        assertions+=2;++cases;
+    }
+    check(cases>=250,"every hint-name case is checked");
+}
 void buffer_tests() {
     auto ci=cfixed(INT_VALUE,0);auto cb=buffer_context(ci);auto cc=class_context(2,500);
     auto slot_at=[](R base,int offset){return rcall(0x0abd0006,{rx(9,{base,ri(offset)})});};
@@ -527,6 +559,7 @@ void buffer_tests() {
 }
 int main(){try{
     buffer_tests();
+    hint_name_tests();
     check(getiFunction(0x0abd0006)->return_type()==ANY_VALUE,"mem_get reports its dynamic return type");
     {
         constexpr int host_id=0x6abc0002;

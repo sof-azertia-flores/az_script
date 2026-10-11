@@ -16,21 +16,16 @@ import java.util.*;
 
 /** Token based AzScript front end. The historical public class name is retained. */
 public class GeneraterJson {
-    private static final int DEFAULT_FUNCTION_NAMESPACE = 0xfff;
-    private static final int RESERVED_RUNTIME_NAMESPACE = 0xabd;
     private static final int MAX_MACRO_EXPANSION_CHARS = 1_048_576;
-    private static final Set<String> TYPES = Set.of("int", "float", "double", "string", "boolean", "bool", "void", "address", "buffer");
-    /** Statement keywords; they can never name a function, parameter, variable, global or macro. */
-    private static final Set<String> KEYWORDS = Set.of("return", "if", "else", "while", "for", "break", "continue", "def", "var", "class", "new", "delete", "this", "null", "extern", "extends", "operator", "public", "private", "protected", "virtual");
+    private static final Set<String> TYPES = SourceRules.TYPES;
+    /** Statement keywords and {@code any}; they can never name a function, parameter, variable, global or macro. */
+    private static final Set<String> KEYWORDS = SourceRules.KEYWORDS;
     private static final Set<String> PREPROCESSOR_DIRECTIVES = Set.of(
             "ifdef", "ifndef", "if_equals", "else", "fi", "endif", "include", "author", "gvar",
             "namespace", "namespace_hint", "assume_hint", "setmeta", "setattr", "define", "undef", "pragma");
     public static final Map<String, Integer> specialNames = Map.of(
             "__script_onload", 0, "main", 0x0fff0000, "__script_pre_destroy", 1);
 
-    private static void hintIdentifier(String name) {
-        if (!name.matches("[A-Za-z_][A-Za-z0-9_]*")) throw new IllegalArgumentException("Invalid hint name: " + name);
-    }
     public interface AzExpression { JsonElement generate(); }
     public static class AzFunction {
         public List<String> params = new ArrayList<>();
@@ -67,7 +62,7 @@ public class GeneraterJson {
         public Map<String,String> tmpoVars = new LinkedHashMap<>();
         public Map<String,String> exts = new LinkedHashMap<>();
         public String author = "";
-        public int functionNamespace = DEFAULT_FUNCTION_NAMESPACE;
+        public int functionNamespace = SourceRules.DEFAULT_NAMESPACE;
         public String namespaceHint = "";
         public Map<String,Integer> assumeHints = new LinkedHashMap<>();
         private boolean namespaceDeclared;
@@ -262,7 +257,7 @@ public class GeneraterJson {
             name2Id.clear(); exts.clear(); globalVariables.clear(); functions.clear();
             externSignatures.clear(); tmpoVars.clear(); macros.clear();
             classes = new JsonArray();
-            author = ""; functionNamespace = DEFAULT_FUNCTION_NAMESPACE;
+            author = ""; functionNamespace = SourceRules.DEFAULT_NAMESPACE;
             namespaceHint = ""; namespaceDeclared = false; assumeHints.clear();
             sourceMap = SourceMap.single("<source>");
             includeRoots = List.of(); searchDirectories = List.of(); rootAliases = List.of();
@@ -383,24 +378,22 @@ public class GeneraterJson {
                                         String[] args = arg.split("\\s+");
                                         if (args.length != 1 || args[0].isBlank())
                                             throw new IllegalArgumentException("Expected one hexadecimal namespace");
-                                        int value = hexadecimal(args[0], 4, "namespace");
+                                        int value = SourceRules.sourceHex(args[0], 4, "namespace");
                                         // 0fff is the default namespace, so naming it explicitly is allowed.
-                                        if (value == 0)
-                                            throw new IllegalArgumentException("Namespace 0000 is reserved for lifecycle hooks and hint-library placeholders");
-                                        if (value == RESERVED_RUNTIME_NAMESPACE)
-                                            throw new IllegalArgumentException("Namespace 0abd is reserved for runtime built-ins");
+                                        String reserved = SourceRules.reservedModuleNamespace(value);
+                                        if (reserved != null) throw new IllegalArgumentException("Namespace " + reserved);
                                         functionNamespace = value; namespaceDeclared = true; namespaceDirective = directive;
                                     }
                                     case "namespace_hint" -> {
                                         if (namespaceDeclared) throw new IllegalArgumentException("Only one #namespace or #namespace_hint is allowed");
-                                        hintIdentifier(arg); namespaceHint = arg; functionNamespace = 0; namespaceDeclared = true;
+                                        SourceRules.requireHint(arg); namespaceHint = arg; functionNamespace = 0; namespaceDeclared = true;
                                         namespaceDirective = directive;
                                     }
                                     case "assume_hint" -> {
                                         String[] args = arg.split("\\s+");
                                         if (args.length != 2) throw new IllegalArgumentException("Expected #assume_hint HINT namespace");
-                                        hintIdentifier(args[0]); int value = hexadecimal(args[1], 4, "assumed namespace");
-                                        if (value == 0 || value == RESERVED_RUNTIME_NAMESPACE || value == DEFAULT_FUNCTION_NAMESPACE)
+                                        SourceRules.requireHint(args[0]); int value = SourceRules.sourceHex(args[1], 4, "assumed namespace");
+                                        if (!SourceRules.assumableNamespace(value))
                                             throw new IllegalArgumentException("Reserved assumed namespace");
                                         Integer previous = assumeHints.get(args[0]);
                                         if (previous != null && previous != value || previous == null && assumeHints.containsValue(value))
@@ -711,8 +704,7 @@ public class GeneraterJson {
             int parenthesis = definition.indexOf('(');
             if (parenthesis <= 0) return;
             String name = definition.substring(0, parenthesis);
-            if (!Character.isJavaIdentifierStart(name.charAt(0))) return;
-            for (int i = 1; i < name.length(); i++) if (!Character.isJavaIdentifierPart(name.charAt(i))) return;
+            if (!SourceRules.isIdentifier(name)) return;
             throw new IllegalArgumentException("Function-like macros are not supported: " + AstShape.printable(name)
                     + "; write a function, or put a space before '(' for an object-like macro");
         }
@@ -793,11 +785,11 @@ public class GeneraterJson {
                     }
                     // Like a C pp-number, identifier characters glued to a literal belong to it:
                     // 5N, 0x10 or 2e must reach the lexer's suffix error, not become 55, 07 or 29.
-                    while (i < line.length() && Character.isJavaIdentifierPart(line.charAt(i))) i++;
+                    while (i < line.length() && SourceRules.identifierPart(line.charAt(i))) i++;
                     appendLimited(out, line.substring(start, i));
-                } else if (Character.isJavaIdentifierStart(c)) {
+                } else if (SourceRules.identifierStart(c)) {
                     int start = i++;
-                    while (i < line.length() && Character.isJavaIdentifierPart(line.charAt(i))) i++;
+                    while (i < line.length() && SourceRules.identifierPart(line.charAt(i))) i++;
                     String word = line.substring(start, i);
                     Macro macro = macros.get(word);
                     if (macro != null) {
@@ -899,12 +891,8 @@ public class GeneraterJson {
         node.addProperty("_line", line); node.addProperty("_column", column);
     }
     private static void identifier(String value) {
-        if (value.isEmpty() || !Character.isJavaIdentifierStart(value.charAt(0)))
-            throw new IllegalArgumentException("Invalid identifier: " + value);
-        for (int i = 1; i < value.length(); i++) if (!Character.isJavaIdentifierPart(value.charAt(i)))
-            throw new IllegalArgumentException("Invalid identifier: " + value);
-        if (KEYWORDS.contains(value) || TYPES.contains(value) || value.equals("true") || value.equals("false"))
-            throw new IllegalArgumentException("'" + value + "' is a reserved word and cannot be used as a name");
+        if (!SourceRules.isIdentifier(value)) throw new IllegalArgumentException("Invalid identifier: " + AstShape.printable(value));
+        SourceRules.requireUnreserved(value, "name");
     }
     private static String normalizeType(String value, boolean allowVoid, String description) {
         if (!TYPES.contains(value)) throw new IllegalArgumentException("Unknown " + description + ": " + value);
@@ -921,14 +909,6 @@ public class GeneraterJson {
             else if (Character.isSurrogate(c)) return false;
         }
         return true;
-    }
-    private static int hexadecimal(String text, int digits, String description) {
-        String value = text.startsWith("0x") || text.startsWith("0X") ? text.substring(2) : text;
-        if (!value.matches("[0-9a-fA-F]+"))
-            throw new IllegalArgumentException("Invalid " + description + ": " + text);
-        value = value.replaceFirst("^0+(?=.)", "");
-        if (value.length() > digits) throw new IllegalArgumentException("Invalid " + description + ": " + text);
-        return (int) Long.parseLong(value, 16);
     }
     /**
      * A lexical token at its original position: source unit (index into the AST
@@ -972,7 +952,8 @@ public class GeneraterJson {
             List<Token> tokens = new ArrayList<>();
             while (offset < source.length()) {
                 char c = peek(0);
-                if (Character.isWhitespace(c) || c == '\ufeff') { take(); continue; }
+                // The preprocessor strips a leading byte order mark, so any other U+FEFF is an unexpected character.
+                if (Character.isWhitespace(c)) { take(); continue; }
                 int l = line, col = column, start = offset;
                 if (c == '/' && peek(1) == '/') { while (offset < source.length() && peek(0) != '\n') take(); continue; }
                 if (c == '/' && peek(1) == '*') {
@@ -987,17 +968,17 @@ public class GeneraterJson {
                     Token string = string(l, col, start);
                     if (string != null) tokens.add(string);
                 } else if (!tokens.isEmpty() && tokens.get(tokens.size() - 1).text().equals(":")
-                        && Character.isJavaIdentifierPart(c)) {
+                        && SourceRules.identifierPart(c)) {
                     // A colon introduces either a hexadecimal ID or a class/base name.
                     // Keep IDs such as 000a intact and defer their validation to the parser.
                     take();
-                    while (peek(0) != '\0' && Character.isJavaIdentifierPart(peek(0))) take();
-                    tokens.add(token(source.substring(start, offset), null, l, col, Character.isJavaIdentifierStart(c)));
+                    while (peek(0) != '\0' && SourceRules.identifierPart(peek(0))) take();
+                    tokens.add(token(source.substring(start, offset), null, l, col, SourceRules.identifierStart(c)));
                 } else if (Character.isDigit(c) || (c == '.' && Character.isDigit(peek(1)))) {
                     Token number = number(l, col, start);
                     if (number != null) tokens.add(number);
-                } else if (Character.isJavaIdentifierStart(c)) {
-                    take(); while (Character.isJavaIdentifierPart(peek(0)) && peek(0) != '\0') take();
+                } else if (SourceRules.identifierStart(c)) {
+                    take(); while (SourceRules.identifierPart(peek(0)) && peek(0) != '\0') take();
                     String text = source.substring(start, offset);
                     JsonElement literal = text.equals("true") || text.equals("false") ? new JsonPrimitive(Boolean.parseBoolean(text)) : null;
                     tokens.add(token(text, literal, l, col, true));
@@ -1083,7 +1064,7 @@ public class GeneraterJson {
             }
             boolean floatSuffix = peek(0) == 'f' || peek(0) == 'F';
             if (floatSuffix) take();
-            if (Character.isJavaIdentifierPart(peek(0)) && peek(0) != '\0') { fail("Invalid numeric suffix", l, col); skipIdentifierPart(); return null; }
+            if (SourceRules.identifierPart(peek(0)) && peek(0) != '\0') { fail("Invalid numeric suffix", l, col); skipIdentifierPart(); return null; }
             String text = source.substring(start, offset - (floatSuffix ? 1 : 0));
             BigDecimal decimal;
             try { decimal = new BigDecimal(text); }
@@ -1116,7 +1097,7 @@ public class GeneraterJson {
             return codePoint > ' ' && codePoint < 0x7f ? Character.toString(codePoint) : String.format("U+%04X", codePoint);
         }
         private void skipIdentifierPart() {
-            while (peek(0) != '\0' && Character.isJavaIdentifierPart(peek(0))) take();
+            while (peek(0) != '\0' && SourceRules.identifierPart(peek(0))) take();
         }
     }
     private static JsonObject operation(String kind, String name, Token at, JsonElement... params) {
@@ -1347,8 +1328,8 @@ public class GeneraterJson {
         private Token expect(String text) { if (!at(text)) throw error("Expected '" + text + "', found '" + current().text() + "'"); return advance(); }
         private Token name() {
             if (!current().identifier() || current().literal() != null) throw error("Expected identifier");
-            if (KEYWORDS.contains(current().text()))
-                throw error("'" + current().text() + "' is a reserved word and cannot be used as a name");
+            // Type names are read here too, so only the keywords are rejected; declaredName() adds the types.
+            if (KEYWORDS.contains(current().text())) throw error(SourceRules.reservedWordMessage(current().text(), "name"));
             return advance();
         }
         /** A name being declared: keywords and type names are both rejected. */
@@ -1395,8 +1376,9 @@ public class GeneraterJson {
         private final List<DuplicateExtern> duplicateExterns = new ArrayList<>();
         /**
          * Parses the declarations, recovering at the next declaration after an error, then
-         * validates class layouts, extern declarations and function IDs, each step
-         * running only when the earlier ones reported no error.
+         * validates base initializers, extern declarations and function IDs, each step
+         * running only when the earlier ones reported no error. Class layouts are left
+         * to the compiler, which reports them at the class for source and compile-json alike.
          */
         void program() {
             for (var assumption : script.assumeHints.entrySet())
@@ -1438,11 +1420,13 @@ public class GeneraterJson {
                 } finally { typeParameters = outer; }
             }
             diagnostics.checkpoint(); // parsing
-            Map<String,JsonArray> layouts = Map.of();
-            try { layouts = validateClassLayouts(); }
-            catch (IllegalArgumentException e) { report(e); }
+            // The compiler validates class layouts, so source and compile-json report the same located errors.
+            validateBaseInitializers();
             diagnostics.checkpoint();
-            validateDuplicateExterns(layouts);
+            // With a broken class the compiler reports its layout error; comparing externs
+            // against a partial layout could report a conflict in its place.
+            Map<String,JsonArray> layouts = classLayouts();
+            if (layouts != null) validateDuplicateExterns(layouts);
             diagnostics.checkpoint();
             try { assignFunctionIds(); }
             catch (IllegalArgumentException e) { report(e); }
@@ -1499,59 +1483,45 @@ public class GeneraterJson {
             Token token = classTokens.get(definition);
             return token != null ? token : located(definition, current());
         }
-        private Map<String,JsonArray> validateClassLayouts() {
-            Map<String,JsonObject> declarations = new LinkedHashMap<>();
-            for (JsonElement item : script.classes) {
-                JsonObject definition = item.getAsJsonObject();
-                declarations.put(definition.get("name").getAsString(), definition);
+        /** A constructor's {@code : Base(...)} initializer must name its own direct base class. */
+        private void validateBaseInitializers() {
+            Map<String,JsonObject> declarations = new HashMap<>();
+            for (JsonElement item : script.classes) declarations.put(item.getAsJsonObject().get("name").getAsString(), item.getAsJsonObject());
+            for (AzFunction function : script.functions) {
+                if (function.baseInitializer == null) continue;
+                JsonObject owner = declarations.get(function.ownerClass);
+                if (owner == null || !owner.has("base") || !owner.get("base").getAsString().equals(function.baseInitializer))
+                    report(error("Constructor " + function.ownerClass + " can initialize only its direct base class",
+                            functionLocation(function)));
             }
+        }
+        /**
+         * Flattened field lists for comparing duplicate extern signatures, or null when a
+         * class has an unknown or cyclic base chain or no fields. Reports nothing: the
+         * compiler always rejects such a class and reports its layout error at the class.
+         */
+        private Map<String,JsonArray> classLayouts() {
+            Map<String,JsonObject> declarations = new HashMap<>();
+            for (JsonElement item : script.classes) declarations.put(item.getAsJsonObject().get("name").getAsString(), item.getAsJsonObject());
             Map<String,JsonArray> layouts = new HashMap<>();
-            for (JsonObject definition : declarations.values()) {
+            for (JsonElement item : script.classes) {
                 Deque<JsonObject> pending = new ArrayDeque<>(); Set<String> chain = new HashSet<>();
-                JsonObject next = definition;
+                JsonObject next = item.getAsJsonObject();
                 while (next != null && !layouts.containsKey(next.get("name").getAsString())) {
-                    String name = next.get("name").getAsString();
-                    if (!chain.add(name)) throw error("Cyclic class inheritance involving " + name, classLocation(next));
+                    if (!chain.add(next.get("name").getAsString())) return null;
                     pending.push(next);
-                    if (next.has("base")) {
-                        String base = next.get("base").getAsString(); JsonObject parent = declarations.get(rawClass(base));
-                        if (parent == null) throw error("Unknown base class: " + base, classLocation(next));
-                        next = parent;
-                    } else next = null;
+                    next = next.has("base") ? declarations.get(rawClass(next.get("base").getAsString())) : null;
+                    if (next == null && pending.peek().has("base")) return null;
                 }
                 while (!pending.isEmpty()) {
                     JsonObject value = pending.pop(); JsonArray fields = new JsonArray();
                     if (value.has("base")) fields.addAll(layouts.get(rawClass(value.get("base").getAsString())));
                     fields.addAll(value.getAsJsonArray("fields"));
-                    String name = value.get("name").getAsString();
-                    if (fields.isEmpty()) throw error("Class " + name + " must contain at least one field", classLocation(value));
-                    layouts.put(name, fields);
+                    if (fields.isEmpty()) return null;
+                    layouts.put(value.get("name").getAsString(), fields);
                 }
             }
-            Map<String,Integer> nesting = new HashMap<>();
-            for (JsonObject definition : declarations.values())
-                valueNesting(definition.get("name").getAsString(), layouts, nesting, new LinkedHashSet<>(), classLocation(definition));
-            for (AzFunction function : script.functions) {
-                if (function.baseInitializer == null) continue;
-                JsonObject owner = declarations.get(function.ownerClass);
-                if (owner == null || !owner.has("base") || !owner.get("base").getAsString().equals(function.baseInitializer))
-                    throw error("Constructor " + function.ownerClass + " can initialize only its direct base class",
-                            functionLocation(function));
-            }
             return layouts;
-        }
-        /** A literal-object field embeds its class, so containment must be acyclic and bounded. */
-        private int valueNesting(String name, Map<String,JsonArray> layouts, Map<String,Integer> known, Set<String> visiting, Token at) {
-            Integer cached = known.get(name);
-            if (cached != null) return cached;
-            if (!visiting.add(name)) throw error("Class " + name + " contains itself by value; use a pointer field", at);
-            int levels = 1;
-            for (JsonElement field : layouts.get(name)) {
-                String type = field.getAsJsonObject().get("type").getAsString();
-                if (classNames.contains(type)) levels = Math.max(levels, 1 + valueNesting(type, layouts, known, visiting, at));
-            }
-            if (levels > 64) throw error("Literal object nesting of " + name + " exceeds 64 levels", at);
-            visiting.remove(name); known.put(name, levels); return levels;
         }
         private void validateDuplicateExterns(Map<String,JsonArray> layouts) {
             for (DuplicateExtern duplicate : duplicateExterns) {
@@ -1584,8 +1554,8 @@ public class GeneraterJson {
             StringBuilder result = new StringBuilder();
             for (int i = 0; i < type.length();) {
                 int end = i + 1;
-                if (Character.isJavaIdentifierStart(type.charAt(i))) {
-                    while (end < type.length() && Character.isJavaIdentifierPart(type.charAt(end))) end++;
+                if (SourceRules.identifierStart(type.charAt(i))) {
+                    while (end < type.length() && SourceRules.identifierPart(type.charAt(end))) end++;
                     String name = type.substring(i, end); result.append(renames.getOrDefault(name, name));
                 } else result.append(type.charAt(i));
                 i = end;
@@ -1840,7 +1810,7 @@ public class GeneraterJson {
                         && (tokens.get(index+1).text().equals("(") || tokens.get(index+1).text().equals("<"));
                 if(!initializer) {
                     Token token=advance();
-                    try{suffix=hexadecimal(token.text(),external?8:4,"function ID");}catch(CompileException e){throw e;}catch(IllegalArgumentException e){throw error(e.getMessage(),token);}
+                    try{suffix=SourceRules.sourceHex(token.text(),external?8:4,"function ID");}catch(CompileException e){throw e;}catch(IllegalArgumentException e){throw error(e.getMessage(),token);}
                     initializer=match(":");
                 }
                 if(initializer) {
@@ -1854,7 +1824,7 @@ public class GeneraterJson {
             if("destructor".equals(kind)&&function.params.size()!=1)throw error("Destructor must have no parameters");
             if(external) {
                 if(suffix==null)throw error("Extern function requires a full hexadecimal ID");
-                if((suffix>>>16)==RESERVED_RUNTIME_NAMESPACE||specialNames.containsValue(suffix))throw error("Reserved external function ID");
+                if(SourceRules.reservedExternalId(suffix))throw error("Reserved external function ID");
                 expect(";");ExternSignature signature=new ExternSignature(type,function.paramTypes);signature.id=suffix;
                 signature.file=location.unit();signature.line=location.line();signature.column=location.column();externTokens.put(signature,location);
                 signature.ownerClass=owner;signature.functionKind=kind;
@@ -2153,7 +2123,7 @@ public class GeneraterJson {
             if (token.identifier()) {
                 String name = advance().text();
                 if (KEYWORDS.contains(name))
-                    throw error("'" + name + "' is a statement and cannot be used in an expression");
+                    throw error("'" + name + "' is " + (name.equals("any") ? "a reserved word" : "a statement") + " and cannot be used in an expression", token);
                 boolean reflection = name.equals("reflect_invoke_function");
                 JsonArray typeArguments = (reflection && at("<")) || callTypeArgumentsAhead()
                         ? readCallTypeArguments(reflection) : null;

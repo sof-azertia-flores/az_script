@@ -176,7 +176,7 @@ public class Compiler {
         private int returnType = -1;
         private int loopDepth;
         private String ownerClass;
-        private int moduleNamespace = 0xfff;
+        private int moduleNamespace = SourceRules.DEFAULT_NAMESPACE;
         public LogicEnvironment() {
             arities = new HashMap<>(); functionReturnTypes = new HashMap<>(); externSignatures = new LinkedHashMap<>();
             scriptSignatures = new LinkedHashMap<>(); builtinSignatures = new LinkedHashMap<>(); namedSignatures = new LinkedHashMap<>();
@@ -774,7 +774,10 @@ public class Compiler {
             }
             case "vardef" -> {
                 arity(call, params, 1, 2); String alias = string(params.get(0), "Variable name");
-                if (alias.equals("this") && !environment.root().trustedNodes.contains(source)) throw new IllegalArgumentException("Cannot declare this");
+                boolean trusted = environment.root().trustedNodes.contains(source);
+                if (alias.equals("this") && !trusted) throw new IllegalArgumentException("Cannot declare this");
+                // Lowering names its own locals #...; any other name must be one source could declare.
+                if (!trusted && !alias.startsWith("#")) validateSourceName(alias, "variable name");
                 int declaredType = source.has("declared-type")
                         ? valueType(string(source.get("declared-type"), "Declared variable type"), true)
                         : AsTypes.ANY_VALUE;
@@ -1455,7 +1458,7 @@ public class Compiler {
     private static void validateConstruction(ClassInfo info,LogicEnvironment environment,Set<ClassInfo> visiting) {
         ensureLayout(info);
         if(!visiting.add(info))throw new IllegalArgumentException("Class "+info.name+" contains itself by value; use a pointer field");
-        if(visiting.size()>MAX_VALUE_NESTING)throw new IllegalArgumentException("Literal object nesting exceeds "+MAX_VALUE_NESTING);
+        if(visiting.size()>MAX_VALUE_NESTING)throw new IllegalArgumentException("Literal object nesting exceeds "+MAX_VALUE_NESTING+" levels");
         for(Field field:info.fields)if(isValueClass(field.type())) {
             ClassInfo nested=CLASS_LAYOUTS.get().get(field.type());ensureLayout(nested);
             Signature constructor=environment.root().namedSignatures.get(nested.constructor);
@@ -1572,14 +1575,15 @@ public class Compiler {
     private static String displayName(String function) {
         return isFactory(function) ? function.substring(0, function.lastIndexOf("::")) + " constructor" : function;
     }
-    private static void validateSourceName(String name, String description) {
-        if (name.isEmpty() || !Character.isJavaIdentifierStart(name.charAt(0))) throw new IllegalArgumentException("Invalid " + description + ": " + name);
-        for (int i = 1; i < name.length(); i++)
-            if (!Character.isJavaIdentifierPart(name.charAt(i))) throw new IllegalArgumentException("Invalid " + description + ": " + name);
-        if (RESERVED_SOURCE_NAMES.contains(name)) throw new IllegalArgumentException("Reserved " + description + ": " + name);
+    /** A name the parser could have read from source; the rules are shared through {@link SourceRules}. */
+    private static void validateSourceName(String name, String description) { SourceRules.requireName(name, description); }
+    /**
+     * Function, extern and abstract names: a qualified class member such as {@code P::get}
+     * or {@code P::<ctor>} is checked with its class instead.
+     */
+    private static void validateFunctionName(String name, String description) {
+        if (!name.contains("::")) validateSourceName(name, description);
     }
-    private static final Set<String> RESERVED_SOURCE_NAMES = Set.of("class", "extends", "new", "delete", "this", "null", "return", "if", "else", "while", "for", "break", "continue", "public", "private", "protected", "virtual", "var", "def",
-            "int", "float", "double", "string", "boolean", "bool", "void", "any", "address", "buffer", "operator", "true", "false", "extern");
     private static int allocateClass(ClassInfo info) {
         int code = NEXT_CLASS.get(); NEXT_CLASS.set(code + 3);
         if (code > MAX_VARIABLE_SLOTS * 3) throw new IllegalArgumentException("Too many parameterized class types");
@@ -1809,10 +1813,17 @@ public class Compiler {
             catch (RuntimeException error) { recover(error, info.source, "class " + info.name, environment); }
         }
         diagnostics.checkpoint();
-        Map<ClassInfo,Integer> nesting=new HashMap<>();
+        Map<ClassInfo,Integer> nesting=new HashMap<>();Set<ClassInfo> reported=new HashSet<>();
         for(ClassInfo info:environment.classes.values()) {
-            try { valueNesting(info,nesting,new HashSet<>()); }
-            catch (RuntimeException error) { recover(error, info.source, "class " + info.name, environment); }
+            if(reported.contains(info))continue;
+            Set<ClassInfo> visiting=new HashSet<>();
+            try { valueNesting(info,nesting,visiting); }
+            catch (RuntimeException error) {
+                recover(error, info.source, "class " + info.name, environment);
+                // Report a containment problem once: the classes on the failing path, and the
+                // generic declarations they apply, count as checked.
+                for(ClassInfo path:visiting){nesting.putIfAbsent(path,1);reported.add(path.declaration);}
+            }
         }
         diagnostics.checkpoint();
     }
@@ -1822,7 +1833,7 @@ public class Compiler {
         Integer cached = known.get(info);
         if (cached != null) return cached;
         if (!visiting.add(info)) throw new IllegalArgumentException("Class " + info.name + " contains itself by value; use a pointer field");
-        if(visiting.size()>MAX_VALUE_NESTING)throw new IllegalArgumentException("Literal object nesting exceeds "+MAX_VALUE_NESTING);
+        if(visiting.size()>MAX_VALUE_NESTING)throw new IllegalArgumentException("Literal object nesting exceeds "+MAX_VALUE_NESTING+" levels");
         int levels = 1;
         for (Field field : info.fields)
             if (isValueClass(field.type())) levels = Math.max(levels, 1 + valueNesting(CLASS_LAYOUTS.get().get(field.type()), known, visiting));
@@ -2093,15 +2104,6 @@ public class Compiler {
         for (JsonElement child : object.getAsJsonArray("param")) if (containsBreak(child)) return true;
         return false;
     }
-    private static int hexId(String value, int digits, String description) {
-        boolean valid = !value.isEmpty() && value.length() <= digits;
-        for (int i = 0; valid && i < value.length(); i++) {
-            char c = value.charAt(i);
-            valid = c >= '0' && c <= '9' || c >= 'a' && c <= 'f' || c >= 'A' && c <= 'F';
-        }
-        if (!valid) throw new IllegalArgumentException("Invalid " + description + ": " + value);
-        return Integer.parseUnsignedInt(value, 16);
-    }
     /** Compiles a readable AST, reporting up to {@link Diagnostics#DEFAULT_MAX_ERRORS} errors in one {@link CompileException}. */
     public static AcsObject compile(JsonObject source) { return compile(source, new Diagnostics()); }
     /**
@@ -2168,9 +2170,6 @@ public class Compiler {
             if (!equivalent(first.paramTypes().get(i), substitute(second.paramTypes().get(i),renaming))) return false;
         return true;
     }
-    private static void hintName(String name) {
-        if (!name.matches("[A-Za-z_][A-Za-z0-9_]*")) throw new IllegalArgumentException("Invalid hint name: " + name);
-    }
     /**
      * Lowers a shape-checked AST. Each global loop reports the errors of every item
      * and ends with a barrier, and function bodies are checked one by one, so
@@ -2189,13 +2188,13 @@ public class Compiler {
         }
         result.put("ext", extension);
         String hint = source.has("namespace-hint") ? string(source.get("namespace-hint"), "Namespace hint") : "";
-        try { if (!hint.isEmpty()) hintName(hint); }
+        try { if (!hint.isEmpty()) SourceRules.requireHint(hint); }
         catch (RuntimeException error) { recover(error, null, null, global); }
         Map<String,Integer> assumptions = new LinkedHashMap<>();
         if (source.has("assume-hints")) for (JsonElement item : source.getAsJsonArray("assume-hints")) try {
-            JsonObject assumption = item.getAsJsonObject(); String name = string(assumption.get("hint"), "Assumed hint"); hintName(name);
+            JsonObject assumption = item.getAsJsonObject(); String name = string(assumption.get("hint"), "Assumed hint"); SourceRules.requireHint(name);
             int namespace = assumption.get("namespace").getAsBigDecimal().intValueExact();
-            if (namespace < 1 || namespace > 0xffff || namespace == 0xabd || namespace == 0xfff)
+            if (!SourceRules.assumableNamespace(namespace))
                 throw new IllegalArgumentException("Reserved or invalid assumed namespace");
             Integer existing = assumptions.get(name);
             if (existing != null && existing != namespace || existing == null && assumptions.containsValue(namespace))
@@ -2204,18 +2203,19 @@ public class Compiler {
         } catch (RuntimeException error) { recover(error, null, null, global); }
         diagnostics.checkpoint();
         addDefaultIds(global.abs); addBuiltinSignatures(global); readClasses(source, global);
-        global.moduleNamespace = metadata.has("function-namespace") ? metadata.get("function-namespace").getAsBigDecimal().intValueExact() : hint.isEmpty() ? 0xfff : 0;
-        if (global.moduleNamespace < 0 || global.moduleNamespace > 0xffff || !hint.isEmpty() && global.moduleNamespace != 0)
+        global.moduleNamespace = metadata.has("function-namespace") ? metadata.get("function-namespace").getAsBigDecimal().intValueExact()
+                : hint.isEmpty() ? SourceRules.DEFAULT_NAMESPACE : SourceRules.LIFECYCLE_NAMESPACE;
+        String reservedNamespace = hint.isEmpty() ? SourceRules.reservedModuleNamespace(global.moduleNamespace) : null;
+        if (global.moduleNamespace < 0 || global.moduleNamespace > 0xffff || !hint.isEmpty() && global.moduleNamespace != SourceRules.LIFECYCLE_NAMESPACE)
             recover(new IllegalArgumentException("Invalid function namespace"), null, null, global);
-        else if (global.moduleNamespace == 0xabd)
-            recover(new IllegalArgumentException("Invalid function namespace: 0abd is reserved for runtime built-ins"), null, null, global);
-        else if (hint.isEmpty() && global.moduleNamespace == 0)
-            recover(new IllegalArgumentException("Invalid function namespace: 0000 is reserved for lifecycle hooks and hint-library placeholders"), null, null, global);
+        else if (reservedNamespace != null)
+            recover(new IllegalArgumentException("Invalid function namespace: " + reservedNamespace), null, null, global);
         Map<String,Integer> abstractIds = new LinkedHashMap<>();
+        // Every abstract name must also name a definition or an extern, where it is checked with a location.
         if (source.has("abstract")) for (var entry : source.getAsJsonObject("abstract").entrySet()) try {
             if (isBuiltinName(entry.getKey()) || global.classes.containsKey(entry.getKey())) throw new IllegalArgumentException("Reserved function name: " + entry.getKey());
-            int id = hexId(string(entry.getValue(), "Function ID"), 8, "function ID");
-            if ((id >>> 16) == 0xabd) throw new IllegalArgumentException("Abstract function cannot use the runtime namespace");
+            int id = SourceRules.hex(string(entry.getValue(), "Function ID"), 8, "function ID");
+            if (SourceRules.runtimeId(id)) throw new IllegalArgumentException("Abstract function cannot use the runtime namespace");
             abstractIds.put(entry.getKey(), id);
         } catch (RuntimeException error) { recover(error, null, null, global); }
         diagnostics.checkpoint();
@@ -2225,7 +2225,7 @@ public class Compiler {
         List<Function> functions = new ArrayList<>(); Map<String,Function> definitions = new LinkedHashMap<>(); Set<Integer> ids = new HashSet<>();
         for (var namespace : source.getAsJsonObject("body").entrySet()) {
             int namespaceId;
-            try { namespaceId = hexId(namespace.getKey(), 4, "namespace") << 16; }
+            try { namespaceId = SourceRules.hex(namespace.getKey(), 4, "namespace") << 16; }
             catch (RuntimeException error) { recover(error, null, null, global); continue; }
             for (var entry : namespace.getValue().getAsJsonObject().entrySet()) {
                 JsonObject function = entry.getValue().getAsJsonObject(), meta = function.getAsJsonObject("metadata");
@@ -2235,17 +2235,24 @@ public class Compiler {
                 if (position < 0 || position > 0xffff) throw new IllegalArgumentException("Invalid function position: " + position);
                 int id = namespaceId | position;
                 if (!hint.isEmpty() && namespaceId != 0) throw new IllegalArgumentException("Invalid definition namespace");
-                if ((id >>> 16) == 0xabd) throw new IllegalArgumentException("Invalid definition namespace: 0abd is reserved for runtime built-ins");
+                if (SourceRules.runtimeId(id))
+                    throw new IllegalArgumentException("Invalid definition namespace: " + SourceRules.reservedModuleNamespace(SourceRules.RUNTIME_NAMESPACE));
                 if (hint.isEmpty() && namespaceId == 0 && id != 0 && id != 1)
                     throw new IllegalArgumentException("Invalid definition namespace: outside hint libraries, namespace 0000 holds only the lifecycle functions "
                             + Diagnostic.hexId(0) + " and " + Diagnostic.hexId(1));
                 if (!ids.add(id)) throw new IllegalArgumentException("Duplicate function ID: " + Diagnostic.hexId(id));
                 name = meta.has("name") ? string(meta.get("name"), "Function name") : abstractNames.getOrDefault(id, entry.getKey());
+                validateFunctionName(name, "function name");
                 diagnostics.metrics().tableProbes++;
                 if (isBuiltinName(name) || global.classes.containsKey(name)) throw new IllegalArgumentException("Reserved function name: " + name);
                 TYPE_SCOPE.set(functionScope(meta));
                 int declaredReturn = returnType(string(meta.get("return-type"), "Function return type"));
                 JsonArray parameterNames = meta.getAsJsonArray("param");
+                for (int i = 0; i < parameterNames.size(); i++) {
+                    // A class function's receiver is the first parameter, named this.
+                    String parameter = string(parameterNames.get(i), "Parameter name");
+                    if (i > 0 || !parameter.equals("this") || !name.contains("::")) validateSourceName(parameter, "parameter name");
+                }
                 if ((id == 0 || id == 1) && (declaredReturn != AsTypes.VOID_VALUE || !parameterNames.isEmpty()))
                     throw new IllegalArgumentException("Lifecycle function " + name + " must be void with no parameters");
                 List<Integer> parameterTypes = readParameterTypes(meta.get("param-types"), parameterNames.size(), true, "Function " + name);
@@ -2262,9 +2269,10 @@ public class Compiler {
             String name = entry.getKey(); JsonObject declaration = entry.getValue().getAsJsonObject();
             try {
             // Boxed in both branches, so a missing mapping is reported below instead of failing to unbox.
-            Integer id = declaration.has("id") ? Integer.valueOf(hexId(string(declaration.get("id"), "External ID"), 8, "external ID")) : abstractIds.get(name);
+            validateFunctionName(name, "function name");
+            Integer id = declaration.has("id") ? Integer.valueOf(SourceRules.hex(string(declaration.get("id"), "External ID"), 8, "external ID")) : abstractIds.get(name);
             if (id == null) throw new IllegalArgumentException("External signature has no abstract mapping: " + name);
-            if (isBuiltinName(name) || global.classes.containsKey(name) || (id >>> 16) == 0xabd || GeneraterJson.specialNames.containsValue(id))
+            if (isBuiltinName(name) || global.classes.containsKey(name) || SourceRules.reservedExternalId(id))
                 throw new IllegalArgumentException("Reserved external function: " + name);
             TYPE_SCOPE.set(functionScope(declaration));
             int returns = returnType(string(declaration.get("return-type"), "External return type"));
@@ -2301,6 +2309,7 @@ public class Compiler {
         if (source.has("global-variable")) for (JsonElement item : source.getAsJsonArray("global-variable")) {
             String name = string(item, "Global name");
             try {
+                validateSourceName(name, "global name");
                 if (global.classes.containsKey(name)) throw new IllegalArgumentException("Global name conflicts with class: " + name);
                 if (globals >= MAX_VARIABLE_SLOTS) throw new IllegalArgumentException("Program exceeds global variable slot limit");
                 global.define(name, -(++globals));
@@ -2320,7 +2329,7 @@ public class Compiler {
             if(isFactory(function.name())||function.metadata().has("function-kind")&&function.metadata().get("function-kind").getAsString().equals("destructor")&&global.classes.get(function.metadata().get("owner-class").getAsString()).synthesizedDestructor)
                 global.namedSignatures.put(function.name(),function.signature());
         }
-        Set<Integer> fixedNamespaces = new HashSet<>(Set.of(0, 0xabd, 0xfff));
+        Set<Integer> fixedNamespaces = new HashSet<>(Set.of(SourceRules.LIFECYCLE_NAMESPACE, SourceRules.RUNTIME_NAMESPACE, SourceRules.DEFAULT_NAMESPACE));
         if (hint.isEmpty()) {fixedNamespaces.add(global.moduleNamespace); for (Function function : functions) fixedNamespaces.add(function.id() >>> 16);}
         for (int namespace : assumptions.values()) if (fixedNamespaces.contains(namespace))
             recover(new IllegalArgumentException("Assumed namespace overlaps a fixed function namespace"), null, null, global);

@@ -108,10 +108,10 @@ public final class ExecCodec {
             throw invalid("invalid "+(parameter?"parameter":"return")+" type "+value);
     }
     private static void scriptId(int id) {
-        if((id>>>16)==0xabd)throw invalid("invalid script function id "+Diagnostic.hexId(id));
+        if(SourceRules.runtimeId(id))throw invalid("invalid script function id "+Diagnostic.hexId(id));
     }
     private static void externalId(int id) {
-        if(id==0||id==1||id==0x0fff0000||(id>>>16)==0xabd)throw invalid("invalid external function id "+Diagnostic.hexId(id));
+        if(SourceRules.reservedExternalId(id))throw invalid("invalid external function id "+Diagnostic.hexId(id));
     }
     private static void slot(int slot,Layout layout,boolean declaration) {
         if(slot<0) {
@@ -210,7 +210,7 @@ public final class ExecCodec {
         for(AcsElement item:array(program.mmp.get("assume-hints"),"assume-hints").acsa) {
             AcsObject assumption=object(item,"assumption");keys(assumption,ASSUMPTION);
             String name=string(assumption.mmp.get("hint"),"hint");hint(name);int namespace=integer(assumption,"namespace");
-            if(namespace<1||namespace>0xffff||namespace==0xabd||namespace==0xfff||namespaces.contains(namespace))
+            if(!SourceRules.assumableNamespace(namespace)||namespaces.contains(namespace))
                 throw invalid("invalid or fixed assumed namespace");
             if(!hints.add(name)||!aliases.add(namespace))throw invalid("duplicate hint or assumed namespace");
             assumptions.add(stack(s(name),n(namespace)));
@@ -220,7 +220,7 @@ public final class ExecCodec {
                 n(globals),extensions(program.mmp.get("ext")),stack(signatures),stack(functions),s(hint),stack(assumptions));
     }
     private static void hint(String name) {
-        if(!name.matches("[A-Za-z_][A-Za-z0-9_]*"))throw invalid("invalid hint name");
+        if(!SourceRules.isHint(name))throw invalid("invalid hint name");
     }
     private static AbdValue expressions(AcsArray expressions,Layout layout,int level) {
         depth(level);List<AbdValue> values=new ArrayList<>();

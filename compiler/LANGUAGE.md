@@ -63,7 +63,7 @@ void __script_pre_destroy() { print("done"); }
 
 块 `{}` 创建词法作用域，允许内层同名变量遮蔽外层；同一作用域重复声明报错。局部编号在整个函数内唯一，避免先前子块和兄弟块编号冲突。变量必须先声明，访问已结束作用域内的变量会编译失败。全局变量用 `#gvar` 声明，通常在 `__script_onload` 中初始化。函数参数按值传递，脚本函数调用会检查参数数量。
 
-非 hint 程序保持 `__script_onload = 0`、`main = 0x0fff0000`、`__script_pre_destroy = 1`；钩子必须是无参数 `void` 函数。普通函数默认位于 `0xfff`，`#namespace 1234` 支持 1～4 位十六进制，`#namespace fff` 显式写出默认 namespace，生成的编号与省略时相同，但仍计入唯一的 namespace 指令。namespace `0000` 保留给生命周期钩子和 hint 库占位，`0abd` 保留给运行时内置函数，`#namespace` 使用这两个值时编译报错；`compile-json` 同样拒绝 `function-namespace` 为 0 的非 hint AST，以及 0000 中除生命周期函数 0/1 以外的普通定义。函数定义可写 `int add(int a,int b):0003 {return a+b;}` 固定低16位编号；先预留显式编号再分配自动编号，固定入口不能用后缀改变编号。自动编号可能随源码改变，宿主应使用同次编译的 AST 映射。需要稳定的公开 ID 时，只在共享头文件的 extern 声明中写一次完整 ID；本模块（hint 库为其自身假定的 namespace）中的实现省略编号即可继承该编号，见 [hint 链接](../docs/HINT_LINKING.md)。
+非 hint 程序保持 `__script_onload = 0`、`main = 0x0fff0000`、`__script_pre_destroy = 1`；钩子必须是无参数 `void` 函数。普通函数默认位于 `0xfff`，`#namespace 1234` 支持 1～4 位十六进制（源码中的 namespace 和函数 ID 可带 `0x` 前缀及任意个前导零，如 `#namespace 0x0005151`、`:00000000abcd`；AST 始终写成不带前缀的十六进制，`compile-json` 只接受不超过字段宽度的纯十六进制数字，namespace 为 4 位，完整 ID 为 8 位），`#namespace fff` 显式写出默认 namespace，生成的编号与省略时相同，但仍计入唯一的 namespace 指令。namespace `0000` 保留给生命周期钩子和 hint 库占位，`0abd` 保留给运行时内置函数，`#namespace` 使用这两个值时编译报错；`compile-json` 同样拒绝 `function-namespace` 为 0 的非 hint AST，以及 0000 中除生命周期函数 0/1 以外的普通定义。函数定义可写 `int add(int a,int b):0003 {return a+b;}` 固定低16位编号；先预留显式编号再分配自动编号，固定入口不能用后缀改变编号。自动编号可能随源码改变，宿主应使用同次编译的 AST 映射。需要稳定的公开 ID 时，只在共享头文件的 extern 声明中写一次完整 ID；本模块（hint 库为其自身假定的 namespace）中的实现省略编号即可继承该编号，见 [hint 链接](../docs/HINT_LINKING.md)。
 
 `#namespace_hint NAME` 声明独立库；库内普通函数（包括 `main`）以0000占位，0/1保留给生命周期，自动编号从2开始。`#assume_hint NAME abcd` 为调用声明假定 namespace，运行时在 `flush()` 中重定位。一个编译单元及其有效 include 最多包含一个 namespace 或 namespace_hint 指令。完整规则及可运行类库示例见 [多文件库与 hint 链接](../docs/HINT_LINKING.md)。
 
@@ -150,7 +150,7 @@ bump(a);                        // a.x 变为 101：字面量对象按地址借�
 
 脚本拿不到字面量对象的存储地址，例外只有两个：类方法中的 `this`，以及 `C (*)` 参数借到的地址，二者的类型都是 `C *`。方法或函数可以返回或保存这个地址，但字面量对象到期后，再经它访问会报 `Invalid or expired object address`。字面量对象的地址也是普通 address：它的最高位标记内部存储，同样参与比较和偏移运算；存储编号永不复用，过期地址不会指向后来创建的对象。
 
-每层类先为标量、address 和指针字段设置默认值：`int` 为 `0`、`float` 为 `0.0f`、`double` 为 `0.0`、布尔为 `false`、字符串为空串、address 和指针为 `null`。然后按本层声明顺序：字面量对象字段用 `C f(args);` 或 `C f = expr;` 构造，没有初始化时调用零参构造（其类没有零参构造则编译报错）；其他字段执行显式初始化表达式。最后执行本层构造正文；继承时父类先完成这些步骤。全部初始化代码位于实际构造实现的前缀，使用实现模块的全局和调用绑定；字段初始化中的名称按 `this`、成员、全局解析，不受构造参数遮蔽。类不能直接或间接以字面量对象包含自身（请改用指针字段），字面量对象嵌套最多 64 层。指针字段不拥有目标对象，销毁外层对象时不会处理它们，需要时在析构内显式 `delete`。
+每层类先为标量、address 和指针字段设置默认值：`int` 为 `0`、`float` 为 `0.0f`、`double` 为 `0.0`、布尔为 `false`、字符串为空串、address 和指针为 `null`。然后按本层声明顺序：字面量对象字段用 `C f(args);` 或 `C f = expr;` 构造，没有初始化时调用零参构造（其类没有零参构造则编译报错）；其他字段执行显式初始化表达式。最后执行本层构造正文；继承时父类先完成这些步骤。全部初始化代码位于实际构造实现的前缀，使用实现模块的全局和调用绑定；字段初始化中的名称按 `this`、成员、全局解析，不受构造参数遮蔽。类不能直接或间接以字面量对象包含自身（请改用指针字段），经泛型字面量字段（如 `class A<T>{B<T> b;}` 与 `class B<T>{A<T> a;}`）形成的包含环同样拒绝，字面量对象嵌套最多 64 层。指针字段不拥有目标对象，销毁外层对象时不会处理它们，需要时在析构内显式 `delete`。
 
 成员通过 `obj.field`、`obj.method(args)` 或 `this.member` 访问，支持连续访问和调用。类内优先查找局部变量和参数，然后查找成员，最后查找全局。接收对象及实参从左到右各求值一次。成员赋值支持 `=`，成员 `+=` 等复合赋值暂不支持。指针可与结构等价、具有父子继承关系的指针或 `null` 做相等比较，不参与地址算术，整数 `0` 不能隐式作为对象。`null` 运行时编码为独立 address 类型的零值；成员访问先验证对象基地址，再计算字段偏移，空指针即使访问非零偏移字段也会报错。
 
@@ -223,7 +223,7 @@ void main() {
 } // literal 与 item 都按 tagged、point 的顺序析构
 ```
 
-写作 `class Child : Base` 或 `class Child : public Base`。父类可以在源码后面声明，继承环、未知父类和多个父类会报编译错误。布局递归保留父类全部 slots 作为前缀，再按声明顺序追加子类自己的字段；继承至少一个字段的子类可以不声明新字段，不增加对象头或隐藏 slots。父类方法接收同一个对象起始地址，因此无需调整地址。
+写作 `class Child : Base` 或 `class Child : public Base`。父类可以在源码后面声明，继承环、未知父类和多个父类会报编译错误。继承环、没有字段的类和以字面量对象包含自身等布局错误由编译器在类声明处报告（如 `main.azs:1:7: error: in class A: Inheritance cycle involving A`），源码编译与 `compile-json` 的报告相同。布局递归保留父类全部 slots 作为前缀，再按声明顺序追加子类自己的字段；继承至少一个字段的子类可以不声明新字段，不增加对象头或隐藏 slots。父类方法接收同一个对象起始地址，因此无需调整地址。
 
 子类可直接使用继承的字段和方法；同名成员由子类遮蔽。成员绑定取决于表达式的静态类类型：子类对象或指针调用子类同名方法，父类指针调用父类方法；父类方法正文中的名称继续按父类解析。当前没有虚函数或运行时方法选择，也没有用于显式选择被遮蔽成员的 `Base::method()` 表达式；可以先绑定父类指针再访问。
 
@@ -326,7 +326,7 @@ extern int host_add(int, int):0xccf0001;
 - 预处理后的文本（含全部 include 和宏展开）最多 16,777,216 个字符，不计最后一行的换行符，所以不含 include 和宏的最大源文件不会超出此上限；
 - 整个程序最多 4,194,304 个词法记号。
 
-源文件开头的 UTF-8 BOM 会被忽略，不影响首行指令。`return`、`if`、`else`、`while`、`for`、`break`、`continue`、`def`、`var`、`class`、`new`、`this`、`null`、`delete`、`extern`、`public/private/protected/virtual`、所有类型名以及 `true/false` 是保留字，不能声明为函数、参数、变量、`#gvar`、`#define` 或 `extern` 的名字。
+源文件开头的 UTF-8 BOM 会被忽略，不影响首行指令。`return`、`if`、`else`、`while`、`for`、`break`、`continue`、`def`、`var`、`class`、`new`、`this`、`null`、`delete`、`extern`、`public/private/protected/virtual`、`any`、所有类型名以及 `true/false` 是保留字，不能声明为类、字段、方法、类型参数、函数、参数、变量、`#gvar`、`#define` 或 `extern` 的名字，报告为 `'any' is a reserved word and cannot be used as a name`。标识符的字符沿用 Java 标识符规则中基本多文种平面（BMP）的字符（字母、数字、`_`、`$` 等，不能以数字开头），但控制字符和格式字符（如零宽空格 U+200B、双向覆盖 U+202E）不能出现在标识符中，以免两个名字看起来相同，源码中报告为 `Unexpected character: U+202E`；不在文件开头的 U+FEFF 同样如此报告。诊断信息把这类字符打印为转义形式，如 `Invalid field name: x\u202e`。`compile-json` 对手写 AST 中的类、字段、方法、类型参数、函数、参数、局部变量和全局变量名应用同一套规则，例如 `in class P: 'any' is a reserved word and cannot be used as a field name`；以 `#` 开头的局部变量名留给编译器生成的变量。
 
 嵌套上限以 ABD 的 128 层容器嵌套为准：函数体从第 4 层开始，每个二元/一元运算、每个调用参数、每条语句和每个块各占一层，所以一个表达式大约可以串联 120 个运算符，或嵌套约 60 层块。超限时编译器报告文件、行列和所在函数，例如 `main.azs:2:8: error: in function main: Expression nesting exceeds the ABD limit of 128 levels; split the expression or statement`。泛型类型及指针的类型表达式嵌套最多 64 层，手写 AST 中的类型字符串也遵守此限制。语法递归和 JSON 容器另有 320 层防护上限，用于保护宿主，超限时报告最内层所在的语句或字段，或 JSON 行列；循环引用的 AST 会提前拒绝。错误后同一进程可以继续编译其他程序。
 

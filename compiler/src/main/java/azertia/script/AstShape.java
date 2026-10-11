@@ -273,14 +273,16 @@ final class AstShape {
         return Character.isISOControl(c) || c == 0x2028 || c == 0x2029 || c == 0x061c || c == 0x200e || c == 0x200f
                 || c >= 0x202a && c <= 0x202e || c >= 0x2066 && c <= 0x2069;
     }
-    /** Input text for a message: unsafe characters and unpaired surrogates become backslash-u hexadecimal escapes. */
+    /** Input text for a message: unsafe and format characters and unpaired surrogates become backslash-u hexadecimal escapes. */
     static String printable(String text) {
         StringBuilder out = new StringBuilder(text.length());
         for (int i = 0; i < text.length(); i++) {
             char c = text.charAt(i);
             boolean pair = Character.isHighSurrogate(c) && i + 1 < text.length() && Character.isLowSurrogate(text.charAt(i + 1));
-            if (pair) { out.append(c).append(text.charAt(++i)); continue; }
-            if (unsafe(c) || Character.isSurrogate(c)) out.append(String.format("\\u%04x", (int) c));
+            // Other format characters, such as U+200B or the tag U+E0061, are escaped too, so no part of a name is invisible.
+            if (pair && Character.getType(Character.toCodePoint(c, text.charAt(i + 1))) != Character.FORMAT) { out.append(c).append(text.charAt(++i)); continue; }
+            if (pair) out.append(String.format("\\u%04x\\u%04x", (int) c, (int) text.charAt(++i)));
+            else if (unsafe(c) || Character.getType(c) == Character.FORMAT || Character.isSurrogate(c)) out.append(String.format("\\u%04x", (int) c));
             else out.append(c);
         }
         return out.toString();

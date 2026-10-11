@@ -56,6 +56,8 @@ install(FILES library.h internelFunctions.h heepalloc.h blocks.h azertianBinaryD
 if(BUILD_TESTING)
     add_executable(runtime-tests runtime_tests.cpp)
     target_link_libraries(runtime-tests PRIVATE abdInvoker)
+    # Shared with the compiler's TypeSafetyTest, so both sides check the same hint names.
+    target_compile_definitions(runtime-tests PRIVATE AZSCRIPT_HINT_CASES="${CMAKE_CURRENT_SOURCE_DIR}/../tests/hint_names.txt")
     add_test(NAME runtime-tests COMMAND runtime-tests)
     add_executable(numeric-module-host ../tests/numeric_module_host.cpp)
     target_link_libraries(numeric-module-host PRIVATE abdInvoker)
