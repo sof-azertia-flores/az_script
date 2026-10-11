@@ -2095,8 +2095,12 @@ public class Compiler {
         diagnostics.checkpoint();
         addDefaultIds(global.abs); addBuiltinSignatures(global); readClasses(source, global);
         global.moduleNamespace = metadata.has("function-namespace") ? metadata.get("function-namespace").getAsBigDecimal().intValueExact() : hint.isEmpty() ? 0xfff : 0;
-        if (global.moduleNamespace < 0 || global.moduleNamespace > 0xffff || global.moduleNamespace == 0xabd || !hint.isEmpty() && global.moduleNamespace != 0)
+        if (global.moduleNamespace < 0 || global.moduleNamespace > 0xffff || !hint.isEmpty() && global.moduleNamespace != 0)
             recover(new IllegalArgumentException("Invalid function namespace"), null, null, global);
+        else if (global.moduleNamespace == 0xabd)
+            recover(new IllegalArgumentException("Invalid function namespace: 0abd is reserved for runtime built-ins"), null, null, global);
+        else if (hint.isEmpty() && global.moduleNamespace == 0)
+            recover(new IllegalArgumentException("Invalid function namespace: 0000 is reserved for lifecycle hooks and hint-library placeholders"), null, null, global);
         Map<String,Integer> abstractIds = new LinkedHashMap<>();
         if (source.has("abstract")) for (var entry : source.getAsJsonObject("abstract").entrySet()) try {
             if (isBuiltinName(entry.getKey()) || global.classes.containsKey(entry.getKey())) throw new IllegalArgumentException("Reserved function name: " + entry.getKey());
@@ -2117,7 +2121,11 @@ public class Compiler {
                 int position = meta.get("position").getAsBigDecimal().intValueExact();
                 if (position < 0 || position > 0xffff) throw new IllegalArgumentException("Invalid function position: " + position);
                 int id = namespaceId | position;
-                if ((id >>> 16) == 0xabd || !hint.isEmpty() && namespaceId != 0) throw new IllegalArgumentException("Invalid definition namespace");
+                if (!hint.isEmpty() && namespaceId != 0) throw new IllegalArgumentException("Invalid definition namespace");
+                if ((id >>> 16) == 0xabd) throw new IllegalArgumentException("Invalid definition namespace: 0abd is reserved for runtime built-ins");
+                if (hint.isEmpty() && namespaceId == 0 && id != 0 && id != 1)
+                    throw new IllegalArgumentException("Invalid definition namespace: outside hint libraries, namespace 0000 holds only the lifecycle functions "
+                            + Diagnostic.hexId(0) + " and " + Diagnostic.hexId(1));
                 if (!ids.add(id)) throw new IllegalArgumentException("Duplicate function ID: " + Diagnostic.hexId(id));
                 name = meta.has("name") ? string(meta.get("name"), "Function name") : abstractIds.entrySet().stream()
                         .filter(item -> item.getValue() == id).map(Map.Entry::getKey).findFirst().orElse(entry.getKey());

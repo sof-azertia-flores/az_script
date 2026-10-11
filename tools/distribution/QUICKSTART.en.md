@@ -117,7 +117,7 @@ The container library is also declarations-only. `List<int> * xs = new List<int>
 
 That example returns 0. Assumed namespace c071 is not the runtime address. See [containers](../stdlib/CONTAINERS.en.md).
 
-Declare globals with #gvar name, usually assigning in parameterless `void __script_onload()`. `void __script_pre_destroy()` runs on explicit close. Non-hint main is fixed at 0x0fff0000 and hooks at 0/1. Ordinary definitions can fix low numbers with `int function():0003 {return 1;}`. Automatic numbers change with source; name-based host calls need the matching --ast abstract map.
+Declare globals with #gvar name, usually assigning in parameterless `void __script_onload()`. `void __script_pre_destroy()` runs on explicit close. Non-hint main is fixed at 0x0fff0000 and hooks at 0/1. Ordinary definitions can fix low numbers with `int function():0003 {return 1;}`, or omit the number and inherit the full ID of an extern in the module's own namespace declared in a shared header. Automatic numbers change with source; name-based host calls need the matching --ast abstract map.
 
 Host declarations require complete signatures, e.g. `extern int host_add(int, int):0x12340001;`, matching host IDs, arguments, and results. The standalone interpreter has no application-specific callbacks; embed C++ or Java for these scripts.
 

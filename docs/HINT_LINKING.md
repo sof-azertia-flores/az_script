@@ -6,13 +6,13 @@
 
 ## 声明与函数编号
 
-一个编译单元及其有效 include 内容只能出现一次 `#namespace` 或 `#namespace_hint`。namespace 支持 1～4 位十六进制；hint 名称为大小写敏感的 ASCII 标识符（字母或下划线开头，后接字母、数字或下划线）。`#assume_hint NAME abcd` 建立编译期地址别名，相同声明合并，同名不同地址或同地址不同名称拒绝。别名排除 0000、0abd、0fff 和本模块固定函数 namespace。
+一个编译单元及其有效 include 内容只能出现一次 `#namespace` 或 `#namespace_hint`。namespace 支持 1～4 位十六进制，拒绝保留的 0000（生命周期钩子和 hint 库占位）和 0abd（运行时内置函数），0fff 即默认 namespace，可以显式写出；hint 名称为大小写敏感的 ASCII 标识符（字母或下划线开头，后接字母、数字或下划线）。`#assume_hint NAME abcd` 建立编译期地址别名，相同声明合并，同名不同地址或同地址不同名称拒绝。别名排除 0000、0abd、0fff 和本模块固定函数 namespace。
 
 `extern int a(int n):addd0003;` 声明完整32位函数地址，参数名可省略，返回类型及参数类型必须明确。旧 `#extern` 已删除，头文件保护使用 `#pragma once` 或 `#ifndef`/`#define`。`int a():0003 { ... }` 给定义指定低16位编号。编号支持可选 `0x` 前缀；定义最多四位、extern最多八位。全部显式编号及自身导入声明占用的编号先保留，再分配普通自动编号和内部函数编号。
 
 hint 库的普通函数先放在 0000 namespace，0000/0001 始终保留给 `__script_onload` / `__script_pre_destroy`，自动普通函数从0002开始。库中 main 不再特殊。非hint程序的 main 仍为 0x0fff0000，生命周期函数仍为0/1；这些固定入口不能用后缀改变编号。
 
-每个hint库自动assume自身，显式自身assume优先，否则按namespace从小到大选一个可用别名，避开保留、固定函数、显式assume和固定extern所占namespace。本库内部调用（含递归及内部工厂调用）通过自身assume输出。调用查找优先extern；同名extern和本地定义签名一致时合法，定义位置与调用绑定独立。指向自身hint的声明与实现必须使用相同低位编号，定义省略编号时从声明取得。完全重复的extern声明可合并，编号或签名冲突则拒绝。
+每个hint库自动assume自身，显式自身assume优先，否则按namespace从小到大选一个可用别名，避开保留、固定函数、显式assume和固定extern所占namespace。本库内部调用（含递归及内部工厂调用）通过自身assume输出。调用查找优先extern；同名extern和本地定义签名一致时合法，定义位置与调用绑定独立。指向自身hint的声明与实现必须使用相同低位编号，定义省略编号时从声明取得，因此公开 ID 只需在共享头文件中写一次。完全重复的extern声明可合并，编号或签名冲突则拒绝。
 
 ## 类外实现与结构类型
 
@@ -113,7 +113,7 @@ AzScript error: Cannot insert lib.exec.abd: Duplicate function id: 0x0fff0001 (n
 
 模块序号按成功插入的顺序从 0 开始，主脚本为 `#0`。已定义该 ID 的模块总是普通模块，因为 hint 库会移到空闲 namespace。只有一个模块可以定义 `main`（`0x0fff0000`），重复定义时错误会给出相应提示。组合普通模块的方式：
 
-- 为每个库指定独立的 `#namespace abcd`，并在共享头文件中以完整 ID 声明其函数（`extern int other():abcd0001;`）；`int other():0001` 这类固定编号可使库修改后 ID 保持不变。主程序可以继续使用默认 namespace；
+- 为每个库指定独立的 `#namespace abcd`，并在共享头文件中以完整 ID 声明其函数（`extern int other():abcd0001;`）。库的实现 include 同一头文件，定义省略编号即可继承声明中的编号，ID 只写一次，库修改后也保持不变。主程序可以继续使用默认 namespace；
 - 或使用 `#namespace_hint NAME` 编译库，调用方声明 `#assume_hint NAME abcd`，并通过假定的 namespace 导入其函数（`extern int other():abcd0002;`），由装载器选择 namespace 并重定位这些 ID。
 
 混合固定 namespace 与 hint 库时，插入顺序有影响。hint 库在插入时取最小的空闲 namespace；之后插入的普通模块若固定 namespace 已被它占用，会报 `Fixed namespace 0x0001 conflicts with hint NAME, which module #N mounted there`。未被 `#assume_hint` 覆盖的固定 `extern` namespace 按同样规则检查。应先插入固定 namespace 的模块，之后的 hint 库会避开这些 namespace；也可以选择远离低位区间的固定 namespace。

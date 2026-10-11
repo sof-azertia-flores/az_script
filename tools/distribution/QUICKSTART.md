@@ -117,7 +117,7 @@ int main() { return math_round(math_hypot(3.0, 4.0)); }
 
 该示例成功返回 `0`。假定 namespace `c071` 不是实际地址。说明见 [容器库](../stdlib/CONTAINERS.md)。
 
-全局变量由 `#gvar name` 声明，通常在 `void __script_onload()` 中赋值；`void __script_pre_destroy()` 在显式关闭脚本时执行。非 hint 程序的 `main` 固定为 `0x0fff0000`，这两个生命周期钩子分别为 `0` 和 `1`，均不能带参数。普通定义可用 `int function():0003 {return 1;}` 固定低16位编号；自动编号随源码改变；宿主需要按名字调用时，应保存与 ABD 同次生成的 `--ast`，读取其中的 `abstract` 映射。
+全局变量由 `#gvar name` 声明，通常在 `void __script_onload()` 中赋值；`void __script_pre_destroy()` 在显式关闭脚本时执行。非 hint 程序的 `main` 固定为 `0x0fff0000`，这两个生命周期钩子分别为 `0` 和 `1`，均不能带参数。普通定义可用 `int function():0003 {return 1;}` 固定低16位编号，也可省略编号，从共享头文件中本模块 namespace 的 extern 声明继承完整 ID；自动编号随源码改变；宿主需要按名字调用时，应保存与 ABD 同次生成的 `--ast`，读取其中的 `abstract` 映射。
 
 宿主函数写完整签名，例如 `extern int host_add(int, int):0x12340001;`；宿主必须注册相同 ID 与对应参数和返回值。独立解释器没有应用专属的宿主回调，使用此类脚本时应嵌入 C++ 或 Java 宿主。
 

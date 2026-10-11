@@ -194,13 +194,13 @@ try {
 }
 ```
 
-Non-library main is 0x0fff0000; ordinary definitions may fix low IDs with :0003. Libraries use namespace_hint; clients use assume_hint and extern. Load all modules, explicitly flush to link/initialize, and flush again after insertion. See [multi-file libraries](docs/HINT_LINKING.en.md) for examples/out-of-class implementations and the [Java guide](abdJavaInvoker/README.en.md) for registration, returning callbacks, and snapshots.
+Non-library main is 0x0fff0000; ordinary definitions may fix low IDs with :0003, or omit the number and inherit the full ID of an extern in the module's own namespace declared in a shared header. Libraries use namespace_hint; clients use assume_hint and extern. Load all modules, explicitly flush to link/initialize, and flush again after insertion. See [multi-file libraries](docs/HINT_LINKING.en.md) for examples/out-of-class implementations and the [Java guide](abdJavaInvoker/README.en.md) for registration, returning callbacks, and snapshots.
 
 ## Defined semantics and limits
 
 - Integers are signed 32-bit; division truncates toward zero and overflow/zero division fail. Numeric promotion is double > float > int; booleans are not implicit numbers.
 - Decimals default to double; 1.5f, 5f, and 2e3f are float.
-- Fully typed extern declarations require explicit types; old #extern is removed. Actual arguments/results match exactly without int/float/double conversions. Namespace accepts 1–4 hex digits; libraries use namespace_hint/assume_hint.
+- Fully typed extern declarations require explicit types; old #extern is removed. Actual arguments/results match exactly without int/float/double conversions. Namespace accepts 1–4 hex digits and rejects the reserved 0000 and 0abd; libraries use namespace_hint/assume_hint.
 - Parameters pass by value, evaluated left to right. Functions access only own locals and globals. Each block/loop iteration has its own scope; for initializer scope ends with the loop.
 - Return crosses current-function blocks; break/continue affect the innermost loop and perform cleanup. Declared returns are checked; finite representable numeric conversions are allowed, unrepresentable ones fail.
 - ABD nesting is limited to 128 levels, checking logical expressions and physical wire containers. Bodies start at level 4; argument/statement lists and constant wrappers add levels (roughly 120 chained operators or 60 nested blocks). Parser/JSON guards are 320 levels; cyclic trees fail. Defaults are 1,000,000 steps and depth 256 per top-level call, 64 MiB script files, and 1,048,576 heap slots including reserved zero. Host callback elapsed time is not budgeted.
@@ -208,7 +208,7 @@ Non-library main is 0x0fff0000; ordinary definitions may fix low IDs with :0003.
 - Numeric strings use shortest roundtrip forms: 0.30000000000000004, 123456789, 1e+20, and -0 for the documented examples.
 - Address and int32 do not implicitly convert. Alloc(int) returns address; memory APIs take it. Address±int and int+address are checked across uint64; address equality/order is unsigned. Class pointers do not support raw arithmetic. Addresses remain logical indices with the same heap limit; bounds/freed access fail, but reused heap addresses cannot identify stale references.
 - Automatically owned allocations may be freed only from their owning scope chain (lexical parents/callers). Reentrant functions in other active scopes cannot free them. Java memFree permits ownerless or globally promoted blocks. Make_free removes this restriction.
-- Namespaces 0, 0xfff, and 0xabd are reserved; hosts cannot take active script namespaces. Hint mounts allocate available positions. Function IDs retain all 32 bits.
+- Namespaces 0, 0xfff, and 0xabd are reserved. 0 holds lifecycle hooks and hint-library placeholders and 0xabd runtime built-ins, so `#namespace` rejects both, and compile-json rejects them as an ordinary module's namespace (hint libraries keep their 0000 placeholders); 0xfff is the default namespace of ordinary programs and may be written explicitly. Hosts cannot register in these three or in active script namespaces. Hint mounts allocate available positions. Function IDs retain all 32 bits.
 - Heap/external registry remain process-shared. Java maintains one active script, serializes calls, and allows same-thread callback reentry. Callbacks must not wait for another runtime-calling thread. Multiple C++ scripts still share resources and are not independent security sandboxes.
 - Collection literals, closures, and a complete static type system are not implemented. See the language guide for annotation semantics and the diagnostic format.
 - ABD is a recoverable binary instruction tree, not encryption or guaranteed decompilation protection. Numeric variable slots hide source names only in exec; AST retains them. Sources/debug JSON may be omitted from releases, but secrets must not rely solely on this format.

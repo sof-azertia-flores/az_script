@@ -47,7 +47,7 @@ Java 桥可以编解码 `Integer`、`Float`、`Double`、`Boolean`、`String`、
 
 `AbdInvoker.addTrustedPublicKey(String)` 和 `addTrustedPublicKey(File)` 把 PEM 公钥交给 `load_extern_library`。`clearTrustedPublicKeys()` 清空这组公钥。Java 宿主不会自动读取 `AZSCRIPT_TRUSTED_KEY` 或 `trusted_key.pem`。动态库注册的是同一进程里的 C++ `registerExecutor`，与 `registerJfunction` 共用命名空间规则。
 
-普通函数可用显式 `:0003` 编号，否则 ID 会随源码变化。AST 的 `abstract` 保存 extern 优先的源码名称绑定，同名 extern 与本地定义共存时，它指向 extern；本地定义位置应读取 `body` 中的 namespace 和 `metadata.position/name`。hint 库的定义 namespace 是0000占位，宿主通过 `namespaceForHint` 查询该库实际 namespace，再与其公开低16位编号组合。不能把本模块 namespace 套到所有 abstract 项；跨库导入须使用其对应库的位置。AST 与 ABD 必须成对部署。
+需要稳定的普通函数 ID 时，在实现所 include 的共享头文件中以完整 ID 声明一次（`#namespace 1234` 的模块写 `extern int f():12340003;`），定义省略编号即可继承；也可用显式 `:0003` 编号，否则 ID 会随源码变化。`#namespace` 不能使用保留的 `0000` 和 `0abd`，编译器会拒绝。AST 的 `abstract` 保存 extern 优先的源码名称绑定，同名 extern 与本地定义共存时，它指向 extern；本地定义位置应读取 `body` 中的 namespace 和 `metadata.position/name`。hint 库的定义 namespace 是0000占位，宿主通过 `namespaceForHint` 查询该库实际 namespace，再与其公开低16位编号组合。不能把本模块 namespace 套到所有 abstract 项；跨库导入须使用其对应库的位置。AST 与 ABD 必须成对部署。
 
 泛型脚本函数只保留一份擦除后的实现，由编译后的脚本调用传入隐藏操作上下文。`AbdInvoker.invoke` 无法提供这些上下文，直接调用泛型入口会报错。应导出参数和返回类型明确的普通非泛型包装函数，再从 Java 调用其 ID：
 

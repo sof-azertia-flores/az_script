@@ -199,11 +199,16 @@ def main():
             'reserved-local': '#namespace_hint A\nint f():0001{return 1;}',
             'signature-conflict': 'extern int f(int):12340002;int f(double n){return 1;}',
             'unequal-layout': 'class A{int x;}class B{double x;}void main(){A a;B b=a;}',
+            'namespace-zero': '#namespace 0\nvoid main(){}',
+            'namespace-runtime': '#namespace 0abd\nvoid main(){}',
         }
+        rejected = {}
         for name, source in bad_sources.items():
             path = work / (name + '.azs')
             path.write_text(source)
-            run(compiler + ['compile', path, '-o', work / (name + '.abd')], success=False)
+            rejected[name] = run(compiler + ['compile', path, '-o', work / (name + '.abd')], success=False).stderr
+        assert 'namespace-zero.azs:1:1: error: Namespace 0000 is reserved' in rejected['namespace-zero'], rejected['namespace-zero']
+        assert 'namespace-runtime.azs:1:1: error: Namespace 0abd is reserved' in rejected['namespace-runtime'], rejected['namespace-runtime']
 
         if args.bridge and args.library:
             snapshot_program, _ = compile_module('snapshot_client', '''#include "point.include.azs"

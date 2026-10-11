@@ -382,8 +382,11 @@ public class GeneraterJson {
                                         if (args.length != 1 || args[0].isBlank())
                                             throw new IllegalArgumentException("Expected one hexadecimal namespace");
                                         int value = hexadecimal(args[0], 4, "namespace");
+                                        // 0fff is the default namespace, so naming it explicitly is allowed.
+                                        if (value == 0)
+                                            throw new IllegalArgumentException("Namespace 0000 is reserved for lifecycle hooks and hint-library placeholders");
                                         if (value == RESERVED_RUNTIME_NAMESPACE)
-                                            throw new IllegalArgumentException("Namespace 0xabd is reserved for the runtime");
+                                            throw new IllegalArgumentException("Namespace 0abd is reserved for runtime built-ins");
                                         functionNamespace = value; namespaceDeclared = true; namespaceDirective = directive;
                                     }
                                     case "namespace_hint" -> {

@@ -238,6 +238,73 @@ class CompilerTest {
                 "float main(){return 1e100f;}"})
             assertThrows(IllegalArgumentException.class, () -> compile(invalid), invalid);
     }
+    @Test void reservedNamespacesAreRejectedInSourceAndAst() throws Exception {
+        String lifecycle = "Namespace 0000 is reserved for lifecycle hooks and hint-library placeholders";
+        String runtime = "Namespace 0abd is reserved for runtime built-ins";
+        for (String spelling : List.of("0", "0000", "0x0", "0X0000"))
+            assertEquals("<source>:1:1: error: " + lifecycle, assertThrows(CompileException.class,
+                    () -> compile("#namespace " + spelling + "\nint helper(){return 1;}")).getMessage(), spelling);
+        for (String spelling : List.of("abd", "0abd", "0x0abd", "0ABD"))
+            assertEquals("<source>:1:1: error: " + runtime, assertThrows(CompileException.class,
+                    () -> compile("#namespace " + spelling + "\nint helper(){return 1;}")).getMessage(), spelling);
+        // Each rejected directive is reported where it stands; a rejected one does not count as the unit's namespace.
+        assertEquals("<source>:2:3: error: " + lifecycle + "\n<source>:3:1: error: " + runtime,
+                assertThrows(CompileException.class, () -> compile("int main(){return 0;}\n  #namespace 0\n#namespace abd\n")).getMessage());
+        // 0fff is the default namespace, so naming it explicitly changes nothing.
+        byte[] implicit = Compiler.compile(newTree("int helper(){return 1;} int main(){return helper();}")).toValue().toAbdFormat();
+        for (String spelling : List.of("fff", "0fff", "0x0fff")) {
+            JsonObject explicit = newTree("#namespace " + spelling + "\nint helper(){return 1;} int main(){return helper();}");
+            assertEquals(0xfff, explicit.getAsJsonObject("metadata").get("function-namespace").getAsInt(), spelling);
+            assertArrayEquals(implicit, Compiler.compile(explicit).toValue().toAbdFormat(), spelling);
+        }
+        for (String spelling : List.of("1", "ffff", "0abc", "0abe"))
+            assertDoesNotThrow(() -> compile("#namespace " + spelling + "\nint helper(){return 1;}"), spelling);
+        // Lifecycle hooks of an ordinary module keep ids 0 and 1, and externs may still name namespace 0000.
+        String hooks = "extern int placeholder():00000005;void __script_onload(){}void __script_pre_destroy(){}int main(){return 0;}";
+        assertDoesNotThrow(() -> Compiler.compile(newTree(hooks)).toValue());
+
+        // compile-json applies the same rules to an AST that bypassed the parser.
+        String source = "int helper(){return 1;}\nint main(){return helper();}\n";
+        JsonObject zero = newTree(source); zero.getAsJsonObject("metadata").addProperty("function-namespace", 0);
+        assertEquals("<source>: error: Invalid function namespace: 0000 is reserved for lifecycle hooks and hint-library placeholders",
+                assertRejected(zero, "function-namespace 0").getMessage());
+        JsonObject builtin = newTree(source); builtin.getAsJsonObject("metadata").addProperty("function-namespace", 0xabd);
+        assertEquals("<source>: error: Invalid function namespace: 0abd is reserved for runtime built-ins",
+                assertRejected(builtin, "function-namespace abd").getMessage());
+        JsonObject explicitDefault = newTree(source); explicitDefault.getAsJsonObject("metadata").addProperty("function-namespace", 0xfff);
+        assertArrayEquals(Compiler.compile(newTree(source)).toValue().toAbdFormat(), Compiler.compile(explicitDefault).toValue().toAbdFormat());
+        for (String namespace : List.of("0", "abd")) {
+            JsonObject moved = newTree(source); JsonObject body = moved.getAsJsonObject("body");
+            JsonObject helper = body.getAsJsonObject("fff").remove("_funcfff0001").getAsJsonObject();
+            // Position 2, because 0000/0001 are the lifecycle hooks an ordinary module may define.
+            helper.getAsJsonObject("metadata").addProperty("position", 2);
+            JsonObject target = new JsonObject(); target.add("_func" + Integer.toHexString(Integer.parseInt(namespace, 16) << 16 | 2), helper);
+            body.add(namespace, target);
+            assertEquals(namespace.equals("0")
+                            ? "<source>:1:11: error: Invalid definition namespace: outside hint libraries, namespace 0000 holds only the lifecycle functions 0x00000000 and 0x00000001"
+                            : "<source>:1:11: error: Invalid definition namespace: 0abd is reserved for runtime built-ins",
+                    assertRejected(moved, "definition in", namespace).getMessage());
+        }
+        // A hint library keeps its definitions in the 0000 placeholder namespace.
+        assertDoesNotThrow(() -> Compiler.compile(newTree("#namespace_hint LIB\n" + source)).toValue());
+    }
+    @Test void ordinaryDefinitionsInheritIdsFromSelfExterns() throws Exception {
+        // The shared header writes the full ID once; the implementation omits the number and inherits it.
+        String source = "#namespace 1234\nextern int other():12340003;\n"
+                + "int helper(){return 1;} int two(){return 2;} int other(){return helper()+two();} int four(){return 4;}\n"
+                + "int main(){return other()+four();}";
+        var script = new GeneraterJson.AzScript(); script.execute(source);
+        for (var expected : List.of(List.of("helper", 0x12340001), List.of("two", 0x12340002), List.of("other", 0x12340003), List.of("four", 0x12340004)))
+            assertEquals(expected.get(1), script.functions.stream().filter(item -> item.name.equals(expected.get(0))).findFirst().orElseThrow().id,
+                    expected.get(0).toString());
+        JsonObject tree = script.toObj();
+        assertTrue(tree.getAsJsonObject("body").getAsJsonObject("1234").has("_func12340003"));
+        assertEquals("12340003", tree.getAsJsonObject("abstract").get("other").getAsString());
+        assertTrue(Compiler.compile(tree).toJson().getAsJsonObject().getAsJsonArray("f").asList().stream()
+                .anyMatch(item -> item.getAsJsonObject().get("id").getAsInt() == 0x12340003));
+        // A repeated number must still agree with the declaration.
+        assertThrows(CompileException.class, () -> compile(source.replace("int other()", "int other():0004")));
+    }
     @Test void typedExternSignaturesAndDeclaredScriptTypesReachAbd() throws Exception {
         var script = new GeneraterJson.AzScript();
         script.execute("extern int host_all(int, string, float, double, bool):0xccf0001;\n"
