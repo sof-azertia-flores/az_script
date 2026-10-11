@@ -21,8 +21,10 @@ import java.util.*;
  */
 final class AstShape {
     /** The preprocessor's include depth limit; a stored include chain is no longer. */
-    static final int MAX_INCLUDE_CHAIN = 64;
-    static final int MAX_SOURCE_NAME = 4096;
+    static final int MAX_INCLUDE_CHAIN = TreeLimits.MAX_INCLUDE_DEPTH;
+    static final int MAX_SOURCE_NAME = TreeLimits.MAX_SOURCE_LABEL_CHARS;
+    /** The main source and one unit per include expansion. */
+    static final int MAX_SOURCES = TreeLimits.MAX_INCLUDES + 1;
     private static final String[] POSITIVE_POSITIONS = {"_line", "_column", "_end_line", "_end_column"};
 
     private record Pending(JsonElement node, String path) {}
@@ -204,6 +206,7 @@ final class AstShape {
         JsonArray entries = value.getAsJsonArray();
         if (entries.isEmpty()) { error(path, "expected at least the main source"); return; }
         units = entries.size();
+        if (units > MAX_SOURCES) { error(path, "expected at most " + MAX_SOURCES + " sources, got " + units); return; }
         int[] depth = new int[entries.size()];
         for (int i = 0; i < entries.size(); i++) {
             String entryPath = path + "/" + i;

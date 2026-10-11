@@ -2,10 +2,16 @@ package azertia.script;
 
 import com.google.gson.*;
 import java.io.IOException;
+import java.io.InputStream;
 import java.math.BigDecimal;
-import java.nio.charset.CharacterCodingException;
+import java.nio.ByteBuffer;
+import java.nio.CharBuffer;
+import java.nio.charset.CharsetDecoder;
+import java.nio.charset.CoderResult;
+import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
+import java.nio.file.attribute.BasicFileAttributes;
 import java.util.*;
 
 /** Token based AzScript front end. The historical public class name is retained. */
@@ -18,7 +24,7 @@ public class GeneraterJson {
     private static final Set<String> KEYWORDS = Set.of("return", "if", "else", "while", "for", "break", "continue", "def", "var", "class", "new", "delete", "this", "null", "extern", "extends", "operator", "public", "private", "protected", "virtual");
     private static final Set<String> PREPROCESSOR_DIRECTIVES = Set.of(
             "ifdef", "ifndef", "if_equals", "else", "fi", "endif", "include", "author", "gvar",
-            "namespace", "namespace_hint", "assume_hint", "setmeta", "setattr", "define", "undef");
+            "namespace", "namespace_hint", "assume_hint", "setmeta", "setattr", "define", "undef", "pragma");
     public static final Map<String, Integer> specialNames = Map.of(
             "__script_onload", 0, "main", 0x0fff0000, "__script_pre_destroy", 1);
 
@@ -81,6 +87,14 @@ public class GeneraterJson {
         private Diagnostics diagnostics = Diagnostics.failFast();
         /** The running parser, which locates an internal compiler error at its current token. */
         private Parser parser;
+        /** Text of every source file read by this compilation, by real path; a repeated include reuses it. */
+        private final Map<Path,String> sourceTexts = new HashMap<>();
+        /** The error of every source file that was read but is not valid UTF-8, by real path. */
+        private final Map<Path,String> sourceFailures = new HashMap<>();
+        /** Real paths of the files that ran {@code #pragma once}; a later include of one expands to nothing. */
+        private final Set<Path> onceFiles = new HashSet<>();
+        private int includeExpansions;
+        private long sourceBytes;
 
         /** Preprocesses a string source relative to the working directory and returns the combined text. */
         public String toPureSource(String src) throws IOException {
@@ -109,19 +123,32 @@ public class GeneraterJson {
             reset(); begin(diagnostics);
             Path real;
             try { real = source.toRealPath(); }
-            catch (NoSuchFileException e) { throw new IllegalArgumentException("Cannot open source file \"" + source + "\": file not found"); }
+            catch (IOException e) {
+                String name = sourceName(source, null);
+                throw fileError(name, "Cannot open source file \"" + name + "\": " + reason(e));
+            }
+            String name = sourceName(source, real);
+            String text;
+            try { text = readSource(real, name); }
+            catch (IOException e) { throw fileError(name, "Cannot open source file \"" + name + "\": " + reason(e)); }
+            catch (IllegalArgumentException e) {
+                if (!(e instanceof LimitError) && !Diagnostics.userError(e)) throw e;
+                throw fileError(name, e.getMessage());
+            }
+            run(() -> parse(preprocessMain(text, name, real.getParent(), real)));
+        }
+        /** The diagnostic name of a main source file: the name it was given, else that of its real path. */
+        private static String sourceName(Path source, Path real) {
             Path typedName = source.getFileName();
-            Path realName = real.getFileName();
+            Path realName = real == null ? null : real.getFileName();
             String name = typedName != null && !typedName.toString().isEmpty() ? typedName.toString()
                     : realName != null ? realName.toString() : source.toString();
             if (AstShape.sourceNameProblem(name) != null)
                 throw new IllegalArgumentException("Invalid source file name: " + AstShape.sourceNameProblem(name));
-            String text;
-            try { text = Files.readString(real, StandardCharsets.UTF_8); }
-            catch (CharacterCodingException e) {
-                throw diagnostics.record(new CompileException(Diagnostic.error(Diagnostic.Position.file(name), "Source file \"" + name + "\" is not valid UTF-8")));
-            }
-            run(() -> parse(preprocessMain(text, name, real.getParent(), real)));
+            return name;
+        }
+        private CompileException fileError(String name, String message) {
+            return diagnostics.record(new CompileException(Diagnostic.error(Diagnostic.Position.file(name), message)));
         }
         private void begin(Diagnostics collector) {
             collector.startParse(); diagnostics = collector;
@@ -154,6 +181,7 @@ public class GeneraterJson {
             namespaceHint = ""; namespaceDeclared = false; assumeHints.clear();
             sourceMap = SourceMap.single("<source>"); labelRoot = null;
             namespaceDirective = null; assumeDirectives.clear(); globalDirectives.clear();
+            sourceTexts.clear(); sourceFailures.clear(); onceFiles.clear(); includeExpansions = 0; sourceBytes = 0;
         }
         private void parse(String source) {
             diagnostics.sources(sourceMap);
@@ -173,7 +201,8 @@ public class GeneraterJson {
             Map<Path,String> active = new LinkedHashMap<>();
             if (real != null) active.put(real, name);
             StringBuilder out = new StringBuilder();
-            preprocess(src, base, unit, active, 0, out);
+            try { preprocess(src, real, base, unit, active, 0, out); }
+            finally { sourceTexts.clear(); sourceFailures.clear(); }
             return out.toString();
         }
         private CompileException located(int unit, int line, int column, String message) {
@@ -188,15 +217,17 @@ public class GeneraterJson {
          * Appends exactly one output line per input line to {@code out}, recording each in the
          * source map; an included file's lines precede the #include line itself. A failing
          * directive or line is reported and skipped; a failing #ifdef, #ifndef or #if_equals
-         * opens an inactive branch, so its #else and #endif still match.
+         * opens an inactive branch, so its #else and #endif still match. {@code file} is the
+         * real path of the text, or null for a string source.
          */
-        private void preprocess(String src, Path base, int unit, Map<Path,String> includes, int depth, StringBuilder out) throws IOException {
+        private void preprocess(String src, Path file, Path base, int unit, Map<Path,String> includes, int depth,
+                                StringBuilder out) throws IOException {
             // A UTF-8 byte order mark must not hide a directive on the first line.
             if (src.startsWith("﻿")) src = src.substring(1);
             Deque<Conditional> stack = new ArrayDeque<>();
             boolean blockComment = false;
             int lineNo = 0, commentLine = 0, commentColumn = 0;
-            for (String line : src.split("\\R", -1)) {
+            for (String line : lines(src)) {
                 lineNo++;
                 // Comments remain lexical even inside an excluded conditional branch.
                 Stripped cleaned = stripComments(line, blockComment);
@@ -240,6 +271,15 @@ public class GeneraterJson {
                                 if (!active) break;
                                 switch (command) {
                                     case "include" -> include(arg, base, unit, lineNo, hash, includes, depth, out);
+                                    case "pragma" -> {
+                                        String[] args = arg.split("\\s+", 2);
+                                        if (args[0].isEmpty()) throw new IllegalArgumentException("Missing pragma name; only #pragma once is supported");
+                                        if (!args[0].equals("once"))
+                                            throw new IllegalArgumentException("Unknown pragma: " + AstShape.printable(args[0]) + "; only #pragma once is supported");
+                                        if (args.length > 1) throw new IllegalArgumentException("Unexpected text after #pragma once");
+                                        // A string source cannot be included, so only files are recorded.
+                                        if (file != null) onceFiles.add(file);
+                                    }
                                     case "author" -> author = arg;
                                     case "gvar" -> {
                                         identifier(arg);
@@ -281,7 +321,7 @@ public class GeneraterJson {
                                             case "setmeta" -> exts.put(args[0], value);
                                             case "setattr" -> tmpoVars.put(args[0], value);
                                             case "define" -> {
-                                                identifier(args[0]);
+                                                functionLikeMacro(args[0]); identifier(args[0]);
                                                 macros.put(args[0], new Macro(value, sourceMap.addMacro(args[0], unit, lineNo, hash)));
                                             }
                                         }
@@ -302,21 +342,24 @@ public class GeneraterJson {
                         CompileException error = located(unit, lineNo, hash, e.getMessage());
                         diagnostics.report(e instanceof LimitError ? error.stopping() : error);
                     }
-                    out.append('\n'); sourceMap.line(unit, lineNo, null);
+                    emit(out, "", unit, lineNo, null);
                 } else {
-                    int[] runs = null;
+                    String text = ""; int[] runs = null;
                     if (active) {
                         SourceMap.Columns columns = new SourceMap.Columns();
-                        try { out.append(expand(content, false, new HashSet<>(), 0, columns).text()); runs = columns.build(); }
+                        try { text = expand(content, false, new HashSet<>(), 0, columns).text(); runs = columns.build(); }
                         catch (CompileException e) { diagnostics.report(e); }
                         catch (IllegalArgumentException e) {
                             if (!(e instanceof LimitError) && !Diagnostics.userError(e)) throw e;
+                            // Reaching the length limit before any macro expanded means the line itself is too long.
+                            String message = e instanceof LimitError && !columns.expanded()
+                                    ? "Source line exceeds " + MAX_MACRO_EXPANSION_CHARS + " characters" : e.getMessage();
                             // The failed line stays empty, keeping one output line per input line.
-                            CompileException error = located(unit, lineNo, columns.errorColumn(), e.getMessage());
+                            CompileException error = located(unit, lineNo, columns.errorColumn(), message);
                             diagnostics.report(e instanceof LimitError ? error.stopping() : error);
                         }
                     }
-                    out.append('\n'); sourceMap.line(unit, lineNo, runs);
+                    emit(out, text, unit, lineNo, runs);
                 }
             }
             if (blockComment) diagnostics.report(located(unit, commentLine, commentColumn, "Unterminated block comment"));
@@ -328,7 +371,6 @@ public class GeneraterJson {
             if (path.startsWith("\"") && path.endsWith("\"") && path.length() >= 2)
                 path = path.substring(1, path.length() - 1);
             if (path.isBlank()) throw new IllegalArgumentException("Missing include path");
-            if (depth >= 64) throw new LimitError("Include nesting exceeds 64 levels");
             Path included;
             try { included = base.resolve(path).toRealPath(); }
             catch (InvalidPathException e) { throw new IllegalArgumentException("Invalid include path: \"" + path + "\""); }
@@ -336,6 +378,8 @@ public class GeneraterJson {
             String label = SourceMap.relativeName(labelRoot, included);
             if (AstShape.sourceNameProblem(label) != null)
                 throw new IllegalArgumentException("Invalid include file name: " + AstShape.sourceNameProblem(label));
+            // Before the cycle check: a #pragma once file may include itself back, as in C.
+            if (onceFiles.contains(included)) return;
             if (includes.containsKey(included)) {
                 List<String> cycle = new ArrayList<>(); boolean inCycle = false;
                 for (var entry : includes.entrySet()) {
@@ -345,14 +389,109 @@ public class GeneraterJson {
                 cycle.add(label);
                 throw new IllegalArgumentException("Include cycle: " + String.join(" -> ", cycle));
             }
+            if (depth >= TreeLimits.MAX_INCLUDE_DEPTH) throw new LimitError("Include nesting exceeds " + TreeLimits.MAX_INCLUDE_DEPTH + " levels");
+            if (++includeExpansions > TreeLimits.MAX_INCLUDES)
+                throw new LimitError("Include count exceeds " + TreeLimits.MAX_INCLUDES + "; add #pragma once to headers that are included repeatedly");
             String text;
-            try { text = Files.readString(included, StandardCharsets.UTF_8); }
-            catch (CharacterCodingException e) { throw new IllegalArgumentException("Source file \"" + label + "\" is not valid UTF-8"); }
+            try { text = readSource(included, label); }
             catch (IOException e) { throw new IllegalArgumentException("Cannot open include file \"" + path + "\": " + reason(e)); }
             int child = sourceMap.addUnit(label, unit, line, column);
             includes.put(included, label);
-            try { preprocess(text, included.getParent(), child, includes, depth + 1, out); }
+            try { preprocess(text, included, included.getParent(), child, includes, depth + 1, out); }
             finally { includes.remove(included); }
+        }
+        /**
+         * The text of a source file, read at most once per compilation: a regular file of at
+         * most {@link TreeLimits#MAX_SOURCE_BYTES} bytes of valid UTF-8. The size is also
+         * enforced while reading, so a file that grows after the check cannot exceed it.
+         */
+        private String readSource(Path real, String label) throws IOException {
+            String cached = sourceTexts.get(real);
+            if (cached != null) return cached;
+            String failed = sourceFailures.get(real);
+            if (failed != null) throw new IllegalArgumentException(failed);
+            // Devices, FIFOs and directories are never opened: reading them could block or never end.
+            BasicFileAttributes attributes = Files.readAttributes(real, BasicFileAttributes.class);
+            if (!attributes.isRegularFile()) throw new IllegalArgumentException("Source file \"" + label + "\" is not a regular file");
+            String tooLarge = "Source file \"" + label + "\" exceeds " + TreeLimits.MAX_SOURCE_BYTES + " bytes";
+            if (attributes.size() > TreeLimits.MAX_SOURCE_BYTES) throw new IllegalArgumentException(tooLarge);
+            byte[] bytes;
+            try (InputStream in = Files.newInputStream(real)) { bytes = in.readNBytes(TreeLimits.MAX_SOURCE_BYTES + 1); }
+            if (bytes.length > TreeLimits.MAX_SOURCE_BYTES) throw new IllegalArgumentException(tooLarge);
+            if (bytes.length > TreeLimits.MAX_TOTAL_SOURCE_BYTES - sourceBytes)
+                throw new LimitError("Source files read by one compilation exceed " + TreeLimits.MAX_TOTAL_SOURCE_BYTES + " bytes");
+            sourceBytes += bytes.length;
+            String text;
+            // A file that failed to decode is not read again by a later include.
+            try { text = decode(bytes, label); }
+            catch (IllegalArgumentException e) { sourceFailures.put(real, e.getMessage()); throw e; }
+            sourceTexts.put(real, text);
+            return text;
+        }
+        /** Strict UTF-8; an invalid sequence is reported at its line and column, counted like the preprocessor's lines. */
+        private static String decode(byte[] bytes, String label) {
+            CharsetDecoder decoder = StandardCharsets.UTF_8.newDecoder()
+                    .onMalformedInput(CodingErrorAction.REPORT).onUnmappableCharacter(CodingErrorAction.REPORT);
+            ByteBuffer in = ByteBuffer.wrap(bytes);
+            // UTF-8 never decodes to more UTF-16 characters than it has bytes.
+            CharBuffer out = CharBuffer.allocate(bytes.length);
+            CoderResult result = decoder.decode(in, out, true);
+            if (result.isUnderflow()) result = decoder.flush(out);
+            out.flip();
+            if (result.isUnderflow()) return out.toString();
+            if (!result.isError()) throw new IllegalStateException("UTF-8 decoding overflowed its buffer");
+            // The decoded text ends right before the invalid sequence.
+            int line = 1, lineStart = 0;
+            for (int i = 0; i < out.limit(); ) {
+                int length = lineBreak(out, i);
+                if (length == 0) { i++; continue; }
+                i += length; line++; lineStart = i;
+            }
+            int column = out.limit() - lineStart + 1;
+            if (lineStart == 0 && out.limit() > 0 && out.charAt(0) == '\ufeff') column--;
+            throw new IllegalArgumentException("Source file \"" + label + "\" is not valid UTF-8 (line " + line + ", column " + column + ")");
+        }
+        /** The length of the line break at {@code i}, matched like the regular expression {@code \R}, or 0. */
+        private static int lineBreak(CharSequence text, int i) {
+            char c = text.charAt(i);
+            if (c == '\r') return i + 1 < text.length() && text.charAt(i + 1) == '\n' ? 2 : 1;
+            return c == '\n' || c == '\u000b' || c == '\f' || c == '\u0085' || c == '\u2028' || c == '\u2029' ? 1 : 0;
+        }
+        /** The lines of a text, as {@code text.split("\\R", -1)} without holding them all at once. */
+        private static Iterable<String> lines(String text) {
+            return () -> new Iterator<>() {
+                private int start;
+                @Override public boolean hasNext() { return start >= 0; }
+                @Override public String next() {
+                    if (start < 0) throw new NoSuchElementException();
+                    int end = start;
+                    while (end < text.length() && lineBreak(text, end) == 0) end++;
+                    String line = text.substring(start, end);
+                    start = end == text.length() ? -1 : end + lineBreak(text, end);
+                    return line;
+                }
+            };
+        }
+        /**
+         * Appends one output line, ending the compilation when the text would exceed the
+         * preprocessed limit; the newline ending the last line is not counted, so a source
+         * file of {@link TreeLimits#MAX_SOURCE_BYTES} without includes or macros always fits.
+         */
+        private void emit(StringBuilder out, String text, int unit, int line, int[] runs) {
+            if (text.length() > TreeLimits.MAX_PREPROCESSED_CHARS - out.length())
+                diagnostics.report(located(unit, line, 1, "Preprocessed source exceeds " + TreeLimits.MAX_PREPROCESSED_CHARS
+                        + " characters after includes and macro expansion").stopping());
+            out.append(text).append('\n'); sourceMap.line(unit, line, runs);
+        }
+        /** Rejects {@code NAME(} in #define, which would be a function-like macro in C. */
+        private static void functionLikeMacro(String definition) {
+            int parenthesis = definition.indexOf('(');
+            if (parenthesis <= 0) return;
+            String name = definition.substring(0, parenthesis);
+            if (!Character.isJavaIdentifierStart(name.charAt(0))) return;
+            for (int i = 1; i < name.length(); i++) if (!Character.isJavaIdentifierPart(name.charAt(i))) return;
+            throw new IllegalArgumentException("Function-like macros are not supported: " + AstShape.printable(name)
+                    + "; write a function, or put a space before '(' for an object-like macro");
         }
         private static String reason(IOException error) {
             if (error instanceof NoSuchFileException) return "file not found";
@@ -411,6 +550,9 @@ public class GeneraterJson {
                         if (c == '\\' && i < line.length()) out.append(line.charAt(i++));
                         else if (c == quote) break;
                     }
+                    // Reported at the literal's start, not after it.
+                    if (out.length() > MAX_MACRO_EXPANSION_CHARS)
+                        throw new LimitError("Macro expansion exceeds " + MAX_MACRO_EXPANSION_CHARS + " characters on one line");
                 } else if (Character.isDigit(c) || (c == '.' && i + 1 < line.length() && Character.isDigit(line.charAt(i + 1)))) {
                     int start = i;
                     while (i < line.length() && Character.isDigit(line.charAt(i))) i++;
@@ -592,6 +734,11 @@ public class GeneraterJson {
             SourceMap.Origin origin = map.resolve(l, c);
             diagnostics.report(new CompileException(map.error(origin.unit(), origin.line(), origin.column(), origin.macro(), null, message)));
         }
+        /** Ends the compilation with an error at preprocessed line l and column c. */
+        private void stop(String message, int l, int c) {
+            SourceMap.Origin origin = map.resolve(l, c);
+            diagnostics.report(new CompileException(map.error(origin.unit(), origin.line(), origin.column(), origin.macro(), null, message)).stopping());
+        }
         List<Token> scan() {
             List<Token> tokens = new ArrayList<>();
             while (offset < source.length()) {
@@ -605,6 +752,8 @@ public class GeneraterJson {
                     if (offset == source.length()) { fail("Unterminated block comment", l, col); continue; }
                     take(); take(); continue;
                 }
+                // Bounds the token list, which is far larger than the text it was read from.
+                if (tokens.size() >= TreeLimits.MAX_TOKENS) stop("Program exceeds " + TreeLimits.MAX_TOKENS + " tokens", l, col);
                 if (c == '\'' || c == '"') {
                     Token string = string(l, col, start);
                     if (string != null) tokens.add(string);
@@ -994,7 +1143,7 @@ public class GeneraterJson {
         private String duplicate(String message, Token first, Token second) {
             boolean sameText = first.unit() != second.unit() && map.name(first.unit()).equals(map.name(second.unit()))
                     && first.line() == second.line() && first.column() == second.column();
-            return sameText ? message + " (the header was included twice; add an include guard)" : message;
+            return sameText ? message + " (the header was included twice; add #pragma once or an include guard)" : message;
         }
         /** A position recorded in an AST node (for example by TreeLimits), as a token. */
         private Token located(JsonObject node, Token fallback) {

@@ -103,6 +103,8 @@ public final class SourceMap {
         }
         /** 1-based source column of the piece being expanded, for expansion errors. */
         int errorColumn() { return current + 1; }
+        /** Whether a macro expanded on this line so far. */
+        boolean expanded() { return expanded; }
         private void add(int out, int source, int macro) {
             if (size + 3 > runs.length) runs = Arrays.copyOf(runs, runs.length * 2);
             runs[size++] = out; runs[size++] = source; runs[size++] = macro;
@@ -197,6 +199,8 @@ public final class SourceMap {
             throw new IllegalArgumentException("sources must be a non-empty array");
         SourceMap map = new SourceMap();
         JsonArray entries = sources.getAsJsonArray();
+        if (entries.size() > TreeLimits.MAX_INCLUDES + 1)
+            throw new IllegalArgumentException("sources has more than " + (TreeLimits.MAX_INCLUDES + 1) + " entries");
         for (int i = 0; i < entries.size(); i++) {
             JsonElement entry = entries.get(i);
             if (!entry.isJsonObject()) throw new IllegalArgumentException("sources[" + i + "] must be an object");

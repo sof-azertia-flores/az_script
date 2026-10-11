@@ -292,6 +292,7 @@ print(total); // 9
 
 ```text
 #include "relative/path.azs"
+#pragma once
 extern int host_add(int, int):0xccf0001;
 #namespace 123
 #gvar variable_name
@@ -312,7 +313,16 @@ extern int host_add(int, int):0xccf0001;
 #undef LIMIT
 ```
 
-`#setattr` 用于条件，不替换代码；`#define` 是标识符级文本替换，不替换字符串、注释、数值字面量内部或其他标识符的子串；紧贴数字的标识符字符（如 `5N`、`0x10`、`2e`）属于该数值字面量，不会展开，而由词法分析报告非法后缀。不支持带参数的宏。include 循环、宏循环、超出 64 层展开、单行宏展开超过 1,048,576 个字符、不匹配条件等会报错。未识别的预处理指令会立即报错，包括未启用的条件分支；普通说明文字应使用 `//` 或 `/* ... */`。宏展开采用文本语义，复杂表达式请写 `#define VALUE (1 + 2)`。
+`#setattr` 用于条件，不替换代码；`#define` 是标识符级文本替换，不替换字符串、注释、数值字面量内部或其他标识符的子串；紧贴数字的标识符字符（如 `5N`、`0x10`、`2e`）属于该数值字面量，不会展开，而由词法分析报告非法后缀。不支持带参数的宏：`#define F(x) ...` 报告 `Function-like macros are not supported: F; write a function, or put a space before '(' for an object-like macro`，`(` 前有空格的 `#define F (x)` 则是值为 `(x)` 的普通宏。include 循环、宏循环、超出 64 层展开、单行（含注释）在宏展开前或展开后超过 1,048,576 个字符（`Source line exceeds 1048576 characters` / `Macro expansion exceeds 1048576 characters on one line`）、不匹配条件等会报错。未识别的预处理指令会立即报错，包括未启用的条件分支；普通说明文字应使用 `//` 或 `/* ... */`。宏展开采用文本语义，复杂表达式请写 `#define VALUE (1 + 2)`。
+
+`#pragma once` 使所在文件在一次编译中只展开一次：之后再 include 同一文件时不产生任何内容，也不计入 include 次数。同一文件按解析符号链接后的真实路径判断，与 include 的写法无关。该检查先于 include 循环检查，所以带 `#pragma once` 的文件经其他文件再 include 自身时直接跳过；文件在执行到 `#pragma once` 之前 include 自身仍是循环。未启用条件分支中的 `#pragma once` 不生效。只支持 `once`，在启用的分支中其他名称或其后多余的文字会报错；与 C 相同，未启用的分支不检查 pragma；字符串源码不能被 include，其中的 `#pragma once` 没有效果。`#ifndef` include guard 照常可用。
+
+源文件（主文件和被包含文件）必须是普通文件：目录、FIFO 和设备文件不会被打开。源文件须为合法 UTF-8，非法字节报告其所在的行列。同一文件在一次编译中只读取一次，再次 include 时复用已读取的文本。预处理有以下上限：
+
+- 单个源文件最多 16 MiB（16,777,216 字节），一次编译读取的不同源文件合计最多 64 MiB；
+- include 最多嵌套 64 层，一次编译最多展开 4096 次 include，被 `#pragma once` 跳过的不计；重复 include 的头文件应使用 `#pragma once`，因为 include guard 既不减少展开次数，也不能避免每次 include 时重新扫描头文件；
+- 预处理后的文本（含全部 include 和宏展开）最多 16,777,216 个字符，不计最后一行的换行符，所以不含 include 和宏的最大源文件不会超出此上限；
+- 整个程序最多 4,194,304 个词法记号。
 
 源文件开头的 UTF-8 BOM 会被忽略，不影响首行指令。`return`、`if`、`else`、`while`、`for`、`break`、`continue`、`def`、`var`、`class`、`new`、`this`、`null`、`delete`、`extern`、`public/private/protected/virtual`、所有类型名以及 `true/false` 是保留字，不能声明为函数、参数、变量、`#gvar`、`#define` 或 `extern` 的名字。
 
@@ -330,16 +340,16 @@ Error: compilation failed: 1 error
 
 - 被包含文件中的错误之后，每层外围 `#include` 各有一行 `note: in file included from here`，由内向外排列。
 - 宏展开产生的记号上的词法或语法错误报告在宏的使用位置，随后一行 `note: in expansion of macro 'NAME' defined here` 指向其 `#define`；`#define` 位于另一文件时，还附上该文件的 include 链。展开代码中的语义错误报告在宏的使用位置，不附此注释。展开之后的记号保持各自的列号。
-- 预处理错误指向指令的 `#`；未闭合的条件报告在其起始指令，未结束的注释报告在注释开始处。找不到 include 文件时提示 `Cannot open include file "x.azs": file not found`；include 循环会列出相关文件。源文件和被包含文件的名称不能含有控制字符或双向格式字符，因为诊断会输出这些名称（`Invalid source file name` / `Invalid include file name`）。
+- 预处理错误指向指令的 `#`；未闭合的条件报告在其起始指令，未结束的注释报告在注释开始处。找不到主文件时提示 `Cannot open source file "x.azs": file not found`，找不到 include 文件时提示 `Cannot open include file "x.azs": file not found`，非普通文件提示 `Source file "x.azs" is not a regular file`，非法 UTF-8 提示 `Source file "x.azs" is not valid UTF-8 (line 3, column 7)`；include 循环会列出相关文件。源文件和被包含文件的名称不能含有控制字符或双向格式字符，因为诊断会输出这些名称（`Invalid source file name` / `Invalid include file name`）。
 - 上下文指出外围声明：`function main`、`function C::m`、构造与析构函数的 `function C::C` 和 `function C::~C`、`function C::operator[]`、`initializer of class P`、`class P` 或 `global g`。没有源码位置的错误（例如手写 AST 的格式错误）只给出输入文件名：`compile` 为源文件，`compile-json` 为 JSON 文件。
-- 从源码编译时，重复的函数、类、函数 ID 以及冲突的 extern 声明附带 `previous definition is here` 或 `previous declaration is here` 注释；同一头文件被读取两次造成的重复定义还会提示添加 include guard。函数 ID 按 8 位十六进制显示，例如 `0x0fff0005`。
+- 从源码编译时，重复的函数、类、函数 ID 以及冲突的 extern 声明附带 `previous definition is here` 或 `previous declaration is here` 注释；同一头文件被读取两次造成的重复定义还会提示添加 `#pragma once` 或 include guard。函数 ID 按 8 位十六进制显示，例如 `0x0fff0005`。
 - 非 void 函数可能不经 `return` 走到末尾时，错误报告在其结束的右花括号处。
 
 文件名对主文件使用其文件名，对被包含文件使用相对主文件目录、以 `/` 分隔的路径；`execute(String)` 使用 `<source>`，单独编译的表达式使用 `<expression>`。这些名称保存在 AST 的 `sources` 表中，所以同一程序的 `compile` 与 `compile-json` 输出完全相同的带位置诊断。`compile-json` 将格式错误的 JSON 报告在其行列，没有 `sources` 表的 AST 以 JSON 文件名命名。
 
 #### 多个错误与退出码
 
-一次编译会一并报告彼此独立的错误。编译分阶段进行：预处理、词法分析、语法分析、语法分析后的类布局、extern 声明与函数 ID 检查、AST 结构检查、全局声明（类、extern、abstract 映射和全局变量）以及函数体。在一个阶段内，编译器出错后会恢复：预处理器从下一条指令或下一行继续，语法分析从下一个声明、类成员或语句继续，检查器从下一个类、全局项或函数继续。某一阶段报告了错误时编译随即结束，后续阶段不会处理有误的输入；例如存在语法错误时，程序其他位置的类型错误不会报告。每个阶段内的错误按源码顺序列出，被包含文件的错误位于其 `#include` 处。语法、AST、include 与宏的嵌套及长度上限，以及内部编译器错误，会立即停止编译。
+一次编译会一并报告彼此独立的错误。编译分阶段进行：预处理、词法分析、语法分析、语法分析后的类布局、extern 声明与函数 ID 检查、AST 结构检查、全局声明（类、extern、abstract 映射和全局变量）以及函数体。在一个阶段内，编译器出错后会恢复：预处理器从下一条指令或下一行继续，语法分析从下一个声明、类成员或语句继续，检查器从下一个类、全局项或函数继续。某一阶段报告了错误时编译随即结束，后续阶段不会处理有误的输入；例如存在语法错误时，程序其他位置的类型错误不会报告。每个阶段内的错误按源码顺序列出，被包含文件的错误位于其 `#include` 处。语法、AST、include 与宏的嵌套及长度上限，include 次数、源文件读取总量、预处理文本长度和记号数量上限，以及内部编译器错误，会立即停止编译。
 
 默认最多报告 20 个错误；`--max-errors N` 修改上限，`0` 表示不限，`1` 表示在第一个错误处停止。若之后还有错误，列表以 `note: too many errors emitted (limit 20); stopping` 结尾。CLI 随后输出汇总行，例如 `Error: compilation failed: 2 errors`，不写出任何输出文件。退出码：成功为 0，程序或命令行有错误为 1，内部编译器错误为 2；未知选项等用法错误输出 `Error: 消息`。
 
@@ -474,7 +484,7 @@ int functionId(int ns, int position) {
 
 可读 AST 保持 `metadata/ext/abstract/global-variable/body` 结构，并为带签名的宿主函数增加 `extern-signatures`。类程序额外保存类定义、字段顺序和成员表达式等编译信息；`compile-json` 会重新执行类型检查与降级。AST 还保存模块 hint、assume、外部声明、定义名称与实际定义编号；调用绑定与定义位置分开，支持完全相同的 ABD 往返。`abstract` 是 extern 优先的源码名称绑定：有 extern 时保存声明 ID，否则保存定义 ID；hint 库的本地定义仍使用 0000 占位，实际调用的 self-assume 地址在降级时生成。函数定义的独立位置由 `body` 的 namespace 和 `metadata.position/name` 保存；每个签名另保存 `return-type` 与 `param-types`。表达式对象有 `t: "ctrl" | "call"`、`call`、`param`，块是数组。
 
-根节点的 `sources` 表对文件的每次包含各有一项，例如 `{"name": "inc/lib.azs", "included-from": {"source": 0, "line": 2, "column": 1}}`；第 0 项是主文件，include 总是指向更早的项。表达式对象、函数元数据、类、字段和 extern 签名带有原始文件中的 `_line/_column`，以及所在 `sources` 项的下标 `_file`（为 0 时省略）。函数元数据还以 `_end_line/_end_column` 记录结束的右花括号，加括号的赋值带有 `_parenthesized: true`。字面值和块不带位置，诊断使用最近的带位置祖先。这些字段仅用于诊断，不写入 ABD 指令。compile-json 输入中的 `sources` 可以省略，此时所有位置都属于以输入文件命名的同一文件。位置均为正整数，`_file` 必须是表中的有效下标；`sources` 的每项命名一个非空、且不含控制字符或双向格式字符的文件，include 链最多 64 层。compile-json 在编译前检查这些结构，见[多个错误与退出码](#多个错误与退出码)。
+根节点的 `sources` 表对文件的每次实际展开的包含各有一项，例如 `{"name": "inc/lib.azs", "included-from": {"source": 0, "line": 2, "column": 1}}`；第 0 项是主文件，include 总是指向更早的项，被 `#pragma once` 跳过的 include 没有对应项。表达式对象、函数元数据、类、字段和 extern 签名带有原始文件中的 `_line/_column`，以及所在 `sources` 项的下标 `_file`（为 0 时省略）。函数元数据还以 `_end_line/_end_column` 记录结束的右花括号，加括号的赋值带有 `_parenthesized: true`。字面值和块不带位置，诊断使用最近的带位置祖先。这些字段仅用于诊断，不写入 ABD 指令。compile-json 输入中的 `sources` 可以省略，此时所有位置都属于以输入文件命名的同一文件。位置均为正整数，`_file` 必须是表中的有效下标；该表最多 4097 项，即主文件加 4096 次 include 展开；`sources` 的每项命名一个非空、不超过 4096 个字符且不含控制字符或双向格式字符的文件，include 链最多 64 层。compile-json 在编译前检查这些结构，见[多个错误与退出码](#多个错误与退出码)。
 
 可读类 AST 保存 `operators` 映射及方法的 `operator-kind`，下标读写和后缀调用使用 `index`、`index-set`、`invoke` 节点，空 buffer 使用 `buffer-new`。compile-json 重新检查类型和降级，保持 ABD 字节一致。
 

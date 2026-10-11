@@ -16,6 +16,23 @@ public final class TreeLimits {
     public static final int MAX_ABD_NESTING = 128;
     /** ABD levels above a function body: the root stack, function-list stack and function record. */
     public static final int ABD_LEVELS_ABOVE_FUNCTION_BODY = 3;
+    /** Largest source file, main or included, in bytes. */
+    public static final int MAX_SOURCE_BYTES = 16 * 1024 * 1024;
+    /**
+     * Total bytes of the distinct source files one compilation reads. Each file is read
+     * once and kept for repeated includes, so this bounds what the preprocessor holds.
+     */
+    public static final int MAX_TOTAL_SOURCE_BYTES = 64 * 1024 * 1024;
+    /** Largest preprocessed program, in UTF-16 characters, after includes and macro expansion. */
+    public static final int MAX_PREPROCESSED_CHARS = 16 * 1024 * 1024;
+    /** Include expansions per compilation; an include skipped by {@code #pragma once} does not count. */
+    public static final int MAX_INCLUDES = 4096;
+    /** Nesting of included files below the main source. */
+    public static final int MAX_INCLUDE_DEPTH = 64;
+    /** Lexical tokens of one program. */
+    public static final int MAX_TOKENS = 4 * 1024 * 1024;
+    /** Longest source file name stored in the AST {@code sources} table and printed in diagnostics. */
+    public static final int MAX_SOURCE_LABEL_CHARS = 4096;
     private TreeLimits() {}
 
     /**

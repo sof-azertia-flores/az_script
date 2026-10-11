@@ -154,9 +154,10 @@ class DiagnosticsTest {
         Path self = write("self.azs", "#include self.azs\n");
         assertEquals("self.azs:1:1: error: Include cycle: self.azs -> self.azs", failure(self).getMessage());
         Path binary = temporary.resolve("binary.azs"); Files.write(binary, new byte[]{'i', 'n', 't', (byte) 0xff});
-        assertEquals("binary.azs: error: Source file \"binary.azs\" is not valid UTF-8", failure(binary).getMessage());
+        assertEquals("binary.azs: error: Source file \"binary.azs\" is not valid UTF-8 (line 1, column 4)", failure(binary).getMessage());
         Path includesBinary = write("includes-binary.azs", "#include \"binary.azs\"\n");
-        assertEquals("includes-binary.azs:1:1: error: Source file \"binary.azs\" is not valid UTF-8", failure(includesBinary).getMessage());
+        assertEquals("includes-binary.azs:1:1: error: Source file \"binary.azs\" is not valid UTF-8 (line 1, column 4)",
+                failure(includesBinary).getMessage());
     }
 
     @Test void formerlyUnlocatedErrorsAreLocated() throws Exception {
@@ -195,9 +196,10 @@ class DiagnosticsTest {
                 () -> Compiler.compileExpression(expression, new Compiler.LogicEnvironment())).getMessage());
         assertEquals("<expression>:1:5: error: Expected expression, found '*'",
                 assertThrows(CompileException.class, () -> GeneraterJson.getExpression("1 + *", 0, script)).getMessage());
-        // A path without a file name is an I/O error, not a crash.
+        // A path without a file name is a located error, not a crash.
         if (FileSystems.getDefault().getSeparator().equals("/"))
-            assertThrows(IOException.class, () -> new GeneraterJson.AzScript().execute(Path.of("/")));
+            assertEquals("/: error: Source file \"/\" is not a regular file",
+                    assertThrows(CompileException.class, () -> new GeneraterJson.AzScript().execute(Path.of("/"))).getMessage());
     }
 
     @Test void errorsWithoutAPositionNameTheCompiledInput() throws Exception {
@@ -307,7 +309,7 @@ class DiagnosticsTest {
         // The same header included twice is called out.
         Path header = write("once.azs", "int once() { return 1; }\n");
         Path twice = write("twice.azs", "#include \"once.azs\"\n#include \"once.azs\"\nint main() { return once(); }\n");
-        assertEquals("once.azs:1:9: error: Duplicate function definition: once (the header was included twice; add an include guard)\n"
+        assertEquals("once.azs:1:9: error: Duplicate function definition: once (the header was included twice; add #pragma once or an include guard)\n"
                 + "twice.azs:2:1: note: in file included from here\n"
                 + "once.azs:1:9: note: previous definition is here\n"
                 + "twice.azs:1:1: note: in file included from here", failure(twice).getMessage());
