@@ -241,7 +241,9 @@ void main() {
 
 写作 `class Child : Base` 或 `class Child : public Base`。父类可以在源码后面声明，继承环、未知父类和多个父类会报编译错误。继承环、没有字段的类和以字面量对象包含自身等布局错误由编译器在类声明处报告（如 `main.azs:1:7: error: in class A: Inheritance cycle involving A`），源码编译与 `compile-json` 的报告相同。布局递归保留父类全部 slots 作为前缀，再按声明顺序追加子类自己的字段；继承至少一个字段的子类可以不声明新字段，不增加对象头或隐藏 slots。父类方法接收同一个对象起始地址，因此无需调整地址。
 
-子类可直接使用继承的字段和方法；同名成员由子类遮蔽。成员绑定取决于表达式的静态类类型：子类对象或指针调用子类同名方法，父类指针调用父类方法；父类方法正文中的名称继续按父类解析。当前没有虚函数或运行时方法选择，也没有用于显式选择被遮蔽成员的 `Base::method()` 表达式；可以先绑定父类指针再访问。
+子类可直接使用继承的字段和方法；同名成员由子类遮蔽。成员绑定取决于表达式的静态类类型：子类对象或指针调用子类同名方法，父类指针调用父类方法；父类方法正文中的名称继续按父类解析。当前没有虚函数或运行时方法选择。
+
+在类函数（方法、构造、析构或字段初始化）中，限定调用 `Base::method(args)` 对 `this` 调用 `Base` 中可见的同名方法；即使当前类用同名方法或字段遮蔽了它，也按静态绑定选择该方法，例如 `int describe() { return Point::describe() * 100 + tag; }`。`Base` 必须是当前类或其父类，书写时不带类型实参，类型实参来自继承链（如 `class IntBox : Box<int>` 中写 `Box::get()`）；泛型方法可显式给出类型实参，如 `Box::echo<string>("e")`。语句也可以以这种调用开头。编译器拒绝以下情况：在类函数之外使用（`A::f() calls are only available inside class functions`）、所写的类既不是当前类也不是其父类（`A is not B or one of its base classes`）、未知方法或字段（`Unknown method: A.h`、`A.x is a field, not a method`）、构造与析构函数、运算符方法、带接收对象的写法（如 `this.A::f()`）、类名带类型实参（`Name a base class without type arguments in A::method(...)`），以及不是类名的名称。
 
 子类指针可用于父类指针变量、参数和返回值，地址与所有权不变；相等比较也允许这种继承关系。父类指针不能隐式变成有额外字段的子类指针。子类的字面量对象不能赋给父类的字面量对象（不做切片）。没有继承关系的类不能互相转换，字段布局完全相同也不行；没有自身字段的子类同样是另一个类，父类指针不能隐式转为它。
 
@@ -500,7 +502,7 @@ int functionId(int ns, int position) {
 
 ## AST 与 ABD 契约
 
-可读 AST 保持 `metadata/ext/abstract/global-variable/body` 结构，并为带签名的宿主函数增加 `extern-signatures`。`global-variable` 先以字符串列出 `#gvar` 名称，再以带位置的 `{"name", "type", "initializer"?}` 对象列出每个带类型全局；`compile-json` 按与源码相同的规则检查并初始化它们。类程序额外保存类定义、字段顺序和成员表达式等编译信息；`compile-json` 会重新执行类型检查与降级。AST 还保存模块 hint、assume、外部声明、定义名称与实际定义编号；调用绑定与定义位置分开，支持完全相同的 ABD 往返。`abstract` 是 extern 优先的源码名称绑定：有 extern 时保存声明 ID，否则保存定义 ID；hint 库的本地定义仍使用 0000 占位，实际调用的 self-assume 地址在降级时生成。函数定义的独立位置由 `body` 的 namespace 和 `metadata.position/name` 保存；每个签名另保存 `return-type` 与 `param-types`。表达式对象有 `t: "ctrl" | "call"`、`call`、`param`，块是数组。
+可读 AST 保持 `metadata/ext/abstract/global-variable/body` 结构，并为带签名的宿主函数增加 `extern-signatures`。`global-variable` 先以字符串列出 `#gvar` 名称，再以带位置的 `{"name", "type", "initializer"?}` 对象列出每个带类型全局；`compile-json` 按与源码相同的规则检查并初始化它们。类程序额外保存类定义、字段顺序和成员表达式等编译信息；`compile-json` 会重新执行类型检查与降级。限定的父类调用写作 `{"t":"ctrl","call":"base-call","param":["Base","method",args...]}`，可附带 `type-args`。AST 还保存模块 hint、assume、外部声明、定义名称与实际定义编号；调用绑定与定义位置分开，支持完全相同的 ABD 往返。`abstract` 是 extern 优先的源码名称绑定：有 extern 时保存声明 ID，否则保存定义 ID；hint 库的本地定义仍使用 0000 占位，实际调用的 self-assume 地址在降级时生成。函数定义的独立位置由 `body` 的 namespace 和 `metadata.position/name` 保存；每个签名另保存 `return-type` 与 `param-types`。表达式对象有 `t: "ctrl" | "call"`、`call`、`param`，块是数组。
 
 根节点的 `sources` 表对文件的每次实际展开的包含各有一项，例如 `{"name": "inc/lib.azs", "included-from": {"source": 0, "line": 2, "column": 1}}`；第 0 项是主文件，include 总是指向更早的项，被 `#pragma once` 跳过的 include 没有对应项。表达式对象、函数元数据、类、字段和 extern 签名带有原始文件中的 `_line/_column`，以及所在 `sources` 项的下标 `_file`（为 0 时省略）。函数元数据还以 `_end_line/_end_column` 记录结束的右花括号，加括号的赋值带有 `_parenthesized: true`。字面值和块不带位置，诊断使用最近的带位置祖先。这些字段仅用于诊断，不写入 ABD 指令。compile-json 输入中的 `sources` 可以省略，此时所有位置都属于以输入文件命名的同一文件。位置均为正整数，`_file` 必须是表中的有效下标；该表最多 4097 项，即主文件加 4096 次 include 展开；`sources` 的每项命名一个非空、不超过 4096 个字符且不含控制字符或双向格式字符的文件，include 链最多 64 层。compile-json 在编译前检查这些结构，见[多个错误与退出码](#多个错误与退出码)。
 

@@ -346,6 +346,7 @@ public class Compiler {
             case "member" -> memberField(params, environment).type();
             case "member-set" -> params.size() == 2 ? expressionType(params.get(1), environment) : AsTypes.ANY_VALUE;
             case "member-call" -> isBufferReceiver(object,environment) ? bufferMethodType(object,environment) : expressionType(memberCall(object,environment),environment);
+            case "base-call" -> expressionType(baseCall(object,environment),environment);
             case "#context-abi" -> {requireTrusted(object,environment);yield AsTypes.INT_VALUE;}
             case "#context-default" -> {requireTrusted(object,environment);yield params.get(0).getAsInt();}
             case "#allocate" -> {
@@ -903,6 +904,7 @@ public class Compiler {
                 result.put("v2", compileExpression(params.get(1), environment));
             }
             case "member-call" -> { return isBufferReceiver(source,environment)?compileBufferCall(source,environment):compileInstruction(memberCall(source,environment),environment); }
+            case "base-call" -> { return compileInstruction(baseCall(source,environment),environment); }
             case "object-new" -> {
                 arity(call, params, 1, Integer.MAX_VALUE);
                 ClassInfo info = classInfo(string(params.get(0), "Class name"), environment);
@@ -1285,6 +1287,31 @@ public class Compiler {
         JsonArray arguments=new JsonArray();arguments.add(receiverAddress(params.get(0),environment));
         for(int i=2;i<params.size();i++)arguments.add(params.get(i));
         JsonObject result=ownedCall(method,arguments,info,environment);
+        if(source.has("type-args"))result.add("type-args",source.get("type-args"));return result;
+    }
+    /**
+     * {@code Base::m(args)}: the method {@code m} visible in {@code Base}, which is the
+     * current class or one of its bases, called on {@code this} with static binding. The
+     * class is named without type arguments; they come from the inheritance chain.
+     */
+    private static JsonObject baseCall(JsonObject source,LogicEnvironment environment) {
+        JsonArray params=parameters(source);arity("base-call",params,2,Integer.MAX_VALUE);
+        String className=string(params.get(0),"Class name"),name=string(params.get(1),"Member name");
+        if(environment.ownerClass==null)
+            throw new IllegalArgumentException(className+"::"+name+"() calls are only available inside class functions");
+        ClassInfo owner=receiverClass(variable("this"),environment),target=null;
+        for(ClassInfo cursor=owner;cursor!=null&&target==null;cursor=cursor.base){ensureLayout(cursor);if(cursor.declaration.name.equals(className))target=cursor;}
+        if(target==null)throw new IllegalArgumentException(className+" is not "+owner.declaration.name+" or one of its base classes");
+        String method=target.methods.get(name);
+        boolean constructor=false;
+        for(ClassInfo cursor=owner;cursor!=null&&!constructor;cursor=cursor.base)constructor=cursor.declaration.name.equals(name);
+        if(method==null&&constructor)
+            throw new IllegalArgumentException("Constructors cannot be called as "+className+"::"+name+"(...); use a base initializer");
+        if(method==null)throw new IllegalArgumentException(target.visibleFields.containsKey(name)
+                ?className+"."+name+" is a field, not a method":"Unknown method: "+className+"."+name);
+        JsonArray arguments=new JsonArray();arguments.add(variable("this"));
+        for(int i=2;i<params.size();i++)arguments.add(params.get(i));
+        JsonObject result=ownedCall(method,arguments,target,environment);
         if(source.has("type-args"))result.add("type-args",source.get("type-args"));return result;
     }
     private static final Set<String> OPERATOR_KINDS=Set.of("add","subtract","multiply","divide","index-get","index-set","call");

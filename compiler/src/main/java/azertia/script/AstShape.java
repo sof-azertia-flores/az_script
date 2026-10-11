@@ -220,7 +220,7 @@ final class AstShape {
     /** Operand positions that hold variable, member or class names. */
     private static final Map<String,Set<Integer>> NAME_OPERANDS = Map.of(
             "var", Set.of(0), "vardef", Set.of(0), "varset", Set.of(0), "object-def", Set.of(0, 1),
-            "member", Set.of(1), "member-call", Set.of(1));
+            "member", Set.of(1), "member-call", Set.of(1), "base-call", Set.of(0, 1));
     /**
      * Operands the compiler reads before it checks an operation's arity or types. A
      * receiver may be any expression, e.g. the literal in {@code "abc".x}, which the
@@ -233,6 +233,9 @@ final class AstShape {
             }
             case "member-call" -> {
                 if (params.size() < 2) error(path, call + " needs a receiver and a member name");
+            }
+            case "base-call" -> {
+                if (params.size() < 2) error(path, call + " needs a class name and a method name");
             }
             case "object-new", "object-value", "buffer-new" -> {
                 if (params.isEmpty()) error(path, call + " needs a type name");

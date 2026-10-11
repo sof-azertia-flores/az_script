@@ -1190,6 +1190,15 @@ public class GeneraterJson {
             expect(">"); return declarations;
         }
         private boolean knownType(String name) { return TYPES.contains(name) || classNames.contains(name) || typeParameters.contains(name); }
+        /**
+         * Whether a statement starts with a declaration type. A type name followed by
+         * "::" (or a class with type arguments followed by "::") starts a qualified
+         * base-method call expression such as {@code Base::m(args)} instead.
+         */
+        private boolean declarationAhead() {
+            return knownType(current().text()) && !at("void") && classOwnerEnd(index) < 0
+                    && !(index + 1 < tokens.size() && tokens.get(index + 1).text().equals("::"));
+        }
         private String sourceType(String value, boolean allowVoid) {
             if (classNames.contains(value) || typeParameters.contains(value)) return value;
             try { return normalizeType(value, allowVoid, "type"); }
@@ -1923,7 +1932,7 @@ public class GeneraterJson {
             if (match("for")) {
                 expect("("); JsonElement initializer = new JsonArray();
                 if (!match(";")) {
-                    if (at("def") || at("var") || (knownType(current().text()) && !at("void"))) initializer = statement();
+                    if (at("def") || at("var") || declarationAhead()) initializer = statement();
                     else { initializer = statementExpression(); expect(";"); }
                 }
                 JsonElement condition = at(";") ? new JsonPrimitive(true) : expression(); expect(";");
@@ -1964,7 +1973,7 @@ public class GeneraterJson {
                 return initializer == null ? operation("ctrl", "vardef", start, new JsonPrimitive(variable))
                         : operation("ctrl", "vardef", start, new JsonPrimitive(variable), initializer);
             }
-            if (at("var") || (knownType(current().text()) && !at("void"))) {
+            if (at("var") || declarationAhead()) {
                 String spelling = advance().text();
                 String declaredType = spelling.equals("var") ? null : pointerSuffix(typeApplication(sourceType(spelling, false)));
                 String variable = declaredName().text();
@@ -2093,6 +2102,8 @@ public class GeneraterJson {
                 Token at = current();
                 if (match(".")) {
                     Token member = name();
+                    if (at("::") && classNames.contains(member.text()))
+                        throw error("Write " + member.text() + "::method(...) without a receiver; a qualified call always calls on this", member);
                     JsonArray typeArguments = callTypeArgumentsAhead() ? readCallTypeArguments(false) : null;
                     if (match("(")) {
                         List<JsonElement> args = new ArrayList<>(); args.add(value); args.add(new JsonPrimitive(member.text()));
@@ -2134,6 +2145,29 @@ public class GeneraterJson {
             do { arguments.add(readType(allowVoid)); } while (match(","));
             expect(">"); return arguments;
         }
+        /**
+         * {@code Base::method(args)} calls the method visible in the named class (the current
+         * class or one of its bases) on {@code this} with static binding. The class is named
+         * without type arguments, which come from the inheritance chain.
+         */
+        private JsonElement baseCall(Token owner) {
+            String className = owner.text();
+            if (at("<")) throw error("Name a base class without type arguments in " + className + "::method(...); they come from the inheritance chain", owner);
+            expect("::");
+            if (at("~")) throw error("Destructors cannot be called directly; delete the object or let it expire");
+            if (at("operator")) throw error("Operator methods cannot be called as " + className + "::operator...(...); qualified calls name ordinary methods");
+            Token member = name();
+            JsonArray typeArguments = callTypeArgumentsAhead() ? readCallTypeArguments(false) : null;
+            if (!at("(")) throw error("Expected '(' after " + className + "::" + member.text() + "; only qualified method calls are supported");
+            expect("(");
+            List<JsonElement> arguments = new ArrayList<>();
+            arguments.add(new JsonPrimitive(className)); arguments.add(new JsonPrimitive(member.text()));
+            if (!at(")")) do { arguments.add(expression()); } while (match(","));
+            expect(")");
+            JsonObject call = operation("ctrl", "base-call", owner, arguments.toArray(JsonElement[]::new));
+            if (typeArguments != null) call.add("type-args", typeArguments);
+            return call;
+        }
         private JsonElement primary() {
             Token token = current();
             if (match("null")) return operation("ctrl", "null", token);
@@ -2159,6 +2193,8 @@ public class GeneraterJson {
                 String name = advance().text();
                 if (KEYWORDS.contains(name))
                     throw error("'" + name + "' is " + (name.equals("any") ? "a reserved word" : "a statement") + " and cannot be used in an expression", token);
+                if (classNames.contains(name) && classOwnerEnd(index - 1) >= 0) return baseCall(token);
+                if (at("::")) throw error(name + " is not a class; " + name + "::method(...) must name the current class or one of its base classes", token);
                 boolean reflection = name.equals("reflect_invoke_function");
                 JsonArray typeArguments = (reflection && at("<")) || callTypeArgumentsAhead()
                         ? readCallTypeArguments(reflection) : null;
@@ -2181,7 +2217,7 @@ public class GeneraterJson {
         JsonElement result;
         if (parser.at("{")) result = parser.block();
         else if (Set.of("return", "break", "continue", "def", "var", "if", "while", "for", "delete", "++", "--").contains(parser.current().text())
-                || parser.knownType(parser.current().text())) result = parser.statement();
+                || parser.declarationAhead()) result = parser.statement();
         else result = parser.expression();
         parser.match(";"); parser.expect("<eof>");
         try { TreeLimits.validate(result); }

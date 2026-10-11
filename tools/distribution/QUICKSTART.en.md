@@ -76,7 +76,7 @@ Fields require explicit types and each occupies one slot. Numbers default to zer
 
 Access members with object.field, object.method(), or this.field. Receiver/arguments evaluate left to right once. Lookup prefers locals/parameters, then members, then globals. Member assignment supports =, not +=. Classes are nominal: pointers assign and compare only within one class, a derived pointer converts to a base pointer, and another class with the same field layout is not interchangeable; pointers also compare to null; integer 0 is not null. Explicit class types are required: `var object = new Point(1); object.get();` fails; write `Point * object`.
 
-Inheritance uses `class Child : Base` or `class Child : public Base`. Base slots come first, derived slots follow; inherited methods use the same address. Derived pointers convert to base pointers in variables, parameters, and returns, with no literal slicing. Calls bind statically, names may be shadowed, and there is no virtual dispatch.
+Inheritance uses `class Child : Base` or `class Child : public Base`. Base slots come first, derived slots follow; inherited methods use the same address. Derived pointers convert to base pointers in variables, parameters, and returns, with no literal slicing. Calls bind statically, names may be shadowed, and there is no virtual dispatch; inside class functions, `Base::method(args)` calls the base method on `this` even when it is shadowed.
 
 ```cpp
 class TaggedPoint : Point {

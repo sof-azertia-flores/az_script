@@ -76,7 +76,7 @@ void main() {
 
 访问成员使用 `object.field`、`object.method()`、`this.field`。接收对象和实参从左到右各求值一次。类内先找局部变量和参数，再找成员，最后找全局变量。成员赋值支持 `=`，暂不支持成员 `+=`。类按名称区分：指针只能在同一个类之间赋值和相等比较，子类指针可以转为父类指针，字段布局相同的其他类不能互换；指针也能与 `null` 比较；整数 `0` 不能代替 `null`。对象须写显式类类型，`var object = new Point(1); object.get();` 不能编译，应写 `Point * object = new Point(1);`。
 
-类继承写作 `class Child : Base` 或 `class Child : public Base`。父类字段位于对象 slots 前部，子类字段追加在后；继承方法直接使用同一个对象地址。子类指针可赋给父类指针变量、参数或返回值（字面量对象不做切片），父类方法的调用按静态类型绑定；同名字段和方法可由子类遮蔽，没有虚函数派发。
+类继承写作 `class Child : Base` 或 `class Child : public Base`。父类字段位于对象 slots 前部，子类字段追加在后；继承方法直接使用同一个对象地址。子类指针可赋给父类指针变量、参数或返回值（字面量对象不做切片），父类方法的调用按静态类型绑定；同名字段和方法可由子类遮蔽，没有虚函数派发；在类函数中可用 `Base::method(args)` 对 `this` 调用被遮蔽的父类方法。
 
 ```cpp
 class TaggedPoint : Point {
