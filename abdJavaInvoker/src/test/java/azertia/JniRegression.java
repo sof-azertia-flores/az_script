@@ -165,7 +165,7 @@ public final class JniRegression {
         equal(true, Caller22220.globalMemories2Str().endsWith("Allocations: 0\n"));
         destructed.clear();
         try { AbdInvoker.invoke(215); throw new AssertionError("Expected original native body failure"); }
-        catch (IllegalStateException error) { equal("Division by zero", error.getMessage()); }
+        catch (IllegalStateException error) { equal("Division by zero\n  at function 0x000000d7", error.getMessage()); }
         equal(List.of(2, 1), destructed);
         equal(true, Caller22220.globalMemories2Str().endsWith("Allocations: 0\n"));
         AbdInvoker.destroyScript();
@@ -230,6 +230,51 @@ public final class JniRegression {
         AbdInvoker.destroyScript();
         equal(List.of(11), destructed);
         AbdInvoker.unregisterJfunction(0x34560004);
+    }
+    private static void runtimeTraces(File work) {
+        loadAndFlush(new File(work, "traces.exec.abd"));
+        String divisionTrace = "Division by zero\n"
+                + "  at 除法 (脚本 🐈.azs:10:12)\n"
+                + "  at middle (脚本 🐈.azs:6:10)\n"
+                + "  at 入口🐈 (脚本 🐈.azs:2:10)";
+        try { AbdInvoker.invoke(301); throw new AssertionError("Expected traced division failure"); }
+        catch (IllegalStateException error) { equal(divisionTrace, error.getMessage()); }
+        String rangeTrace = "Invalid or freed heap pointer: 0\n  at range (脚本 🐈.azs:14:10)";
+        try { AbdInvoker.invoke(304); throw new AssertionError("Expected traced range failure"); }
+        catch (IndexOutOfBoundsException error) { equal(rangeTrace, error.getMessage()); }
+        try { AbdInvoker.invoke(305); throw new AssertionError("Expected traced allocation failure"); }
+        catch (IllegalArgumentException error) {
+            equal("Invalid allocation size\n  at allocate (脚本 🐈.azs:18:10)", error.getMessage());
+        }
+        // The same native type/message from a host-only operation must not pick
+        // up the preceding script's published trace.
+        try { Caller20.memAlloc(-1); throw new AssertionError("Expected host allocation failure"); }
+        catch (IllegalArgumentException error) { equal("Invalid allocation size", error.getMessage()); }
+        List<Throwable> reentered = new ArrayList<>();
+        AbdInvoker.registerJfunction(0x34560006, values -> {
+            try { AbdInvoker.invoke(301); throw new AssertionError("Expected swallowed script failure"); }
+            catch (IllegalStateException error) { equal(divisionTrace, error.getMessage()); }
+            try { AbdInvoker.invoke(304); throw new AssertionError("Expected second script failure"); }
+            catch (IndexOutOfBoundsException error) { reentered.add(error); throw error; }
+        });
+        try { AbdInvoker.invoke(306); throw new AssertionError("Expected reentrant callback failure"); }
+        catch (IndexOutOfBoundsException error) {
+            equal(1, reentered.size());
+            equal(true, reentered.get(0) == error);
+            equal(rangeTrace, error.getMessage());
+        }
+        AbdInvoker.registerJfunction(0x34560007, values -> {
+            try { AbdInvoker.invoke(301); throw new AssertionError("Expected swallowed script failure"); }
+            catch (IllegalStateException error) { equal(divisionTrace, error.getMessage()); }
+            return null;
+        });
+        try { AbdInvoker.invoke(307); throw new AssertionError("Expected failure after callback recovery"); }
+        catch (IllegalStateException error) {
+            equal("Division by zero\n  at recovered (脚本 🐈.azs:26:12)", error.getMessage());
+        }
+        AbdInvoker.destroyScript();
+        AbdInvoker.unregisterJfunction(0x34560006);
+        AbdInvoker.unregisterJfunction(0x34560007);
     }
     public static void main(String[] args) throws Exception {
         File work = new File(args[0]);
@@ -418,6 +463,7 @@ public final class JniRegression {
             AbdInvoker.destroyScript();
             objectSnapshots(work);
             numericSnapshots(work);
+            runtimeTraces(work);
             checks += JniHintRegression.run(work);
             loadAndFlush(script);
             equal(42, AbdInvoker.invoke(110));

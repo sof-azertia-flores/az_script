@@ -244,6 +244,23 @@ def main():
     failed_load['f'][0]['script'] = [call(202, 91), call(202, 92),
                                     {'t': 0, 'c': 'divide', 'v1': 1, 'v2': 0}]
     write_abd(work / 'objects.load-failure.exec.abd', failed_load)
+    # Exact JNI error messages must use ordinary UTF-8, including supplementary
+    # characters in display names and source files, while preserving Java types.
+    def trace_function(ident, name, body, line, node=2, column=10):
+        return {**object_function(ident, 0, body), 'debug': {
+            'name': name, 'file': 0, 'line': line - 1, 'column': 1,
+            'locations': [f'{node}:0:{line}:{column}']}}
+
+    division = {'t': 0, 'c': 'divide', 'v1': 1, 'v2': 0}
+    write_abd(work / 'traces.exec.abd', {'gvs': 0, 'debug-files': ['脚本 🐈.azs'], 'f': [
+        trace_function(301, '入口🐈', [ret(call(302))], 2),
+        trace_function(302, 'middle', [ret(call(303))], 6),
+        trace_function(303, '除法', [ret(division)], 10, column=12),
+        trace_function(304, 'range', [ret(call(0x0ABD0006, {'address': 0}))], 14),
+        trace_function(305, 'allocate', [ret(call(0x0ABD0003, -1))], 18),
+        trace_function(306, 'reenter', [ret(call(0x34560006))], 22),
+        trace_function(307, 'recovered', [call(0x34560007), ret(division)], 26, 3, 12),
+    ]})
     object_snapshot = {
         'snapshot version': 9, 'module manifest': [manifest('objects.exec.abd', 1)],
         'variable global': [66], 'global owned allocations': [Address(2), Address(1)],

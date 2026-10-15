@@ -262,6 +262,25 @@ def verify(package: Path, java: Optional[Path] = None) -> Dict[str, object]:
         _require(result.stdout.splitlines() == ["Hello, AzScript!", "42"], f"-g changed the program output: {result.stdout!r}")
         passed("opt-in -g debug records keep instructions, outputs and the AST roundtrip")
 
+        trace_source = source_directory / "runtime trace.azs"
+        trace_text = "int fail():0002{return 1 / 0;}\nint main(){return fail();}\n"
+        trace_source.write_text(trace_text, encoding="utf-8")
+        trace_abd = cwd / "debug output/failure.abd"
+        _run([compiler, trace_source, "-o", trace_abd, "-g"], cwd, compiler_environment)
+        failure = _run([runner, trace_abd], cwd, environment, succeeds=False)
+        _require(failure.returncode == 1 and not failure.stdout and failure.stderr == (
+                     "AzScript error: Division by zero\n"
+                     f"  at fail (runtime trace.azs:1:{trace_text.splitlines()[0].index('/') + 1})\n"
+                     f"  at main (runtime trace.azs:2:{trace_text.splitlines()[1].index('fail(') + 1})\n"),
+                 f"Packaged runtime lost debug error locations: {failure.stderr!r}")
+        _run([compiler, trace_source, "-o", trace_abd], cwd, compiler_environment)
+        failure = _run([runner, trace_abd], cwd, environment, succeeds=False)
+        _require(failure.returncode == 1 and not failure.stdout and failure.stderr == (
+                     "AzScript error: Division by zero\n"
+                     "  at function 0x0fff0002\n  at function 0x0fff0000\n"),
+                 f"Packaged runtime lost stripped error frames: {failure.stderr!r}")
+        passed("packaged debug and stripped runtime traces preserve exact error reports")
+
         broken_source = source_directory / "invalid source.azs"
         broken_source.write_text("int main() { return missing_name; }\n", encoding="utf-8")
         broken = _run([compiler, broken_source], cwd, compiler_environment, succeeds=False)

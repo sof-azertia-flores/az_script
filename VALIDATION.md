@@ -1,3 +1,13 @@
+# C14 脚本运行时调用栈（2026-10-15）
+
+中文 | [English](VALIDATION.en.md)
+
+从 C13 之后继续 `claude/confident-galileo-fic3s1`。运行时错误现在保留脚本及原生调用帧；显式 `-g` 提供源码位置，未开启时显示十六进制函数 ID。清理保留首个异常及其调用栈。JNI 保持原有异常映射和 Java 回调异常对象身份，同时携带多行 UTF-8 信息。C++ 宿主在清理前调用 `describe_error()`；宿主及插件须按配套公开 ABI 重建。exec 仍为 v10，JNI 快照仍为 v9。
+
+在取消 `JAVA_TOOL_OPTIONS` 的环境下顺序执行 V0 空白及未跟踪文件审查、V1 `python3 tools/build_and_test.py --offline`、V2 同命令追加 `--sanitize`、V3 `python3 tools/export_distribution.py build/dist-check --offline`，全部退出 0。两种构建均通过 221 项 Java 测试和 1428 项原生运行时检查。普通 JNI 通过 2680 项断言、4 个线程的 800 次调用、23 个独立进程入口用例及 1000 模块深链接。新增源码调用栈套件分别通过普通构建 15 项、sanitizer 构建 13 项，覆盖源码/AST/ABD 字节一致、生命周期和析构错误、hint/include 调用帧及 Unicode 位置。未发现 ASan/UBSan 报告。
+
+Linux x86_64 Release 导出通过 24 项搬迁及消费者检查，包含调试版与无调试信息版精确报错、静态/共享 C++ SDK 及真实 JNI 消费者；清单包含 173 个文件。日志：`build/c14/v1.log`、`build/c14/v2.log`、`build/c14/v3.log`；验收包：`build/dist-check/`。C15–C28 保留为后续独立工作。
+
 # 发行导出与宿主入口遗漏修复（2026-09-27）
 
 中文 | [English](VALIDATION.en.md)

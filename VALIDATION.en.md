@@ -1,3 +1,13 @@
+# C14 Script Runtime Traces (2026-10-15)
+
+[中文](VALIDATION.md) | English
+
+Continued `claude/confident-galileo-fic3s1` after C13. Runtime failures now retain script and native frames, with opt-in `-g` source positions or stripped hexadecimal IDs. Cleanup preserves the first exception and its trace. JNI keeps native exception mappings and original Java callback throwable identity while carrying multiline UTF-8 messages. C++ hosts capture `describe_error()` before cleanup; hosts/plugins must rebuild against the matching public ABI. Exec remains v10 and JNI snapshots remain v9.
+
+Sequential validation, with `JAVA_TOOL_OPTIONS` unset: V0 whitespace/untracked-file review; V1 `python3 tools/build_and_test.py --offline`; V2 the same command with `--sanitize`; V3 `python3 tools/export_distribution.py build/dist-check --offline`. All commands exited 0. Both builds passed 221 Java tests and 1428 native runtime checks. Ordinary JNI passed 2680 assertions, 800 calls from four workers, 23 fresh-process entry cases, and 1000-module deep linking. The new compiled runtime-trace suite passed 15 ordinary and 13 sanitizer cases, including byte-identical source/AST/ABD roundtrips, lifecycle and destructor errors, hint/include frames and Unicode positions. No ASan/UBSan reports occurred.
+
+The Linux x86_64 release export passed 24 relocation/consumer checks, including exact debug/stripped error reports, static/shared C++ SDK consumers and real JNI consumers. Its manifest lists 173 files. Logs: `build/c14/v1.log`, `build/c14/v2.log`, `build/c14/v3.log`; package: `build/dist-check/`. Later roadmap items C15–C28 remain separate work.
+
 # Distribution and Host Entry Update Audit (2026-09-27)
 
 [中文](VALIDATION.md) | English

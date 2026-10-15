@@ -10,11 +10,178 @@
 #include <cstring>
 #include <exception>
 #include <limits>
+#include <new>
 #include <stdexcept>
 #include <system_error>
+#include <typeinfo>
 #include <utility>
 
 namespace azertian {
+namespace detail {
+struct trace_state {
+    error_trace active,published;
+    const std::type_info* published_type=nullptr;
+    // Keep exception ownership inside pending_error. Equality works for every
+    // C++ exception type and retaining it prevents allocator-address reuse.
+    pending_error published_exception;
+    std::string published_message;
+    std::size_t entries=0,sequence=0,published_sequence=0;
+    trace_state* next=nullptr;
+    void remember_exception() noexcept {published_exception.exception_=std::current_exception();}
+    bool matches_current_exception() const noexcept {return published_exception.exception_==std::current_exception();}
+    void forget_exception() noexcept {published_exception.exception_=nullptr;}
+};
+}
+namespace {
+using detail::trace_state;
+// A trivial TLS pointer remains usable during host and plugin teardown. In
+// particular, no TLS vector/string destructor races later runtime cleanup.
+thread_local trace_state* thread_trace=nullptr;
+struct trace_registry {
+    std::mutex mutex;
+    trace_state* first=nullptr;
+};
+trace_state* trace_storage() noexcept {
+    // Process ownership also retains states from terminated threads. Keeping
+    // the registry itself alive avoids static destruction-order dependencies.
+    static trace_registry* registry=new(std::nothrow) trace_registry;
+    if(!thread_trace&&registry) {
+        auto state=new(std::nothrow) trace_state;if(!state)return nullptr;
+        try {
+            std::lock_guard<std::mutex> lock(registry->mutex);
+            state->next=registry->first;registry->first=state;thread_trace=state;
+        } catch(...) {delete state;}
+    }
+    return thread_trace;
+}
+void discard_active_trace() noexcept {
+    if(thread_trace)thread_trace->active={};
+}
+void publish_trace(const std::exception* error,bool move_outermost=true) noexcept {
+    auto state=thread_trace;if(!state)return;
+    try {
+        std::string message=error&&error->what()?error->what():"";
+        error_trace trace;
+        if(move_outermost&&state->entries<=1){trace=std::move(state->active);state->active={};}
+        else trace=state->active;
+        state->published=std::move(trace);
+        state->published_message=std::move(message);
+        state->published_type=error?&typeid(*error):nullptr;
+        state->remember_exception();state->published_sequence=state->sequence;
+    } catch(...) {
+        state->published={};state->published_message.clear();state->published_type=nullptr;state->forget_exception();
+    }
+}
+class entry_scope {
+    trace_state* state=trace_storage();
+    bool failed=false;
+public:
+    entry_scope() noexcept {if(state){++state->entries;++state->sequence;state->active={};}}
+    ~entry_scope() noexcept {
+        if(state){if(!failed)clear_error_trace();--state->entries;}
+    }
+    template<class Body> decltype(auto) run(Body body) {
+        try {return body();}
+        catch(const std::exception& error){failed=true;publish_trace(&error);throw;}
+        catch(...){failed=true;publish_trace(nullptr);throw;}
+    }
+};
+void note_frame(trace_frame frame) noexcept {
+    auto state=trace_storage();if(!state)return;
+    try {
+        if(state->active.frames.size()<64)state->active.frames.push_back(std::move(frame));
+        else ++state->active.omitted_frames;
+    } catch(...) {++state->active.omitted_frames;}
+}
+void note_script_frame(const ofunction& function,const std::shared_ptr<function_frame>& frame) noexcept {
+    try {
+        trace_frame result;result.function_id=function.function_id;
+        if(auto debug=function.debug) {
+            result.name=debug->name;
+            const auto location=frame?frame->location:0;
+            const auto position=location&&location<=debug->locations.size()?debug->locations[location-1]:debug->header;
+            if(position.line&&position.column&&debug->files&&position.file<debug->files->size()) {
+                result.file=(*debug->files)[position.file];result.line=position.line;result.column=position.column;
+            }
+        }
+        note_frame(std::move(result));
+    } catch(...) {if(auto state=trace_storage())++state->active.omitted_frames;}
+}
+}
+std::string function_id_text(int id) {
+    char text[16];std::snprintf(text,sizeof text,"0x%08x",static_cast<unsigned>(static_cast<std::uint32_t>(id)));
+    return text;
+}
+const error_trace& last_error_trace() noexcept {
+    static const error_trace empty;
+    return thread_trace?thread_trace->published:empty;
+}
+std::string format_error_trace(const error_trace& trace) {
+    std::string result;
+    for(const auto& frame:trace.frames) {
+        if(!result.empty())result+='\n';
+        result+="  at ";
+        if(frame.native)result+="native function "+function_id_text(frame.function_id);
+        else if(frame.name.empty())result+="function "+function_id_text(frame.function_id);
+        else result+=frame.name;
+        if(!frame.native&&!frame.file.empty()&&frame.line&&frame.column)
+            result+=" ("+frame.file+":"+std::to_string(frame.line)+":"+std::to_string(frame.column)+")";
+    }
+    if(trace.omitted_frames) {
+        if(!result.empty())result+='\n';
+        result+="  ... "+std::to_string(trace.omitted_frames)+" more frames";
+    }
+    return result;
+}
+std::string describe_error(const std::exception& error) {
+    std::string result=error.what()?error.what():"";
+    if(thread_trace&&thread_trace->published_type&&*thread_trace->published_type==typeid(error)&&
+       thread_trace->published_message==result) {
+        auto trace=format_error_trace(thread_trace->published);
+        if(!trace.empty())result+='\n'+trace;
+    }
+    return result;
+}
+void clear_error_trace() noexcept {
+    if(thread_trace) {
+        thread_trace->active={};thread_trace->published={};
+        thread_trace->published_message.clear();thread_trace->published_type=nullptr;thread_trace->forget_exception();
+    }
+}
+pending_error pending_error::capture() noexcept {
+    pending_error result;result.capture_current();return result;
+}
+pending_error::operator bool() const noexcept {return static_cast<bool>(exception_);}
+void pending_error::capture_current() noexcept {
+    if(!exception_) {
+        exception_=std::current_exception();
+        if(exception_&&thread_trace) {
+            trace_=std::move(thread_trace->active);
+            // A direct host cleanup can catch an invocation after its outer
+            // entry moved the active trace into the published record.
+            if(trace_.frames.empty()&&!trace_.omitted_frames&&
+               thread_trace->published_sequence==thread_trace->sequence) {
+                if(thread_trace->published_exception.exception_==exception_)
+                    try {trace_=thread_trace->published;}catch(...) {}
+            }
+        }
+    }
+    discard_active_trace();
+}
+[[noreturn]] void pending_error::rethrow() const {
+    if(thread_trace) {
+        try {thread_trace->active=trace_;}catch(...){thread_trace->active={};}
+    }
+    if(!exception_)throw std::logic_error("No pending error");
+    try {std::rethrow_exception(exception_);}
+    catch(const std::exception& error) {
+        publish_trace(&error,!thread_trace||!thread_trace->entries);
+        throw;
+    } catch(...) {
+        publish_trace(nullptr,!thread_trace||!thread_trace->entries);
+        throw;
+    }
+}
 struct context_spec {
     int ref=-1,abi=VOID_VALUE,kind=0,width=1;
     std::optional<int> factory_id;
@@ -53,8 +220,28 @@ std::string hex_text(std::uint32_t value,int digits) {
     char text[16];std::snprintf(text,sizeof text,"0x%0*x",digits,static_cast<unsigned>(value));
     return text;
 }
-std::string function_id_text(int id) { return hex_text(static_cast<std::uint32_t>(id),8); }
 std::string namespace_text(int ns) { return hex_text(static_cast<std::uint32_t>(ns)&0xffffu,4); }
+class at_location {
+    std::shared_ptr<function_frame> frame;
+    std::uint32_t previous=0;
+    int exceptions=std::uncaught_exceptions();
+public:
+    at_location(const E& env,std::uint32_t location):frame(env?env->frame:nullptr) {
+        if(frame){previous=frame->location;if(location)frame->location=location;}
+    }
+    ~at_location() {
+        // An exceptional path keeps the innermost failing position until the
+        // owning function has recorded its frame.
+        if(frame&&std::uncaught_exceptions()==exceptions)frame->location=previous;
+    }
+};
+V run(const std::shared_ptr<expression>& code,const E& env) {
+    at_location location(env,code->location);return code->execute(env);
+}
+void mark_returned(const E& env,V result) {
+    env->frame->return_location=env->frame->location;
+    env->frame->result=std::move(result);env->frame->returned=true;
+}
 bool valid_context_kind(int abi,int kind) {
     return (kind==0&&abi>=INT_VALUE&&abi<=VOID_VALUE)||((kind==1||kind==2)&&abi==ADDRESS_VALUE)
         ||((kind==3||kind==4)&&abi==OBJECT_VALUE);
@@ -264,7 +451,7 @@ public:
         :op(std::move(op)),a(std::move(a)),b(std::move(b)) {}
     V execute(E env) override {
         tick(env);
-        auto x=a->execute(env)->deepCopy();
+        auto x=run(a,env)->deepCopy();
         if(op=="not") return std::make_shared<variable>(!truth(x));
         if(op=="neg") {
             if(x->type==INT_VALUE) return checked_int(-static_cast<std::int64_t>(*static_cast<int*>(x->value)));
@@ -274,7 +461,7 @@ public:
         }
         if(op=="and"&&!truth(x)) return std::make_shared<variable>(false);
         if(op=="or"&&truth(x)) return std::make_shared<variable>(true);
-        auto y=b->execute(env);
+        auto y=run(b,env);
         if(op=="and"||op=="or") return std::make_shared<variable>(truth(y));
         return binary(op,x,y);
     }
@@ -299,6 +486,8 @@ public:
         :target(std::move(target)),signature(std::move(signature)),id(id),script_owner(std::move(owner)),typed(typed) {}
     int return_type() override{return typed?signature.return_type:target->return_type();}
     V invoke(E env,std::vector<V> args={}) override {
+        entry_scope entry;return entry.run([&]() -> V {
+        try {
         std::lock_guard<std::recursive_mutex> lock(runtime_mutex());
         auto script=script_owner.lock();
         if(!script||!env||env->script.lock()!=script)throw std::runtime_error("Function belongs to another or unavailable script");
@@ -307,6 +496,9 @@ public:
         call_guard guard(env);
         if(typed)validate_arguments("External function",id,signature.param_types,args,signature.hidden_count>0);
         auto result=target->invoke(std::move(env),std::move(args));
+        // Returning normally means any nested failure was handled by the
+        // callback. It cannot become part of a later signature error.
+        discard_active_trace();
         if(!result)
             throw std::runtime_error("External function "+function_id_text(id)+" returned a null pointer");
         const int got=static_cast<int>(result->type);
@@ -314,6 +506,16 @@ public:
             throw std::runtime_error("External function "+function_id_text(id)+
                 " return type mismatch: expected "+type_name(signature.return_type)+", got "+type_name(got));
         return result;
+        } catch(...) {
+            // A callback may handle a script error and throw a fresh host
+            // exception. Preserve nested frames only for the propagated one.
+            if(thread_trace&&!thread_trace->matches_current_exception())discard_active_trace();
+            if((static_cast<std::uint32_t>(id)>>16)!=0x0abdu) {
+                trace_frame frame;frame.function_id=id;frame.native=true;note_frame(std::move(frame));
+            }
+            throw;
+        }
+        });
     }
 };
 // Unbound object temporaries created while the body runs are destroyed when it
@@ -321,25 +523,26 @@ public:
 template<class Body> V statement_scope(const E& env,Body body) {
     auto frame=env?env->frame:nullptr;
     const auto mark=frame?frame->temporaries.size():0;
-    V result;std::exception_ptr failure;
-    try {result=body();}catch(...){failure=std::current_exception();}
-    if(frame)try{blocks::finalize_temporaries(*frame,mark,env);}catch(...){if(!failure)failure=std::current_exception();}
-    if(failure)std::rethrow_exception(failure);
+    V result;pending_error failure;
+    try {result=body();}catch(...){failure.capture_current();}
+    if(frame)try{blocks::finalize_temporaries(*frame,mark,env);}catch(...){failure.capture_current();}
+    if(failure)failure.rethrow();
     return result;
 }
 template<class Body> V with_cleanup(const E& scope,Body body) {
     V result;
-    std::exception_ptr failure;
-    try {result=body();}catch(...){failure=std::current_exception();}
-    try {scope->cleanup(scope);}catch(...){if(!failure)failure=std::current_exception();}
-    if(failure)std::rethrow_exception(failure);
+    pending_error failure;
+    try {result=body();}catch(...){failure.capture_current();}
+    try {scope->cleanup(scope);}catch(...){failure.capture_current();}
+    if(failure)failure.rethrow();
     return result;
 }
 V scoped_execute(const std::shared_ptr<expression>& body,E env) {
-    if(std::dynamic_pointer_cast<complex_expression>(body)) return body->execute(env);
+    at_location location(env,body->location);
+    if(std::dynamic_pointer_cast<complex_expression>(body)) return run(body,env);
     auto scope=std::make_shared<environment>();
     scope->parent=env;scope->script=env->script;scope->frame=env->frame;
-    return with_cleanup(scope,[&]{return statement_scope(scope,[&]{return body->execute(scope);});});
+    return with_cleanup(scope,[&]{return statement_scope(scope,[&]{return run(body,scope);});});
 }
 // Compiler-generated base cleanup. It does not encode classes or object layouts:
 // both operands are ordinary code, and the finalizer is usually a function call.
@@ -350,18 +553,25 @@ public:
     cleanup_expression(std::shared_ptr<expression> body,std::shared_ptr<expression> cleanup,bool on_error)
         :body(std::move(body)),cleanup(std::move(cleanup)),on_error(on_error) {}
     V execute(E env) override {
-        std::exception_ptr failure;
-        try {tick(env);scoped_execute(body,env);}catch(...){failure=std::current_exception();}
+        pending_error failure;
+        try {tick(env);scoped_execute(body,env);}catch(...){failure.capture_current();}
         if(!on_error||failure) {
             auto frame=env->frame;
             const bool returned=frame&&frame->returned,broken=frame&&frame->break_requested,
                 continued=frame&&frame->continue_requested;
             const auto result=frame?frame->result:nullptr;
+            auto location=frame?frame->location:0;
+            const auto return_location=frame?frame->return_location:0;
+            const bool had_failure=static_cast<bool>(failure);
             if(frame){frame->returned=false;frame->break_requested=false;frame->continue_requested=false;}
-            try {scoped_execute(cleanup,env);}catch(...){if(!failure)failure=std::current_exception();}
-            if(frame){frame->returned=returned;frame->break_requested=broken;frame->continue_requested=continued;frame->result=result;}
+            try {scoped_execute(cleanup,env);}catch(...){
+                if(frame&&!had_failure)location=frame->location;
+                failure.capture_current();
+            }
+            if(frame){frame->returned=returned;frame->break_requested=broken;frame->continue_requested=continued;frame->result=result;
+                frame->location=location;frame->return_location=return_location;}
         }
-        if(failure)std::rethrow_exception(failure);
+        if(failure)failure.rethrow();
         return nil();
     }
 };
@@ -381,7 +591,7 @@ public:
         :op("ob"),value(std::move(value)),destructor(destructor),manual(manual) {}
     int* destructor_address(){return destructor?&*destructor:nullptr;}
     V execute(E env) override {
-        tick(env);auto pointer=value->execute(env);
+        tick(env);auto pointer=run(value,env);
         if(pointer->type!=ADDRESS_VALUE)throw std::runtime_error("Object pointer requires address type");
         const auto object_pointer=*static_cast<address*>(pointer->value);
         if(op=="oa")return std::make_shared<variable>(heap::object_address(object_pointer,offset));
@@ -407,7 +617,7 @@ class block_address_expression final:public expression {
 public:
     explicit block_address_expression(std::shared_ptr<expression> value):value(std::move(value)) {}
     V execute(E env) override {
-        tick(env);auto result=value->execute(env);
+        tick(env);auto result=run(value,env);
         auto block=blocks::of(result);
         if(!block||block->buffer)throw std::runtime_error("Object address requires a class value");
         return std::make_shared<variable>(blocks::address_of(block));
@@ -423,7 +633,7 @@ class drop_expression final:public expression {
     std::shared_ptr<expression> target;
 public:
     explicit drop_expression(std::shared_ptr<expression> target):target(std::move(target)) {}
-    V execute(E env) override {tick(env);blocks::drop(target->execute(env),env);return nil();}
+    V execute(E env) override {tick(env);blocks::drop(run(target,env),env);return nil();}
 };
 class context_expression final:public expression {
     int opcode;
@@ -460,7 +670,7 @@ public:
             default:throw std::runtime_error("Generic type cannot be default initialized");
             }
         }
-        auto result=value->execute(env);
+        auto result=run(value,env);
         if(!result||result->type!=bound->abi)throw std::runtime_error("Generic value type mismatch");
         if(opcode==39)return result;
         if(!env->frame)throw std::runtime_error("Return outside function");
@@ -469,7 +679,7 @@ public:
             result=result->deepCopy();
             if(bound->kind==2)heap::return_object(*static_cast<address*>(result->value),env);
         }
-        env->frame->result=std::move(result);env->frame->returned=true;return nil();
+        mark_returned(env,std::move(result));return nil();
     }
 };
 class buffer_new_expression final:public expression {
@@ -488,8 +698,8 @@ public:
     buffer_operation_expression(int operation,std::shared_ptr<expression> receiver,std::vector<std::shared_ptr<expression>> arguments)
         :operation(operation),receiver(std::move(receiver)),arguments(std::move(arguments)) {}
     V execute(E env) override {
-        tick(env);auto buffer=blocks::of(receiver->execute(env));
-        std::vector<V> values;for(auto& argument:arguments)values.push_back(blocks::materialize(argument->execute(env),env));
+        tick(env);auto buffer=blocks::of(run(receiver,env));
+        std::vector<V> values;for(auto& argument:arguments)values.push_back(blocks::materialize(run(argument,env),env));
         return blocks::buffer_operation(operation,buffer,values,env);
     }
 };
@@ -499,7 +709,7 @@ public:
     value_compare_expression(std::shared_ptr<context_spec> context,std::shared_ptr<expression> left,std::shared_ptr<expression> right)
         :context(std::move(context)),left(std::move(left)),right(std::move(right)) {}
     V execute(E env) override {
-        tick(env);auto a=blocks::materialize(left->execute(env),env);auto b=blocks::materialize(right->execute(env),env);
+        tick(env);auto a=blocks::materialize(run(left,env),env);auto b=blocks::materialize(run(right,env),env);
         return std::make_shared<variable>(blocks::compare_value(bind_context(context,env),a,b,env));
     }
 };
@@ -1040,23 +1250,29 @@ void validate_type_contexts(const type_contexts& contexts,const std::shared_ptr<
     for(auto& context:contexts)check(check,context,1);
 }
 V invoke_bound_function(const std::shared_ptr<script>& script,int id,const E& env,std::vector<V> args,type_contexts contexts) {
+    entry_scope entry;return entry.run([&]() -> V {
     auto target=script->getFunction(id);
     if(auto fn=std::dynamic_pointer_cast<ofunction>(target))return fn->invoke_bound(env,std::move(args),std::move(contexts));
     if(!contexts.empty())throw std::runtime_error("Generic contexts require a script function implementation");
     return target->invoke(env,std::move(args));
+    });
 }
 std::shared_ptr<script> load_script(const unsigned char* bytes,std::size_t length) {
+    entry_scope entry;return entry.run([&]() -> std::shared_ptr<script> {
     std::lock_guard<std::recursive_mutex> lock(runtime_mutex());
     auto result=std::make_shared<script>();
     result->baseEnv=std::make_shared<environment>();result->baseEnv->script=result;
     result->insert_script(bytes,length);
     live_scripts().push_back(result);
     return result;
+    });
 }
 std::shared_ptr<script> load_script(unsigned char* bytes) {
+    entry_scope entry;return entry.run([&]() -> std::shared_ptr<script> {
     if(!bytes)throw std::invalid_argument("Null script");
     const int length=b2i(bytes);if(length<0)throw std::invalid_argument("Negative script length");
     return load_script(bytes,static_cast<std::size_t>(length)+4);
+    });
 }
 void script::require_execution() const {
     std::lock_guard<std::recursive_mutex> lock(runtime_mutex());
@@ -1086,9 +1302,11 @@ bool script::hasFunction(int id) {
     return (ns==0x0abd||!script_namespaces.contains(ns))&&isInternelFunction(id);
 }
 V script::invoke(int id,std::vector<V> args) {
+    entry_scope entry;return entry.run([&]() -> V {
     std::lock_guard<std::recursive_mutex> lock(runtime_mutex());
     if(destroying)throw std::runtime_error("Script is being destroyed");
     require_execution();return getFunction(id)->invoke(baseEnv,std::move(args));
+    });
 }
 int script::namespace_for_hint(const std::string& hint) const {
     std::lock_guard<std::recursive_mutex> lock(runtime_mutex());
@@ -1108,6 +1326,7 @@ std::vector<module_manifest_entry> script::module_manifest() const {
     return result;
 }
 void script::insert_script(const unsigned char* bytes,std::size_t length) {
+    entry_scope entry;return entry.run([&]() -> void {
     std::lock_guard<std::recursive_mutex> lock(runtime_mutex());
     if(closed)throw std::runtime_error("Script is closed");
     if(faulted)throw std::runtime_error("Script initialization failed; close and rebuild the script");
@@ -1169,8 +1388,10 @@ void script::insert_script(const unsigned char* bytes,std::size_t length) {
     // Every allocation and validation above is complete before state is published.
     functions.swap(candidate_functions);script_namespaces.swap(candidate_namespaces);fixed_host_namespaces.swap(candidate_hosts);
     baseEnv->variables.swap(candidate_globals);modules.swap(candidate_modules);meta=module->meta;setup=false;
+    });
 }
 void script::flush() {
+    entry_scope entry;return entry.run([&]() -> void {
     std::lock_guard<std::recursive_mutex> lock(runtime_mutex());
     if(closed)throw std::runtime_error("Script is closed");
     if(faulted)throw std::runtime_error("Script initialization failed; close and rebuild the script");
@@ -1300,32 +1521,40 @@ void script::flush() {
         }
         initializing=false;setup=true;
     } catch(...) {initializing=false;setup=false;faulted=true;throw;}
+    });
 }
 void script::destroy() {
+    entry_scope entry;return entry.run([&]() -> void {
     std::lock_guard<std::recursive_mutex> lock(runtime_mutex());
     if(closed)return;
     if(destroying)throw std::runtime_error("Script is being destroyed");
     if(active_calls||initializing)throw std::runtime_error("Cannot destroy a running script");
-    destroying=true;std::exception_ptr failure;
+    destroying=true;pending_error failure;
     try {
         call_guard guard(baseEnv);
         for(auto hook=on_destory.rbegin();hook!=on_destory.rend();++hook) {
-            try{(*hook)->invoke(baseEnv,{});}catch(...){if(!failure)failure=std::current_exception();}
+            try{(*hook)->invoke(baseEnv,{});}catch(...){failure.capture_current();}
         }
-        try{baseEnv->cleanup(baseEnv);}catch(...){if(!failure)failure=std::current_exception();}
+        try{baseEnv->cleanup(baseEnv);}catch(...){failure.capture_current();}
         // Only hand-written exec can keep an object in a global; it still ends here.
         blocks::finalize_storage(baseEnv->variables,baseEnv,true,failure);
-    }catch(...){if(!failure)failure=std::current_exception();}
+    }catch(...){failure.capture_current();}
     heap::discard_script_objects(this);
     closed=true;setup=false;functions.clear();extern_signatures.clear();on_destory.clear();modules.clear();baseEnv.reset();destroying=false;
-    if(failure)std::rethrow_exception(failure);
+    if(failure)failure.rethrow();
+    });
 }
 int ofunction::return_type(){return rett;}
 V ofunction::invoke(E ev,std::vector<V> args) {
+    entry_scope entry;return entry.run([&]() -> V {
     if(hidden_count)throw std::runtime_error("Generic function requires a non-generic wrapper for public invocation");
     return invoke_bound(std::move(ev),std::move(args),{});
+    });
 }
 V ofunction::invoke_bound(E ev,std::vector<V> args,type_contexts contexts) {
+    entry_scope entry;return entry.run([&]() -> V {
+    std::shared_ptr<function_frame> frame;
+    try {
     std::lock_guard<std::recursive_mutex> lock(runtime_mutex());
     auto bound=script_owner.lock();
     if(!bound||!ev||ev->script.lock()!=bound)throw std::runtime_error("Function belongs to another or unavailable script");
@@ -1338,6 +1567,7 @@ V ofunction::invoke_bound(E ev,std::vector<V> args,type_contexts contexts) {
     auto env=std::make_shared<environment>();
     env->script=guard.s;env->parent=guard.s->baseEnv;env->caller=ev;env->frame_root=true;
     env->frame=std::make_shared<function_frame>();
+    frame=env->frame;
     env->frame->hidden_contexts=std::move(contexts);
     env->frame->global_offset=global_offset;env->frame->global_count=global_count;
     env->frame->param_count=args.size();
@@ -1350,27 +1580,34 @@ V ofunction::invoke_bound(E ev,std::vector<V> args,type_contexts contexts) {
         env->frame->slots[i]=storage;blocks::bind_local(storage,env);
     }
     return with_cleanup(env,[&] {
-        if(auto block=std::dynamic_pointer_cast<complex_expression>(code)) block->execute_body(env);
-        else code->execute(env);
+        {
+            at_location location(env,code->location);
+            if(auto block=std::dynamic_pointer_cast<complex_expression>(code)) block->execute_body(env);
+            else run(code,env);
+        }
+        env->frame->location=env->frame->return_location;
         return convert_return(env->frame->result,rett);
+    });
+    } catch(...) {note_script_frame(*this,frame);throw;}
     });
 }
 V complex_expression::execute_body(E env) {
     tick(env);
     for(auto& e:expressions) {
         if(env->frame&&(env->frame->returned||env->frame->break_requested||env->frame->continue_requested)) break;
-        statement_scope(env,[&]{return e->execute(env);});
+        at_location location(env,e->location);
+        statement_scope(env,[&]{return run(e,env);});
     }
     return nil();
 }
 V complex_expression::execute(E env) {
     auto scope=std::make_shared<environment>();scope->parent=env;scope->script=env->script;scope->frame=env->frame;
-    return with_cleanup(scope,[&]{return execute_body(scope);});
+    return with_cleanup(scope,[&]{at_location location(scope,this->location);return execute_body(scope);});
 }
 V functionInvocationExpression::execute(E env) {
     tick(env);std::vector<V> args;
     // Snapshot each argument before evaluating the next one (left-to-right).
-    for(auto& p:params) args.push_back(blocks::materialize(p->execute(env),env));
+    for(auto& p:params) args.push_back(blocks::materialize(run(p,env),env));
     auto result=invoke_bound_function(owner(env),function_id,env,std::move(args),bind_contexts(contexts,env));
     if(!result) throw std::runtime_error("Host function returned a null pointer");
     blocks::adopt_result(result,env);
@@ -1385,17 +1622,17 @@ V varDefineExpression::execute(E env) {
     auto& slot=env->frame->slots[static_cast<std::size_t>(varindex)];
     if(slot)throw std::runtime_error("Duplicate variable slot: "+std::to_string(varindex));
     auto storage=nil();
-    if(initializer)blocks::store(storage,initializer->execute(env),env);
+    if(initializer)blocks::store(storage,run(initializer,env),env);
     env->declared_slots.push_back(static_cast<std::size_t>(varindex));
     env->frame->slots[static_cast<std::size_t>(varindex)]=storage;blocks::bind_local(storage,env);return nil();
 }
 V varSetExpression::execute(E env) {
     tick(env);auto v=env->getVariable(varindex);
-    blocks::store(v,expression->execute(env),env);return v->deepCopy();
+    blocks::store(v,run(expression,env),env);return v->deepCopy();
 }
 V returnExpression::execute(E env) {
     tick(env);if(!env->frame) throw std::runtime_error("Return outside function");
-    auto value=returnType?returnType->execute(env):nil();
+    auto value=returnType?run(returnType,env):nil();
     V result;
     if(value->type==OBJECT_VALUE)result=blocks::export_result(value,env);
     else {
@@ -1405,7 +1642,7 @@ V returnExpression::execute(E env) {
             heap::return_object(*static_cast<address*>(result->value),env);
         }
     }
-    env->frame->result=std::move(result);env->frame->returned=true;return nil();
+    mark_returned(env,std::move(result));return nil();
 }
 constantExpression::constantExpression(std::shared_ptr<AbdMapValue> v) {
     if(auto p=std::dynamic_pointer_cast<IntAbdValue>(v)) value=std::make_shared<variable>(p->data);
@@ -1419,7 +1656,7 @@ constantExpression::constantExpression(std::shared_ptr<AbdMapValue> v) {
 }
 V constantExpression::execute(E env){tick(env);return value->deepCopy();}
 #define BINARY_IMPL(Class,Op) \
-V Class::execute(E env){tick(env);auto a=exp1->execute(env)->deepCopy();auto b=exp2->execute(env);return binary(Op,a,b);}
+V Class::execute(E env){tick(env);auto a=run(exp1,env)->deepCopy();auto b=run(exp2,env);return binary(Op,a,b);}
 BINARY_IMPL(addExpression,"add")
 BINARY_IMPL(minusExpression,"minus")
 BINARY_IMPL(multiplyExpression,"multiply")
@@ -1428,12 +1665,13 @@ BINARY_IMPL(equalExpression,"eq")
 BINARY_IMPL(gtExpression,"gt")
 BINARY_IMPL(ltExpression,"lt")
 #undef BINARY_IMPL
-V movExpression::execute(E env){tick(env);auto a=exp1->execute(env);auto b=exp2->execute(env);blocks::store(a,b,env);return a->deepCopy();}
+V movExpression::execute(E env){tick(env);auto a=run(exp1,env);auto b=run(exp2,env);blocks::store(a,b,env);return a->deepCopy();}
 namespace {
 // Temporaries of a condition end once its truth value is known.
 bool condition(const std::shared_ptr<expression>& test,const E& env) {
+    at_location location(env,test->location);
     bool value=false;
-    statement_scope(env,[&]{value=truth(test->execute(env));return nil();});
+    statement_scope(env,[&]{value=truth(run(test,env));return nil();});
     return value;
 }
 }
@@ -1519,11 +1757,11 @@ environment::~environment() {heap::discard_owned(this);}
 void environment::cleanup(const std::shared_ptr<environment>& self) {
     if(closing)return;
     closing=true;
-    std::exception_ptr failure;
-    if(frame_root&&frame)try{blocks::finalize_temporaries(*frame,0,self);}catch(...){if(!failure)failure=std::current_exception();}
+    pending_error failure;
+    if(frame_root&&frame)try{blocks::finalize_temporaries(*frame,0,self);}catch(...){failure.capture_current();}
     while(!owned_pointer.empty()) {
         address pointer=owned_pointer.back();owned_pointer.pop_back();
-        try {heap::release_owned(pointer,self);}catch(...){if(!failure)failure=std::current_exception();}
+        try {heap::release_owned(pointer,self);}catch(...){failure.capture_current();}
     }
     // Objects that a dynamic variable acquired after its declaration end here.
     if(frame) {
@@ -1536,7 +1774,7 @@ void environment::cleanup(const std::shared_ptr<environment>& self) {
     // retire its locals only after every owned allocation has been cleaned.
     if(frame)for(auto index:declared_slots)frame->slots[index].reset();
     declared_slots.clear();
-    if(failure)std::rethrow_exception(failure);
+    if(failure)failure.rethrow();
 }
 V environment::getVariable(std::string name) {
     for(auto& v:variables) if(v->name==name)return v;

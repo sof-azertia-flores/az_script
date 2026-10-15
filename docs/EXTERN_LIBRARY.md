@@ -98,6 +98,12 @@ Windows 使用 `compile_extern_lib.cmd` 和 `sign_extern_lib.cmd`。签名程序
 
 开发树里可以设置 `AZSCRIPT_INCLUDE`、`AZSCRIPT_LIBDIR` 和 `AZSCRIPT_SIGN_EXTERN`。未设置时，脚本会尝试发行包布局，再尝试仓库的 `build/native` 或 `build/sanitize`。
 
+## 运行错误与兼容性
+
+原生回调失败时，在脚本调用栈中增加 `  at native function 0x12340001`；`0x0abd` namespace 的内置函数不增加原生帧。脚本调用方以 `-g` 编译时显示名称和源码位置，否则显示十六进制函数 ID。调用栈最多保留 64 帧，其余以 `  ... N more frames` 报告。C++ 异常保留原类型；在 `destroy()` 或再次进入运行时之前调用 `azertian::describe_error(error)` 保存消息，它返回原消息加匹配的调用帧，不含独立 CLI 的 `AzScript error: ` 前缀。回调重入会重新开始线程局部的调用帧收集，后续清理错误不会污染首个错误的调用帧。
+
+调用栈支持改变了公开 C++ ABI。宿主和插件均须用配套头文件及共享运行库重新构建；重新构建的插件必须再次签名，旧签名只适用于旧字节。
+
 ## 拥有型缓冲区的宿主边界
 
 exec v10 的 `buffer<T>` 使用 OBJECT_VALUE 并区分存储类别，它不是 address 或普通可调整大小的类块。C++ 集成和插件须用配套运行库重新构建。原始块调整/地址接口不能调整 buffer 或内联元素视图；通过脚本包装函数使用 get/set/push/resize，才能保留元素所有权和类型检查。JNI 不直接映射 OBJECT_VALUE。经 this 保存的元素指针会在扩容、删除或整体替换后失效。

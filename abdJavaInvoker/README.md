@@ -60,6 +60,16 @@ int integer_identity(int value):0003 { return identity<int>(value); }
 
 原有 `JfuncExecutor` 的 `void run(Object[])` 继续支持，在脚本中返回 `null`。新的 `registerJfunction(int, Function<Object[],Object>)` 可以返回任一种支持的值。回调抛出的 Java 异常传回最初调用方；未知回调、类型错误、文件错误和非法地址均转换为 Java 异常，C++ 异常不会越过 JNI。
 
+原生错误保留现有 Java 异常类型，其多行消息由原错误和脚本调用帧组成：
+
+```text
+Division by zero
+  at divide (main.azs:2:14)
+  at main (main.azs:5:12)
+```
+
+编译时显式加 `-g` 才携带名称和源码位置，否则帧显示为 `  at function 0x0fff0002`。非内置的原生回调增加 `  at native function 0x12340001`。消息转换为 Java 字符串时保留 UTF-8 文本；行和 UTF-16 列从 1 开始。最多保留 64 帧，其余以 `  ... N more frames` 报告。Java 回调抛出的 throwable 仍以同一个对象传播，不包装，也不改写消息。记录是线程局部的，每次 JNI 入口（包括回调重入）都清空，因此被吞掉的异常不会污染后续错误。清理保留首个错误及其调用帧，详见[运行错误](../compiler/LANGUAGE.md#运行错误与调试信息)。公开 C++ ABI 已改变，C++ 宿主和原生插件须用配套头文件及运行库重新构建。
+
 每个进程使用一个共享脚本/堆。`AbdInvoker` 串行处理多线程调用，回调可在同一线程再次调用 `invoke`。回调不得等待另一个将调用该运行时的线程，否则会等待自己持有的运行时锁。纯宿主回调重入也有深度上限。多个相互独立的脚本实例尚未实现。
 
 `destroyScript()` 可重复调用，会释放脚本拥有的状态，保留调用者单独分配的宿主内存；保留回调注册以便重新加载。`close()` 还会释放回调的 JVM 全局引用；应在宿主退出或类加载器卸载前调用，即使卸载函数抛错也会清理。`unregisterJfunction(id)` 移除单个注册。脚本运行或回调期间不能销毁、insert、flush 或恢复快照；`saveStatus` 在回调中返回 `false`。`loadScript` 和 `insertScript(File)` 只装配，之后必须显式 `flush()`；通过 `namespaceForHint(String)` 查询库的实际 namespace。初始化回调可以 invoke 已链接函数。链接检查失败可补库重试；onload 失败则脚本进入故障态，只能关闭后重新加载。

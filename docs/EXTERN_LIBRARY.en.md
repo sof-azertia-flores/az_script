@@ -98,6 +98,12 @@ Windows uses `compile_extern_lib.cmd` and `sign_extern_lib.cmd`. The signer is `
 
 In a source checkout, `AZSCRIPT_INCLUDE`, `AZSCRIPT_LIBDIR`, and `AZSCRIPT_SIGN_EXTERN` can override paths. Otherwise scripts try the distribution layout, then repository `build/native` or `build/sanitize`.
 
+## Runtime errors and compatibility
+
+A failing native callback contributes `  at native function 0x12340001` to the script trace; built-ins in namespace `0x0abd` do not add native frames. Its script callers show names and source positions when compiled with `-g`, otherwise hex function IDs. Traces keep at most 64 frames, then `  ... N more frames`. C++ exceptions retain their original types; capture `azertian::describe_error(error)` before `destroy()` or another runtime entry. It returns the original message plus matching frames without the standalone CLI's `AzScript error: ` prefix. Callback reentry starts fresh thread-local trace collection, and later cleanup errors cannot contaminate the first error's trace.
+
+Trace support changes the public C++ ABI. Rebuild both hosts and plugins against matching headers and shared runtime, then sign rebuilt plugin binaries again; an existing signature applies only to the old bytes.
+
 ## Owning buffers at the host boundary
 
 Exec v10 represents `buffer<T>` using OBJECT_VALUE with a distinct storage category; it is not an address or a normal resizable class block. Rebuild C++ integrations and plugins against the matching runtime. Raw block resize/address APIs cannot resize a buffer or an inline element view. Script wrappers using get/set/push/resize preserve element ownership and type checks; JNI does not directly marshal OBJECT_VALUE. Element pointers retained from this expire on growth, removal, or whole-buffer replacement.

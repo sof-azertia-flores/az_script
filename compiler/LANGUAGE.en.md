@@ -397,6 +397,22 @@ main.azs:4:9: warning: in function main: assignment used as a condition; use '==
 
 A successful compilation prints its warnings to stderr and exits with status 0. A failed compilation lists warnings among its errors in source order and counts them in the summary, e.g. `Error: compilation failed: 1 error, 1 warning`. The checks run on the AST, so `compile` and `compile-json` report the same warnings; AST nodes without a source position, such as those of a handwritten AST, and code the compiler generates never warn. In Java, configure the `Diagnostics` collector, e.g. `new Diagnostics().allWarnings().warning("unreachable-code", false).warningsAsErrors(true)`, and read `diagnostics.warnings()` after compiling; `Diagnostics.WARNINGS` lists the warnings.
 
+## Runtime errors and debug info
+
+Compile with `-g` to include function names and source positions in runtime errors; debug info is opt-in for both `compile` and `compile-json`. The standalone interpreter writes the message and frames to stderr and exits with status 1:
+
+```text
+AzScript error: Division by zero
+  at divide (main.azs:2:14)
+  at main (main.azs:5:12)
+```
+
+Frames run from the failing function outward to its callers. Without debug info, a script frame reads `  at function 0x0fff0002`. Native callbacks use `  at native function 0x12340001`; built-ins in namespace `0x0abd` add no native frame. At most 64 frames are retained; any remainder is reported as `  ... N more frames`. Lines and columns start at 1; columns count UTF-16 code units, so a supplementary Unicode character occupies two columns. Included files retain their own source positions.
+
+C++ exceptions keep their original types and `what()` messages. `azertian::describe_error(error)` returns `what()` plus the matching trace, without the CLI's `AzScript error: ` prefix or a trailing newline. Call it before `destroy()` or another runtime entry. `last_error_trace()` returns an `error_trace` containing `frames` and `omitted_frames`; `format_error_trace(trace)` formats only the frame lines, and `clear_error_trace()` clears the active and published trace. Trace state is thread-local, with fresh collection at each runtime entry, including callback reentry. Cleanup preserves the original error and its frames; a later destructor error cannot replace or add frames to it. When cleanup is the first failure, its first error is retained.
+
+JNI carries native error messages and trace lines as UTF-8 into Java strings without changing the exception mapping. A throwable raised by a Java callback is returned as the same throwable object, without rewriting its message. Trace support changes the public C++ ABI; rebuild C++ hosts and native plugins with matching headers and libraries.
+
 ## Generics
 
 Generic classes, functions, and methods share one compiled body. Different type arguments do not allocate new public function IDs. A type parameter denotes a complete type: primitive, address, class value, class pointer, parameterized class, or `buffer<T>`. `void`, `any`, and parameter-only `C(*)` are not type arguments.

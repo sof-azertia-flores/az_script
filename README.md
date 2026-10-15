@@ -185,6 +185,8 @@ script->destroy();
 
 执行失败抛出标准 C++ 异常，调用者可以捕获；`destroy()` 幂等，执行销毁钩子后释放全局状态。析构时释放拥有的内存，但不自动运行用户钩子。
 
+捕获异常后，在 `destroy()` 或再次进入运行时之前调用 `azertian::describe_error(error)`。异常类型和 `what()` 保持不变，该函数返回原消息加脚本调用帧，不含 CLI 的 `AzScript error: ` 前缀和末尾换行。`last_error_trace()` 返回含 `frames` 和 `omitted_frames` 的 `error_trace`；`format_error_trace(trace)` 格式化其调用帧，`clear_error_trace()` 清空记录。记录是线程局部的，每次进入（包括回调重入）都重新开始收集，清理只保留首个错误的调用帧。编译时加 `-g` 可显示名称及从 1 开始的文件、行、UTF-16 列位置，否则显示十六进制函数 ID。原生帧及 64 帧上限见[运行错误](compiler/LANGUAGE.md#运行错误与调试信息)。公开 C++ ABI 已改变，宿主和插件须用配套头文件及库重新构建。
+
 ## 嵌入 Java
 
 使用 `build/java/abdJavaInvoker.jar`，同时部署 `libabdJ`、`libabdInvoker`（macOS 后缀 `.dylib`，Linux 为 `.so`）。也可以按 `abdJavaInvoker/README.md` 选择加载路径。

@@ -60,6 +60,16 @@ The wrapper uses the existing Java value mapping. Generic extern declarations mu
 
 The original `JfuncExecutor` with `void run(Object[])` remains supported and returns `null` to scripts. `registerJfunction(int, Function<Object[],Object>)` can return any supported value. Java callback exceptions return to the original caller. Unknown callbacks, type errors, file errors, and invalid addresses become Java exceptions; C++ exceptions never cross JNI.
 
+Native failures retain their existing Java exception types, with a multiline message containing the original error followed by script frames:
+
+```text
+Division by zero
+  at divide (main.azs:2:14)
+  at main (main.azs:5:12)
+```
+
+Compile with opt-in `-g` for names and source positions; otherwise a frame reads `  at function 0x0fff0002`. Non-built-in native callbacks add `  at native function 0x12340001`. Messages preserve UTF-8 text when converted to Java strings; lines and UTF-16 columns start at 1. At most 64 frames are kept, followed by `  ... N more frames` if needed. A Java callback's throwable is propagated as the same object, without wrapping or rewriting its message. Trace state is thread-local and cleared at every JNI entry, including callback reentry, so swallowed failures do not contaminate later errors. Cleanup preserves the first error and its frames. See [runtime errors](../compiler/LANGUAGE.en.md#runtime-errors-and-debug-info). Rebuild C++ hosts and native plugins with the matching headers and runtime because the public C++ ABI has changed.
+
 Each process uses one shared script/heap. `AbdInvoker` serializes multithreaded calls and permits callbacks to invoke again on the same thread. A callback must not wait for another thread that will call the runtime, or it will wait on its own runtime lock. Pure host-callback reentry also has a depth limit. Multiple independent script instances are not implemented.
 
 `destroyScript()` is repeatable and releases script-owned state while preserving independently allocated host memory and callback registrations for reload. `close()` also releases callback JVM global references; call it before host exit or class-loader unloading. Cleanup continues even if the unload hook throws. `unregisterJfunction(id)` removes one registration. Destruction, insertion, flush, and snapshot restoration are forbidden during execution or callbacks; `saveStatus` returns `false` from a callback. `loadScript` and `insertScript(File)` only assemble modules and require explicit `flush()` afterward. `namespaceForHint(String)` returns the mounted namespace. Initialization callbacks may invoke linked functions. Failed link validation permits adding dependencies and retrying; failed onload faults the script, requiring close and reload.

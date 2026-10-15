@@ -1,7 +1,6 @@
 #ifndef AZSCRIPT_BLOCKS_H
 #define AZSCRIPT_BLOCKS_H
 #include "library.h"
-#include <exception>
 namespace azertian {
 struct buffer_storage {
     std::shared_ptr<const type_context> element;
@@ -75,7 +74,7 @@ void finalize(const std::shared_ptr<slot_block>& block,const std::shared_ptr<env
 void finalize_temporaries(function_frame& frame,std::size_t mark,const std::shared_ptr<environment>& env);
 // Finalizes blocks owned by these storage variables, last first; keeps the first error.
 void finalize_storage(const std::vector<std::shared_ptr<variable>>& storage,const std::shared_ptr<environment>& env,
-                      bool run_destructor,std::exception_ptr& failure);
+                      bool run_destructor,pending_error& failure);
 void release_owned(address pointer,const std::shared_ptr<environment>& env);
 void discard_owned(address pointer,const environment* env) noexcept;
 // Marks an owned block dead without running user code; used when storage dies.

@@ -399,6 +399,22 @@ main.azs:4:9: warning: in function main: assignment used as a condition; use '==
 
 编译成功时警告写到标准错误，退出码为 0。编译失败时警告与错误按源码顺序一并列出，并计入汇总行，例如 `Error: compilation failed: 1 error, 1 warning`。这些检查在 AST 上进行，所以 `compile` 与 `compile-json` 报告相同的警告；没有源码位置的 AST 节点（例如手写 AST 中的节点）和编译器生成的代码从不产生警告。Java 调用方配置 `Diagnostics` 实例，例如 `new Diagnostics().allWarnings().warning("unreachable-code", false).warningsAsErrors(true)`，并在编译后读取 `diagnostics.warnings()`；`Diagnostics.WARNINGS` 列出全部警告。
 
+## 运行错误与调试信息
+
+编译时加 `-g` 可让运行错误包含函数名和源码位置；`compile` 和 `compile-json` 均默认不携带调试信息。独立解释器把消息和调用帧写到标准错误，退出码为 1：
+
+```text
+AzScript error: Division by zero
+  at divide (main.azs:2:14)
+  at main (main.azs:5:12)
+```
+
+调用帧从出错函数向外排列到调用方。没有调试信息时，脚本帧显示为 `  at function 0x0fff0002`。原生回调显示为 `  at native function 0x12340001`；`0x0abd` namespace 的内置函数不增加原生帧。最多保留 64 帧，其余以 `  ... N more frames` 报告。行列从 1 开始，列按 UTF-16 代码单元计数，因此补充平面的 Unicode 字符占两列。被包含文件保留自己的源码位置。
+
+C++ 异常保留原类型和 `what()` 消息。`azertian::describe_error(error)` 返回 `what()` 加上匹配的调用帧，不含 CLI 的 `AzScript error: ` 前缀和末尾换行；必须在 `destroy()` 或再次进入运行时之前调用。`last_error_trace()` 返回含 `frames` 和 `omitted_frames` 的 `error_trace`；`format_error_trace(trace)` 只格式化调用帧，`clear_error_trace()` 清空正在收集及已发布的记录。记录是线程局部的，每次进入运行时（包括回调重入）都重新开始收集。清理保留原错误及其调用帧，后续析构错误不会替换它或向它追加调用帧；若清理是最先失败的操作，则保留其中的首个错误。
+
+JNI 将原生错误消息和调用帧按 UTF-8 转为 Java 字符串，不改变异常映射。Java 回调抛出的 throwable 仍以同一个对象返回，不改写其消息。调用栈支持改变了公开 C++ ABI，C++ 宿主和原生插件须用配套头文件及库重新构建。
+
 ## 泛型
 
 泛型类、函数及成员方法使用类型参数，共享一份编译后的正文；不同类型实参不分配新的公开函数 ID。类型参数代表完整类型，可传基础类型、`address`、类值、类指针、参数化类和 `buffer<T>`，不接受 `void`、`any` 或参数专用的 `C(*)`。

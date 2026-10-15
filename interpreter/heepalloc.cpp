@@ -2,7 +2,6 @@
 #include "blocks.h"
 #include <algorithm>
 #include <map>
-#include <exception>
 #include <set>
 #include <stdexcept>
 namespace azertian {
@@ -234,15 +233,15 @@ void destroy_registered(address pointer,const std::shared_ptr<environment>& env)
     auto it=objects.find(pointer);
     if(it==objects.end()) {
         // A failed construction still destroys its completed value members.
-        std::exception_ptr failure;blocks::finalize_storage(allocation_slots(pointer),env,true,failure);
+        pending_error failure;blocks::finalize_storage(allocation_slots(pointer),env,true,failure);
         free(pointer);
-        if(failure)std::rethrow_exception(failure);
+        if(failure)failure.rethrow();
         return;
     }
     check_not_destroying(pointer);
     const object_record record=it->second.value;
     it->second.destroying=true;
-    std::exception_ptr failure;
+    pending_error failure;
     try {
         if(record.destructor_id) {
             auto script=record.script_owner.lock();
@@ -254,14 +253,14 @@ void destroy_registered(address pointer,const std::shared_ptr<environment>& env)
             }
             invoke_bound_function(script,*record.destructor_id,context,{std::make_shared<variable>(pointer)},record.destructor_contexts);
         }
-    } catch(...) {failure=std::current_exception();}
+    } catch(...) {failure.capture_current();}
     // Value members end after the destructor body, while the object is still
     // marked as destroying so they cannot delete or free their container.
     blocks::finalize_storage(allocation_slots(pointer),env,true,failure);
     // No registry iterator survives the script callback: it may delete other objects.
     objects.erase(pointer);
     free(pointer);
-    if(failure)std::rethrow_exception(failure);
+    if(failure)failure.rethrow();
 }
 }
 void delete_object(address pointer,const std::shared_ptr<environment>& env) {

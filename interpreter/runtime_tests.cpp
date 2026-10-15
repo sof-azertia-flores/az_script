@@ -17,6 +17,7 @@
 #include <map>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 namespace {
@@ -557,7 +558,256 @@ void buffer_tests() {
     rejects([&]{load_raw(rmodule({rfn(10,VOID_VALUE,bop(5,rc(n(0)),{}))}));},"buffer wire validates operation arity");
     rejects([&]{load_raw(rmodule({rfn(10,VOID_VALUE,bop(7,rc(n(0)),{}))}));},"buffer wire validates operation number");
 }
+void runtime_trace_tests() {
+    // These fixtures use the public exec format and host entry points. Locations
+    // name the failing operation and its callers rather than decoder internals.
+    auto debug=[](R function,const std::string& name,int line,int column,std::initializer_list<int> locations={}) {
+        AbdStack quads;for(int value:locations)quads.vs.push_back(ri(value));
+        return append_raw(replace_raw(function,8,rb(true)),raw({rs(name),ri(0),ri(line),ri(column),quads.toAbdValue()}));
+    };
+    auto files=[](R module){return replace_raw(module,10,raw({rs("trace.azs")}));};
+    auto divide=[](){return rx(15,{rc(n(1)),rc(n(0))});};
+    auto overflow=[](){return rx(12,{rc(n(std::numeric_limits<int>::max())),rc(n(1))});};
+    constexpr int host_ns=0x6ce0,host_range=0x6ce00001,host_reenter=0x6ce00002,
+                  host_swallow=0x6ce00003,host_cleanup=0x6ce00004,host_primary=0x6ce00005,
+                  host_nonstandard=0x6ce00006,host_swallow_null=0x6ce00007,
+                  host_swallow_wrong=0x6ce00008,host_swallow_fresh=0x6ce00009;
+    std::shared_ptr<script> traced;
+    auto host=std::make_shared<test_executor>(host_ns);
+    host->functions[host_range]=std::make_shared<test_function>(VOID_VALUE,[](const std::vector<V>&)->V {
+        throw std::out_of_range("host range");
+    });
+    host->functions[host_reenter]=std::make_shared<test_function>(VOID_VALUE,[&](const std::vector<V>&)->V {
+        try{traced->invoke(10);}catch(const std::exception& e) {
+            check(describe_error(e)=="Division by zero\n  at leaf (trace.azs:3:17)","a caught reentrant failure has its own trace");
+        }
+        traced->invoke(12);return std::make_shared<variable>(nullptr);
+    });
+    host->functions[host_swallow]=std::make_shared<test_function>(VOID_VALUE,[&](const std::vector<V>&)->V {
+        try{traced->invoke(10);}catch(const std::exception&){}
+        return std::make_shared<variable>(nullptr);
+    });
+    host->functions[host_cleanup]=std::make_shared<test_function>(VOID_VALUE,[](const std::vector<V>&)->V {
+        throw std::runtime_error("cleanup failure");
+    });
+    host->functions[host_primary]=std::make_shared<test_function>(VOID_VALUE,[](const std::vector<V>&)->V {
+        throw std::overflow_error("Integer overflow");
+    });
+    host->functions[host_nonstandard]=std::make_shared<test_function>(VOID_VALUE,[](const std::vector<V>&)->V {throw 73;});
+    auto swallow_leaf=[&]{try{traced->invoke(10);}catch(const std::runtime_error&){}};
+    host->functions[host_swallow_null]=std::make_shared<test_function>(VOID_VALUE,[&](const std::vector<V>&)->V {
+        swallow_leaf();return nullptr;
+    });
+    host->functions[host_swallow_wrong]=std::make_shared<test_function>(INT_VALUE,[&](const std::vector<V>&)->V {
+        swallow_leaf();return std::make_shared<variable>(std::string("wrong type"));
+    });
+    host->functions[host_swallow_fresh]=std::make_shared<test_function>(VOID_VALUE,[&](const std::vector<V>&)->V {
+        swallow_leaf();throw std::runtime_error("Division by zero");
+    });
+    registered_executor registered(host);
+    auto signatures=raw({rsignature(host_range,VOID_VALUE),rsignature(host_reenter,VOID_VALUE),
+        rsignature(host_swallow,VOID_VALUE),rsignature(host_cleanup,VOID_VALUE),rsignature(host_primary,VOID_VALUE,{OBJECT_VALUE}),
+        rsignature(host_nonstandard,VOID_VALUE),rsignature(host_swallow_null,VOID_VALUE),
+        rsignature(host_swallow_wrong,INT_VALUE),rsignature(host_swallow_fresh,VOID_VALUE)});
+    traced=load_raw(files(rmodule({
+        debug(rfn(10,INT_VALUE,rreturn(divide())),"leaf",3,1,{1,0,3,17}),
+        debug(rfn(11,INT_VALUE,rreturn(rcall(10))),"outer",7,1,{1,0,8,12}),
+        debug(rfn(12,INT_VALUE,rreturn(overflow())),"overflow",12,1,{1,0,12,19}),
+        debug(rfn(13,INT_VALUE,rreturn(rc(n(7)))),"success",15,1),
+        debug(rfn(14,VOID_VALUE,rcall(host_range)),"nativeCaller",20,1,{0,0,21,5}),
+        debug(rfn(15,VOID_VALUE,rcall(host_reenter)),"reenter",25,1,{0,0,26,5}),
+        debug(rfn(16,VOID_VALUE,rblock({rcall(host_swallow),divide()})),"afterSwallow",30,1,{2,0,32,9}),
+        debug(rfn(17,INT_VALUE,rreturn(rcall(17))),"recursive",35,1,{1,0,36,12}),
+        debug(rfn(18,VOID_VALUE,rcall(host_swallow_null)),"nullAfterSwallow",90,1),
+        debug(rfn(19,INT_VALUE,rreturn(rcall(host_swallow_wrong))),"wrongAfterSwallow",92,1),
+        debug(rfn(40,VOID_VALUE,rcall(host_swallow_fresh)),"freshAfterSwallow",94,1),
+    },0,signatures)));
+    clear_error_trace();
+    check(last_error_trace().frames.empty()&&format_error_trace(last_error_trace()).empty(),"clearing a trace removes published frames");
+    bool caught=false;
+    try{traced->invoke(11);}catch(const std::runtime_error& e) {
+        caught=true;
+        check(std::string(e.what())=="Division by zero","script traces do not change the original exception message");
+        check(describe_error(e)=="Division by zero\n  at leaf (trace.azs:3:17)\n  at outer (trace.azs:8:12)",
+              "script traces list the failing operation then the caller's call site");
+        const auto& trace=last_error_trace();
+        check(trace.frames.size()==2&&trace.omitted_frames==0&&trace.frames[0].function_id==10&&
+              !trace.frames[0].native&&trace.frames[0].name=="leaf"&&trace.frames[0].file=="trace.azs"&&
+              trace.frames[0].line==3&&trace.frames[0].column==17,"structured traces expose stable function and source information");
+    }
+    check(caught,"a traced arithmetic failure preserves its C++ exception type");
+    caught=false;
+    try{traced->invoke(12);}catch(const std::overflow_error& e) {
+        caught=true;
+        check(describe_error(e)=="Integer overflow\n  at overflow (trace.azs:12:19)","overflow retains its specific exception type and source");
+        check(describe_error(std::runtime_error(e.what()))==e.what(),"a different exception type cannot borrow a stale trace");
+        check(describe_error(std::overflow_error("another overflow"))=="another overflow","a different message cannot borrow a stale trace");
+    }
+    check(caught,"overflow is still catchable as std::overflow_error");
+    check(integer(traced->invoke(13))==7,"a successful entry remains usable after a traced failure");
+    check(describe_error(std::overflow_error("Integer overflow"))=="Integer overflow","a successful entry suppresses an earlier trace");
+    caught=false;
+    try{traced->invoke(14);}catch(const std::out_of_range& e) {
+        caught=true;
+        check(describe_error(e)=="host range\n  at native function 0x6ce00001\n  at nativeCaller (trace.azs:21:5)",
+              "native callback frames preserve the host exception type");
+    }
+    check(caught,"a native out_of_range exception keeps its dynamic type");
+    caught=false;
+    try{traced->invoke(15);}catch(const std::overflow_error& e) {
+        caught=true;
+        check(describe_error(e)=="Integer overflow\n  at overflow (trace.azs:12:19)\n  at native function 0x6ce00002\n  at reenter (trace.azs:26:5)",
+              "a second nested host failure excludes a swallowed reentrant failure");
+    }
+    check(caught,"nested host reentry propagates the second failure");
+    caught=false;
+    try{traced->invoke(16);}catch(const std::runtime_error& e) {
+        caught=true;
+        check(describe_error(e)=="Division by zero\n  at afterSwallow (trace.azs:32:9)",
+              "a successful host callback discards the failure it swallowed");
+    }
+    check(caught,"the caller can fail after a host callback swallowed a nested failure");
+    auto fresh_callback_error=[&](int id,const std::string& expected) {
+        bool failed=false;
+        try{traced->invoke(id);}catch(const std::runtime_error& e) {
+            failed=true;check(describe_error(e)==expected,"callback validation and fresh errors exclude swallowed script frames");
+        }
+        check(failed,"a callback failure remains visible after swallowing a script error");
+    };
+    fresh_callback_error(18,"External function 0x6ce00007 returned a null pointer\n  at native function 0x6ce00007\n  at nullAfterSwallow (trace.azs:90:1)");
+    fresh_callback_error(19,"External function 0x6ce00008 return type mismatch: expected int, got string\n  at native function 0x6ce00008\n  at wrongAfterSwallow (trace.azs:92:1)");
+    fresh_callback_error(40,"Division by zero\n  at native function 0x6ce00009\n  at freshAfterSwallow (trace.azs:94:1)");
+    traced->max_call_depth=80;caught=false;
+    try{traced->invoke(17);}catch(const std::runtime_error& e) {
+        caught=true;const auto& trace=last_error_trace();
+        check(std::string(e.what()).find("call depth limit")!=std::string::npos&&trace.frames.size()==64&&trace.omitted_frames>0,
+              "recursive traces retain 64 frames and count the remainder");
+        const auto suffix="\n  ... "+std::to_string(trace.omitted_frames)+" more frames";
+        const auto formatted=format_error_trace(trace);
+        check(formatted.ends_with(suffix)&&!formatted.ends_with('\n'),"truncated traces have a counted suffix and no trailing newline");
+    }
+    check(caught,"trace truncation preserves the recursion-limit failure");
+    try{traced->invoke(12);}catch(const std::overflow_error&){}
+    const auto main_trace=describe_error(std::overflow_error("Integer overflow"));
+    std::string worker_trace,worker_failure;
+    std::thread worker([&] {
+        try {
+            if(!last_error_trace().frames.empty())throw std::runtime_error("new thread inherited another thread's trace");
+            auto program=load_raw(rmodule({rfn(10,INT_VALUE,rreturn(divide()))}));
+            try{program->invoke(10);}catch(const std::runtime_error& e){worker_trace=describe_error(e);}
+            clear_error_trace();program->destroy();
+        }catch(const std::exception& e){worker_failure=e.what();}
+    });
+    worker.join();
+    check(worker_failure.empty()&&worker_trace=="Division by zero\n  at function 0x0000000a","another thread starts empty and can publish a stripped trace");
+    check(describe_error(std::overflow_error("Integer overflow"))==main_trace,"another thread cannot publish or clear the calling thread's trace");
+    clear_error_trace();
+    check(describe_error(std::overflow_error("Integer overflow"))=="Integer overflow","explicit clearing suppresses a matching published error");
+    traced->destroy();
+
+    auto bind=[](int destructor,R pointer){return rx(10,{pointer,rb(true),ri(destructor),rb(false),raw({})});};
+    auto cleanup=load_raw(files(rmodule({
+        debug(rfn(20,OBJECT_VALUE,rblock({rdef(0,rx(32,{ri(1)})),bind(30,rx(33,{rvar(0)})),rreturn(rvar(0))}),1),"temporary",40,1),
+        debug(rfn(21,OBJECT_VALUE,rblock({rdef(0,rx(32,{ri(1)})),bind(31,rx(33,{rvar(0)})),rreturn(rvar(0))}),1),"firstObject",42,1),
+        debug(rfn(22,VOID_VALUE,rcall(host_primary,{rcall(20)})),"temporaryFailure",45,1),
+        debug(rfn(23,VOID_VALUE,rblock({rdef(0,rcall(20)),overflow()}),1),"scopeFailure",47,1,{3,0,49,9}),
+        debug(rfn(24,VOID_VALUE,rx(11,{rvar(0)}),0,{ADDRESS_VALUE}),"deleteObject",51,1),
+        debug(rfn(25,VOID_VALUE,rblock({rdef(0,rcall(20)),rdef(1,rcall(21))}),2),"scopeDestructors",53,1),
+        debug(rfn(30,VOID_VALUE,rblock({rset(-2,rx(12,{rvar(-2),rc(n(1))})),rcall(host_cleanup)}),0,{ADDRESS_VALUE}),"cleanupDestructor",57,1),
+        debug(rfn(31,VOID_VALUE,rcall(host_range),0,{ADDRESS_VALUE}),"firstDestructor",60,1),
+        debug(rfn(32,VOID_VALUE,rcall(host_nonstandard),0,{ADDRESS_VALUE}),"nonStandardDestructor",61,1),
+        debug(gfn(35,VOID_VALUE,rblock({rset(-1,rx(12,{rvar(-1),rc(n(1))})),
+            rx(27,{rx(19,{rvar(-1),rc(n(2))}),overflow(),rb(false)}),bind(30,rvar(0))}),0,0,{ADDRESS_VALUE},1),"placement",63,1),
+        debug(rfn(36,VOID_VALUE,rblock({rdef(0,bnew(class_context(1,35))),bop(2,rvar(0),{rc(n(2))}),bop(6,rvar(0),{rc(n(2))})}),1),"resizeFailure",68,1),
+    },2,signatures)));
+    cleanup->baseEnv->getVariable(-1)->setValue(0);cleanup->baseEnv->getVariable(-2)->setValue(0);
+    auto primary_only=[&](const std::function<void()>& run,const std::string& expected) {
+        bool primary=false;
+        try{run();}catch(const std::overflow_error& e) {
+            primary=true;const auto message=describe_error(e);
+            check(std::string(e.what())=="Integer overflow"&&message.find(expected)!=std::string::npos&&
+                  message.find("cleanupDestructor")==std::string::npos&&message.find("0x6ce00004")==std::string::npos,
+                  "cleanup errors do not contaminate the first error's exception or frames");
+        }
+        check(primary,"cleanup preserves the first failure's dynamic type");
+    };
+    primary_only([&]{cleanup->invoke(22);},"temporaryFailure");
+    primary_only([&]{cleanup->invoke(23);},"scopeFailure (trace.azs:49:9)");
+    check(integer(cleanup->baseEnv->getVariable(-2))==2,"failing statement and scope cleanup both run their destructors");
+    auto first_destructor_only=[&](const std::function<void()>& run) {
+        bool primary=false;
+        try{run();}catch(const std::out_of_range& e) {
+            primary=true;const auto message=describe_error(e);
+            check(std::string(e.what())=="host range"&&message.find("firstDestructor")!=std::string::npos&&
+                  message.find("cleanupDestructor")==std::string::npos&&message.find("0x6ce00004")==std::string::npos,
+                  "later destructors cannot replace the first destructor's error trace");
+        }
+        check(primary,"a destructor failure preserves its original exception type");
+    };
+    first_destructor_only([&]{cleanup->invoke(25);});
+    auto nested=blocks::create(2,cleanup);
+    for(int i=0;i<2;++i) {
+        auto child=blocks::create(1,cleanup);child->destructor=i?31:30;
+        nested->slots[i]->setValue(child);child->owner=nested->slots[i].get();
+    }
+    auto storage=std::make_shared<variable>(nested);nested->owner=storage.get();
+    first_destructor_only([&]{blocks::drop(storage,cleanup->baseEnv);});
+    check(storage->type==VOID_VALUE&&nested->state==slot_block::status::dead,"drop finishes every nested value after the first destructor failure");
+    try{throw std::out_of_range("host range");}catch(...) {
+        auto unrelated=pending_error::capture();bool recaught=false;
+        try{unrelated.rethrow();}catch(const std::out_of_range& e) {
+            recaught=true;
+            check(describe_error(e)=="host range"&&last_error_trace().frames.empty(),
+                  "a fresh host exception with matching type and message cannot inherit a prior direct cleanup trace");
+        }
+        check(recaught,"capturing a fresh host exception preserves its type");
+    }
+    auto nonstandard=blocks::create(1,cleanup);nonstandard->destructor=32;
+    auto later=blocks::create(1,cleanup);later->destructor=30;
+    nonstandard->slots[0]->setValue(later);later->owner=nonstandard->slots[0].get();
+    auto nonstandard_storage=std::make_shared<variable>(nonstandard);nonstandard->owner=nonstandard_storage.get();
+    pending_error saved_nonstandard;
+    const std::string nonstandard_trace="  at native function 0x6ce00006\n  at nonStandardDestructor (trace.azs:61:1)";
+    try{blocks::drop(nonstandard_storage,cleanup->baseEnv);}catch(int value) {
+        check(value==73&&format_error_trace(last_error_trace())==nonstandard_trace,
+              "direct host cleanup preserves a non-standard exception and excludes later cleanup frames");
+        saved_nonstandard.capture_current();
+    }
+    check(static_cast<bool>(saved_nonstandard)&&nonstandard_storage->type==VOID_VALUE&&later->state==slot_block::status::dead,
+          "direct cleanup finishes nested values before a non-standard failure is recaptured");
+    for(int attempt=0;attempt<2;++attempt) {
+        bool recaught=false;
+        try{saved_nonstandard.rethrow();}catch(int value) {
+            recaught=true;check(value==73&&format_error_trace(last_error_trace())==nonstandard_trace,
+                  "rethrowing a recaptured non-standard failure retains its trace on every attempt");
+        }
+        check(recaught,"a recaptured non-standard exception keeps its original type");
+    }
+    auto pointer=heap::alloc(1);heap::set_owner(pointer,cleanup->baseEnv.get());
+    heap::register_object(pointer,31,true,cleanup->baseEnv);
+    auto member=blocks::create(1,cleanup);member->destructor=30;
+    auto heap_slot=heap::getAt(pointer);heap_slot->setValue(member);member->owner=heap_slot.get();
+    first_destructor_only([&]{cleanup->invoke(24,{std::make_shared<variable>(pointer)});});
+    check(member->state==slot_block::status::dead,"heap object cleanup completes its value members after a destructor failure");
+    rejects([&]{heap::getAt(pointer);},"a failing heap object destructor still releases storage");
+    const auto before_resize=integer(cleanup->baseEnv->getVariable(-2));
+    primary_only([&]{cleanup->invoke(36);},"placement");
+    check(integer(cleanup->baseEnv->getVariable(-1))==2&&integer(cleanup->baseEnv->getVariable(-2))==before_resize+1,
+          "buffer rollback cleans completed elements while preserving the construction failure");
+    cleanup->destroy();
+
+    auto shutdown=load_raw(files(rmodule({
+        debug(rfn(1,VOID_VALUE,overflow()),"shutdown",75,1),
+        debug(rfn(30,VOID_VALUE,rcall(host_cleanup),0,{ADDRESS_VALUE}),"cleanupDestructor",77,1),
+    },0,signatures)));
+    auto owned=blocks::create(1,shutdown);owned->destructor=30;
+    auto owned_storage=std::make_shared<variable>(owned);owned->owner=owned_storage.get();blocks::bind_local(owned_storage,shutdown->baseEnv);
+    primary_only([&]{shutdown->destroy();},"shutdown");
+    check(shutdown->closed&&owned->state==slot_block::status::dead,"shutdown finishes owned values after a pre-destroy failure");
+    clear_error_trace();
+}
 int main(){try{
+    runtime_trace_tests();
     buffer_tests();
     hint_name_tests();
     check(getiFunction(0x0abd0006)->return_type()==ANY_VALUE,"mem_get reports its dynamic return type");

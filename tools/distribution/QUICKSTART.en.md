@@ -14,6 +14,18 @@ int main() {
 }
 ```
 
+## Runtime errors
+
+Compile with `./compile.sh -g hello.azs` to include function names and source locations; `-g` is off by default. A runtime failure exits with status 1 and writes to stderr, for example:
+
+```text
+AzScript error: Division by zero
+  at divide (hello.azs:2:14)
+  at main (hello.azs:5:12)
+```
+
+Without `-g`, a frame reads `  at function 0x0fff0002`. Native callbacks use `  at native function 0x12340001`; built-ins add no native frame. The failing function comes first, followed by callers, with at most 64 frames and `  ... N more frames` for any remainder. Lines and UTF-16 columns start at 1. See [runtime errors](LANGUAGE.en.md#runtime-errors-and-debug-info) for host exception handling.
+
 ## Variables, functions, and control flow
 
 Basic types are int, float, double, boolean (also bool), string, and address; functions may also return void. Int is signed 32-bit; address is an independent unsigned 64-bit slot address with null as its empty value. They do not implicitly convert. Decimals default to double; 1.5f is float. Integer overflow and division by zero are errors. Explicit primitive locals require initialization; var and def declare dynamic variables.

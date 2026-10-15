@@ -53,6 +53,18 @@ Launchers also accept full CLI commands: `./compile.sh compile-json hello.ast.js
 
 Call bin/azscript-run (Windows bin\azscript-run.exe) directly or through run.sh/run.cmd. An optional second argument is a hex/decimal function ID, for parameterless functions only. Repeated --insert path assembles libraries, then automatically flushes, runs dependency-ordered onload, executes entry, and closes. A rejected library is reported as `AzScript error: Cannot insert <path>: ...`; function IDs in errors are printed in hex, such as `0x0fff0001`. See [hint linking](HINT_LINKING.en.md) for separately compiled ordinary modules that collide in the default namespace.
 
+### Runtime errors
+
+Use `./compile.sh -g program.azs` for source locations. Execution errors exit with status 1 and print to stderr:
+
+```text
+AzScript error: Division by zero
+  at divide (program.azs:2:14)
+  at main (program.azs:5:12)
+```
+
+Without `-g`, frames read `  at function 0x0fff0002`. Native callbacks read `  at native function 0x12340001`; built-ins add no native frame. Frames list the failing function first, retain at most 64 entries, and end with `  ... N more frames` when truncated. Lines and UTF-16 columns start at 1. Cleanup preserves the first error and its trace. See [runtime errors and debug info](LANGUAGE.en.md#runtime-errors-and-debug-info).
+
 ## Math library
 
 Clients include declarations from stdlib/math.include.azs, by name as `#include "math.include.azs"` from anywhere, since the package's stdlib/ is searched by default, or by relative path, e.g. `#include "../stdlib/math.include.azs"` under examples/. Implementation stdlib/math.azs compiles independently with AZSCRIPT_MATH; do not include it in clients. Precompiled ABD and matching AST/exec JSON are bundled. Recompilation updates all three:
@@ -103,6 +115,8 @@ script->destroy();
 C++ azertian::address stores uint64 in .value. Variable(address) differs from variable(int); explicitly construct address arguments, e.g. azertian::address{bits}. Class pointers also use address; fields still occupy one slot. Literal values use OBJECT_VALUE (8); returned literals are host-owned without later user destructors. Public azertian::blocks create/resize/length/address_of APIs directly manage slot blocks.
 
 Load only mounts code. Flush links and initializes pending modules before invoke. Destroy runs destruction hooks and cleanup and is repeatable. Explicitly close on normal and exceptional exits. Do not use the old unbounded pointer API for external files. See examples/cpp/main.cpp for bounded reading, errors, and budgets.
+
+Catch the original C++ exception type and call `azertian::describe_error(error)` before `destroy()` or another runtime entry. It returns `what()` plus matching frames, without the CLI prefix or a trailing newline. `last_error_trace()` returns an `error_trace` containing `frames` and `omitted_frames`; `format_error_trace(trace)` formats the frames and `clear_error_trace()` clears them. Collection is thread-local and restarts at each entry, including callback reentry. The trace API changes the public C++ ABI: rebuild hosts and plugins against this package's matching headers and libraries.
 
 Insert_script records each module's global offset per function, so two -1 globals refer to separate slots. Parameter/local frames and block destructors remain independent. Fixed namespaces must avoid ID collisions; namespace_hint libraries receive runtime namespaces. Successful insertion requires another flush. Query namespace_for_hint("NAME"). See [global offsets](LANGUAGE.en.md#insert-and-module-global-offsets).
 
@@ -158,6 +172,8 @@ java -cp "java-build;java\abdJavaInvoker.jar" RunScript "%CD%" examples\hello.ex
 ```
 
 Before the first JNI call, applications may set `System.setProperty("azertia.native.library", absoluteLibraryPath)` or use -Djava.library.path to find abdJ. The OS must still locate its interpreter dependency.
+
+Native failures retain their Java exception mapping; their messages can contain multiple UTF-8 trace lines. Java callback throwables keep their original object identity and message. Each JNI entry, including reentry, starts fresh trace collection.
 
 Invoke accepts Integer, Float, Double, Boolean, String, azertia.Address, and null without truncating Long to int. Register matching IDs and exact script signatures:
 

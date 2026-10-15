@@ -14,6 +14,18 @@ int main() {
 }
 ```
 
+## 运行错误
+
+使用 `./compile.sh -g hello.azs` 可携带函数名和源码位置，`-g` 默认关闭。运行失败时退出码为 1，并向标准错误输出，例如：
+
+```text
+AzScript error: Division by zero
+  at divide (hello.azs:2:14)
+  at main (hello.azs:5:12)
+```
+
+未加 `-g` 时帧显示为 `  at function 0x0fff0002`。原生回调使用 `  at native function 0x12340001`，内置函数不增加原生帧。出错函数排在前面，随后是调用方；最多保留 64 帧，其余以 `  ... N more frames` 报告。行和 UTF-16 列从 1 开始。宿主异常处理见[运行错误](LANGUAGE.md#运行错误与调试信息)。
+
 ## 变量、函数与控制流
 
 基础类型为 `int`、`float`、`double`、`boolean`（也可写 `bool`）、`string`、`address`；函数还可以返回 `void`。`int` 是有符号 32 位整数，`address` 是独立的无符号 64 位 slot 地址，空地址写 `null`；二者不隐式转换。小数默认是 `double`，`1.5f` 是 `float`。整数溢出和除零会报错。显式基础类型的局部变量必须初始化；`var` 和 `def` 声明动态变量。

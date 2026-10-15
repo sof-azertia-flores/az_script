@@ -52,7 +52,8 @@ int main(int argc,char* argv[]) {
         if(value->type!=azertian::VOID_VALUE)std::cout<<azertian::value_to_string(value)<<'\n';
         script->destroy();return 0;
     }catch(const std::exception& error){
+        const auto message=azertian::describe_error(error);
         if(script&&!script->closed)try{script->destroy();}catch(...){}
-        std::cerr<<"AzScript error: "<<error.what()<<'\n';return 1;
+        std::cerr<<"AzScript error: "<<message<<'\n';return 1;
     }
 }

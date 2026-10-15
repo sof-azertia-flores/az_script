@@ -19,6 +19,7 @@
 #include <set>
 #include <sstream>
 #include <stdexcept>
+#include <string_view>
 #include <vector>
 
 using namespace azertian;
@@ -79,26 +80,29 @@ void require(JNIEnv* env, const void* value, const char* message) {
     checked(env);
     if (!value) throw std::invalid_argument(message);
 }
-void throwJava(JNIEnv* env, const char* kind, const char* message) noexcept {
-    if (env->ExceptionCheck()) return;
-    auto cls = env->FindClass(kind);
-    if (cls) { env->ThrowNew(cls, message); env->DeleteLocalRef(cls); }
+jstring toJava(JNIEnv* env, const std::string& value);
+void throwJava(JNIEnv* env, const char* kind, std::string_view message) noexcept;
+void reportError(JNIEnv* env, const char* kind, const std::exception& error) noexcept {
+    try { throwJava(env, kind, describe_error(error)); }
+    catch (...) { throwJava(env, kind, error.what()); }
 }
 void reportException(JNIEnv* env) noexcept {
     if (env->ExceptionCheck()) return;
     try { throw; }
     catch (const JavaException& error) { env->Throw(error.throwable->value); }
     catch (const std::bad_alloc&) { throwJava(env, "java/lang/OutOfMemoryError", "Native allocation failed"); }
-    catch (const std::out_of_range& e) { throwJava(env, "java/lang/IndexOutOfBoundsException", e.what()); }
-    catch (const std::invalid_argument& e) { throwJava(env, "java/lang/IllegalArgumentException", e.what()); }
-    catch (const std::exception& e) { throwJava(env, "java/lang/IllegalStateException", e.what()); }
+    catch (const std::out_of_range& e) { reportError(env, "java/lang/IndexOutOfBoundsException", e); }
+    catch (const std::invalid_argument& e) { reportError(env, "java/lang/IllegalArgumentException", e); }
+    catch (const std::exception& e) { reportError(env, "java/lang/IllegalStateException", e); }
     catch (...) { throwJava(env, "java/lang/IllegalStateException", "Unknown native runtime error"); }
 }
 template<class T, class F> T boundary(JNIEnv* env, T fallback, F&& action) noexcept {
+    clear_error_trace();
     try { std::lock_guard<std::recursive_mutex> lock(runtime_mutex()); return action(); }
     catch (...) { reportException(env); return fallback; }
 }
 template<class F> void boundary(JNIEnv* env, F&& action) noexcept {
+    clear_error_trace();
     try { std::lock_guard<std::recursive_mutex> lock(runtime_mutex()); action(); }
     catch (...) { reportException(env); }
 }
@@ -148,6 +152,31 @@ jstring toJava(JNIEnv* env, const std::string& value) {
         auto result = env->NewObject(cls, ctor, bytes, encoding); checked(env);
         return static_cast<jstring>(env->PopLocalFrame(result));
     } catch (...) { env->PopLocalFrame(nullptr); throw; }
+}
+void throwJava(JNIEnv* env, const char* kind, std::string_view message) noexcept {
+    if (env->ExceptionCheck()) return;
+    bool frame = false;
+    try {
+        if (env->PushLocalFrame(8) < 0) throw JavaException(env);
+        frame = true;
+        auto cls = env->FindClass(kind); checked(env);
+        auto ctor = env->GetMethodID(cls, "<init>", "(Ljava/lang/String;)V"); checked(env);
+        auto text = toJava(env, std::string(message));
+        auto error = static_cast<jthrowable>(env->NewObject(cls, ctor, text)); checked(env);
+        if (!error) throw std::bad_alloc();
+        env->Throw(error);
+        env->PopLocalFrame(nullptr);
+    } catch (...) {
+        // Constructor/string failures may leave a pending exception. Clear it
+        // before the ASCII-only fallback so -Xcheck:jni sees valid JNI calls.
+        env->ExceptionClear();
+        if (frame) env->PopLocalFrame(nullptr);
+        auto cls = env->FindClass(kind);
+        if (cls) {
+            env->ThrowNew(cls, "Native runtime error (message conversion failed)");
+            env->DeleteLocalRef(cls);
+        }
+    }
 }
 std::shared_ptr<variable> fromJavaObject(JNIEnv* env, jobject object) {
     if (!object) return std::make_shared<variable>(nullptr);
@@ -715,7 +744,8 @@ JNIEXPORT jlong JNICALL Java_azertia_jni_Caller_call(JNIEnv* env, jclass, jint i
         if (!result || result->type == VOID_VALUE) return jlong(0);
         if (result->type == OBJECT_VALUE) {
             // The value cannot reach Java, so it ends here; its destructor still runs.
-            try { blocks::finalize(blocks::of(result), loadedScript->baseEnv, true); } catch (...) {}
+            try { blocks::finalize(blocks::of(result), loadedScript->baseEnv, true); }
+            catch (...) { clear_error_trace(); }
             throw std::invalid_argument("The script function returned a literal object; return a pointer to cross the Java boundary");
         }
         HeapBlock storage(1);

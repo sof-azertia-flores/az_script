@@ -181,6 +181,8 @@ Insert_script appends modules and requires another flush on success. Exec global
 
 Execution throws standard C++ exceptions. Destroy is idempotent, runs destruction hooks, and releases globals. C++ object destruction releases owned storage but does not automatically run user hooks.
 
+In a catch handler, call `azertian::describe_error(error)` before `destroy()` or another runtime entry. It preserves the exception's type and `what()`, returning that message plus script frames without the `AzScript error: ` CLI prefix or a trailing newline. `last_error_trace()` returns an `error_trace` with `frames` and `omitted_frames`; `format_error_trace(trace)` formats its frame lines, and `clear_error_trace()` clears the trace. Collection is thread-local and starts afresh on each entry, including callback reentry; cleanup retains only the first error's trace. Compile with `-g` for names and 1-based file/line/UTF-16-column positions; otherwise frames use hex function IDs. See [runtime errors](compiler/LANGUAGE.en.md#runtime-errors-and-debug-info) for native frames and the 64-frame limit. The public C++ ABI has changed; rebuild hosts and plugins against matching headers and libraries.
+
 ## Java embedding
 
 Use build/java/abdJavaInvoker.jar with libabdJ and libabdInvoker (.dylib on macOS, .so on Linux). See [Java integration](abdJavaInvoker/README.en.md) for library paths.

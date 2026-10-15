@@ -55,6 +55,18 @@ AST 包含 extern 优先的名称绑定；普通定义的独立 ID 由 body name
 
 独立程序可直接调用 `bin/azscript-run`（Windows 为 `bin\azscript-run.exe`），也可通过 `run.sh`/`run.cmd` 调用。可选第二个参数是十六进制或十进制函数 ID；该入口只调用无参数函数。可重复使用 `--insert path` 装配库；装配后自动 flush、按依赖顺序执行 onload，再调用入口，最后关闭脚本。库被拒绝时报告 `AzScript error: Cannot insert <path>: ...`；错误中的函数 ID 以十六进制显示，例如 `0x0fff0001`。独立编译的普通模块在默认 namespace 冲突时的处理见 [hint 链接](HINT_LINKING.md)。
 
+### 运行错误
+
+使用 `./compile.sh -g program.azs` 保留源码位置。执行失败时退出码为 1，标准错误输出为：
+
+```text
+AzScript error: Division by zero
+  at divide (program.azs:2:14)
+  at main (program.azs:5:12)
+```
+
+未加 `-g` 时帧显示为 `  at function 0x0fff0002`。原生回调显示为 `  at native function 0x12340001`，内置函数不增加原生帧。调用帧从出错函数向外排列，最多保留 64 帧，截断时以 `  ... N more frames` 结束。行和 UTF-16 列从 1 开始。清理保留首个错误及其调用帧，详见[运行错误与调试信息](LANGUAGE.md#运行错误与调试信息)。
+
 ## 使用数学库
 
 调用方包含 `stdlib/math.include.azs` 中的 extern 声明：本包的 `stdlib/` 默认在查找范围内，任意位置都可写 `#include "math.include.azs"`；也可按调用源文件所在目录填写相对路径，例如 `examples/` 中使用 `#include "../stdlib/math.include.azs"`。实现 `stdlib/math.azs` 使用 `AZSCRIPT_MATH` hint 独立编译，不能 include 到调用方。发行包附带预编译的 `stdlib/math.exec.abd` 及配套 AST、exec JSON；修改实现后重新编译会默认更新这三份产物：
@@ -105,6 +117,8 @@ script->destroy();
 C++ 地址类型为 `azertian::address`，其 `.value` 保存无符号 64 位地址；`variable(address)` 与整数 `variable(int)` 是不同的值类型。地址参数须显式构造，例如 `azertian::address{bits}`，不能用整数替代。类指针也使用地址类型，单个字段仍占一个 slot。字面量对象以 `OBJECT_VALUE`（8）传递，宿主调用得到的字面量对象由宿主持有、不再运行析构；可用 `azscript/runtime.hpp` 中的 `azertian::blocks` API（`create/resize/length/address_of`）直接使用 slot 块。
 
 `load_script` 只装载；`flush()` 链接依赖并执行尚未初始化模块的加载钩子，成功后才能 invoke。`destroy()` 执行销毁钩子并清理脚本，允许重复调用。宿主应在正常和异常退出时都显式关闭脚本。不要用无长度的旧指针入口读取外部文件。完整文件读取、异常处理及预算设置见 `examples/cpp/main.cpp`。
+
+按原 C++ 异常类型捕获，在 `destroy()` 或再次进入运行时之前调用 `azertian::describe_error(error)`。它返回 `what()` 加匹配的调用帧，不含 CLI 前缀和末尾换行。`last_error_trace()` 返回含 `frames` 和 `omitted_frames` 的 `error_trace`；`format_error_trace(trace)` 格式化调用帧，`clear_error_trace()` 清空记录。记录是线程局部的，每次进入（包括回调重入）都重新开始收集。调用栈 API 改变了公开 C++ ABI，宿主和插件须用本包配套的头文件及库重新构建。
 
 使用 `script->insert_script(bytes.data(), bytes.size())` 追加数字 exec 模块时，每个函数保存模块自己的全局 offset；即使两个模块都使用 `-1` 作为第一个全局变量，也分别访问各自的槽。参数、局部变量和对象的块级析构保持独立。固定 namespace 的模块须避免 ID 冲突；独立库使用 `#namespace_hint NAME`，由运行时自动分配 namespace。成功 insert 后须再次 flush；通过 `namespace_for_hint("NAME")` 查询实际位置。数字变量格式与类型信息见 [语言文档](LANGUAGE.md#insert-与模块全局偏移)。
 
@@ -160,6 +174,8 @@ java -cp "java-build;java\abdJavaInvoker.jar" RunScript "%CD%" examples\hello.ex
 ```
 
 应用也可直接在首次 JNI 调用前设置 `System.setProperty("azertia.native.library", absoluteLibraryPath)`，或使用 `-Djava.library.path` 查找 `abdJ`。后一种方式仍须保证操作系统能找到它依赖的解释器库。
+
+原生错误保留现有 Java 异常映射，消息可能含多行 UTF-8 调用帧。Java 回调抛出的 throwable 保留原对象身份和消息。每次 JNI 入口（包括重入）都重新开始收集调用帧。
 
 Java `invoke` 支持 `Integer`、`Float`、`Double`、`Boolean`、`String`、`azertia.Address` 和 `null`，不会把 `Long` 隐式截断为 `int`。外部函数使用相同 ID 注册回调，并与脚本完整签名精确匹配：
 

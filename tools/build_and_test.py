@@ -71,6 +71,19 @@ def compile_java(module, deps):
     run(['jar','--create','--file',jar,'-C',classes,'.'])
     return jar
 
+def check_error_storage():
+    # Cleanup must retain both exception identity and its trace. Raw exception
+    # pointers outside pending_error would silently lose the latter on unwind.
+    for name in ('library.h', 'library.cpp', 'blocks.h', 'blocks.cpp', 'heepalloc.cpp'):
+        text = (ROOT/'interpreter'/name).read_text(encoding='utf-8')
+        if name == 'library.h':
+            start = text.index('class pending_error {')
+            end = text.index('\n};', start) + len('\n};')
+            text = text[:start] + text[end:]
+        if 'std::exception_ptr' in text:
+            raise RuntimeError(f'Raw exception storage outside pending_error in interpreter/{name}')
+    print('Error trace storage check passed.', flush=True)
+
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--offline',action='store_true')
@@ -78,6 +91,7 @@ def main():
     parser.add_argument('--skip-tests',action='store_true')
     parser.add_argument('--sanitize',action='store_true',help='Address/UB sanitizers on native tests (builds without JNI)')
     args=parser.parse_args()
+    check_error_storage()
     BUILD.mkdir(exist_ok=True)
     (BUILD/'tmp').mkdir(exist_ok=True)
     jars=[dependency(s,args.offline) for s in (DEPS[:1] if args.skip_tests else DEPS)]
@@ -154,6 +168,10 @@ def main():
            '--runner', native/'interpreter/azscript-run']
     if jni:types += ['--bridge', bridge, '--library', native/'abdjni'/libname]
     run(types)
+    traces=[sys.executable, ROOT/'tests/runtime_trace_end_to_end.py', '--classpath', classpath,
+            '--runner', native/'interpreter/azscript-run']
+    if jni:traces += ['--bridge', bridge, '--library', native/'abdjni'/libname]
+    run(traces)
     run([sys.executable, ROOT/'tests/address_end_to_end.py', '--classpath', classpath,
          '--runner', native/'interpreter/azscript-run', '--host', native/'interpreter/numeric-module-host'])
     run([sys.executable, ROOT/'tests/numeric_slots_end_to_end.py', '--classpath', classpath,
