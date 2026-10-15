@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Operators, conversions, ternary and switch source/AST/ABD parity, lifetimes and JNI."""
+"""Language operators, conversions, control flow and Unicode strings through source/AST/ABD and JNI."""
 import argparse
 import json
 import os
@@ -475,6 +475,84 @@ def main():
                 ('expression', 'int main(){return switch(1){default:break;};}', '')]:
             compile_case('switch-invalid-' + label, source, error=expected)
 
+        strings, _ = execute('strings-builtins', r'''void main(){string text="A中😀\u0000Z";
+            print(str_length(text));print(str_byte_length(text));print(str_substring(text,1,3));
+            print(str_char_at(text,2));print(str_code_at(text,2));print(str_from_code(128512));
+            print(str_index_of(text,"😀"));print(str_starts_with(text,"A中"));print(str_ends_with(text,"\u0000Z"));
+        }''', '5\n10\n中😀\n😀\n128512\n😀\n2\ntrue\ntrue\n')
+
+        def call_ids(value):
+            if isinstance(value, dict):
+                if value.get('t') == 1:
+                    yield value['id']
+                for child in value.values():
+                    yield from call_ids(child)
+            elif isinstance(value, list):
+                for child in value:
+                    yield from call_ids(child)
+
+        assert set(range(0x0abd000b, 0x0abd0014)) <= set(call_ids(strings[1])), strings[1]
+        checks += 1
+        execute('strings-methods-and-index', r'''void main(){string text="A中😀\u0000Z";
+            print(text.length());print(text.byte_length());print(text.substring(1,3));
+            print(text.char_at(2));print(text.code_at(2));print(text[2]);print(text[2].length());
+            print(text.index_of("😀"));print(text.index_of("😀",3));print(text.contains("😀"));print(text.contains("absent"));
+            print(text.starts_with(""));print(text.ends_with(""));print(text.index_of("",5));
+            print(text.substring(5,5)=="");print(text[3]=="\u0000");print(str_from_code(0)=="\u0000");
+        }''', '5\n10\n中😀\n😀\n128512\n😀\n1\n2\n-1\ntrue\nfalse\ntrue\ntrue\n5\ntrue\ntrue\ntrue\n')
+        execute('strings-empty-and-scalars', r'''void main(){string empty="";
+            print(empty.length());print(empty.byte_length());print("["+empty.substring(0,0)+"]");
+            print(empty.index_of(""));print(empty.starts_with(""));print(empty.ends_with(""));
+            print(str_length("e\u0301"));print(str_byte_length("e\u0301"));
+            print(str_char_at("e\u0301",1)=="\u0301");
+            print(str_code_at(str_from_code(1114111),0)==1114111);
+        }''', '0\n0\n[]\n0\ntrue\ntrue\n2\n3\ntrue\ntrue\n')
+        execute('strings-call-order', '''int trace;
+            string receiver(){trace=trace*10+1;return "abcd";}
+            int begin(){trace=trace*10+2;return 1;}
+            int end(){trace=trace*10+3;return 3;}
+            string needle(){trace=trace*10+4;return "bc";}
+            void main(){print(receiver().substring(begin(),end()));print(trace);
+                trace=0;print(receiver()[begin()]);print(trace);
+                trace=0;print(receiver().contains(needle()));print(trace);
+                trace=0;print(receiver().index_of(needle(),begin()));print(trace);}
+        ''', 'bc\n123\nb\n12\ntrue\n14\n1\n142\n')
+        execute('strings-class-name-shadow', '''class Shadow{int n;
+            int str_length(string value){return 99;}
+            string str_char_at(string value,int index){return "wrong";}
+            int str_index_of(string value,string needle,int from){return -1;}
+            int length(){return 88;}
+            int read(){string value="abc";return value.length();}
+            string first(){string value="中";return value[0];}
+            boolean found(){string value="abc";return value.contains("b");}}
+            void main(){Shadow value;print(value.read());print(value.first());print(value.found());print(value.length());}
+        ''', '3\n中\ntrue\n88\n')
+        text_literal = json.dumps('A中😀\0Z', ensure_ascii=False)
+        for label, expression, expected in [
+                ('char-negative', 'text.char_at(-1)', 'String index -1 is outside length 5'),
+                ('char-end', 'text[5]', 'String index 5 is outside length 5'),
+                ('code-end', 'text.code_at(5)', 'String index 5 is outside length 5'),
+                ('substring-negative', 'text.substring(-1,2)', 'String index -1 is outside length 5'),
+                ('substring-end', 'text.substring(0,6)', 'String index 6 is outside length 5'),
+                ('substring-order', 'text.substring(4,3)', 'String substring start 4 is after end 3'),
+                ('index-from-negative', 'text.index_of("",-1)', 'String index -1 is outside length 5'),
+                ('index-from-end', 'text.index_of("",6)', 'String index 6 is outside length 5')]:
+            execute('strings-bounds-' + label, f'void main(){{string text={text_literal};print({expression});}}', error=expected)
+        execute('strings-empty-index', 'void main(){print(""[0]);}', error='String index 0 is outside length 0')
+        for code in (-1, 55296, 57343, 1114112):
+            execute('strings-invalid-code-' + str(code), f'void main(){{print(str_from_code({code}));}}',
+                    error=f'Invalid Unicode code point: {code}')
+        for label, source, expected in [
+                ('immutable', 'void main(){string text="abc";text[0]="z";}', 'Strings are immutable'),
+                ('bad-index-type', 'void main(){print("abc"[true]);}', ''),
+                ('bad-length-type', 'void main(){print(str_length(1));}', ''),
+                ('bad-code-type', 'void main(){print(str_from_code(1.5));}', ''),
+                ('void-argument', 'void empty(){}void main(){print(str_length(empty()));}', ''),
+                ('bad-arity', 'void main(){print(str_substring("abc",0));}', ''),
+                ('unknown-method', 'void main(){string text="abc";text.unknown();}', '')]:
+            compile_case('strings-invalid-' + label, source, error=expected)
+        execute('operators-documented-example', (ROOT / 'compiler/examples/operators-regressions.azs').read_text(encoding='utf-8'), '0\n')
+
         if args.library:
             assert args.bridge, '--library requires --bridge'
             binary, _ = compile_case('jni', '''#namespace 5151
@@ -626,8 +704,63 @@ public class SelectionHost {
                           '-cp', os.pathsep.join((str(work), str(args.bridge))), 'SelectionHost', selection_binary])
             assert result.returncode == 0 and not result.stdout and not result.stderr, (result.stdout, result.stderr)
             checks += 1
+            string_binary, _ = compile_case('strings-jni', '''#namespace 5151
+                int length(string value):0060{return value.length();}
+                int bytes(string value):0061{return value.byte_length();}
+                string substring(string value,int begin,int end):0062{return value.substring(begin,end);}
+                string charAt(string value,int index):0063{return value[index];}
+                int codeAt(string value,int index):0064{return value.code_at(index);}
+                string fromCode(int code):0065{return str_from_code(code);}
+                int indexOf(string value,string needle,int from):0066{return value.index_of(needle,from);}
+                boolean starts(string value,string prefix):0067{return value.starts_with(prefix);}
+                boolean ends(string value,string suffix):0068{return value.ends_with(suffix);}
+                boolean contains(string value,string needle):0069{return value.contains(needle);}
+            ''')
+            string_java = work / 'UnicodeStringsHost.java'
+            string_java.write_text(r'''import azertia.AbdInvoker;
+import java.io.File;
+public class UnicodeStringsHost {
+ static void expect(int local,Object expected,Object... arguments){
+  Object actual=AbdInvoker.invoke(0x51510000|local,arguments);
+  if(actual==null||actual.getClass()!=expected.getClass()||!expected.equals(actual))throw new AssertionError(local+": "+actual);
+ }
+ static void reject(int local,Class<? extends RuntimeException> type,String message,Object... arguments){
+  try{AbdInvoker.invoke(0x51510000|local,arguments);throw new AssertionError("string operation accepted");}
+  catch(RuntimeException error){
+   String expected=message+"\n  at function "+String.format("0x%08x",0x51510000|local);
+   if(error.getClass()!=type||!expected.equals(error.getMessage()))throw new AssertionError(error.getMessage(),error);
+  }
+ }
+ public static void main(String[] args){
+  try{
+   AbdInvoker.loadScript(new File(args[0]));AbdInvoker.flush();
+   String value="A中😀"+(char)0+"Z";
+   expect(0x60,Integer.valueOf(5),value);expect(0x61,Integer.valueOf(10),value);
+   expect(0x62,"中😀"+(char)0,value,1,4);expect(0x63,"😀",value,2);
+   expect(0x63,String.valueOf((char)0),value,3);expect(0x64,Integer.valueOf(128512),value,2);
+   expect(0x65,"😀",128512);expect(0x65,String.valueOf((char)0),0);
+   expect(0x66,Integer.valueOf(2),value,"😀",0);expect(0x66,Integer.valueOf(5),value,"",5);
+   expect(0x67,Boolean.TRUE,value,"A中");expect(0x68,Boolean.TRUE,value,String.valueOf((char)0)+"Z");
+   expect(0x69,Boolean.TRUE,value,"😀");expect(0x69,Boolean.FALSE,value,"absent");
+   reject(0x63,IndexOutOfBoundsException.class,"String index -1 is outside length 5",value,-1);
+   reject(0x64,IndexOutOfBoundsException.class,"String index 5 is outside length 5",value,5);
+   reject(0x62,IndexOutOfBoundsException.class,"String substring start 4 is after end 3",value,4,3);
+   reject(0x66,IndexOutOfBoundsException.class,"String index 6 is outside length 5",value,"",6);
+   reject(0x65,IllegalArgumentException.class,"Invalid Unicode code point: 55296",55296);
+   reject(0x65,IllegalArgumentException.class,"Invalid Unicode code point: 1114112",1114112);
+   expect(0x63,"😀",value,2);
+  }finally{AbdInvoker.close();}
+ }
+}
+''', encoding='utf-8')
+            compiled = run(['javac', '--release', '17', '-encoding', 'UTF-8', '-cp', args.bridge, '-d', work, string_java])
+            assert compiled.returncode == 0 and not compiled.stderr, (compiled.stdout, compiled.stderr)
+            result = run(['java', '-Xcheck:jni', '-Dazertia.native.library=' + str(args.library.resolve()),
+                          '-cp', os.pathsep.join((str(work), str(args.bridge))), 'UnicodeStringsHost', string_binary])
+            assert result.returncode == 0 and not result.stdout and not result.stderr, (result.stdout, result.stderr)
+            checks += 1
 
-    print(f'Language operators end-to-end checks passed: {checks} (source/AST/ABD identity, bitwise, shifts, conversions, selection, switch, lifetimes and errors).')
+    print(f'Language operators end-to-end checks passed: {checks} (source/AST/ABD identity, bitwise, shifts, conversions, selection, switch, Unicode strings, lifetimes and errors).')
 
 
 if __name__ == '__main__':

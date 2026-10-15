@@ -810,6 +810,128 @@ void runtime_trace_tests() {
     check(shutdown->closed&&owned->state==slot_block::status::dead,"shutdown finishes owned values after a pre-destroy failure");
     clear_error_trace();
 }
+void string_tests() {
+    constexpr int builtin_base=0x0abd0000;
+    auto function=rfn(700,STRING_VALUE,rreturn(rcall(builtin_base+0x0e,{rvar(0),rvar(1)})),0,{ANY_VALUE,ANY_VALUE});
+    auto record=raw({rs("stringCall"),ri(0),ri(5),ri(1),raw({ri(1),ri(0),ri(7),ri(9)})});
+    function=append_raw(replace_raw(function,8,rb(true)),record);
+    auto program=load_raw(replace_raw(rmodule({function}),10,raw({rs("strings.azs")})));
+    auto text=[](std::string value){return std::make_shared<variable>(std::move(value));};
+    auto number=[](int value){return std::make_shared<variable>(value);};
+    auto call=[&](int operation,std::vector<V> args){return program->invoke(builtin_base+operation,std::move(args));};
+    auto string_result=[&](int operation,std::vector<V> args) {
+        auto value=call(operation,std::move(args));check(value->type==STRING_VALUE,"string operations preserve their string result ABI");
+        return *static_cast<std::string*>(value->value);
+    };
+    auto boolean_result=[&](int operation,std::vector<V> args) {
+        auto value=call(operation,std::move(args));check(value->type==BOOLEAN_VALUE,"string predicates return boolean values");
+        return *static_cast<bool*>(value->value);
+    };
+    auto failure=[&](int operation,std::vector<V> args,const std::string& message,bool range=false) {
+        bool caught=false;
+        try {call(operation,std::move(args));}
+        catch(const std::exception& error) {
+            caught=true;const auto& expected=range?typeid(std::out_of_range):typeid(std::invalid_argument);
+            check(typeid(error)==expected&&error.what()==message,"string failures retain their exact bounds or argument exception type and message");
+        }
+        check(caught,"invalid string operations must throw");
+    };
+    const int result_types[]{INT_VALUE,INT_VALUE,STRING_VALUE,STRING_VALUE,INT_VALUE,STRING_VALUE,INT_VALUE,BOOLEAN_VALUE,BOOLEAN_VALUE};
+    for(int operation=0x0b;operation<=0x13;++operation) {
+        auto builtin=getiFunction(builtin_base+operation);
+        check(builtin&&builtin->return_type()==result_types[operation-0x0b],"the dense string builtin range advertises correct result types");
+    }
+    const std::string cjk="\xe4\xb8\xad",emoji="\xf0\x9f\x98\x80",nul(1,'\0');
+    const std::string sample="A"+cjk+emoji+nul+"B",repeated=sample+cjk+emoji;
+    for(const auto& item:std::initializer_list<std::pair<std::string,int>>{
+        {"",0},{"hello",5},{cjk+"\xe6\x96\x87",2},{emoji+emoji,2},{nul,1},{sample,5},{"e\xcc\x81",2},
+    }) {
+        check(integer(call(0x0b,{text(item.first)}))==item.second,"str_length counts Unicode scalars rather than bytes, graphemes or UTF16 units");
+        check(integer(call(0x0c,{text(item.first)}))==static_cast<int>(item.first.size()),"str_byte_length includes every UTF8 byte and embedded NUL");
+    }
+    const std::vector<std::string> characters{"A",cjk,emoji,nul,"B"};const int codes[]{0x41,0x4e2d,0x1f600,0,0x42};
+    for(int i=0;i<5;++i) {
+        check(string_result(0x0e,{text(sample),number(i)})==characters[static_cast<std::size_t>(i)],"char_at returns exactly one complete code point");
+        check(integer(call(0x0f,{text(sample),number(i)}))==codes[i],"code_at returns Unicode scalar values including NUL and non-BMP values");
+    }
+    for(const auto& item:std::initializer_list<std::pair<int,std::string>>{
+        {0,nul},{0x7f,"\x7f"},{0x80,"\xc2\x80"},{0x7ff,"\xdf\xbf"},{0x800,"\xe0\xa0\x80"},
+        {0xd7ff,"\xed\x9f\xbf"},{0xe000,"\xee\x80\x80"},{0xffff,"\xef\xbf\xbf"},
+        {0x10000,"\xf0\x90\x80\x80"},{0x10ffff,"\xf4\x8f\xbf\xbf"},
+    }) {
+        auto encoded=string_result(0x10,{number(item.first)});
+        check(encoded==item.second&&integer(call(0x0b,{text(encoded)}))==1&&integer(call(0x0f,{text(encoded),number(0)}))==item.first,
+              "from_code emits the canonical UTF8 encoding at every scalar-width boundary");
+    }
+    struct slice {int begin,end;std::string expected;};
+    for(const auto& item:std::initializer_list<slice>{{0,0,""},{0,5,sample},{1,3,cjk+emoji},{2,3,emoji},{3,4,nul},{4,5,"B"},{5,5,""}})
+        check(string_result(0x0d,{text(sample),number(item.begin),number(item.end)})==item.expected,"substring uses half-open code-point indexes");
+    check(integer(call(0x11,{text(repeated),text(cjk+emoji)}))==1&&
+          integer(call(0x11,{text(repeated),text(cjk+emoji),number(2)}))==5&&
+          integer(call(0x11,{text(repeated),text(cjk+emoji),number(6)}))==-1,"index_of returns code-point indexes and honors its optional start");
+    check(integer(call(0x11,{text(sample),text(nul)}))==3&&integer(call(0x11,{text(sample),text("B")}))==4,
+          "index_of handles NUL and does not count a non-BMP character as two positions");
+    for(int from:{0,3,7})check(integer(call(0x11,{text(repeated),text(""),number(from)}))==from,"an empty needle matches the requested boundary including the end");
+    check(integer(call(0x11,{text(""),text("")}))==0&&integer(call(0x11,{text(""),text("x")}))==-1&&
+          integer(call(0x11,{text(repeated),text(emoji),number(7)}))==-1,"index_of handles empty text and a nonempty needle at the end");
+    check(boolean_result(0x12,{text(sample),text("A"+cjk)})&&boolean_result(0x13,{text(sample),text(nul+"B")})&&
+          boolean_result(0x12,{text(""),text("")})&&boolean_result(0x13,{text(""),text("")}),"prefix/suffix predicates support Unicode, NUL and empty strings");
+    check(!boolean_result(0x12,{text(sample),text(emoji)})&&!boolean_result(0x13,{text(sample),text(cjk)})&&
+          !boolean_result(0x12,{text("e\xcc\x81"),text("\xc3\xa9")}),"prefix/suffix checks compare code points without normalization");
+
+    for(int operation:{0x0e,0x0f})for(int index:{-1,5})
+        failure(operation,{text(sample),number(index)},"String index "+std::to_string(index)+" is outside length 5",true);
+    failure(0x0e,{text(""),number(0)},"String index 0 is outside length 0",true);
+    failure(0x0d,{text(sample),number(-1),number(2)},"String index -1 is outside length 5",true);
+    failure(0x0d,{text(sample),number(0),number(6)},"String index 6 is outside length 5",true);
+    failure(0x0d,{text(sample),number(3),number(2)},"String substring start 3 is after end 2",true);
+    for(int from:{-1,8})failure(0x11,{text(repeated),text(""),number(from)},"String index "+std::to_string(from)+" is outside length 7",true);
+    for(int code:{std::numeric_limits<int>::min(),-1,0xd800,0xdbff,0xdfff,0x110000,std::numeric_limits<int>::max()})
+        failure(0x10,{number(code)},"Invalid Unicode code point: "+std::to_string(code));
+    struct arguments {int operation;const char* name;std::vector<V> values;std::vector<int> types;};
+    const std::vector<arguments> cases{
+        {0x0b,"str_length",{text(sample)},{STRING_VALUE}},{0x0c,"str_byte_length",{text(sample)},{STRING_VALUE}},
+        {0x0d,"str_substring",{text(sample),number(0),number(5)},{STRING_VALUE,INT_VALUE,INT_VALUE}},
+        {0x0e,"str_char_at",{text(sample),number(0)},{STRING_VALUE,INT_VALUE}},
+        {0x0f,"str_code_at",{text(sample),number(0)},{STRING_VALUE,INT_VALUE}},
+        {0x10,"str_from_code",{number(0x41)},{INT_VALUE}},
+        {0x11,"str_index_of",{text(sample),text(cjk)},{STRING_VALUE,STRING_VALUE}},
+        {0x12,"str_starts_with",{text(sample),text("A")},{STRING_VALUE,STRING_VALUE}},
+        {0x13,"str_ends_with",{text(sample),text("B")},{STRING_VALUE,STRING_VALUE}},
+    };
+    for(const auto& item:cases) {
+        std::string arity=std::string(item.name)+" requires "+(item.operation==0x11?std::string("2 or 3 arguments"):
+            std::to_string(item.values.size())+(item.values.size()==1?" argument":" arguments"));
+        auto missing=item.values;missing.pop_back();failure(item.operation,missing,arity);
+        auto extra=item.values;extra.push_back(number(0));if(item.operation==0x11)extra.push_back(number(0));failure(item.operation,extra,arity);
+        for(std::size_t i=0;i<item.values.size();++i) {
+            const std::string message=std::string(item.name)+" argument "+std::to_string(i+1)+" must be "+(item.types[i]==INT_VALUE?"int":"string");
+            auto wrong=item.values;wrong[i]=item.types[i]==INT_VALUE?text("1"):number(1);failure(item.operation,wrong,message);
+            wrong[i]=nullptr;failure(item.operation,wrong,message);
+        }
+    }
+    failure(0x11,{text(sample),text(""),text("0")},"str_index_of argument 3 must be int");
+    const std::vector<std::string> malformed{
+        "\x80","\xc0\x80","\xc1\xbf","\xc2","\xe0\x80\x80","\xed\xa0\x80", "\xf0\x80\x80\x80",
+        "\xf4\x90\x80\x80","\xf5\x80\x80\x80","\xff","\xe2\x28\xa1","ok\xc2",
+    };
+    for(const auto& invalid:malformed) {
+        for(const auto& item:cases)if(item.operation!=0x10) {
+            auto args=item.values;args[0]=text(invalid);failure(item.operation,args,"Invalid UTF-8 string");
+        }
+        for(int operation:{0x11,0x12,0x13})failure(operation,{text(""),text(invalid)},"Invalid UTF-8 string");
+    }
+    check(value_to_string(program->invoke(700,{text(sample),number(2)}))==emoji,"script builtin calls return intact non-BMP UTF8");
+    bool caught=false;
+    try {program->invoke(700,{text(sample),number(5)});}
+    catch(const std::out_of_range& error) {
+        caught=true;check(typeid(error)==typeid(std::out_of_range)&&
+            describe_error(error)=="String index 5 is outside length 5\n  at stringCall (strings.azs:7:9)",
+            "string index failures keep their JNI-compatible exception type and script trace");
+    }
+    check(caught,"script string index failures propagate");
+    program->destroy();
+}
 void select_tests() {
     auto select=[](R condition,R when_true,R when_false){return rx(50,{std::move(condition),std::move(when_true),std::move(when_false)});};
     auto divide=[](){return rx(15,{rc(n(1)),rc(n(0))});};
@@ -1420,6 +1542,7 @@ void boolean_condition_equality_tests() {
     program->destroy();
 }
 int main(){try{
+    string_tests();
     select_tests();
     checked_return_tests();
     conversion_tests();

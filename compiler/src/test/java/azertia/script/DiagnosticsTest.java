@@ -684,13 +684,23 @@ class DiagnosticsTest {
 
     @Test void parsedProgramsAlwaysPassTheShapeCheck() throws Exception {
         // Any expression may be a receiver; the compiler rejects these by type, not as malformed ASTs.
-        for (String statement : List.of("int a = \"abc\".x;", "int b = \"abc\"[0];", "\"abc\"[0] = 1;", "\"abc\".x = 2;",
-                "return \"abc\".f(1);", "int c = 1(2);", "var e = true[1];", "null[0] = 1;", "var f = {1;}.x;")) {
+        record Case(String statement, String diagnostic) {}
+        for (Case item : List.of(
+                new Case("int a = \"abc\".x;", "String member access requires a supported string method"),
+                new Case("int b = \"abc\"[0];", "Initializer for b expected int, got string"),
+                new Case("\"abc\"[0] = 1;", "Strings are immutable"),
+                new Case("\"abc\".x = 2;", "String member access requires a supported string method"),
+                new Case("return \"abc\".f(1);", "Unknown string method: f"),
+                new Case("int c = 1(2);", "Member access requires a known class type"),
+                new Case("var e = true[1];", "Member access requires a known class type"),
+                new Case("null[0] = 1;", "Member access requires a known class type"),
+                new Case("var f = {1;}.x;", "Member access requires a known class type"))) {
+            String statement = item.statement();
             var script = new GeneraterJson.AzScript(); Diagnostics diagnostics = new Diagnostics();
             script.execute("int main(){\n  " + statement + "\n  return 0;\n}\n", diagnostics);
             CompileException error = assertThrows(CompileException.class, () -> Compiler.compile(script.toObj(), diagnostics), statement);
             assertFalse(error.internal(), error::getMessage);
-            assertTrue(error.getMessage().startsWith("<source>:2:") && error.getMessage().contains("Member access requires a known class type"),
+            assertTrue(error.getMessage().startsWith("<source>:2:") && error.getMessage().contains(item.diagnostic()),
                     error::getMessage);
         }
     }

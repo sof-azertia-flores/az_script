@@ -2,9 +2,11 @@
 #include "extern_library.h"
 #include "heepalloc.h"
 #include "blocks.h"
+#include "utf8_internal.h"
 #include <cstdint>
 #include <cstdio>
 #include <iostream>
+#include <limits>
 #include <stdexcept>
 namespace azertian {
 namespace {
@@ -71,6 +73,67 @@ public:
         return std::make_shared<variable>(script->namespace_for_hint(hint));
     }
 };
+class string_function final:public function {
+    int operation;
+    static constexpr const char* names[]{"str_length","str_byte_length","str_substring","str_char_at","str_code_at",
+        "str_from_code","str_index_of","str_starts_with","str_ends_with"};
+public:
+    explicit string_function(int operation):operation(operation) {}
+    int return_type() override {
+        if(operation==0x0d||operation==0x0e||operation==0x10)return STRING_VALUE;
+        if(operation==0x12||operation==0x13)return BOOLEAN_VALUE;
+        return INT_VALUE;
+    }
+    std::shared_ptr<variable> invoke(std::shared_ptr<environment>,std::vector<std::shared_ptr<variable>> args) override {
+        const std::string name=names[operation-0x0b];
+        const std::size_t arity=operation==0x0d?3:(operation==0x0b||operation==0x0c||operation==0x10)?1:2;
+        if(operation==0x11) {
+            if(args.size()!=2&&args.size()!=3)throw std::invalid_argument(name+" requires 2 or 3 arguments");
+        } else if(args.size()!=arity)
+            throw std::invalid_argument(name+" requires "+std::to_string(arity)+(arity==1?" argument":" arguments"));
+        auto argument=[&](std::size_t index,int type) -> const std::shared_ptr<variable>& {
+            if(!args[index]||args[index]->type!=type)
+                throw std::invalid_argument(name+" argument "+std::to_string(index+1)+" must be "+(type==INT_VALUE?"int":"string"));
+            return args[index];
+        };
+        auto integer=[&](std::size_t index){return *static_cast<int*>(argument(index,INT_VALUE)->value);};
+        auto string=[&](std::size_t index) -> const std::string& {return *static_cast<std::string*>(argument(index,STRING_VALUE)->value);};
+        auto as_int=[](std::size_t size) {
+            if(size>static_cast<std::size_t>(std::numeric_limits<int>::max()))throw std::overflow_error("String length exceeds int range");
+            return static_cast<int>(size);
+        };
+        if(operation==0x10)return std::make_shared<variable>(utf8_internal::encode(integer(0)));
+        const utf8_internal::view text(string(0));
+        auto index=[&](int value,bool allow_end) {
+            if(value<0||static_cast<std::size_t>(value)>text.length()||(!allow_end&&static_cast<std::size_t>(value)==text.length()))
+                throw std::out_of_range("String index "+std::to_string(value)+" is outside length "+std::to_string(text.length()));
+            return static_cast<std::size_t>(value);
+        };
+        if(operation==0x0b)return std::make_shared<variable>(as_int(text.length()));
+        if(operation==0x0c)return std::make_shared<variable>(as_int(text.bytes().size()));
+        if(operation==0x0d) {
+            const int begin=integer(1),end=integer(2);const auto first=index(begin,true),last=index(end,true);
+            if(first>last)throw std::out_of_range("String substring start "+std::to_string(begin)+" is after end "+std::to_string(end));
+            const auto offset=text.byte_offset(first),finish=text.byte_offset(last);
+            return std::make_shared<variable>(std::string(text.bytes().substr(offset,finish-offset)));
+        }
+        if(operation==0x0e||operation==0x0f) {
+            const auto offset=text.byte_offset(index(integer(1),false));
+            const auto scalar=utf8_internal::decode(text.bytes(),offset);
+            if(operation==0x0f)return std::make_shared<variable>(static_cast<int>(scalar.code));
+            return std::make_shared<variable>(std::string(text.bytes().substr(offset,scalar.width)));
+        }
+        const utf8_internal::view needle(string(1));
+        if(operation==0x12)return std::make_shared<variable>(text.bytes().starts_with(needle.bytes()));
+        if(operation==0x13)return std::make_shared<variable>(text.bytes().ends_with(needle.bytes()));
+        const auto from=index(args.size()==3?integer(2):0,true);
+        const auto found=text.bytes().find(needle.bytes(),text.byte_offset(from));
+        if(found==std::string_view::npos)return std::make_shared<variable>(-1);
+        // A valid UTF-8 needle never starts with a continuation byte, so every
+        // byte match starts at a code-point boundary, including matches of NUL.
+        return std::make_shared<variable>(as_int(utf8_internal::count(text.bytes().substr(0,found))));
+    }
+};
 std::map<int,std::shared_ptr<executor>>& registry(){static std::map<int,std::shared_ptr<executor>> r;return r;}
 std::uint64_t& generation(){static std::uint64_t value=0;return value;}
 std::shared_ptr<function> builtin(int id) {
@@ -78,7 +141,10 @@ std::shared_ptr<function> builtin(int id) {
         std::make_shared<print_function>(),std::make_shared<depth_function>(),std::make_shared<f_free>(),
         std::make_shared<f_heepalloc>(),std::make_shared<f_make_free>(),std::make_shared<f_send_up>(),std::make_shared<f_get>(),
         std::make_shared<load_extern_library_function>(),std::make_shared<reflect_invoke_function>(),
-        std::make_shared<hint_query_function>(false),std::make_shared<hint_query_function>(true)};
+        std::make_shared<hint_query_function>(false),std::make_shared<hint_query_function>(true),
+        std::make_shared<string_function>(0x0b),std::make_shared<string_function>(0x0c),std::make_shared<string_function>(0x0d),
+        std::make_shared<string_function>(0x0e),std::make_shared<string_function>(0x0f),std::make_shared<string_function>(0x10),
+        std::make_shared<string_function>(0x11),std::make_shared<string_function>(0x12),std::make_shared<string_function>(0x13)};
     int i=id&0xffff;
     return i<static_cast<int>(functions.size())?functions[i]:nullptr;
 }

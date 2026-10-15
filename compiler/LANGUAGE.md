@@ -87,7 +87,7 @@ float narrow(double value) { return float(value); }
 
 `#namespace_hint NAME` 声明独立库；库内普通函数（包括 `main`）以0000占位，0/1保留给生命周期，自动编号从2开始。`#assume_hint NAME abcd` 为调用声明假定 namespace，运行时在 `flush()` 中重定位。一个编译单元及其有效 include 最多包含一个 namespace 或 namespace_hint 指令。完整规则及可运行类库示例见 [多文件库与 hint 链接](../docs/HINT_LINKING.md)。
 
-十一个内置函数无需声明即可直接调用：
+二十个内置函数无需声明即可直接调用：
 
 | 名称 | 签名 | ID |
 | --- | --- | --- |
@@ -102,6 +102,15 @@ float narrow(double value) { return float(value); }
 | `reflect_invoke_function<R>` | `R(int, ...)` | `0x0abd0008` |
 | `reflect_get_hint_namespace` | `int(string)` | `0x0abd0009` |
 | `reflect_hint_loaded` | `boolean(string)` | `0x0abd000a` |
+| `str_length` | `int(string)` | `0x0abd000b` |
+| `str_byte_length` | `int(string)` | `0x0abd000c` |
+| `str_substring` | `string(string, int, int)` | `0x0abd000d` |
+| `str_char_at` | `string(string, int)` | `0x0abd000e` |
+| `str_code_at` | `int(string, int)` | `0x0abd000f` |
+| `str_from_code` | `string(int)` | `0x0abd0010` |
+| `str_index_of` | `int(string, string[, int])` | `0x0abd0011` |
+| `str_starts_with` | `boolean(string, string)` | `0x0abd0012` |
+| `str_ends_with` | `boolean(string, string)` | `0x0abd0013` |
 
 这些名称和 `0xabd` ID 是保留的，不能声明为脚本函数或外部函数；内置函数不会写入 AST 的 `abstract` 或 `extern-signatures`。
 
@@ -338,7 +347,7 @@ print(total); // 9
 
 `i++`、`++i`、`i--`、`--i` 可用作独立语句或 for 步进，只对简单数字或 address 变量进行加减一，不能嵌入返回值、实参或其他表达式，因此不区分前缀/后缀的取值结果。成员或 mem_get 左值仍不支持这种复合修改。整型溢出、地址越界，以及动态变量的非数字且非 address 值会报运行错误。
 
-非 void 函数的每条正常退出路径都必须返回值：if 需要两个分支都返回；while/for 只有条件为字面量 true（for 也可以省略条件）且循环体内没有属于它的 break 时才视为不会正常结束，否则编译器报告 `non-void function can reach the end of its body without returning a value`。语句以分号结束；紧邻块结尾的最后一条语句可以省略分号。函数定义尾部的分号可选。没有数组下标、对象字面量、闭包或异常处理语法；遇到这些语法会拒绝编译。
+非 void 函数的每条正常退出路径都必须返回值：if 需要两个分支都返回；while/for 只有条件为字面量 true（for 也可以省略条件）且循环体内没有属于它的 break 时才视为不会正常结束，否则编译器报告 `non-void function can reach the end of its body without returning a value`。语句以分号结束；紧邻块结尾的最后一条语句可以省略分号。函数定义尾部的分号可选。没有对象字面量、闭包或异常处理语法；遇到这些语法会拒绝编译。字符串、buffer 和提供下标运算符的类支持下标访问。
 
 整数是有符号 32 位，编译期拒绝超范围整数字面量。小数与科学记数法字面量默认生成 double；加 `f`/`F` 后缀生成 float，例如 `1.5f`、`5f`、`2e3f`。两种浮点字面量都会拒绝溢出及下溢为零。数值参与 `print` 或字符串 `+` 拼接时使用最短可往返表示（同 Java/JavaScript 的思路）：`0.1+0.2` 得到 `0.30000000000000004`，`123456789.0` 得到 `123456789`，`1e20` 得到 `1e+20`，float 按 float 精度输出（`0.1f` 得到 `0.1`），负零得到 `-0`。`n / 0` 在除数只能运行时确定时会正常编译；执行时，int、float、double 以及浮点正零或负零都统一抛出 `Division by zero`，不会产生 Infinity 或 NaN。整数算术溢出同样在运行时报告；位移遵循下述位模式规则。
 
@@ -435,6 +444,41 @@ Cannot convert string "1e400" to double: value is out of range
 ## 字符串、注释与预处理
 
 字符串可用单双引号。支持 `\\`、`\"`、`\'`、`\n`、`\r`、`\t`、`\b`、`\f`、`\0`、`\uXXXX`；`\uXXXX` 产生的 UTF-16 代理项必须成对书写（如 `\uD83D\uDE00`），孤立代理项在编译时报错；字符串中的空格、逗号、括号、分号和花括号完整保留。字符串不能跨越实际换行。支持 `//` 行注释和 `/* ... */` 块注释，括号、字符串、转义或注释未闭合时给出错误位置。
+
+### 字符串函数
+
+字符串下标、长度、搜索位置和子串端点按从零开始的 Unicode 码点计数，不按 UTF-8 字节、UTF-16 代码单元或字素簇计数：BMP 之外的 emoji 算一个码点，基础字母加组合附加符号算两个。只有 `byte_length` 统计 UTF-8 字节数。匹配精确且区分大小写，不进行 Unicode 规范化。嵌入 NUL 是普通码点，不会终止字符串。
+
+| 字符串形式 | 等价内置函数 | 结果 |
+| --- | --- | --- |
+| `s.length()` | `str_length(s)` | 码点数量。 |
+| `s.byte_length()` | `str_byte_length(s)` | UTF-8 字节数。 |
+| `s.substring(begin, end)` | `str_substring(s, begin, end)` | 半开区间 `[begin, end)` 的字符串。 |
+| `s.char_at(i)` 或 `s[i]` | `str_char_at(s, i)` | 含一个码点的字符串。 |
+| `s.code_at(i)` | `str_code_at(s, i)` | int 表示的 Unicode 标量值。 |
+| `s.index_of(needle[, from])` | `str_index_of(s, needle[, from])` | from 及之后首个匹配的码点下标，未找到为 -1；from 默认是 0。 |
+| `s.contains(needle)` | `str_index_of(s, needle, 0) >= 0` | 是否包含 needle。 |
+| `s.starts_with(prefix)` | `str_starts_with(s, prefix)` | 是否匹配前缀。 |
+| `s.ends_with(suffix)` | `str_ends_with(s, suffix)` | 是否匹配后缀。 |
+| `str_from_code(code)` | 同名函数；没有接收对象形式 | 含一个 Unicode 标量值的字符串。 |
+
+```c
+string text = "A😀中";
+print(text.length());         // 3
+print(text.byte_length());    // 8
+print(text[1]);               // 😀
+print(text.substring(1, 3));  // 😀中
+print(text.index_of("中"));    // 2
+print(str_from_code(128512) == text[1]); // true
+```
+
+`char_at`、`code_at` 及下标访问要求 `0 <= i < length`。子串要求 `0 <= begin <= end <= length`，空区间产生空串。搜索起点要求 `0 <= from <= length`。空 needle 在 from 处匹配，包括 length 处；空前缀、后缀总是匹配。`str_from_code` 接受 0…0x10ffff，但排除代理项 0xd800…0xdfff；码值 0 产生 NUL。
+
+下标和码值必须为 int，字符串参数必须为 string，void 实参被拒绝。接收对象和实参从左到右各求值一次。方法名只提供表中的 snake_case 形式；`contains` 只有方法形式，不占用独立内置 ID。双参数 `str_index_of(s, needle)` 和单参数 `s.index_of(needle)` 都在编译时补上显式的零起点。字符串方法和下标直接绑定保留的字符串内置函数，不受同名类方法影响。
+
+字符串不可变。`s[i] = value` 报告 `Strings are immutable; cannot assign through an index`；应构造新字符串，再给变量赋值。所有字符串函数都拒绝宿主传入的非法 UTF-8，包括 `byte_length` 和 needle 为空的搜索。下标/范围错误使用 `std::out_of_range`（JNI 为 `IndexOutOfBoundsException`），例如 `String index 5 is outside length 3` 或 `String substring start 2 is after end 1`。非法 UTF-8 或标量值使用 `std::invalid_argument`（JNI 为 `IllegalArgumentException`），消息为 `Invalid UTF-8 string` 或 `Invalid Unicode code point: 55296`。运行时调用栈保留这些异常类型。
+
+### 预处理
 
 支持以下预处理指令，可在行前缩进：
 

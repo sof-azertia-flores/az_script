@@ -86,6 +86,21 @@ Use `int(x)`, `float(x)`, or `double(x)` for numeric conversion or strict decima
 
 `int(2.9)` is 2, `int(2147483647.9)` is 2147483647, and `int("+7")` is 7. Numeric-to-int truncates toward zero before checking its range. Floating conversion can round and underflow to zero or a subnormal, but overflow fails. Integer strings allow only an optional sign and decimal digits; float/double strings also allow a point and exponent. Parsing uses `.` regardless of locale and rejects spaces, hex, suffixes, NaN/Infinity, and trailing text, even for literal string arguments. Use `int(x)`, not `(int)x`, and a comparison instead of `bool(x)`. See the [conversion matrix](LANGUAGE.en.md#explicit-conversions).
 
+## String functions
+
+```c
+string text = "A😀中";
+print(text.length());        // 3 code points
+print(text.byte_length());   // 8 UTF-8 bytes
+print(text[1]);              // 😀
+print(text.substring(1, 3)); // 😀中
+print(text.contains("中"));  // true
+```
+
+Methods also include `char_at(i)`, `code_at(i)`, `index_of(needle[, from])`, `starts_with(prefix)`, and `ends_with(suffix)`. Indices start at zero and count Unicode code points; substring uses an exclusive end. Search returns -1 when absent and defaults to from=0. Empty needles match at from; empty prefixes/suffixes match. `str_from_code(128512)` constructs "😀"; NUL is valid too.
+
+Strings are immutable: replace the variable with a new string instead of assigning `text[i]`. Invalid indices and substring ranges fail; surrogate code values and invalid UTF-8 are rejected. The corresponding `str_*` built-ins need no include/declaration. Only snake_case method names are supported. See [string functions](LANGUAGE.en.md#string-functions) for signatures and bounds.
+
 ## Classes, objects, and destruction
 
 ```cpp

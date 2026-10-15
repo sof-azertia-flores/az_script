@@ -2,11 +2,11 @@
 
 中文 | [English](STATUS.en.md)
 
-本分支计划 28 个提交，修复审查发现的编译器问题，增加语言特性和运行时行号。现已恢复工作并完成 C20；下一项是 C21。完整进度表、剩余提交说明、用户决定和恢复步骤以英文版 [STATUS.en.md](STATUS.en.md) 为准；逐提交设计见 [DESIGN.md](DESIGN.md)，设计审查见 [COMPLETENESS.md](COMPLETENESS.md)。
+本分支计划 28 个提交，修复审查发现的编译器问题，增加语言特性和运行时行号。现已恢复工作并完成 C21；下一项是 C22。完整进度表、剩余提交说明、用户决定和恢复步骤以英文版 [STATUS.en.md](STATUS.en.md) 为准；逐提交设计见 [DESIGN.md](DESIGN.md)，设计审查见 [COMPLETENESS.md](COMPLETENESS.md)。
 
 ## 已完成
 
-C01–C13 已提交并推送，C14–C20 已在本次续做中完成：
+C01–C13 已提交并推送，C14–C21 已在本次续做中完成：
 - 带源码映射的诊断，支持多错误报告与警告；
 - 十六进制运行时 ID；
 - include 根目录与 `#pragma once`；
@@ -30,9 +30,10 @@ C01–C13 已提交并推送，C14–C20 已在本次续做中完成：
 
 - C20 扁平 switch 降级、分组字面量标签、禁止贯穿及外层循环 continue，V0、V1、V3 均通过。
 
+- C21 Unicode 字符串函数、不可变的码点索引与方法语法；V0–V3 全部通过。
+
 ## 剩余
 
-- C21 字符串函数；
 - C22 类指针保持类型、对象存储拒绝原始内存访问；
 - C23 `check_object`；
 - C24 虚方法与 JNI 快照 v10；

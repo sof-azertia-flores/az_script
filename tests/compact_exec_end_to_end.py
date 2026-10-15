@@ -838,6 +838,44 @@ def main():
             execute_wire('select-condition-' + str(index), module([function(body)]), invalid=True,
                          error='Condition must be boolean')
 
+        # Builtins retain the ordinary CALL wire record and strict UTF-8
+        # constants, including NUL and a supplementary Unicode scalar.
+        unicode_text = 'A中😀\0Z'
+        string_calls = [(0x0abd000b, [unicode_text], 0, '5\n'),
+                        (0x0abd000c, [unicode_text], 0, '10\n'),
+                        (0x0abd000d, [unicode_text, 1, 4], 1, '中😀\0\n'),
+                        (0x0abd000e, [unicode_text, 2], 1, '😀\n'),
+                        (0x0abd000f, [unicode_text, 2], 0, '128512\n'),
+                        (0x0abd0010, [128512], 1, '😀\n'), (0x0abd0010, [0], 1, '\0\n'),
+                        (0x0abd0011, [unicode_text, '😀'], 0, '2\n'),
+                        (0x0abd0011, [unicode_text, '😀', 3], 0, '-1\n'),
+                        (0x0abd0011, [unicode_text, '', 5], 0, '5\n'),
+                        (0x0abd0012, [unicode_text, 'A中'], 4, 'true\n'),
+                        (0x0abd0013, [unicode_text, '\0Z'], 4, 'true\n')]
+        for index, (ident, arguments, kind, expected) in enumerate(string_calls):
+            call = expression(2, integer(ident), stack(*(constant(value) for value in arguments)), stack())
+            fields = module([function(returning(call), return_type=kind)])
+            payload = frame(stack(*fields))
+            parsed = WireReader().read(payload)
+            assert encode_compact_module(parsed) == payload, ('Unicode builtin wire roundtrip', ident)
+            execute_wire('independent-string-' + str(index), fields, expected=expected)
+        for index, (ident, arguments, error) in enumerate([
+                (0x0abd000e, [unicode_text, -1], 'String index -1 is outside length 5'),
+                (0x0abd000f, [unicode_text, 5], 'String index 5 is outside length 5'),
+                (0x0abd000d, [unicode_text, 4, 3], 'String substring start 4 is after end 3'),
+                (0x0abd000d, [unicode_text, 0, 6], 'String index 6 is outside length 5'),
+                (0x0abd0011, [unicode_text, '', 6], 'String index 6 is outside length 5'),
+                (0x0abd0010, [-1], 'Invalid Unicode code point: -1'),
+                (0x0abd0010, [55296], 'Invalid Unicode code point: 55296'),
+                (0x0abd0010, [1114112], 'Invalid Unicode code point: 1114112'),
+                (0x0abd000b, [1], 'str_length argument 1 must be string'),
+                (0x0abd000e, [unicode_text, True], 'str_char_at argument 2 must be int'),
+                (0x0abd0011, [unicode_text], 'str_index_of requires 2 or 3 arguments'),
+                (0x0abd0012, [unicode_text, '', 'extra'], 'str_starts_with requires 2 arguments')]):
+            call = expression(2, integer(ident), stack(*(constant(value) for value in arguments)), stack())
+            execute_wire('string-invalid-' + str(index), module([function(returning(call), return_type=0)]),
+                         invalid=True, error=error)
+
         mutations = [('root-missing', minimum[:-1]), ('root-extra', minimum + [b''])]
         for index, value, label in [(0, b'AZSCRIPX', 'magic'), (1, integer(5), 'version'), (1, integer(6), 'address-only-version'), (1, integer(7), 'literal-only-version'), (1, integer(8), 'v8-version'), (1, integer(9), 'previous-version'),
                 (1, b'\4', 'version-width'), (2, b'\2', 'source-version-width'),

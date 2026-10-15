@@ -1,3 +1,11 @@
+# C21 Unicode 字符串函数（2026-10-15）
+
+中文 | [English](VALIDATION.en.md)
+
+新增九个严格 UTF-8 字符串内建函数、码点索引和不可变的方法语法。流式校验覆盖内嵌 NUL、非法编码、码点与范围错误及搜索，无需分配码点数组。方法调用直接绑定内建 ID；私有 UTF-8 辅助头文件不属于 SDK。exec 保持 v10，快照保持 v9。
+
+清除 JAVA_TOOL_OPTIONS 后依次通过 V0–V3：264 项 Java 测试、5619 项原生检查、普通构建361项及 Sanitizer构建353项运算符/字符串用例、314项独立线格式用例。既有 JNI、模块和生命周期套件均通过，无 ASan/UBSan 报告。审查修正两处过时或无效的 Java 测试夹具后完整重跑。发行包通过26项迁移/消费者验收，174个清单文件的大小和 SHA-256 全部吻合。日志：build/c21/v1.log、build/c21/v2.log、build/c21/v3.log。
+
 # C20 switch 语句（2026-10-15）
 
 中文 | [English](VALIDATION.en.md)

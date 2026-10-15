@@ -165,6 +165,26 @@ At a script function boundary, a numeric result must exactly match the declared 
 
 Intentional narrowing requires an explicit `convert` expression before the return. Its truncation, range, rounding, and underflow checks run first; the resulting tag then matches the declaration. Native callback signatures still require exact argument/result tags; object ownership and pointer-return rules remain in force. These return checks change semantics only: exec stays v10, with no new opcode or record field.
 
+## String built-ins
+
+String operations use ordinary CALL records (opcode 2) with reserved IDs below; no extern signature, new opcode, or format version is introduced.
+
+| Name | Signature | Function ID |
+| --- | --- | --- |
+| `str_length` | `int(string)` | `0x0abd000b` |
+| `str_byte_length` | `int(string)` | `0x0abd000c` |
+| `str_substring` | `string(string, int, int)` | `0x0abd000d` |
+| `str_char_at` | `string(string, int)` | `0x0abd000e` |
+| `str_code_at` | `int(string, int)` | `0x0abd000f` |
+| `str_from_code` | `string(int)` | `0x0abd0010` |
+| `str_index_of` | `int(string, string[, int])` | `0x0abd0011` |
+| `str_starts_with` | `boolean(string, string)` | `0x0abd0012` |
+| `str_ends_with` | `boolean(string, string)` | `0x0abd0013` |
+
+These take exact string/int argument tags. `str_index_of` accepts two or three arguments at runtime, defaulting from to zero; source compilation always supplies the third argument. String methods lower to these same IDs, `s[i]` to `str_char_at(s, i)`, and `s.contains(n)` to `str_index_of(s, n, 0) >= 0`. There is no contains ID. Receivers and arguments evaluate once in order.
+
+All string arguments must be valid UTF-8, including for byte length and empty-needle/prefix/suffix cases; NUL is valid. Indices, lengths, substring endpoints, and search results count Unicode code points, except `str_byte_length` counts bytes. `char_at` returns a one-code-point string and `code_at` its int scalar. Substrings use `[begin, end)` with `0 <= begin <= end <= length`; char/code indices require `0 <= index < length`, and search starts require `0 <= from <= length`. Empty needles return from, absence returns -1, and empty prefixes/suffixes match. `str_from_code` excludes negative values, surrogates, and values above 0x10ffff. Bounds errors are `std::out_of_range`; invalid UTF-8/scalars are `std::invalid_argument`. Strings remain immutable; methods and indexing add no storage or object ABI.
+
 ## Type numbers and constants
 
 Signature and `declared_type` numbers are int=0, string=1, float=2, double=3, boolean=4, void=5, any=6, address=7, object=8. Parameters and variables cannot be void. Untyped script parameters/variables use any. An any return or any external parameter is permitted only when `hidden_count > 0`, for generic erasure; source extern declarations still require explicit types. The inspection JSON may omit `declared-type` for any. Class pointers, `C (*)` parameters, implicit this, and pointer-factory returns erase to address; callers apply `block_address` to literal-object arguments for `C (*)`. Literal parameters, returns, and variables use object. Addresses do not loosen int checks. These numbers are distinct from ABD scalar tags; object values have no constant encoding.

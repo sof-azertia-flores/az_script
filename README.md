@@ -80,7 +80,7 @@ int main() {
 }
 ```
 
-内置函数 `print`、`getDepth`、`mem_free`、`alloc`、`make_free`、`mem_send_up`、`mem_get` 和 `load_extern_library` 由编译器直接提供，不需要 include 或声明。`load_extern_library("xxx")` 按当前系统加载已签名的 `xxx.so` / `xxx.dylib` / `xxx.dll`，库内用现有的 C++ 宿主注册接口挂上外部函数。独立运行时从 `AZSCRIPT_TRUSTED_KEY` 或 `trusted_key.pem` 读取公钥；嵌入式宿主通过 C++ / Java API 提供公钥。完整约定见 [外部动态库](docs/EXTERN_LIBRARY.md)。include 先按所在源文件的目录解析，再依次查找各 `-I` 目录和包装脚本的标准库目录；绝对路径和离开这些根目录的路径需要 `--unrestricted-includes`（见[预处理](compiler/LANGUAGE.md#字符串注释与预处理)）。
+内置函数 `print`、`getDepth`、`mem_free`、`alloc`、`make_free`、`mem_send_up`、`mem_get` 和 `load_extern_library` 由编译器直接提供，不需要 include 或声明。`str_*` [字符串函数](compiler/LANGUAGE.md#字符串函数) 同样无需声明，并提供按码点计算的方法和下标访问。`load_extern_library("xxx")` 按当前系统加载已签名的 `xxx.so` / `xxx.dylib` / `xxx.dll`，库内用现有的 C++ 宿主注册接口挂上外部函数。独立运行时从 `AZSCRIPT_TRUSTED_KEY` 或 `trusted_key.pem` 读取公钥；嵌入式宿主通过 C++ / Java API 提供公钥。完整约定见 [外部动态库](docs/EXTERN_LIBRARY.md)。include 先按所在源文件的目录解析，再依次查找各 `-I` 目录和包装脚本的标准库目录；绝对路径和离开这些根目录的路径需要 `--unrestricted-includes`（见[预处理](compiler/LANGUAGE.md#字符串注释与预处理)）。
 
 `address` 是独立的无符号 64 位地址类型，表示 slot 位置，空地址写作 `null`。例如 `address p = alloc(2); mem_get(p + 1) = 42; mem_free(p);`。地址支持与 int32 偏移加减并检查越界；对象引用也使用该运行时类型，类成员的静态类型检查和继承规则保持不变。地址值、变量槽编号、分配数量和函数 ID 是不同概念，后面三者仍使用既有 32 位表示。
 
@@ -214,6 +214,7 @@ try {
 - 显式 `int/float/double/string/address(x)` 按受检查的配对表执行数值转换、严格十进制字符串解析、数值/address 转字符串及 address 恒等；不支持 int/address 互转、布尔/类转换或 C 风格强转。int 先截断再检查范围，浮点转换允许下溢但拒绝溢出。详见[显式转换](compiler/LANGUAGE.md#显式转换)。
 - `条件 ? a : b` 在外围作用域中只计算一个分支，结果取共同类型并进行数值提升。它在赋值和 `||` 之间右结合；两个分支都须通过类型检查。详见[条件表达式](compiler/LANGUAGE.md#条件表达式)。
 - `switch` 对 int/string 值求值一次，匹配字面量标签，不允许贯穿。连续标签共享分段，default 可在任意位置，每个分段有独立作用域。详见 [switch](compiler/LANGUAGE.md#switch)。
+- 字符串是不可变 UTF-8 值。`s.length()`、`s[i]`、半开区间 `substring(begin, end)` 和搜索按 Unicode 码点计算，`byte_length()` 统计字节。NUL 合法，非法 UTF-8 被拒绝，越界映射为 Java IndexOutOfBoundsException。
 - 小数默认是 double；`1.5f`、`5f`、`2e3f` 是 float 字面量。
 - `extern int host_add(int, int):0xccf0001;` 以完整签名绑定宿主函数；类型必填，旧 `#extern` 指令已删除。参数和回调返回值按实际类型精确匹配，`int`、`float`、`double` 之间不隐式转换。`#namespace 1234` 支持1～4位，拒绝保留的 `0000` 和 `0abd`；独立库用 `#namespace_hint` 声明，`#assume_hint` 绑定调用。
 - 函数按值传参，参数从左到右求值；函数只能访问自己的局部变量和全局变量。块有独立作用域，循环每次创建新的块作用域。`for` 初始化变量的作用域包含整个循环，循环结束后不可见。

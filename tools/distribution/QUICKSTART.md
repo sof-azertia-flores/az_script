@@ -86,6 +86,21 @@ double value = ready ? 1 : 2.5; // double 1
 
 `int(2.9)` 为 2，`int(2147483647.9)` 为 2147483647，`int("+7")` 为 7。数值转 int 先向零截断再检查范围。浮点转换可能舍入、下溢为零或次正规数，但溢出会失败。整数字符串只允许可选正负号和十进制数字；float/double 字符串还允许小数点和指数。解析不受区域设置影响，小数点固定为 `.`，拒绝空格、十六进制、后缀、NaN/Infinity 和尾部多余文字，即使参数是字符串字面量也如此。使用 `int(x)` 而不是 `(int)x`，使用比较而不是 `bool(x)`；详见[转换配对表](LANGUAGE.md#显式转换)。
 
+## 字符串函数
+
+```c
+string text = "A😀中";
+print(text.length());        // 3 个码点
+print(text.byte_length());   // 8 个 UTF-8 字节
+print(text[1]);              // 😀
+print(text.substring(1, 3)); // 😀中
+print(text.contains("中"));  // true
+```
+
+方法还包括 `char_at(i)`、`code_at(i)`、`index_of(needle[, from])`、`starts_with(prefix)` 和 `ends_with(suffix)`。下标从零开始，按 Unicode 码点计数，子串不包含 end 端点。搜索未找到返回 -1，from 默认为 0。空 needle 在 from 处匹配，空前缀/后缀总是匹配。`str_from_code(128512)` 构造 "😀"，NUL 同样合法。
+
+字符串不可变：应把新字符串赋给变量，而不是给 `text[i]` 赋值。非法下标、子串范围会报错，Unicode 代理项码值和非法 UTF-8 被拒绝。对应的 `str_*` 内置函数不需要 include 或声明；方法名只支持 snake_case 形式。签名和边界规则见[字符串函数](LANGUAGE.md#字符串函数)。
+
 ## 类、对象与析构
 
 ```cpp

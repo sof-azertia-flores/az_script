@@ -145,7 +145,8 @@ def verify(package: Path, java: Optional[Path] = None) -> Dict[str, object]:
                 package / "stdlib/containers.exec.json",
                 package / "examples/hello.azs", package / "examples/classes.azs",
                 package / "examples/loops-regressions.azs", package / "examples/inheritance-regressions.azs",
-                package / "examples/address-regressions.azs", package / "include/azscript/detail/abdC/address.h",
+                package / "examples/address-regressions.azs", package / "examples/operators-regressions.azs",
+                package / "include/azscript/detail/abdC/address.h",
                 package / "include/azscript/extern_library.hpp",
                 package / "include/azscript/detail/interpreter/library.h",
                 package / "include/azscript/detail/interpreter/internelFunctions.h",
@@ -355,7 +356,7 @@ def verify(package: Path, java: Optional[Path] = None) -> Dict[str, object]:
                  f"Class example or destructor order failed: {result.stdout!r}")
         passed("literal objects, pointer objects and destructor execution")
 
-        for name, expected in (("loops-regressions", "9"), ("inheritance-regressions", "0"), ("address-regressions", "0")):
+        for name, expected in (("loops-regressions", "9"), ("inheritance-regressions", "0"), ("address-regressions", "0"), ("operators-regressions", "0")):
             output = cwd / "language output" / (name + ".exec.abd")
             _run([compiler, package / "examples" / (name + ".azs"), "-o", output], cwd, compiler_environment)
             ast = output.with_name(name + ".ast.json")
@@ -539,6 +540,12 @@ int main() {
         case "ready": switched += 1;
     }
     if (switched != 314) return -21;
+    string text = "A中😀\\u0000Z";
+    if (str_length(text) != 5 || str_byte_length(text) != 10) return -40;
+    if (str_substring(text, 1, 3) != "中😀" || str_char_at(text, 2) != "😀") return -41;
+    if (str_code_at(text, 2) != 128512 || str_from_code(128512) != "😀") return -42;
+    if (str_index_of(text, "😀") != 2 || str_index_of(text, "", 5) != 5) return -43;
+    if (!str_starts_with(text, "A中") || !str_ends_with(text, "Z")) return -44;
     return invoke<int>(305397826, values[0]) + value_compare<string>("b", "a");
 }
 ''', encoding="utf-8")
@@ -557,6 +564,19 @@ int main() {
                  f"Conversion probe must exercise the exec v{EXEC_VERSION} convert instruction")
         _require(50 in modern_opcodes,
                  f"Conditional expression probe must exercise the exec v{EXEC_VERSION} select instruction")
+
+        def builtin_calls(value):
+            if isinstance(value, dict):
+                if value.get("t") == 1:
+                    yield value["id"]
+                for child in value.values():
+                    yield from builtin_calls(child)
+            elif isinstance(value, list):
+                for child in value:
+                    yield from builtin_calls(child)
+
+        _require(set(range(0x0abd000b, 0x0abd0014)) <= set(builtin_calls(modern_view["f"])),
+                 "String probe must exercise all nine Unicode string builtins")
         modern_roundtrip = modern_abd.with_name("features.roundtrip.abd")
         _run([compiler, "compile-json", modern_ast, "-o", modern_roundtrip], cwd, compiler_environment)
         _require(modern_abd.read_bytes() == modern_roundtrip.read_bytes(),
@@ -564,7 +584,7 @@ int main() {
         result = _run([runner, modern_abd], cwd, environment)
         _require(result.stdout.splitlines() == ["42"],
                  f"Packaged feature probe failed: {result.stdout!r}")
-        passed("generic contexts, owning buffers, class operators, reflection, bitwise, shifts, conversions, conditional expressions and switch through relocated tools")
+        passed("generic contexts, owning buffers, class operators, reflection, bitwise, shifts, conversions, conditional expressions, switch and Unicode strings through relocated tools")
 
         standalone = work / "standalone runner"
         standalone_bin = standalone / "bin"

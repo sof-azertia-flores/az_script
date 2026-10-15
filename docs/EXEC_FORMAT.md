@@ -165,6 +165,26 @@ JNI 快照 v9 递归保存对象已绑定的析构上下文，包括 ABI、kind�
 
 有意收窄时，必须在返回前显式执行 `convert` 表达式，先完成其截断、范围、舍入和下溢检查，再以转换后的标签匹配声明。原生回调签名仍要求实参/结果标签精确匹配；对象所有权和指针返回规则继续生效。返回检查只改变语义：exec 保持 v10，不增加 opcode 或记录字段。
 
+## 字符串内置函数
+
+字符串操作使用普通 CALL 记录（opcode 2）及下列保留 ID；不增加 extern 签名、新 opcode 或格式版本。
+
+| 名称 | 签名 | 函数 ID |
+| --- | --- | --- |
+| `str_length` | `int(string)` | `0x0abd000b` |
+| `str_byte_length` | `int(string)` | `0x0abd000c` |
+| `str_substring` | `string(string, int, int)` | `0x0abd000d` |
+| `str_char_at` | `string(string, int)` | `0x0abd000e` |
+| `str_code_at` | `int(string, int)` | `0x0abd000f` |
+| `str_from_code` | `string(int)` | `0x0abd0010` |
+| `str_index_of` | `int(string, string[, int])` | `0x0abd0011` |
+| `str_starts_with` | `boolean(string, string)` | `0x0abd0012` |
+| `str_ends_with` | `boolean(string, string)` | `0x0abd0013` |
+
+实参标签必须精确匹配 string/int。运行时 `str_index_of` 接受两个或三个参数，缺省 from 为零；源码编译总是补齐第三个参数。字符串方法降为相同 ID，`s[i]` 降为 `str_char_at(s, i)`，`s.contains(n)` 降为 `str_index_of(s, n, 0) >= 0`，没有 contains ID。接收对象和实参按顺序各求值一次。
+
+所有字符串实参都必须是合法 UTF-8，字节长度及空 needle/前缀/后缀也不例外；NUL 合法。下标、长度、子串端点和搜索结果按 Unicode 码点计数，只有 `str_byte_length` 统计字节数。`char_at` 返回含一个码点的字符串，`code_at` 返回其 int 标量值。子串使用 `[begin, end)`，要求 `0 <= begin <= end <= length`；char/code 下标要求 `0 <= index < length`，搜索起点要求 `0 <= from <= length`。空 needle 返回 from，未找到返回 -1，空前缀/后缀匹配。`str_from_code` 拒绝负数、代理项和大于 0x10ffff 的值。越界使用 `std::out_of_range`，非法 UTF-8/标量值使用 `std::invalid_argument`。字符串仍不可变，方法和下标不增加存储或对象 ABI。
+
 ## 类型编号与常量
 
 函数签名与 `declared_type` 的类型编号为 int=0、string=1、float=2、double=3、boolean=4、void=5、any=6、address=7、object=8。参数和变量不能为 void；未标注类型的脚本参数/变量使用 any。仅当 `hidden_count > 0` 时允许 any 返回和 any 外部参数，用于泛型擦除；源码 extern 声明仍须明确标注类型。检查视图 JSON 可省略 any 的 `declared-type`。类指针、`C (*)` 参数、隐式 this 以及指针工厂的返回值擦除为 address（`C (*)` 实参为字面量对象时，调用方先用 `block_address` 取地址）；字面量对象的参数、返回、变量类型为 object。地址不会放宽 int 参数的类型检查。这些编号与 ABD 标量标签属于不同的编码层；对象值没有常量表示。

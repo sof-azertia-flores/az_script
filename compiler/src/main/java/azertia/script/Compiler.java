@@ -38,7 +38,26 @@ public class Compiler {
             new BuiltinSpec("load_extern_library", 0x0abd0007, AsTypes.VOID_VALUE, List.of(AsTypes.STRING_VALUE)),
             new BuiltinSpec("reflect_invoke_function", 0x0abd0008, AsTypes.ANY_VALUE, List.of()),
             new BuiltinSpec("reflect_get_hint_namespace", 0x0abd0009, AsTypes.INT_VALUE, List.of(AsTypes.STRING_VALUE)),
-            new BuiltinSpec("reflect_hint_loaded", 0x0abd000a, AsTypes.BOOLEAN_VALUE, List.of(AsTypes.STRING_VALUE)));
+            new BuiltinSpec("reflect_hint_loaded", 0x0abd000a, AsTypes.BOOLEAN_VALUE, List.of(AsTypes.STRING_VALUE)),
+            new BuiltinSpec("str_length", 0x0abd000b, AsTypes.INT_VALUE, List.of(AsTypes.STRING_VALUE)),
+            new BuiltinSpec("str_byte_length", 0x0abd000c, AsTypes.INT_VALUE, List.of(AsTypes.STRING_VALUE)),
+            new BuiltinSpec("str_substring", 0x0abd000d, AsTypes.STRING_VALUE, List.of(AsTypes.STRING_VALUE, AsTypes.INT_VALUE, AsTypes.INT_VALUE)),
+            new BuiltinSpec("str_char_at", 0x0abd000e, AsTypes.STRING_VALUE, List.of(AsTypes.STRING_VALUE, AsTypes.INT_VALUE)),
+            new BuiltinSpec("str_code_at", 0x0abd000f, AsTypes.INT_VALUE, List.of(AsTypes.STRING_VALUE, AsTypes.INT_VALUE)),
+            new BuiltinSpec("str_from_code", 0x0abd0010, AsTypes.STRING_VALUE, List.of(AsTypes.INT_VALUE)),
+            new BuiltinSpec("str_index_of", 0x0abd0011, AsTypes.INT_VALUE, List.of(AsTypes.STRING_VALUE, AsTypes.STRING_VALUE, AsTypes.INT_VALUE)),
+            new BuiltinSpec("str_starts_with", 0x0abd0012, AsTypes.BOOLEAN_VALUE, List.of(AsTypes.STRING_VALUE, AsTypes.STRING_VALUE)),
+            new BuiltinSpec("str_ends_with", 0x0abd0013, AsTypes.BOOLEAN_VALUE, List.of(AsTypes.STRING_VALUE, AsTypes.STRING_VALUE)));
+    private static final Map<String,BuiltinSpec> STRING_BUILTINS = stringBuiltins();
+    private static Map<String,BuiltinSpec> stringBuiltins() {
+        Map<String,BuiltinSpec> result = new LinkedHashMap<>();
+        for (BuiltinSpec spec : BUILTINS) if (spec.id() >= 0x0abd000b && spec.id() <= 0x0abd0013) result.put(spec.name(), spec);
+        return Map.copyOf(result);
+    }
+    private static final Map<String,String> STRING_METHODS = Map.of(
+            "length", "str_length", "byte_length", "str_byte_length", "substring", "str_substring",
+            "char_at", "str_char_at", "code_at", "str_code_at", "index_of", "str_index_of",
+            "contains", "str_index_of", "starts_with", "str_starts_with", "ends_with", "str_ends_with");
     private static final Set<String> BUILTIN_NAMES = builtinNames();
     private static Set<String> builtinNames() {
         Set<String> names = new HashSet<>(Set.of("value_compare", "buffer"));
@@ -369,6 +388,7 @@ public class Compiler {
         JsonObject overloaded = overloadedCall(object, environment);
         if (overloaded != null) return expressionType(overloaded, environment);
         if(kind.equals("call")) {
+            if (STRING_BUILTINS.containsKey(operation)) return STRING_BUILTINS.get(operation).returnType();
             if (SourceRules.CONVERSIONS.contains(operation)) return conversionTarget(operation);
             if (operation.equals("boolean") || operation.equals("bool"))
                 throw new IllegalArgumentException("Boolean conversions are not supported; write a comparison");
@@ -386,7 +406,13 @@ public class Compiler {
             case "buffer-new" -> bufferType(valueType(string(params.get(0), "Buffer element type"), true));
             case "member" -> memberField(params, environment).type();
             case "member-set" -> params.size() == 2 ? expressionType(params.get(1), environment) : AsTypes.ANY_VALUE;
-            case "member-call" -> isBufferReceiver(object,environment) ? bufferMethodType(object,environment) : expressionType(memberCall(object,environment),environment);
+            case "member-call" -> isStringReceiver(object,environment) ? stringMethodType(object)
+                    : isBufferReceiver(object,environment) ? bufferMethodType(object,environment) : expressionType(memberCall(object,environment),environment);
+            case "index" -> isStringReceiver(object,environment) ? AsTypes.STRING_VALUE : AsTypes.ANY_VALUE;
+            case "index-set" -> {
+                if (isStringReceiver(object,environment)) throw new IllegalArgumentException("Strings are immutable; cannot assign through an index");
+                yield AsTypes.ANY_VALUE;
+            }
             case "base-call" -> expressionType(baseCall(object,environment),environment);
             case "#context-abi" -> {requireTrusted(object,environment);yield AsTypes.INT_VALUE;}
             case "#context-default" -> {requireTrusted(object,environment);yield params.get(0).getAsInt();}
@@ -871,6 +897,7 @@ public class Compiler {
         JsonObject overloaded=overloadedCall(source,environment);
         if(overloaded!=null)return compileInstruction(overloaded,environment);
         if (type.equals("call")) {
+            if (STRING_BUILTINS.containsKey(call)) return compileStringBuiltin(call, params, source.has("type-args"), environment);
             if (SourceRules.CONVERSIONS.contains(call)) return compileConversion(source, environment);
             if (call.equals("boolean") || call.equals("bool"))
                 throw new IllegalArgumentException("Boolean conversions are not supported; write a comparison");
@@ -1046,7 +1073,14 @@ public class Compiler {
                 result.put("c", ExecOpcodes.code("m")); result.put("v1", compileExpression(member, environment));
                 result.put("v2", compileExpression(params.get(1), environment));
             }
-            case "member-call" -> { return isBufferReceiver(source,environment)?compileBufferCall(source,environment):compileInstruction(memberCall(source,environment),environment); }
+            case "member-call" -> { return isStringReceiver(source,environment) ? compileStringMethod(source,environment)
+                    : isBufferReceiver(source,environment)?compileBufferCall(source,environment):compileInstruction(memberCall(source,environment),environment); }
+            case "index" -> {
+                arity(call,params,2,2);
+                if (!isStringReceiver(source,environment)) throw new IllegalArgumentException("Indexing requires a string or a class with an index operator");
+                return compileStringBuiltin("str_char_at",params,source.has("type-args"),environment);
+            }
+            case "index-set" -> throw new IllegalArgumentException("Strings are immutable; cannot assign through an index");
             case "base-call" -> { return compileInstruction(baseCall(source,environment),environment); }
             case "object-new" -> {
                 arity(call, params, 1, Integer.MAX_VALUE);
@@ -1597,6 +1631,7 @@ public class Compiler {
         if(!kind.equals("ctrl"))return null;
         if(INDEX_OPERATIONS.contains(operation)) {
             arity(operation,params,operation.equals("invoke")?1:operation.equals("index")?2:3,operation.equals("invoke")?Integer.MAX_VALUE:operation.equals("index")?2:3);
+            if (!operation.equals("invoke") && expressionType(params.get(0),environment) == AsTypes.STRING_VALUE) return null;
             if(operation.equals("index-set"))requireWritableReceiver(params.get(0),environment);
             JsonArray arguments=new JsonArray();for(int i=1;i<params.size();i++)arguments.add(params.get(i));
             return operatorCall(operation.equals("index")?"index-get":operation.equals("index-set")?"index-set":"call",params.get(0),arguments,source,environment);
@@ -1621,6 +1656,53 @@ public class Compiler {
         }
     }
     private static final List<String> BUFFER_METHODS=List.of("length","capacity","reserve","get","set","push","resize");
+    private static boolean isStringReceiver(JsonObject source, LogicEnvironment environment) {
+        JsonArray params = parameters(source);
+        return !params.isEmpty() && expressionType(params.get(0),environment) == AsTypes.STRING_VALUE;
+    }
+    private static String stringMethod(JsonObject source) {
+        JsonArray params = parameters(source); arity("String method",params,2,Integer.MAX_VALUE);
+        String name = string(params.get(1),"String method name");
+        if (!STRING_METHODS.containsKey(name)) throw new IllegalArgumentException("Unknown string method: " + name);
+        return name;
+    }
+    private static int stringMethodType(JsonObject source) {
+        String method = stringMethod(source);
+        return method.equals("contains") ? AsTypes.BOOLEAN_VALUE : STRING_BUILTINS.get(STRING_METHODS.get(method)).returnType();
+    }
+    private static AcsElement compileStringBuiltin(String name, JsonArray params, boolean typeArguments, LogicEnvironment environment) {
+        if (typeArguments) throw new IllegalArgumentException(name + " does not take type arguments");
+        BuiltinSpec spec = STRING_BUILTINS.get(name);
+        arity(name,params,name.equals("str_index_of") ? 2 : spec.paramTypes().size(),spec.paramTypes().size());
+        JsonArray normalized = new JsonArray(); params.forEach(normalized::add);
+        if (name.equals("str_index_of") && normalized.size() == 2) normalized.add(0);
+        AcsArray arguments = new AcsArray();
+        for (int i = 0; i < normalized.size(); i++) {
+            JsonElement argument = normalized.get(i); String label = name + " argument " + (i + 1);
+            rejectVoidValue(label,argument,environment);
+            int actual = expressionType(argument,environment);
+            if (actual != AsTypes.ANY_VALUE) requireKnownExact(label,spec.paramTypes().get(i),actual);
+            arguments.acsa.add(withDepth(1,()->compileExpression(argument,environment)));
+        }
+        // Constant IDs keep an enclosing class's same-named method from capturing
+        // a primitive string operation through implicit-this name resolution.
+        AcsObject result = new AcsObject(); result.put("t",1); result.put("id",spec.id()); result.put("param",arguments);
+        result.put("contexts",new AcsArray()); return result;
+    }
+    private static AcsElement compileStringMethod(JsonObject source, LogicEnvironment environment) {
+        if (source.has("type-args")) throw new IllegalArgumentException("String methods do not take type arguments");
+        String method = stringMethod(source), builtin = STRING_METHODS.get(method);
+        JsonArray params = parameters(source), supplied = new JsonArray();
+        for (int i = 2; i < params.size(); i++) supplied.add(params.get(i));
+        int count = STRING_BUILTINS.get(builtin).paramTypes().size() - 1;
+        arity("String method " + method,supplied,method.equals("contains") || method.equals("index_of") ? 1 : count,method.equals("contains") ? 1 : count);
+        JsonArray arguments = new JsonArray(); arguments.add(params.get(0)); supplied.forEach(arguments::add);
+        if (!method.equals("contains")) return compileStringBuiltin(builtin,arguments,false,environment);
+        AcsElement result = withDepth(1,()->compileStringBuiltin(builtin,arguments,false,environment));
+        AcsObject found = new AcsObject(); found.put("t",0); found.put("c",ExecOpcodes.GREATER_EQUAL); found.put("v1",result);
+        found.put("v2",compileExpression(new JsonPrimitive(0),environment));
+        return found;
+    }
     private static boolean isBufferReceiver(JsonObject source,LogicEnvironment environment) {
         JsonArray params=parameters(source);
         return !params.isEmpty()&&isBuffer(expressionType(params.get(0),environment));
@@ -1843,6 +1925,7 @@ public class Compiler {
     }
     private static ClassInfo receiverClass(JsonElement receiver, LogicEnvironment environment) {
         int type = typeBound(expressionType(receiver, environment));
+        if (type == AsTypes.STRING_VALUE) throw new IllegalArgumentException("String member access requires a supported string method, such as length()");
         ClassInfo info = isClass(type) ? CLASS_LAYOUTS.get().get(type) : null;
         if (info == null) throw new IllegalArgumentException("Member access requires a known class type, got " + typeName(type));
         ensureLayout(info);return info;

@@ -1,3 +1,11 @@
+# C21 Unicode String Functions (2026-10-15)
+
+[中文](VALIDATION.md) | English
+
+Added nine strict UTF-8 string built-ins, code-point indexing and immutable method sugar. Streaming validation covers embedded NUL, malformed sequences, scalar/range errors and searches without code-point arrays. Method lowering binds the built-in IDs directly. The private UTF-8 helper is not installed as SDK API. Exec remains v10 and snapshots v9.
+
+V0–V3 passed sequentially with JAVA_TOOL_OPTIONS unset: 264 Java tests,5619 native checks,361 ordinary and353 sanitizer operator/string cases, and314 independent wire cases. Existing JNI, modules and lifetime suites passed without ASan/UBSan reports. Review corrected two obsolete/invalid Java fixtures before complete reruns. The release export passed26 relocation/consumer checks; all174 manifest file sizes and SHA-256 digests matched. Logs: build/c21/v1.log,build/c21/v2.log,build/c21/v3.log.
+
 # C20 Switch Statements (2026-10-15)
 
 [中文](VALIDATION.md) | English

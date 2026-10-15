@@ -6,6 +6,8 @@ import azertia.binary.AbdValue;
 import azertia.binary.complexBinary.*;
 import com.google.gson.*;
 import org.junit.jupiter.api.Test;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.List;
 import java.util.function.Consumer;
 import static org.junit.jupiter.api.Assertions.*;
@@ -443,6 +445,170 @@ class LanguageOpsTest {
         String message = assertThrows(CompileException.class, () -> Compiler.compile(ast)).getMessage();
         assertTrue(message.contains("case label must be an int literal"), message);
         assertFalse(message.contains("Malformed script JSON"), message);
+    }
+
+    private static void builtinCall(JsonObject expression, int id, int argumentCount) {
+        assertEquals(1, expression.get("t").getAsInt());
+        assertEquals(id, expression.get("id").getAsInt());
+        assertEquals(argumentCount, expression.getAsJsonArray("param").size());
+    }
+    private static int builtinCallCount(JsonElement value, int id) {
+        int count = 0;
+        if (value.isJsonArray()) for (JsonElement child : value.getAsJsonArray()) count += builtinCallCount(child, id);
+        else if (value.isJsonObject()) {
+            JsonObject node = value.getAsJsonObject();
+            if (node.has("t") && node.get("t").getAsInt() == 1 && node.has("id") && node.get("id").getAsInt() == id) count++;
+            for (JsonElement child : node.asMap().values()) count += builtinCallCount(child, id);
+        }
+        return count;
+    }
+
+    @Test void stringBuiltinsHaveFixedSignaturesAndNormalizeIndexOfStart() throws Exception {
+        record Case(String type, String expression, int id, int arguments) {}
+        for (Case item : List.of(
+                new Case("int", "str_length(\"A中😀\\0\")", 0x0abd000b, 1),
+                new Case("int", "str_byte_length(\"A中😀\\0\")", 0x0abd000c, 1),
+                new Case("string", "str_substring(\"A中😀\\0\",1,3)", 0x0abd000d, 3),
+                new Case("string", "str_char_at(\"A中😀\\0\",2)", 0x0abd000e, 2),
+                new Case("int", "str_code_at(\"A中😀\\0\",2)", 0x0abd000f, 2),
+                new Case("string", "str_from_code(128512)", 0x0abd0010, 1),
+                new Case("int", "str_index_of(\"A中😀\\0\",\"😀\")", 0x0abd0011, 3),
+                new Case("boolean", "str_starts_with(\"A中😀\\0\",\"A\")", 0x0abd0012, 2),
+                new Case("boolean", "str_ends_with(\"A中😀\\0\",\"\\0\")", 0x0abd0013, 2))) {
+            String source = item.type() + " main(){return " + item.expression() + ";}";
+            JsonObject compiled = execReturn(source);
+            builtinCall(compiled, item.id(), item.arguments());
+            if (item.id() == 0x0abd0011) assertEquals(0, compiled.getAsJsonArray("param").get(2).getAsInt());
+            roundTrip(source);
+        }
+        JsonObject explicit = execReturn("int main(){return str_index_of(\"ababa\",\"ba\",2);}");
+        builtinCall(explicit, 0x0abd0011, 3);
+        assertEquals(2, explicit.getAsJsonArray("param").get(2).getAsInt());
+        roundTrip("int main(){return str_index_of(\"ababa\",\"ba\",2);}");
+        for (String source : List.of(
+                "int main(value){return str_length(value);}",
+                "int main(value){return str_byte_length(value);}",
+                "string main(value,begin,end){return str_substring(value,begin,end);}",
+                "string main(value,index){return str_char_at(value,index);}",
+                "int main(value,index){return str_code_at(value,index);}",
+                "string main(code){return str_from_code(code);}",
+                "int main(value,needle,from){return str_index_of(value,needle,from);}",
+                "boolean main(value,prefix){return str_starts_with(value,prefix);}",
+                "boolean main(value,suffix){return str_ends_with(value,suffix);}")) roundTrip(source);
+    }
+
+    @Test void stringMethodsAndIndexingEmitTheCanonicalBuiltinCalls() throws Exception {
+        record Case(String type, String method, String free, int id, int arguments) {}
+        for (Case item : List.of(
+                new Case("int", "value.length()", "str_length(value)", 0x0abd000b, 1),
+                new Case("int", "value.byte_length()", "str_byte_length(value)", 0x0abd000c, 1),
+                new Case("string", "value.substring(1,3)", "str_substring(value,1,3)", 0x0abd000d, 3),
+                new Case("string", "value.char_at(2)", "str_char_at(value,2)", 0x0abd000e, 2),
+                new Case("int", "value.code_at(2)", "str_code_at(value,2)", 0x0abd000f, 2),
+                new Case("int", "value.index_of(\"😀\")", "str_index_of(value,\"😀\")", 0x0abd0011, 3),
+                new Case("int", "value.index_of(\"😀\",1)", "str_index_of(value,\"😀\",1)", 0x0abd0011, 3),
+                new Case("boolean", "value.starts_with(\"A\")", "str_starts_with(value,\"A\")", 0x0abd0012, 2),
+                new Case("boolean", "value.ends_with(\"\\0\")", "str_ends_with(value,\"\\0\")", 0x0abd0013, 2),
+                new Case("string", "value[2]", "str_char_at(value,2)", 0x0abd000e, 2))) {
+            String method = item.type() + " main(string value){return " + item.method() + ";}";
+            String free = item.type() + " main(string value){return " + item.free() + ";}";
+            JsonObject compiled = execReturn(method);
+            builtinCall(compiled, item.id(), item.arguments());
+            assertEquals(execReturn(free), compiled, method);
+            roundTrip(method);
+        }
+        JsonObject contains = execReturn("boolean main(string value){return value.contains(\"😀\");}");
+        assertEquals(ExecOpcodes.GREATER_EQUAL, contains.get("c").getAsInt());
+        builtinCall(contains.getAsJsonObject("v1"), 0x0abd0011, 3);
+        assertEquals(0, contains.getAsJsonObject("v1").getAsJsonArray("param").get(2).getAsInt());
+        assertEquals(0, contains.get("v2").getAsInt());
+        roundTrip("boolean main(string value){return value.contains(\"😀\");}");
+        roundTrip("string main(index){return \"A中😀\\0\"[index];}");
+    }
+
+    @Test void stringMethodCallsCannotBeCapturedByAnEnclosingClassMethod() throws Exception {
+        String source = "class Trap{int marker;int str_length(string value){return 900;}"
+                + "int str_index_of(string value,string needle,int from){return -1;}"
+                + "int size(string value){return value.length();}"
+                + "boolean has(string value){return value.contains(\"x\");}}"
+                + "int main(){Trap value;return value.size(\"x\")+(value.has(\"x\")?1:0);}";
+        JsonElement compiled = Compiler.compile(tree(source)).toJson();
+        assertEquals(1, builtinCallCount(compiled, 0x0abd000b));
+        assertEquals(1, builtinCallCount(compiled, 0x0abd0011));
+        roundTrip(source);
+    }
+
+    @Test void stringBuiltinsRejectKnownWrongTypesAndVoidValues() {
+        record Case(String expression, String message) {}
+        for (Case item : List.of(
+                new Case("str_length(1)", "str_length argument 1 expected string, got int"),
+                new Case("str_byte_length(false)", "str_byte_length argument 1 expected string, got boolean"),
+                new Case("str_substring(\"abc\",true,2)", "str_substring argument 2 expected int, got boolean"),
+                new Case("str_char_at(\"abc\",1.0)", "str_char_at argument 2 expected int, got double"),
+                new Case("str_code_at(\"abc\",\"1\")", "str_code_at argument 2 expected int, got string"),
+                new Case("str_from_code(\"65\")", "str_from_code argument 1 expected int, got string"),
+                new Case("str_index_of(\"abc\",false)", "str_index_of argument 2 expected string, got boolean"),
+                new Case("str_starts_with(\"abc\",1)", "str_starts_with argument 2 expected string, got int"),
+                new Case("str_ends_with(1,\"a\")", "str_ends_with argument 1 expected string, got int"),
+                new Case("str_length(print(1))", "str_length argument 1 cannot use a void value"),
+                new Case("str_from_code(print(1))", "str_from_code argument 1 cannot use a void value"),
+                new Case("\"abc\".substring(print(1),2)", "str_substring argument 2 cannot use a void value"),
+                new Case("\"abc\"[true]", "str_char_at argument 2 expected int, got boolean"))) {
+            String message = failure("void main(){" + item.expression() + ";}").getMessage();
+            assertTrue(message.contains(item.message()), message);
+            assertFalse(message.contains("Internal compiler error"), message);
+        }
+    }
+
+    @Test void stringMethodsRejectUnknownNamesTypeArgumentsAndWrongArity() {
+        for (String expression : List.of(
+                "str_length()", "str_length(\"x\",1)", "str_substring(\"x\",0)", "str_char_at(\"x\")",
+                "str_index_of(\"x\")", "str_index_of(\"x\",\"x\",0,1)", "str_from_code()",
+                "\"x\".length(1)", "\"x\".substring(0)", "\"x\".substring(0,1,2)",
+                "\"x\".index_of()", "\"x\".index_of(\"x\",0,1)", "\"x\".contains(\"x\",0)")) {
+            String message = failure("void main(){" + expression + ";}").getMessage();
+            assertTrue(message.contains("expects"), message);
+        }
+        for (String expression : List.of("str_length<int>(\"x\")", "\"x\".length<int>()")) {
+            String message = failure("void main(){" + expression + ";}").getMessage();
+            assertTrue(message.contains("type arguments"), message);
+        }
+        for (String method : List.of("unknown", "from_code", "byteLength", "charAt")) {
+            String message = failure("void main(){\"x\"." + method + "();}").getMessage();
+            assertTrue(message.contains(method), message);
+        }
+        assertThrows(CompileException.class, () -> Compiler.compile(tree("void main(){(1).length();}")));
+        assertThrows(CompileException.class, () -> Compiler.compile(tree("void main(value){value.length();}")));
+        String field = failure("void main(){print(\"abc\".length);}").getMessage();
+        assertTrue(field.contains("String member access requires a supported string method, such as length()"), field);
+    }
+
+    @Test void stringsRejectIndexWritesFromSourceAndCompileJson() throws Exception {
+        for (String expression : List.of("value[0]=\"x\"", "value[0]=1")) {
+            String message = failure("void main(){string value=\"abc\";" + expression + ";}").getMessage();
+            assertTrue(message.contains("Strings are immutable; cannot assign through an index"), message);
+        }
+        JsonObject indexed = tree("void main(){buffer<int> value;value[0]=1;}");
+        JsonObject assignment = main(indexed).getAsJsonArray("script").get(1).getAsJsonObject();
+        assignment.getAsJsonArray("param").set(0, new JsonPrimitive("abc"));
+        String message = assertThrows(CompileException.class, () -> Compiler.compile(indexed)).getMessage();
+        assertTrue(message.contains("Strings are immutable; cannot assign through an index"), message);
+        JsonObject ast = tree("int main(){return str_length(\"abc\");}");
+        JsonObject call = main(ast).getAsJsonArray("script").get(0).getAsJsonObject().getAsJsonArray("param").get(0).getAsJsonObject();
+        call.getAsJsonArray("param").set(0, new JsonPrimitive(true));
+        JsonObject invalid = ast;
+        message = assertThrows(CompileException.class, () -> Compiler.compile(invalid)).getMessage();
+        assertTrue(message.contains("str_length argument 1 expected string, got boolean"), message);
+        call.getAsJsonArray("param").set(0, new JsonPrimitive("abc"));
+        JsonArray typeArguments = new JsonArray(); typeArguments.add("int"); call.add("type-args", typeArguments);
+        message = assertThrows(CompileException.class, () -> Compiler.compile(invalid)).getMessage();
+        assertTrue(message.contains("str_length does not take type arguments"), message);
+    }
+
+    @Test void operatorRegressionExampleRoundTripsWithUnicodeAndEmbeddedNul() throws Exception {
+        String source = Files.readString(Path.of("examples", "operators-regressions.azs"));
+        assertTrue(source.contains("😀") && source.contains("\\0"), source);
+        roundTrip(source);
     }
 
     private static int targetCode(String target) {

@@ -87,7 +87,7 @@ Non-hint programs retain `__script_onload = 0`, `main = 0x0fff0000`, and `__scri
 
 `#namespace_hint NAME` declares an independent library. Ordinary library functions, including main, use placeholder 0000; 0/1 are reserved for lifecycle and automatic numbering starts at 2. `#assume_hint NAME abcd` supplies a call namespace relocated by flush. A compilation unit including active includes may have at most one namespace or namespace_hint directive. See [multi-file libraries and hint linking](../docs/HINT_LINKING.en.md).
 
-Eleven built-ins require no declaration:
+Twenty built-ins require no declaration:
 
 | Name | Signature | ID |
 | --- | --- | --- |
@@ -102,6 +102,15 @@ Eleven built-ins require no declaration:
 | `reflect_invoke_function<R>` | `R(int, ...)` | `0x0abd0008` |
 | `reflect_get_hint_namespace` | `int(string)` | `0x0abd0009` |
 | `reflect_hint_loaded` | `boolean(string)` | `0x0abd000a` |
+| `str_length` | `int(string)` | `0x0abd000b` |
+| `str_byte_length` | `int(string)` | `0x0abd000c` |
+| `str_substring` | `string(string, int, int)` | `0x0abd000d` |
+| `str_char_at` | `string(string, int)` | `0x0abd000e` |
+| `str_code_at` | `int(string, int)` | `0x0abd000f` |
+| `str_from_code` | `string(int)` | `0x0abd0010` |
+| `str_index_of` | `int(string, string[, int])` | `0x0abd0011` |
+| `str_starts_with` | `boolean(string, string)` | `0x0abd0012` |
+| `str_ends_with` | `boolean(string, string)` | `0x0abd0013` |
 
 These names and `0xabd` IDs are reserved and cannot be script or extern declarations. Built-ins do not appear in AST abstract or extern-signatures.
 
@@ -336,7 +345,7 @@ print(total); // 9
 
 `i++`, `++i`, `i--`, `--i` are standalone statements or for steps on simple numeric/address variables only. They cannot appear in returns, arguments, or other expressions, so prefix/postfix result differences do not apply. Members and mem_get targets do not support them. Integer overflow, address bounds, and dynamic values that are neither numbers nor addresses fail at runtime.
 
-Every normal exit of a nonvoid function must return. Both if branches must return. While/for counts as nonterminating only with literal true conditions (or an omitted for condition) and no break belonging to that loop; otherwise compilation reports `non-void function can reach the end of its body without returning a value`. Statements end in semicolons, optional immediately before block end; function-definition trailing semicolons are optional. Array subscripts, object-literal expression syntax, closures, and exception handling are unsupported and rejected.
+Every normal exit of a nonvoid function must return. Both if branches must return. While/for counts as nonterminating only with literal true conditions (or an omitted for condition) and no break belonging to that loop; otherwise compilation reports `non-void function can reach the end of its body without returning a value`. Statements end in semicolons, optional immediately before block end; function-definition trailing semicolons are optional. Object-literal expression syntax, closures, and exception handling are unsupported and rejected. Indexing is available for strings, buffers, and classes with an index operator.
 
 Integers are signed 32-bit; out-of-range literals fail compilation. Decimal/scientific literals default to double; f/F produces float, e.g. 1.5f, 5f, 2e3f. Both reject overflow and underflow to zero. Numeric print/string concatenation uses shortest round-trippable text: `0.1+0.2` → `0.30000000000000004`, `123456789.0` → `123456789`, `1e20` → `1e+20`; float uses its own precision (0.1f → 0.1), and negative zero prints -0. Runtime-only zero divisors compile but int/float/double division, including positive/negative floating zero, throws `Division by zero`, never Infinity/NaN. Arithmetic integer overflow also fails at runtime; bitwise shifts use the bit-pattern rules below.
 
@@ -433,6 +442,41 @@ Quoted string values in errors are limited to the first 64 Unicode scalar charac
 ## Strings, comments, and preprocessing
 
 Strings use single or double quotes and support `\\`, `\"`, `\'`, `\n`, `\r`, `\t`, `\b`, `\f`, `\0`, and `\uXXXX`. UTF-16 surrogates must be paired (e.g. `\uD83D\uDE00`); isolated surrogates fail compilation. Spaces, commas, parentheses, semicolons, and braces inside strings are preserved. Strings cannot span physical newlines. Comments use // or /* ... */. Unclosed parentheses, strings, escapes, and comments report positions.
+
+### String functions
+
+String indices, lengths, search positions, and substring endpoints count Unicode code points, starting at zero. They do not count UTF-8 bytes, UTF-16 code units, or grapheme clusters: an emoji outside the BMP counts as one, while a base letter plus a combining mark counts as two. Only `byte_length` counts UTF-8 bytes. Matching is exact and case-sensitive, with no Unicode normalization. Embedded NUL is an ordinary code point and does not terminate a string.
+
+| String form | Equivalent built-in | Result |
+| --- | --- | --- |
+| `s.length()` | `str_length(s)` | Code-point count. |
+| `s.byte_length()` | `str_byte_length(s)` | UTF-8 byte count. |
+| `s.substring(begin, end)` | `str_substring(s, begin, end)` | String over the half-open range `[begin, end)`. |
+| `s.char_at(i)` or `s[i]` | `str_char_at(s, i)` | One-code-point string. |
+| `s.code_at(i)` | `str_code_at(s, i)` | Unicode scalar value as int. |
+| `s.index_of(needle[, from])` | `str_index_of(s, needle[, from])` | First matching code-point index at or after from, or -1; from defaults to 0. |
+| `s.contains(needle)` | `str_index_of(s, needle, 0) >= 0` | Whether the needle occurs. |
+| `s.starts_with(prefix)` | `str_starts_with(s, prefix)` | Whether the prefix matches. |
+| `s.ends_with(suffix)` | `str_ends_with(s, suffix)` | Whether the suffix matches. |
+| `str_from_code(code)` | Same function; no receiver form | String containing one Unicode scalar value. |
+
+```c
+string text = "A😀中";
+print(text.length());         // 3
+print(text.byte_length());    // 8
+print(text[1]);               // 😀
+print(text.substring(1, 3));  // 😀中
+print(text.index_of("中"));    // 2
+print(str_from_code(128512) == text[1]); // true
+```
+
+`char_at`, `code_at`, and indexing require `0 <= i < length`. Substrings require `0 <= begin <= end <= length`; an empty range yields an empty string. Search starts require `0 <= from <= length`. An empty needle matches at from, including at length; empty prefixes and suffixes always match. `str_from_code` accepts 0…0x10ffff except surrogate values 0xd800…0xdfff; code 0 produces NUL.
+
+Indices and code values must be int, string arguments must be string, and void arguments are rejected. Receivers and arguments evaluate once, left to right. Only the snake_case method names above are provided; `contains` is method-only and uses no separate built-in ID. Both two-argument `str_index_of(s, needle)` and one-argument `s.index_of(needle)` compile with an explicit zero start. String methods and indexing bind directly to the reserved string built-ins, unaffected by similarly named class methods.
+
+Strings are immutable. `s[i] = value` fails with `Strings are immutable; cannot assign through an index`; construct a new string and assign the variable instead. Bad host-provided UTF-8 is rejected by every string function, including `byte_length` and searches with an empty needle. Index/range errors use `std::out_of_range` (JNI `IndexOutOfBoundsException`), such as `String index 5 is outside length 3` or `String substring start 2 is after end 1`. Invalid UTF-8 and invalid scalar values use `std::invalid_argument` (JNI `IllegalArgumentException`), with `Invalid UTF-8 string` or `Invalid Unicode code point: 55296`. Runtime traces retain these exception types.
+
+### Preprocessing
 
 Supported preprocessor directives may be indented:
 
