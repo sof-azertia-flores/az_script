@@ -51,7 +51,7 @@ def main():
         def command(argv, timeout=90):
             return subprocess.run(list(map(str, argv)), cwd=ROOT, capture_output=True, text=True, timeout=timeout)
 
-        def compile_case(name, path, limit=128, *, debug=False, allow_depth_failure=False):
+        def compile_case(name, path, limit=128, *, debug=False, allow_depth_failure=False, allow_scope_failure=False):
             key = (path.resolve(), limit, debug)
             if key in cache:
                 return cache[key]
@@ -64,7 +64,7 @@ def main():
                                      *(['-g'] if debug else [])])
             elapsed = time.monotonic() - started
             if result.returncode != 0:
-                assert allow_depth_failure and limit < 128, (name, limit, result.stdout, result.stderr)
+                assert (allow_depth_failure and limit < 128) or allow_scope_failure, (name, limit, result.stdout, result.stderr)
                 assert result.returncode == 1 and 'Error:' in result.stderr and path.name in result.stderr, (name, limit, result.stderr)
                 assert 'Exception in thread' not in result.stderr and 'StackOverflow' not in result.stderr, (name, limit, result.stderr)
                 assert any(word in result.stderr.lower() for word in ('depth', 'nesting', 'operand', 'condition', 'budget')), (name, limit, result.stderr)
@@ -97,7 +97,7 @@ def main():
             artifact['metrics']['run_seconds'] = time.monotonic() - started
             return result
 
-        def differential(name, source, expected=None, error=None, *, debug=False, require_spill=False):
+        def differential(name, source, expected=None, error=None, *, debug=False, require_spill=False, allow_infeasible=False, expected_stderr=None):
             nonlocal checks
             if not selected(name):
                 return
@@ -111,10 +111,15 @@ def main():
                 assert result.returncode == 0 and not result.stderr, (name, result.stdout, result.stderr)
             if expected is not None:
                 assert result.stdout == expected, (name, result.stdout, expected)
+            if expected_stderr is not None:
+                assert result.stderr == expected_stderr, (name, result.stderr, expected_stderr)
             signature = (result.returncode == 0, result.stdout, result.stderr)
             baseline['metrics']['status'] = 'passed'
             for limit in LIMITS[1:]:
-                artifact, _ = compile_case(name, path, limit, debug=debug)
+                artifact, entry = compile_case(name, path, limit, debug=debug, allow_depth_failure=allow_infeasible)
+                if artifact is None:
+                    print(f'Limits differential: {name} at{limit} infeasible: {entry["reason"]}', flush=True)
+                    continue
                 result = run_case(name, artifact)
                 assert (result.returncode == 0, result.stdout, result.stderr) == signature, (name, limit, result.stdout, result.stderr, signature)
                 artifact['metrics']['status'] = 'passed'
@@ -127,7 +132,6 @@ def main():
                 checks += 1
             checks += 1
             return baseline
-
 
         def lifetime_differential(name, source, expected=None, error=None):
             """A cut may be rejected if existing opcodes cannot preserve lifetime/identity."""
@@ -296,6 +300,166 @@ def main():
                 result = command(['java', '-Xmx1g', '-cp', args.classpath, 'azertia.Main', 'compile-json', invalid, '-o', work / 'chain-invalid.abd'])
                 assert result.returncode == 1 and 'Error:' in result.stderr and 'Exception in thread' not in result.stderr, (mutation, result.stderr)
                 checks += 1
+
+        def ladder(count, condition, body, otherwise=''):
+            branches = [('if' if i == 0 else 'else if') + '(' + condition(i) + '){' + body(i) + '}' for i in range(count)]
+            return ''.join(branches) + ('else{' + otherwise + '}' if otherwise else '')
+
+        def ladder_scope_differential(name, source, expected, count, *, allow_scope_rejection=False, error=None):
+            """Moved scopes must preserve output or explain a specific unsafe lowering."""
+            nonlocal checks
+            if not selected(name):
+                return
+            path = work / (name + '.azs');path.write_text(source, encoding='utf-8')
+            scope_hint = ('Flattening this if ladder would change object lifetime or scope; '
+                          'store this operand in a local variable first')
+            signature = None
+            for limit in LIMITS:
+                # The110-section source must retain its ordinary nested128
+                # baseline. A200-section source requires flat lowering even128.
+                may_reject = allow_scope_rejection and (limit < 128 or count > 128)
+                artifact, entry = compile_case(name, path, limit, allow_scope_failure=may_reject)
+                if artifact is None:
+                    assert scope_hint in entry['reason'], (name, limit, entry['reason'])
+                    assert re.search(re.escape(path.name) + r':\d+:\d+: error:', entry['reason']), (name, limit, entry['reason'])
+                    entry['rejection_category'] = 'if-ladder-scope'
+                else:
+                    flat_ast = any(node.get('call') == 'if-chain' for node in nodes(artifact['ast']))
+                    assert flat_ast == (count > 128), (name, limit, 'parser threshold changed')
+                    result = run_case(name, artifact)
+                    if error:
+                        assert result.returncode != 0 and error.lower() in result.stderr.lower(), (name, limit, result.stdout, result.stderr)
+                    else:
+                        assert result.returncode == 0 and not result.stderr, (name, limit, result.stdout, result.stderr)
+                    assert result.stdout == expected, (name, limit, result.stdout, expected)
+                    current = (result.returncode == 0, result.stdout, result.stderr)
+                    if signature is None:
+                        signature = current
+                    else:
+                        assert current == signature, (name, limit, current, signature)
+                    entry['status'] = 'passed'
+                checks += 1
+
+        # The first predicate belongs to the containing scope. Later predicates
+        # belong to nested else scopes; moving them or mem_send_up into a one-shot
+        # loop must not change automatic destruction or the allocation's parent.
+        condition_marker = ('class Marker{int tag;Marker(int n){tag=n;}boolean test(){print(tag);return false;}'
+                            '~Marker(){print(tag+100);}}Marker* make(int n){Marker* p(n);return p;}')
+        for count in (110, 200):
+            debug_name = f'ladder-condition-first-debug-{count}'
+            invalid_first = ladder(count, lambda i: 'mem_get(p)' if i == 0 else 'false', lambda i: '')
+            debug_source = 'void main(){\n  address p=alloc(1);\n  mem_get(p)=1;\n  ' + invalid_first + '\n}\n'
+            column = debug_source.splitlines()[3].index('mem_get(p)') + 1
+            expected_error = ('AzScript error: Condition must be boolean, got int\n'
+                              f'  at main ({debug_name}.azs:4:{column})\n')
+            differential(debug_name, debug_source, '', error='Condition must be boolean, got int',
+                         debug=True, expected_stderr=expected_error)
+            first = ladder(count, lambda i: 'make(0).test()' if i == 0 else 'false', lambda i: '', 'print("else");')
+            ladder_scope_differential(f'ladder-condition-owned-first-{count}', condition_marker +
+                                     'void main(){' + first + 'print("after");}', '0\nelse\nafter\n100\n', count)
+            later = ladder(count, lambda i: 'make(0).test()' if i == 0 else 'make(1).test()' if i == 1 else 'false', lambda i: '', 'print("else");')
+            ladder_scope_differential(f'ladder-condition-owned-later-{count}', condition_marker +
+                                     'void main(){' + later + 'print("after");}', '0\n1\nelse\n101\nafter\n100\n', count,
+                                     allow_scope_rejection=True)
+            raw_first = ladder(count, lambda i: '(saved=alloc(1))!=null' if i == 0 else 'false', lambda i: '')
+            ladder_scope_differential(f'ladder-condition-raw-first-{count}', 'address saved=null;void main(){' + raw_first +
+                                     'mem_get(saved)=7;print(mem_get(saved));}', '7\n', count)
+            raw_parent = ladder(count, lambda i: 'true' if i == 0 else 'false',
+                                lambda i: 'saved=alloc(1);mem_send_up(saved);' if i == 0 else '')
+            ladder_scope_differential(f'ladder-branch-raw-parent-{count}', 'address saved=null;void main(){' + raw_parent +
+                                     'mem_get(saved)=7;print(mem_get(saved));}', '7\n', count, allow_scope_rejection=True)
+            transitive = ladder(count, lambda i: 'true' if i == 0 else 'false',
+                                lambda i: 'transfer();print(mem_get(saved));' if i == 0 else '')
+            ladder_scope_differential(f'ladder-branch-transitive-scope-{count}',
+                                     'address saved=null;void transfer(){saved=alloc(1);mem_get(saved)=7;mem_send_up(saved);}' +
+                                     'void main(){' + transitive + 'print("after");}', '7\nafter\n', count,
+                                     allow_scope_rejection=True)
+
+        # Below the AST threshold, the compiler still has to select flat lowering
+        # whenever function/control scaffolding leaves insufficient wire depth.
+        for count in (121, 125, 128, 129, 200, 10000):
+            source = 'int choose(int n){' + ladder(count, lambda i: f'n=={i}', lambda i: f'return {i};', 'return -1;') + '}'
+            source += f'int main(){{return choose({count-1});}}'
+            artifact = differential(f'ladder-budget-{count}', source, f'{count-1}\n')
+            if artifact:
+                flat = any(node.get('call') == 'if-chain' for node in nodes(artifact['ast']))
+                assert flat == (count > 128), (count, 'parser threshold changed')
+                checks += 1
+        inside = ladder(110, lambda i: f'n=={i}', lambda i: f'result={i};', 'result=-2;')
+        differential('ladder-110-inside-three-loops', 'int main(){int n=109;int result=-1;int a=0;while(a<1){a+=1;'
+                     'int b=0;while(b<1){b+=1;int c=0;while(c<1){c+=1;' + inside + '}}}return result;}',
+                     '109\n', allow_infeasible=True)
+        eager_conditions = ladder(200, lambda i: f'test({i})', lambda i: f'return {i};', 'return -1;')
+        differential('ladder-first-match-only', 'int seen=0;int wanted=0;boolean test(int n){seen+=1;return n==wanted;}' +
+                     'int choose(){' + eager_conditions + '}int main(){seen=0;wanted=125;print(choose());return seen;}', '125\n126\n')
+        scopes = ladder(200, lambda i: f'n=={i}', lambda i: f'int same={i};return same;', 'int same=-1;return same;')
+        differential('ladder-branch-local-scopes', 'int choose(int n){' + scopes + '}int main(){print(choose(0));print(choose(199));return choose(-1);}', '0\n199\n-1\n')
+        control = ladder(200, lambda i: f'i=={i}', lambda i: 'seen+=1;continue;' if i == 0 else 'seen+=10;break;' if i == 1 else 'seen+=100;', 'seen+=1000;')
+        differential('ladder-original-for-jumps', 'int main(){int seen=0;for(int i=0;i<4;i++){' + control + 'seen+=10000;}return seen;}', '11\n')
+        control_nested = ladder(110, lambda i: f'c=={i}', lambda i: 'continue;' if i == 0 else 'break;' if i == 1 else 'seen+=100;', 'seen+=1000;')
+        differential('ladder-three-loops-original-targets', 'int main(){int seen=0;for(int a=0;a<2;a++){for(int b=0;b<2;b++){for(int c=0;c<3;c++){seen+=1;' +
+                     control_nested + 'seen+=10000;}}}return seen;}', '8\n', allow_infeasible=True)
+        switch_control = ladder(200, lambda i: f'i=={i}', lambda i: 'seen+=1;continue;' if i == 0 else 'seen+=2;break;' if i == 1 else 'seen+=100;', '')
+        differential('ladder-switch-and-loop-targets', 'int main(){int seen=0;for(int i=0;i<3;i++){switch(i){case 0:case 1:' +
+                     switch_control + 'seen+=1000;break;default:seen+=10;break;}seen+=100;}return seen;}', '213\n', allow_infeasible=True)
+        marker = 'class Marker{int tag;Marker(int n){tag=n;}~Marker(){print(tag);}}'
+        throwing = 'class Marker{int tag;Marker(int n){tag=n;}~Marker(){print(tag);if(tag==10){int max=2147483647;int bad=max+1;}}}'
+        for count in (110, 200):
+            lifetime = ladder(count, lambda i: f'i=={i}', lambda i: 'Marker local(10);continue;' if i == 0 else 'Marker local(11);break;' if i == 1 else '', '')
+            ladder_scope_differential(f'ladder-jump-lifetime-{count}', marker +
+                                     'int main(){for(int i=0;i<3;i++){Marker outer(i);' + lifetime + '}return 42;}',
+                                     '10\n0\n11\n1\n42\n', count, allow_scope_rejection=True)
+            ladder_scope_differential(f'ladder-cleanup-error-{count}', throwing +
+                                     'void main(){for(int i=0;i<3;i++){Marker outer(i);' + lifetime + '}}',
+                                     '10\n0\n', count, allow_scope_rejection=True, error='Integer overflow')
+
+        if selected('ladder-missing-return'):
+            path = work / 'ladder-missing-return.azs'
+            source = 'int choose(int n){' + ladder(200, lambda i: f'n=={i}', lambda i: f'return {i};') + '}void main(){}'
+            path.write_text(source, encoding='utf-8')
+            result = command(['java', '-Xmx1g', '-cp', args.classpath, 'azertia.Main', 'compile', path, '-o', work / 'missing-return.abd'])
+            assert result.returncode == 1 and 'without returning' in result.stderr and 'Exception in thread' not in result.stderr, result.stderr
+            checks += 1
+        if selected('ladder-ast-schema'):
+            path = work / 'ladder-ast-schema.azs'
+            path.write_text('int main(){int n=199;' + ladder(200, lambda i: f'n=={i}', lambda i: f'return {i};', 'return -1;') + '}', encoding='utf-8')
+            artifact, _ = compile_case('ladder-ast-schema', path)
+            for mutation in ('empty-branches', 'branch-not-object', 'wrong-branch-call', 'missing-body', 'extra-branch-argument', 'nonboolean-condition'):
+                tree = json.loads(json.dumps(artifact['ast']))
+                chain = next(node for node in nodes(tree) if node.get('call') == 'if-chain')
+                if mutation == 'empty-branches': chain['param'] = []
+                elif mutation == 'branch-not-object': chain['param'][0] = 1
+                elif mutation == 'wrong-branch-call': chain['param'][0]['call'] = 'while'
+                elif mutation == 'missing-body': chain['param'][0]['param'].pop()
+                elif mutation == 'extra-branch-argument': chain['param'][0]['param'].append(0)
+                else: chain['param'][0]['param'][0] = 0
+                invalid = work / ('ladder-' + mutation + '.json');invalid.write_text(json.dumps(tree), encoding='utf-8')
+                result = command(['java', '-Xmx1g', '-cp', args.classpath, 'azertia.Main', 'compile-json', invalid, '-o', work / 'ladder-invalid.abd'])
+                assert result.returncode == 1 and 'Error:' in result.stderr and 'Exception in thread' not in result.stderr, (mutation, result.stderr)
+                checks += 1
+        if selected('expression-if-value'):
+            path = work / 'expression-if-value.azs';path.write_text('int main(){return 42;}', encoding='utf-8')
+            artifact, _ = compile_case('expression-if-value', path)
+            # Functional if is a readable-AST expression. Source statement
+            # ladders must never make this expression lose its selected value.
+            for count in (20, 125):
+                tree = json.loads(json.dumps(artifact['ast']))
+                returned = next(node for node in nodes(tree) if node.get('call') == 'return')
+                expression = 42
+                for _ in range(count):
+                    expression = {'t': 'ctrl', 'call': 'if', 'param': [False, 0, expression], '_line': 1, '_column': 19}
+                returned['param'][0] = expression
+                ast = work / f'expression-if-{count}.json';ast.write_text(json.dumps(tree), encoding='utf-8')
+                for limit in (128, 48):
+                    abd = work / f'expression-if-{count}-{limit}.abd'
+                    result = command(['java', '-Xmx1g', f'-Dazscript.internal.abdLimit={limit}', '-cp', args.classpath, 'azertia.Main', 'compile-json', ast, '-o', abd])
+                    if count == 20:
+                        assert result.returncode == 0, (count, limit, result.stderr)
+                        result = command([args.runner, abd]);assert result.returncode == 0 and result.stdout == '42\n' and not result.stderr, (count, limit, result.stdout, result.stderr)
+                    else:
+                        assert result.returncode == 1 and 'Error:' in result.stderr and 'Exception in thread' not in result.stderr, (count, limit, result.stderr)
+                        assert any(word in result.stderr.lower() for word in ('limit', 'nesting', 'depth', 'local variable')), (count, limit, result.stderr)
+                    checks += 1
 
         # These cuts would change evaluation timing. Their rejection must identify
         # the original source and explain how the user can express the local.

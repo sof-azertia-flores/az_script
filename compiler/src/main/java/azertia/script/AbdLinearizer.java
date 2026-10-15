@@ -58,7 +58,14 @@ final class AbdLinearizer {
     }
     private List<AcsElement> statement(AcsElement value,int level) {
         AcsElement previous=activeStatement;activeStatement=value;
+        java.util.function.Supplier<AcsElement> fallback=tables.ladders.remove(value);
+        int next=tables.nextSlot;Set<Integer> priorSlots=fallback==null?Set.of():new HashSet<>(privateSlots);
         try { return lowerStatement(value,level); }
+        catch(LimitExceeded error) {
+            if(fallback==null)throw error;
+            tables.nextSlot=next;tables.slots.keySet().removeIf(slot->slot>=next);privateSlots.clear();privateSlots.addAll(priorSlots);
+            AcsElement flattened=fallback.get();return lowerStatement(flattened,level);
+        }
         finally { activeStatement=previous; }
     }
     private List<AcsElement> lowerStatement(AcsElement value,int level) {

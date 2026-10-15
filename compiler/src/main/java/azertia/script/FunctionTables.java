@@ -9,6 +9,10 @@ final class FunctionTables {
     final Map<Integer,Integer> returns;
     Set<Integer> scriptIds=Set.of();
     Set<Integer> scopeSafeCalls=Set.of();
+    final Set<com.google.gson.JsonElement> statementSiblings=Collections.newSetFromMap(new IdentityHashMap<>());
+    final Set<com.google.gson.JsonElement> ladderTails=Collections.newSetFromMap(new IdentityHashMap<>());
+    final Set<com.google.gson.JsonElement> statements=Collections.newSetFromMap(new IdentityHashMap<>());
+    final IdentityHashMap<AcsElement,java.util.function.Supplier<AcsElement>> ladders=new IdentityHashMap<>();
     record Precompiled(AcsElement value,int type) {}
     final IdentityHashMap<com.google.gson.JsonObject,Precompiled> precompiled=new IdentityHashMap<>();
     final Set<AcsElement> stagedCaptures=Collections.newSetFromMap(new IdentityHashMap<>());

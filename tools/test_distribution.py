@@ -645,6 +645,31 @@ int main() {
         _require(result.stdout == "10000\n", f"Flat-chain package execution failed: {result.stdout!r}")
         passed("ten thousand string operands through relocated tools")
 
+        ladder_source = source_directory / "flat ten thousand branches.azs"
+        ladder = "".join(("if" if i == 0 else "else if") + f"(n=={i}){{return {i};}}" for i in range(10000))
+        ladder_source.write_text("int choose(int n){" + ladder + "else{return -1;}}int main(){return choose(9999);}\n", encoding="utf-8")
+        ladder_abd = cwd / "limits output/ladder.exec.abd"
+        ladder_ast = ladder_abd.with_name("ladder.ast.json")
+        ladder_json = ladder_abd.with_name("ladder.exec.json")
+        _run([compiler, ladder_source, "-o", ladder_abd], cwd, compiler_environment)
+        _outputs(ladder_abd, ladder_ast, ladder_json)
+        pending = [json.loads(ladder_ast.read_text(encoding="utf-8"))]
+        has_ladder = False
+        while pending:
+            item = pending.pop()
+            if isinstance(item, dict):
+                has_ladder |= item.get("call") == "if-chain"
+                pending.extend(item.values())
+            elif isinstance(item, list):
+                pending.extend(item)
+        _require(has_ladder, "Long source else-if ladders must retain the flat readable AST")
+        ladder_rebuilt = ladder_abd.with_name("ladder.roundtrip.abd")
+        _run([compiler, "compile-json", ladder_ast, "-o", ladder_rebuilt], cwd, compiler_environment)
+        _require(ladder_abd.read_bytes() == ladder_rebuilt.read_bytes(), "Flat-ladder package AST roundtrip differs")
+        result = _run([runner, ladder_abd], cwd, environment)
+        _require(result.stdout == "9999\n", f"Flat-ladder package execution failed: {result.stdout!r}")
+        passed("ten thousand else-if branches through relocated tools")
+
         standalone = work / "standalone runner"
         standalone_bin = standalone / "bin"
         standalone_bin.mkdir(parents=True)

@@ -21,16 +21,19 @@ class DepthLimitsTest {
         var parser = new GeneraterJson.AzScript(); parser.execute(source); return parser.toObj();
     }
     private static Compiled compile(String source, int limit) throws Exception {
+        return compileAst(tree(source), limit);
+    }
+    private static Compiled compileAst(JsonObject ast, int limit) throws Exception {
         return atLimit(Integer.toString(limit), () -> {
-            JsonObject ast = tree(source), restored = JsonParser.parseString(ast.toString()).getAsJsonObject();
+            JsonObject restored = JsonParser.parseString(ast.toString()).getAsJsonObject();
             String original = ast.toString(); JsonObject result = null;
             for (boolean debug : List.of(false, true)) {
                 AcsObject program = Compiler.compile(ast, debug);
                 for (AcsElement item : program.getAsAcsArray("f").acsa)
                     ExecShape.requireFits(((AcsObject) item).mmp.get("script"), 4, limit);
                 byte[] wire = program.toValue().toAbdFormat();
-                assertArrayEquals(wire, Compiler.compile(restored, debug).toValue().toAbdFormat(), source);
-                assertArrayEquals(wire, ExecCodec.decode(wire).toValue().toAbdFormat(), source);
+                assertArrayEquals(wire, Compiler.compile(restored, debug).toValue().toAbdFormat());
+                assertArrayEquals(wire, ExecCodec.decode(wire).toValue().toAbdFormat());
                 assertEquals(original, ast.toString());
                 JsonObject view = program.toJson().getAsJsonObject();
                 assertTrue(nodes(view, ExecShape.INTERNAL_SEQUENCE).isEmpty());
@@ -463,5 +466,222 @@ class DepthLimitsTest {
         assertTrue(AstShape.validate(unpositioned).isEmpty(), "handwritten operator positions remain optional");
         atLimit("32", () -> { Compiler.compile(unpositioned, true); return null; });
         assertEquals(unchanged, original.toString());
+    }
+
+    private static String emptyLadder(int conditions, boolean fallback) {
+        return "if(false){}" + "else if(false){}".repeat(conditions - 1) + (fallback ? "else{}" : "");
+    }
+    private static String returningLadder(int conditions, boolean fallback) {
+        StringBuilder source = new StringBuilder();
+        for (int i = 0; i < conditions; i++) {
+            if (i > 0) source.append("else ");
+            source.append("if(false)return ").append(i).append(';');
+        }
+        if (fallback) source.append("else return -1;");
+        return source.toString();
+    }
+    private static JsonObject firstAst(JsonObject ast) {
+        return ast.getAsJsonObject("body").getAsJsonObject("fff").getAsJsonObject("_funcfff0000")
+                .getAsJsonArray("script").get(0).getAsJsonObject();
+    }
+    private static JsonObject positionedIf(JsonElement condition, JsonElement body, JsonElement fallback, int line, int column) {
+        JsonObject node = new JsonObject(); node.addProperty("t", "ctrl"); node.addProperty("call", "if");
+        JsonArray params = new JsonArray(); params.add(condition); params.add(body);
+        if (fallback != null) params.add(fallback);
+        node.add("param", params); node.addProperty("_line", line); node.addProperty("_column", column); return node;
+    }
+    private static JsonElement legacyEmptyLadder(int count, boolean fallback, int prefixLength) {
+        JsonElement result = fallback ? new JsonArray() : null;
+        for (int i = count - 1; i >= 0; i--)
+            result = positionedIf(new JsonPrimitive(false), new JsonArray(), result, 1,
+                    prefixLength + 1 + i * "if(false){}else ".length());
+        return result;
+    }
+
+    @Test void ordinaryElseIfIsIterativeAndPreservesExactLegacyAstThrough128Conditions() throws Exception {
+        String prefix = "void main(){";
+        for (int count : List.of(1, 2, 120, 128)) for (boolean fallback : List.of(false, true)) {
+            JsonObject ast = tree(prefix + emptyLadder(count, fallback) + "}");
+            assertEquals(legacyEmptyLadder(count, fallback, prefix.length()).toString(), firstAst(ast).toString(),
+                    "positions, optional else and field order are unchanged through 128 conditions");
+            assertTrue(AstShape.validate(ast).isEmpty());
+        }
+        for (int count : List.of(129, 200, 10_000)) for (boolean fallback : List.of(false, true)) {
+            JsonObject ast = tree(prefix + emptyLadder(count, fallback) + "}"); JsonObject ladder = firstAst(ast);
+            assertEquals("if-chain", ladder.get("call").getAsString());
+            assertEquals(count, ladder.getAsJsonArray("param").size());
+            assertEquals(fallback, ladder.has("else"));
+            assertEquals(prefix.length() + 1, ladder.get("_column").getAsInt());
+            assertFalse(ladder.has("operators"));
+            for (int i = 0; i < count; i++) {
+                JsonObject branch = ladder.getAsJsonArray("param").get(i).getAsJsonObject();
+                assertEquals(Set.of("t", "call", "param", "_line", "_column"), branch.keySet());
+                assertEquals("ctrl", branch.get("t").getAsString()); assertEquals("if", branch.get("call").getAsString());
+                assertEquals(JsonParser.parseString("[false,[]]"), branch.get("param"));
+                assertEquals(1, branch.get("_line").getAsInt());
+                assertEquals(prefix.length() + 1 + i * "if(false){}else ".length(), branch.get("_column").getAsInt());
+            }
+            assertTrue(AstShape.validate(ast).isEmpty()); assertEquals(ast, JsonParser.parseString(ast.toString()));
+        }
+    }
+
+    @Test void functionalIfDanglingElseAndTrueNestingKeepTheirExistingGrammar() throws Exception {
+        JsonObject functional = GeneraterJson.getExpression("if(true,1,2);", 0, new GeneraterJson.AzScript()).generate().getAsJsonObject();
+        assertEquals(positionedIf(new JsonPrimitive(true), new JsonPrimitive(1), new JsonPrimitive(2), 1, 1).toString(), functional.toString());
+        JsonObject tail = firstAst(tree("void main(){if(false){}else if(true,1,2);}"));
+        assertEquals("if", tail.get("call").getAsString());
+        assertEquals(JsonParser.parseString("[true,1,2]"), tail.getAsJsonArray("param").get(2).getAsJsonObject().get("param"));
+        JsonObject outer = firstAst(tree("void main(){if(true)if(false){}else{}else{}}"));
+        assertEquals(3, outer.getAsJsonArray("param").size());
+        assertEquals(3, outer.getAsJsonArray("param").get(1).getAsJsonObject().getAsJsonArray("param").size());
+        assertTrue(outer.getAsJsonArray("param").get(2).isJsonArray());
+        JsonObject semicolons = tree("void main(){if(false){}else if(false){};;;print(1);}");
+        assertEquals(2, semicolons.getAsJsonObject("body").getAsJsonObject("fff").getAsJsonObject("_funcfff0000").getAsJsonArray("script").size());
+        CompileException nested = assertThrows(CompileException.class,
+                () -> tree("void main(){" + "if(true)".repeat(400) + "{}" + "}"));
+        assertTrue(nested.getMessage().contains("Syntax nesting exceeds 320 levels"), nested::getMessage);
+        for (String broken : List.of("if(false){}else if(){}", "if(false){}else if(true)", "if(false){}else")) {
+            CompileException error = assertThrows(CompileException.class, () -> tree("void main(){" + broken + "}"));
+            assertFalse(error.internal(), error::getMessage); assertTrue(error.getMessage().contains("<source>:1:"), error::getMessage);
+        }
+        compile("int if_chain(int n){return n;}int main(){return if_chain(1);}", 32);
+    }
+
+    @Test void flatLaddersCompileAt200And10kConditionsAndRequireARealElseForExhaustiveReturns() throws Exception {
+        for (int count : List.of(200, 10_000)) {
+            Compiled compiled = compile("int main(){" + returningLadder(count, true) + "}", 32);
+            assertEquals("if-chain", firstAst(compiled.ast()).get("call").getAsString());
+            assertEquals(count, nodes(main(compiled), ExecOpcodes.IF).size());
+            assertEquals(1, nodes(main(compiled), ExecOpcodes.WHILE).size());
+            assertEquals(count + 1, nodes(main(compiled), ExecOpcodes.RETURN).size());
+            assertFalse(Compiler.canCompleteNormally(firstAst(compiled.ast())));
+        }
+        JsonObject partial = firstAst(tree("void main(){" + returningLadder(200, false) + "}"));
+        assertTrue(Compiler.canCompleteNormally(partial));
+        String missing = failure("int main(){" + returningLadder(200, false) + "}", 32).getMessage();
+        assertTrue(missing.contains("return"), missing);
+        compile("void main(){" + emptyLadder(200, false) + "}", 32);
+    }
+
+    @Test void ordinaryLadderLoweringUsesTheRemainingWireBudgetAtTheActualStatementLevel() throws Exception {
+        for (int count : List.of(120, 121, 125, 128)) {
+            Compiled compiled = compile("int main(){" + returningLadder(count, true) + "}", 128);
+            assertEquals("if", firstAst(compiled.ast()).get("call").getAsString(), "the readable AST stays legacy-shaped");
+            assertEquals(count == 120 ? 0 : 1, nodes(main(compiled), ExecOpcodes.WHILE).size(), "root conditions=" + count);
+        }
+        String nested = "int main(){while(true){while(true){while(true){" + returningLadder(110, true) + "}}}}";
+        for (int limit : List.of(128, 125, 121)) {
+            Compiled compiled = compile(nested, limit);
+            assertEquals(limit == 128 ? 3 : 4, nodes(main(compiled), ExecOpcodes.WHILE).size(), "nested limit=" + limit);
+        }
+    }
+
+    @Test void flatLaddersInsideRealLoopsKeepEachConditionOnceAndRetargetOuterJumps() throws Exception {
+        StringBuilder ladder = new StringBuilder();
+        for (int i = 0; i < 200; i++) {
+            if (i > 0) ladder.append("else ");
+            ladder.append("if(mark(").append(i).append("))").append(i % 2 == 0 ? "break;" : "continue;");
+        }
+        ladder.append("else break;");
+        Compiled compiled = compile("boolean mark(int n){return n<0;}void main(){while(true){while(true){"
+                + ladder + "}break;}}", 32);
+        JsonObject function = main(compiled);
+        assertEquals(200, calls(function, id(compiled, "mark")).size(), "retargeting never replays a condition");
+        assertEquals(3, nodes(function, ExecOpcodes.WHILE).size(), "the two real loops enclose one ladder loop");
+        assertFalse(nodes(function, ExecOpcodes.CONTINUE).isEmpty(), "a selected continue must still reach its enclosing real loop");
+    }
+
+    @Test void flatLaddersKeepTheFirstAutomaticPredicateInTheContainingStatementScope() throws Exception {
+        String declarations="class Marker{int n;boolean test(){return false;}~Marker(){}}"
+                +"Marker* make(){Marker* value();return value;}";
+        for(int count:List.of(110,200)) {
+            String source=declarations+"void main(){if(make().test()){}"+"else if(false){}".repeat(count-1)+"print(99);}";
+            Compiled compiled=compile(source,32);JsonObject function=main(compiled);
+            assertEquals(1,calls(function,id(compiled,"make")).size());
+            JsonObject loop=nodes(function,ExecOpcodes.WHILE).get(0);
+            assertTrue(calls(loop,id(compiled,"make")).isEmpty(),"the original first predicate must precede the synthetic loop");
+            JsonArray body=function.getAsJsonArray("script");
+            int checked=index(body,node->!calls(node,id(compiled,"make")).isEmpty());
+            int entered=index(body,node->!nodes(node,ExecOpcodes.WHILE).isEmpty());assertTrue(checked>=0&&checked<entered);
+        }
+    }
+
+    @Test void flatLaddersRejectLaterAutomaticPredicatesAndTransitiveScopeTransfers() throws Exception {
+        String message="Flattening this if ladder would change object lifetime or scope; store this operand in a local variable first";
+        String objects="class Marker{int n;boolean test(){return false;}~Marker(){}}Marker* make(){Marker* value();return value;}";
+        String later=objects+"void main(){if(false){}else if(make().test()){}"+"else if(false){}".repeat(108)+"}";
+        assertTrue(failure(later,32).getMessage().contains(message));
+        String shadow="address saved=null;class C{int n;virtual int str_length(){saved=alloc(1);mem_send_up(saved);return 0;}"
+                +"void run(){if(false){str_length();}"+"else if(false){}".repeat(109)+"}}void main(){}";
+        compile(shadow,128);assertTrue(failure(shadow,32).getMessage().contains(message));
+        String declarations="address saved=null;void promote(){saved=alloc(1);mem_send_up(saved);}void relay(){promote();}";
+        for(String operation:List.of("saved=alloc(1);mem_send_up(saved);","relay();")) {
+            String source=declarations+"void main(){if(false){"+operation+"}"+"else if(false){}".repeat(109)+"}";
+            compile(source,128);String rejected=failure(source,32).getMessage();assertTrue(rejected.contains(message),rejected);
+        }
+    }
+
+    @Test void malformedIfChainBranchesThresholdElseAndMetadataFailBeforeCompilation() throws Exception {
+        JsonObject original = tree("void main(){" + emptyLadder(129, true) + "}"); String unchanged = original.toString();
+        Map<String,java.util.function.Consumer<JsonObject>> mutations = new LinkedHashMap<>();
+        mutations.put("missing branches", node -> node.remove("param"));
+        mutations.put("branch list type", node -> node.addProperty("param", true));
+        mutations.put("threshold", node -> node.getAsJsonArray("param").remove(128));
+        mutations.put("branch primitive", node -> node.getAsJsonArray("param").set(0, new JsonPrimitive(0)));
+        mutations.put("branch array", node -> node.getAsJsonArray("param").set(0, new JsonArray()));
+        mutations.put("branch kind", node -> node.getAsJsonArray("param").get(0).getAsJsonObject().addProperty("t", "call"));
+        mutations.put("branch operation", node -> node.getAsJsonArray("param").get(0).getAsJsonObject().addProperty("call", "while"));
+        mutations.put("branch params missing", node -> node.getAsJsonArray("param").get(0).getAsJsonObject().remove("param"));
+        mutations.put("branch body missing", node -> node.getAsJsonArray("param").get(0).getAsJsonObject().getAsJsonArray("param").remove(1));
+        mutations.put("branch third operand", node -> node.getAsJsonArray("param").get(0).getAsJsonObject().getAsJsonArray("param").add(new JsonArray()));
+        mutations.put("branch else field", node -> node.getAsJsonArray("param").get(0).getAsJsonObject().add("else", new JsonArray()));
+        mutations.put("root operators", node -> node.add("operators", new JsonArray()));
+        mutations.put("branch operators", node -> node.getAsJsonArray("param").get(0).getAsJsonObject().add("operators", new JsonArray()));
+        mutations.put("branch position", node -> node.getAsJsonArray("param").get(0).getAsJsonObject().addProperty("_line", 0));
+        mutations.put("else null", node -> node.add("else", JsonNull.INSTANCE));
+        mutations.put("else body object", node -> node.add("else", new JsonObject()));
+        mutations.put("else body child", node -> { JsonArray body = new JsonArray(); body.add(new JsonObject()); node.add("else", body); });
+        for (var mutation : mutations.entrySet()) {
+            JsonObject changed = JsonParser.parseString(unchanged).getAsJsonObject(); mutation.getValue().accept(firstAst(changed));
+            List<String> problems = AstShape.validate(changed); assertFalse(problems.isEmpty(), mutation.getKey());
+            assertTrue(problems.stream().allMatch(problem -> problem.contains("/_funcfff0000/script/0/")), problems::toString);
+            CompileException error = assertThrows(CompileException.class, () -> Compiler.compile(changed), mutation.getKey());
+            assertFalse(error.internal(), error::getMessage);
+        }
+        JsonObject unpositioned = JsonParser.parseString(unchanged).getAsJsonObject();
+        for (JsonElement branch : firstAst(unpositioned).getAsJsonArray("param"))
+            for (String position : List.of("_file", "_line", "_column")) branch.getAsJsonObject().remove(position);
+        assertTrue(AstShape.validate(unpositioned).isEmpty()); compileAst(unpositioned, 32);
+        assertEquals(unchanged, original.toString());
+    }
+
+    private static JsonObject valueIfTree(int conditions) throws Exception {
+        JsonObject ast = tree("int main(){\nreturn 0;}"); JsonElement result = new JsonPrimitive(-1);
+        for (int i = conditions - 1; i >= 0; i--)
+            result = positionedIf(new JsonPrimitive(false), new JsonPrimitive(i), result, 2, 8);
+        firstAst(ast).getAsJsonArray("param").set(0, result); return ast;
+    }
+
+    @Test void valueIfKeepsItsResultWhenItFitsAndGetsALocatedOperandHintWhenItCannotFit() throws Exception {
+        Compiled fitted = compileAst(valueIfTree(8), 32);
+        assertEquals(8, nodes(main(fitted), ExecOpcodes.IF).size());
+        assertTrue(nodes(main(fitted), ExecOpcodes.WHILE).isEmpty(), "a value if must keep its result-producing form");
+        JsonObject returned = nodes(main(fitted), ExecOpcodes.RETURN).get(0);
+        JsonElement value = returned.get("r");
+        for (int i = 0; i < 8; i++) {
+            JsonObject branch = value.getAsJsonObject(); assertEquals(ExecOpcodes.IF, branch.get("c").getAsInt());
+            assertEquals(new JsonPrimitive(false), branch.get("v")); assertEquals(new JsonPrimitive(i), branch.get("val"));
+            value = branch.get("else");
+        }
+        assertEquals(new JsonPrimitive(-1), value);
+        atLimit("32", () -> {
+            for (JsonObject ast : List.of(valueIfTree(40), JsonParser.parseString(valueIfTree(40).toString()).getAsJsonObject())) {
+                CompileException error = assertThrows(CompileException.class, () -> Compiler.compile(ast));
+                assertFalse(error.internal(), error::getMessage);
+                assertTrue(error.getMessage().contains("store this operand in a local variable first"), error::getMessage);
+                assertTrue(error.getMessage().contains("<source>:2:"), error::getMessage);
+            }
+            return null;
+        });
     }
 }

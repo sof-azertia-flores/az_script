@@ -1,3 +1,13 @@
+# C27 Flat Else-if Ladders (2026-10-15)
+
+[中文](VALIDATION.md) | English
+
+The parser collects ladders iteratively and preserves legacy AST through128 conditions. Lowering chooses the nested or one-shot-loop form from the actual remaining physical depth. The first checked predicate remains a sibling in its original containing scope; later predicates and moved bodies require transitive scope-effect proof. Unsafe lifetime/scope changes report a located local-variable hint. Original loop/switch jumps, functional-if values, return analysis, warnings, AST validation, help and paired contracts were reviewed together. Exec and JNI snapshots remain v10.
+
+V0–V2 passed sequentially with JAVA_TOOL_OPTIONS unset:330 Java tests,5944 native checks,3402 JNI assertions/800 calls from four workers,1000-module linking and405 independent wire cases. Each complete ordinary/sanitizer run passed355 depth/differential checks. Cases cover121/125/128/129/200/10000 conditions,110 inside three loops, exact first-predicate traces, first-match counts, original jump targets and cleanup. Each report has254 passed,73 explicitly infeasible (35 carrying the exact ladder-scope rejection category),24 compiled dependencies and16 non-standalone records; forced96/64/48 showed extra locals/defines in17/24/24 cases. No ASan/UBSan reports occurred.
+
+Before full runs,114 targeted Java tests and125 targeted ladder checks passed. Integration corrected two Java pointer-return declarations and changed the first-match fixture's ANY globals to typed int counters, preserving its side-effect assertions. Independent source review found no additional blocker. Logs/reports: build/c27/v1.log,v2.log,limits-v1.json,limits-v2.json,ladder-target.log,ladder-target.json; validation.exit=0. This step requires no V3. C28 records these complete final-implementation runs and adds fresh export and measurements.
+
 # C26 Flat Operator Chains (2026-10-15)
 
 [中文](VALIDATION.md) | English

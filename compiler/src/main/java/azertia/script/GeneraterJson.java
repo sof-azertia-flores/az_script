@@ -2004,26 +2004,23 @@ public class GeneraterJson {
                 JsonElement result = operation("ctrl", "object-delete", start, expression());
                 endStatement(); return result;
             }
-            if (at("if") || at("while")) {
-                String keyword = advance().text(); expect("("); JsonElement condition = expression();
-                JsonElement body, otherwise = null;
-                boolean loop = keyword.equals("while");
-                if (loop) loopDepth++;
+            if (at("if")) return ifStatement();
+            if (match("while")) {
+                expect("("); JsonElement condition = expression();
+                JsonElement body;
+                loopDepth++;
                 try {
                     if (match(",")) {
                         body = at("{") ? block() : expression();
-                        if (keyword.equals("if") && match(",")) otherwise = at("{") ? block() : expression();
                         expect(")");
                         // The original functional spelling remains accepted.
                         endStatement();
                     } else {
                         expect(")"); body = statement();
-                        if (keyword.equals("if") && match("else")) otherwise = statement();
                         match(";");
                     }
-                } finally { if (loop) loopDepth--; }
-                return otherwise == null ? operation("ctrl", keyword, start, condition, body)
-                        : operation("ctrl", keyword, start, condition, body, otherwise);
+                } finally { loopDepth--; }
+                return operation("ctrl", "while", start, condition, body);
             }
             if (match("def")) {
                 expect("("); String variable = declaredName().text();
@@ -2068,6 +2065,42 @@ public class GeneraterJson {
                 return definition;
             }
             JsonElement expression = statementExpression(); endStatement(); return expression;
+        }
+        /** Else-if links are siblings while parsing; true statement nesting still uses statement(). */
+        private JsonElement ifStatement() {
+            Token first = current(); List<JsonObject> branches = new ArrayList<>();
+            JsonElement otherwise = null;
+            while (true) {
+                Token start = current(); expect("if"); expect("("); JsonElement condition = expression();
+                if (match(",")) {
+                    // Functional if keeps its original expression/body spelling and AST.
+                    JsonElement body = at("{") ? block() : expression();
+                    JsonElement fallback = match(",") ? (at("{") ? block() : expression()) : null;
+                    expect(")"); endStatement();
+                    otherwise = fallback == null ? operation("ctrl", "if", start, condition, body)
+                            : operation("ctrl", "if", start, condition, body, fallback);
+                    if (branches.isEmpty()) return otherwise;
+                    break;
+                }
+                expect(")"); JsonElement body = statement();
+                branches.add(operation("ctrl", "if", start, condition, body));
+                if (!match("else")) break;
+                if (!at("if")) { otherwise = statement(); break; }
+            }
+            // The recursive parser accepted one optional trailing semicolon per link.
+            for (int i = 0; i < branches.size(); i++) match(";");
+            if (branches.size() > 128) {
+                JsonObject chain = operation("ctrl", "if-chain", first, branches.toArray(JsonElement[]::new));
+                if (otherwise != null) chain.add("else", otherwise);
+                return chain;
+            }
+            // Preserve field order, positions and the exact legacy tree through 128 conditions.
+            for (int i = branches.size() - 1; i >= 0; i--) {
+                JsonObject branch = branches.get(i);
+                if (otherwise != null) branch.getAsJsonArray("param").add(otherwise);
+                otherwise = branch;
+            }
+            return otherwise;
         }
         private JsonElement switchStatement(Token start) {
             expect("("); JsonElement value = expression(); expect(")"); expect("{");

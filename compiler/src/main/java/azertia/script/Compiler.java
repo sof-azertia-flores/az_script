@@ -121,7 +121,7 @@ public class Compiler {
     }
     private static class Counter { int next, hidden; }
     /** A synthetic loop can relay control to the nearest enclosing real loop. */
-    private record SyntheticLoop(String breakFlag, String continueFlag, int outerLoopDepth) {}
+    private record SyntheticLoop(String breakFlag, String continueFlag, int outerLoopDepth, boolean transparent, boolean breakAllowed) {}
     /** Per-compilation state shared through the root environment. */
     static final class CompilationState {
         final Diagnostics diagnostics;
@@ -467,7 +467,7 @@ public class Compiler {
                     ? AsTypes.INT_VALUE : AsTypes.ANY_VALUE;
             case "if" -> branchType(params, environment);
             case "select" -> selectType(params, environment);
-            case "vardef", "return", "break", "continue", "while", "for", "switch", "#switch-loop", "increment", "decrement", "object-def", "object-delete", "#bind", "#set-methods", "#base-completed", "#drop" -> AsTypes.VOID_VALUE;
+            case "vardef", "return", "break", "continue", "while", "for", "switch", "if-chain", "#switch-loop", "#if-loop", "#synthetic-break", "increment", "decrement", "object-def", "object-delete", "#bind", "#set-methods", "#base-completed", "#drop" -> AsTypes.VOID_VALUE;
             default -> AsTypes.ANY_VALUE;
         };
     }
@@ -912,7 +912,7 @@ public class Compiler {
                 JsonElement end = null; boolean reported = !checkReachability;
                 for (JsonElement statement : input.getAsJsonArray()) {
                     if (end != null && !reported) reported = warnUnreachable(end, statement, scope);
-                    block.acsa.add(compileNode(statement, scope));
+                    block.acsa.add(compileStatementNode(statement, scope,true));
                     if (end == null && !reported && !canCompleteNormally(statement)) end = statement;
                 }
                 return null;
@@ -922,6 +922,17 @@ public class Compiler {
         }
         if (!input.isJsonObject()) throw new IllegalArgumentException("Invalid expression");
         return compileInstruction(input.getAsJsonObject(), environment);
+    }
+    private static AcsElement compileStatementNode(JsonElement source,LogicEnvironment environment) {return compileStatementNode(source,environment,false);}
+    private static AcsElement compileStatementNode(JsonElement source,LogicEnvironment environment,boolean siblings) {
+        boolean added=environment.tables.statements.add(source),siblingAdded=siblings&&environment.tables.statementSiblings.add(source);
+        try{return compileNode(source,environment);}
+        finally{if(added)environment.tables.statements.remove(source);if(siblingAdded)environment.tables.statementSiblings.remove(source);}
+    }
+    private static AcsElement compileLadderElse(JsonElement source,LogicEnvironment environment) {
+        boolean added=environment.tables.ladderTails.add(source);
+        try{return compileStatementNode(source,environment);}
+        finally{if(added)environment.tables.ladderTails.remove(source);}
     }
     private static AcsElement compileInstruction(JsonObject source, LogicEnvironment environment) {
         String type = string(source.get("t"), "Instruction t"), call = string(source.get("call"), "Instruction call");
@@ -1354,25 +1365,31 @@ public class Compiler {
                 return withDepth(1, () -> new AcsFloat(number));
             }
             case "break", "continue" -> {
-                arity(call, params, 0, 0);
-                if (call.equals("continue") && environment.syntheticLoop != null) {
-                    SyntheticLoop loop = environment.syntheticLoop;
-                    if (loop.outerLoopDepth() == 0) throw new IllegalArgumentException("continue can only be used inside a loop");
-                    return compileNode(array(node("varset", new JsonPrimitive(loop.continueFlag()), new JsonPrimitive(true)), node("break")), environment);
+                arity(call, params, 0, 0);SyntheticLoop loop=environment.syntheticLoop;
+                if(loop!=null&&(call.equals("continue")||loop.transparent())) {
+                    if(call.equals("continue")&&loop.outerLoopDepth()==0)throw new IllegalArgumentException("continue can only be used inside a loop");
+                    if(call.equals("break")&&!loop.breakAllowed())throw new IllegalArgumentException("break can only be used inside a loop or switch");
+                    String flag=call.equals("break")?loop.breakFlag():loop.continueFlag();
+                    if(!loop.transparent())return compileNode(array(node("varset",new JsonPrimitive(flag),new JsonPrimitive(true)),node("break")),environment);
+                    AcsElement set=compileNode(node("varset",new JsonPrimitive(flag),new JsonPrimitive(true)),environment);recordPosition(source,set,environment);
+                    AcsObject exit=new AcsObject();exit.put("t",0);exit.put("c",ExecOpcodes.BREAK);recordPosition(source,exit,environment);
+                    return execSequence(List.of(set,exit),source,environment);
                 }
-                if (environment.loopDepth == 0 && environment.syntheticLoop == null)
+                if (environment.loopDepth == 0 && loop == null)
                     throw new IllegalArgumentException(call + " can only be used inside " + (call.equals("break") ? "a loop or switch" : "a loop"));
                 result.put("c", ExecOpcodes.code(call.equals("break") ? "brk" : "cont"));
             }
+            case "#synthetic-break" -> {requireTrusted(source,environment);arity(call,params,0,0);result.put("c",ExecOpcodes.BREAK);}
             case "switch" -> { return compileSwitch(source, environment); }
+            case "if-chain" -> { return compileFlatLadder(source,environment,environment.tables.statementSiblings.contains(source)); }
             case "case" -> throw new IllegalArgumentException("case/default can only be used inside a switch");
-            case "#switch-loop" -> {
+            case "#switch-loop", "#if-loop" -> {
                 requireTrusted(source, environment); arity(call, params, 1, 1);
                 SyntheticLoop descriptor = environment.state().syntheticLoops.get(source);
                 if (descriptor == null) throw new IllegalArgumentException("Missing synthetic loop descriptor");
                 LogicEnvironment loop = environment.child(); loop.syntheticLoop = descriptor;
                 result.put("c", ExecOpcodes.WHILE); result.put("v", new AcsBooleanElement(true));
-                result.put("val", compileNode(params.get(0), loop)); finishScope(loop);
+                result.put("val", compileStatementNode(params.get(0), loop)); finishScope(loop);
             }
             case "increment", "decrement" -> {
                 arity(call, params, 1, 1); JsonElement target = params.get(0);
@@ -1425,17 +1442,129 @@ public class Compiler {
                 requireConditionOrUnknown(call + " condition", params.get(0), environment);
                 result.put("c", ExecOpcodes.code(call.equals("if") ? "if" : "wi"));
                 result.put("v", compileNode(params.get(0), environment));
+                boolean statement=call.equals("while")||environment.tables.statements.contains(source);
                 LogicEnvironment body = call.equals("while") ? environment.loopChild() : environment.child();
-                // A body without braces, e.g. "if (c) int x = f();", still ends its own scope.
-                result.put("val", compileNode(params.get(1), body)); finishScope(body);
+                // A body without braces still ends its own scope. Value-if arms
+                // remain values and cannot acquire statement-only ladder lowering.
+                result.put("val", statement?compileStatementNode(params.get(1),body):compileNode(params.get(1),body)); finishScope(body);
                 if (params.size() == 3) {
                     LogicEnvironment otherwise = environment.child();
-                    result.put("else", compileNode(params.get(2), otherwise)); finishScope(otherwise);
+                    result.put("else",statement?compileLadderElse(params.get(2),otherwise):compileNode(params.get(2),otherwise)); finishScope(otherwise);
+                }
+                if(call.equals("if")&&statement&&!environment.tables.ladderTails.contains(source)&&ladder(source).branches().size()>1) {
+                    LogicEnvironment captured=snapshotEnvironment(environment);boolean siblings=environment.tables.statementSiblings.contains(source);
+                    environment.tables.ladders.put(result,()-> {
+                        captured.counter.next=captured.tables.nextSlot;
+                        AcsElement flattened=compileFlatLadder(source,captured,siblings);captured.tables.nextSlot=captured.counter.next;return flattened;
+                    });
                 }
             }
             default -> throw new IllegalArgumentException("Unknown control operation: " + call);
         }
         return result;
+    }
+    private record IfLadder(List<JsonObject> branches,JsonElement otherwise) {}
+    private static IfLadder ladder(JsonObject source) {
+        List<JsonObject> branches=new ArrayList<>();JsonElement otherwise=null;
+        if(source.get("call").getAsString().equals("if-chain")) {
+            for(JsonElement branch:parameters(source))branches.add(branch.getAsJsonObject());
+            otherwise=source.get("else");
+        } else {
+            JsonObject current=source;
+            while(true) {
+                branches.add(current);JsonArray params=parameters(current);if(params.size()<3)break;
+                JsonElement next=params.get(2);
+                if(next.isJsonObject()&&isControl(next.getAsJsonObject())&&next.getAsJsonObject().get("call").getAsString().equals("if"))current=next.getAsJsonObject();
+                else {otherwise=next;break;}
+            }
+        }
+        return new IfLadder(List.copyOf(branches),otherwise);
+    }
+    /** Capture only bindings already visible at this source point, before later declarations. */
+    private static LogicEnvironment snapshotEnvironment(LogicEnvironment environment) {
+        if(environment.parent==null)return environment;
+        LogicEnvironment snapshot=new LogicEnvironment(environment.root());snapshot.parent=snapshotEnvironment(environment.parent);
+        snapshot.counter=environment.counter;snapshot.context=environment.context;snapshot.returnType=environment.returnType;
+        snapshot.loopDepth=environment.loopDepth;snapshot.ownerClass=environment.ownerClass;snapshot.syntheticLoop=environment.syntheticLoop;
+        snapshot.typeScope=environment.typeScope;snapshot.typeParameters=environment.typeParameters;snapshot.tables=environment.tables;
+        snapshot.vars=new ArrayList<>(environment.vars);return snapshot;
+    }
+    private static AcsElement execSequence(List<AcsElement> statements,JsonElement source,LogicEnvironment environment) {
+        if(statements.size()==1)return statements.get(0);
+        AcsObject sequence=new AcsObject();sequence.put("t",0);sequence.put("c",ExecShape.INTERNAL_SEQUENCE);
+        AcsArray prefix=new AcsArray();prefix.acsa.addAll(statements.subList(0,statements.size()-1));sequence.put("statements",prefix);sequence.put("v",statements.get(statements.size()-1));
+        return recordPosition(source,sequence,environment);
+    }
+    /** All source transfers are retargeted while compiling under this transparent loop. */
+    private static AcsElement compileFlatLadder(JsonObject source,LogicEnvironment environment,boolean firstInOriginalScope) {
+        IfLadder ladder=ladder(source);boolean breaks=false,continues=false;
+        for(int i=0;i<ladder.branches().size();i++) {
+            JsonObject branch=ladder.branches().get(i);JsonArray params=parameters(branch);
+            if((i>0||!firstInOriginalScope)&&!scopeSafeExpression(params.get(0),environment)
+                    ||i>0&&!predicateReturnsSafe(params.get(0),environment)||!scopeSafeExpression(params.get(1),environment))
+                throw ladderScopeError(branch,environment);
+        }
+        if(ladder.otherwise()!=null&&!scopeSafeExpression(ladder.otherwise(),environment))throw ladderScopeError(source,environment);
+        for(JsonObject branch:ladder.branches()) {
+            breaks|=ladderFlow(parameters(branch).get(1),"break");continues|=ladderFlow(parameters(branch).get(1),"continue");
+        }
+        if(ladder.otherwise()!=null) {breaks|=ladderFlow(ladder.otherwise(),"break");continues|=ladderFlow(ladder.otherwise(),"continue");}
+        int serial=environment.counter.hidden++;String broken="#if-break-"+serial,continued="#if-continue-"+serial;
+        boolean breakAllowed=environment.loopDepth>0||environment.syntheticLoop!=null&&environment.syntheticLoop.breakAllowed();
+        SyntheticLoop descriptor=new SyntheticLoop(broken,continued,environment.loopDepth,true,breakAllowed);
+        List<AcsElement> statements=new ArrayList<>();
+        JsonObject firstBranch=ladder.branches().get(0);JsonElement firstCondition=parameters(firstBranch).get(0);
+        warnAssignmentCondition(firstCondition,environment);rejectVoidValue("if condition",firstCondition,environment);requireConditionOrUnknown("if condition",firstCondition,environment);
+        JsonElement firstAt=firstCondition.isJsonObject()&&firstCondition.getAsJsonObject().has("_line")?firstCondition:firstBranch;
+        JsonObject inner=node("not",firstCondition),checked=node("not",inner);copyPosition(firstAt,inner,environment);copyPosition(firstAt,checked,environment);
+        String firstValue="#if-first-"+serial;JsonObject saved=node("vardef",new JsonPrimitive(firstValue),checked);saved.addProperty("declared-type","boolean");copyPosition(firstAt,saved,environment);
+        statements.add(compileStatementNode(saved,environment));
+        // These are siblings of the loop and its relay tests, never an extra scope.
+        for(String flag:List.of(broken,continued)) {
+            if(flag.equals(broken)&&!breaks||flag.equals(continued)&&!continues)continue;
+            JsonObject definition=node("vardef",new JsonPrimitive(flag),new JsonPrimitive(false));definition.addProperty("declared-type","boolean");copyPosition(source,definition,environment);
+            statements.add(compileStatementNode(definition,environment));
+        }
+        JsonArray iteration=new JsonArray();
+        for(int index=0;index<ladder.branches().size();index++) {
+            JsonObject branch=ladder.branches().get(index);JsonArray params=parameters(branch);JsonArray body=new JsonArray();
+            if(params.get(1).isJsonArray())body.addAll(params.get(1).getAsJsonArray());else body.add(params.get(1));
+            JsonObject exit=internal(environment,"#synthetic-break");copyPosition(branch,exit,environment);body.add(exit);JsonObject conditional=node("if",index==0?variable(firstValue):params.get(0),body);copyPosition(branch,conditional,environment);iteration.add(conditional);
+        }
+        if(ladder.otherwise()!=null)iteration.add(ladder.otherwise());
+        JsonObject exit=internal(environment,"#synthetic-break");copyPosition(source,exit,environment);iteration.add(exit);
+        JsonObject loop=internal(environment,"#if-loop",iteration);copyPosition(source,loop,environment);environment.state().syntheticLoops.put(loop,descriptor);
+        statements.add(compileStatementNode(loop,environment));
+        if(breaks) {JsonObject relay=node("if",variable(broken),node("break"));copyPosition(source,relay,environment);statements.add(compileStatementNode(relay,environment));}
+        if(continues) {JsonObject relay=node("if",variable(continued),node("continue"));copyPosition(source,relay,environment);statements.add(compileStatementNode(relay,environment));}
+        return execSequence(statements,source,environment);
+    }
+    private static RuntimeException ladderScopeError(JsonObject source,LogicEnvironment environment) {
+        return relocate(new IllegalArgumentException("Flattening this if ladder would change object lifetime or scope; store this operand in a local variable first"),source,environment);
+    }
+    private static boolean scopeSafeExpression(JsonElement source,LogicEnvironment environment) {
+        Set<Integer> dependencies=new HashSet<>();return scopeDependencies(source,environment,dependencies)&&environment.tables.scopeSafeCalls.containsAll(dependencies);
+    }
+    private static boolean predicateReturnsSafe(JsonElement source,LogicEnvironment environment) {
+        if(source==null||source.isJsonNull()||source.isJsonPrimitive())return true;
+        if(source.isJsonArray()){for(JsonElement child:source.getAsJsonArray())if(!predicateReturnsSafe(child,environment))return false;return true;}
+        JsonObject node=source.getAsJsonObject();String kind=node.get("t").getAsString(),call=node.get("call").getAsString();
+        String resolved=kind.equals("call")?resolveCall(call,environment):call;
+        if(kind.equals("call")&&(!SourceRules.CONVERSIONS.contains(call)||!resolved.equals(call))) {
+            Integer id=environment.root().abs.get(resolved);if(id==null)return false;
+            int type=environment.root().functionReturnTypes.getOrDefault(id,AsTypes.ANY_VALUE);
+            if(id!=0x0abd0006&&(type<0||type>AsTypes.VOID_VALUE))return false;
+        }
+        for(JsonElement child:parameters(node))if(!predicateReturnsSafe(child,environment))return false;
+        return true;
+    }
+    private static boolean ladderFlow(JsonElement value,String transfer) {
+        if(value==null||value.isJsonNull()||value.isJsonPrimitive())return false;
+        if(value.isJsonArray()) {for(JsonElement child:value.getAsJsonArray())if(ladderFlow(child,transfer))return true;return false;}
+        JsonObject node=value.getAsJsonObject();if(!isControl(node))return false;String call=node.get("call").getAsString();
+        if(call.equals(transfer))return true;if(call.equals("while")||call.equals("for")||transfer.equals("break")&&call.equals("switch"))return false;
+        for(JsonElement child:parameters(node))if(ladderFlow(child,transfer))return true;
+        return call.equals("if-chain")&&node.has("else")&&ladderFlow(node.get("else"),transfer);
     }
     private static FunctionTables.Precompiled precompiled(JsonObject source,LogicEnvironment environment) {
         FunctionTables.Precompiled value=environment.tables.precompiled.get(source);
@@ -1568,7 +1697,7 @@ public class Compiler {
         String value = "#switch-value-" + serial, continued = "#switch-continue-" + serial;
         // breakFlag is reserved for transparent synthetic loops (C27); source
         // switch breaks already target this wrapper directly.
-        SyntheticLoop descriptor = new SyntheticLoop("#switch-break-" + serial, continued, environment.loopDepth);
+        SyntheticLoop descriptor = new SyntheticLoop("#switch-break-" + serial, continued, environment.loopDepth,false,true);
         JsonObject saved = node("vardef", new JsonPrimitive(value), params.get(0)); saved.addProperty("declared-type", typeName(type));
         copyPosition(source, saved, environment);
         JsonArray wrapper = array(saved); boolean relayContinue = groups.stream().anyMatch(group -> containsContinue(group.body()));
@@ -2772,6 +2901,10 @@ public class Compiler {
         return switch (object.get("call").getAsString()) {
             case "return", "break", "continue" -> false;
             case "if" -> params.size() < 3 || canCompleteNormally(params.get(1)) || canCompleteNormally(params.get(2));
+            case "if-chain" -> {
+                boolean completes=!object.has("else")||canCompleteNormally(object.get("else"));
+                for(JsonElement branch:params)completes|=canCompleteNormally(parameters(branch.getAsJsonObject()).get(1));yield completes;
+            }
             case "while" -> params.size() < 2 || !isTrueLiteral(params.get(0)) || containsBreak(params.get(1));
             case "for" -> params.size() < 4 || !isTrueLiteral(params.get(1)) || containsBreak(params.get(3));
             case "switch" -> switchCanComplete(params);
@@ -2806,7 +2939,7 @@ public class Compiler {
         if (call.equals("while") || call.equals("for") || call.equals("switch")) return false;
         if (!object.has("param") || !object.get("param").isJsonArray()) return false;
         for (JsonElement child : object.getAsJsonArray("param")) if (containsBreak(child)) return true;
-        return false;
+        return call.equals("if-chain")&&object.has("else")&&containsBreak(object.get("else"));
     }
     private static boolean switchCanComplete(JsonArray params) {
         if (params.size() != 2 || !params.get(1).isJsonArray()) return true;
@@ -2832,7 +2965,7 @@ public class Compiler {
         if (call.equals("continue")) return true;
         if (call.equals("while") || call.equals("for")) return false;
         for (JsonElement child : parameters(object)) if (containsContinue(child)) return true;
-        return false;
+        return call.equals("if-chain")&&object.has("else")&&containsContinue(object.get("else"));
     }
     /**
      * Compiles a readable AST without debug info, reporting up to

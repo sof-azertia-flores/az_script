@@ -580,6 +580,18 @@ extern int host_add(int, int):0xccf0001;
 
 扁平 AST 减少编译嵌套，不增加执行 opcode 或格式版本；降级后的结果仍须符合物理 ABD 上限及前述全部语句拆分限制。左折叠分段通过同一套安全检查；重载运算符的拥有型结果若需要不安全的分段捕获，会收到生命周期/复制诊断。原本符合限制的普通表达式保持既有 AST 和 ABD 结构。
 
+### 长 else-if 链
+
+语句 `if (...) { ... } else if (...) { ... } ... else { ... }` 从左到右检查条件，到首次匹配时只执行该正文，跳过后续条件及正文；末尾 else 可省略。每个条件须为 boolean，分支作用域和正常清理规则不变。分支内的 return、break、continue 保留原源码目标，包括处于外围循环和 switch 中的情况。
+
+解析器迭代收集 else-if 链；超过 128 个条件时使用扁平可读 `if-chain`，128 个及以下保留既有嵌套 AST。编译先按实际剩余 ABD 深度尝试普通嵌套 if 及其支持的切分；仍无法容纳时，才对整条链尝试扁平降级，并遵守下述作用域检查。较短的链位于循环或其他嵌套语句内时同样适用，因此 128 是 AST 表示的阈值，不保证 128 层执行 if 一定符合限制。
+
+扁平降级能在链旁生成兄弟语句时，会让首个条件的求值和布尔检查保留在原外围作用域；字面量临时值在进入选定分支前结束，返回的自动指针保留原所有者。后续条件和被移动的正文必须传递检查其操作及调用的辅助函数，证明作用域和生命周期不变。仅有标量返回类型不足以证明安全：`mem_send_up`、间接调用的不安全辅助函数、反射/加载库、未知宿主/虚调用、未证明安全的类/成员/buffer/泛型操作及未知 any 值都会阻止此证明。后续条件中的调用不能引入 address、any 或 object 结果；无花括号的首个条件若无法通过兄弟语句保留其精确作用域，也须通过证明。
+
+检查失败时报告 `Flattening this if ladder would change object lifetime or scope; store this operand in a local variable first`，因此超过 128 个分支不保证一定能编译。可用作用域明确的局部变量表达生命周期，或调整条件链结构；属于被跳过分支的计算仍须有条件地执行。
+
+扁平降级只适用于语句。产生值的函数式 if 在符合限制时保留表达式语义和嵌套表示；无法安全编码时报告带位置的限制错误，不会静默变成 void 语句。每个条件和正文仍遵守拆分限制，扁平链不允许不安全的拥有型捕获或惰性操作数内部切分。真正嵌套的块和表达式保留既有上限，不增加 opcode、exec 版本或快照版本。
+
 ### 诊断
 
 编译错误采用 gcc/clang 格式 `文件:行:列: error: [in 上下文: ]消息`，输出到标准错误。经过 `#include` 和宏展开后，位置仍指向原始文件、行和列：
@@ -757,6 +769,8 @@ int functionId(int ns, int position) {
 可读 AST 保持 `metadata/ext/abstract/global-variable/body` 结构，并为带签名的宿主函数增加 `extern-signatures`。`global-variable` 先以字符串列出 `#gvar` 名称，再以带位置的 `{"name", "type", "initializer"?}` 对象列出每个带类型全局；`compile-json` 按与源码相同的规则检查并初始化它们。类程序额外保存类定义、字段顺序和成员表达式等编译信息；`compile-json` 会重新执行类型检查与降级。限定的父类调用写作 `{"t":"ctrl","call":"base-call","param":["Base","method",args...]}`，可附带 `type-args`。AST 还保存模块 hint、assume、外部声明、定义名称与实际定义编号；调用绑定与定义位置分开，支持完全相同的 ABD 往返。`abstract` 是 extern 优先的源码名称绑定：有 extern 时保存声明 ID，否则保存定义 ID；hint 库的本地定义仍使用 0000 占位，实际调用的 self-assume 地址在降级时生成。函数定义的独立位置由 `body` 的 namespace 和 `metadata.position/name` 保存；每个签名另保存 `return-type` 与 `param-types`。表达式对象有 `t: "ctrl" | "call"`、`call`、`param`，块是数组。
 
 可读运算链使用 `{"t":"ctrl","call":"chain","param":[operand,...],"operators":[{"call":"add","_line":1,"_column":3},...]}`。`param` 按源码顺序保存操作数，`operators` 恰好少一项，各项用规范二元操作名（如 `add`、`minus`、`multiply`、`cmp`、`and`）及通常的 `_file/_line/_column` 元数据记录对应运算符和位置。此结构要求同一优先级超过 128 个操作数。`chain` 是 AST 操作名，不是源码保留字，普通函数仍可使用该名称。所有运算符须属于同一规范优先级组；手写 AST 可省略运算符位置，提供时会校验。`compile-json` 检查节点、运算符名称/数量及位置，再重新进行类型检查和降级；内部的分段占位和序列记录不会写入源 AST 或执行 wire 格式。
+
+可读 else-if 链使用 `{"t":"ctrl","call":"if-chain","param":[{"t":"ctrl","call":"if","param":[condition,body]},...],"else":body}`。每个带位置的分支是仅有条件和正文的普通 `if` 节点，可选的最终 `else` 属于外围 `if-chain`。此扁平结构要求超过 128 个条件；较短源码链保留嵌套 AST，即使执行降级采用扁平形式。`compile-json` 检查结构及布尔条件，再进行分支作用域、跳转、缺失返回和按剩余深度选择降级的检查；手写嵌套链也可获得同样的扁平执行降级，而不改变其源 AST。
 
 可读 switch AST 使用 `{"t":"ctrl","call":"switch","param":[value,sections]}`，sections 是数组。每个分段为 `{"t":"ctrl","call":"case","labels":[literal,...],"param":[body]}`，body 是语句数组，可附带 `default: true`；只有 default 的分段不带 case 标签。解析器保留各个标签，编译时把相邻的空分段与后续正文合并。`compile-json` 重新检查标签、作用域、跳转及贯穿路径。降级先对值求值一次，再使用一次性循环、同级 if 分段和平衡的短路标签比较；无论 default 在源码何处，都最后处理。隐藏局部变量保持源码 break/continue 的目标不变。
 

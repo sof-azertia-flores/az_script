@@ -14,7 +14,8 @@ import java.util.*;
  * {@code Malformed script JSON at /body/fff/_funcfff0000/metadata/position: expected an integer, got "abc"},
  * so a hand-written or edited AST fails with a clear message instead of an
  * exception inside the compiler. Unknown fields are ignored except in compact
- * chain operator records; the meaning of well-typed names and types is left to the compiler.
+ * chain operator records and reserved if-chain fields; the meaning of well-typed
+ * names and types is left to the compiler.
  *
  * <p>The walk is iterative; it runs after {@link TreeLimits#validate} has bounded
  * the nesting and excluded cycles.
@@ -47,8 +48,9 @@ final class AstShape {
             return text.toString();
         }
     }
-    private record Pending(JsonElement node, Pointer path, boolean switchSection) {
-        Pending(JsonElement node, Pointer path) { this(node, path, false); }
+    private record Pending(JsonElement node, Pointer path, boolean switchSection, boolean ifChainBranch) {
+        Pending(JsonElement node, Pointer path) { this(node, path, false, false); }
+        Pending(JsonElement node, Pointer path, boolean switchSection) { this(node, path, switchSection, false); }
     }
     private final List<String> errors = new ArrayList<>();
     private final Deque<Pending> nodes = new ArrayDeque<>();
@@ -204,6 +206,10 @@ final class AstShape {
                 error(path, "expected a ctrl/case switch section, got " + describe(value));
                 continue;
             }
+            if (pending.ifChainBranch() && (value == null || !value.isJsonObject())) {
+                error(path, "expected a ctrl/if branch, got " + describe(value));
+                continue;
+            }
             // Null is reported by the compiler as a value error at its context.
             if (value == null || value.isJsonNull()) continue;
             if (value.isJsonPrimitive()) { number(value.getAsJsonPrimitive(), path); continue; }
@@ -222,7 +228,18 @@ final class AstShape {
                 literalTrue(node, "_parenthesized", path);
                 JsonArray params = array(node, "param", path, false);
                 boolean control = "ctrl".equals(kind);
+                boolean ifChain = control && "if-chain".equals(call);
                 if (control && "chain".equals(call)) chain(node, params, path);
+                if (ifChain) ifChain(node, params, path, children);
+                if (pending.ifChainBranch()) {
+                    if (!(control && "if".equals(call))) error(path, "expected a ctrl/if branch");
+                    if (params == null) {
+                        if (!node.has("param")) missing(path.key("param"));
+                    } else if (params.size() != 2)
+                        error(path.key("param"), "an if-chain branch needs exactly two operands: condition and body");
+                    if (node.has("else")) error(path.key("else"), "the final else belongs to the outer if-chain");
+                    if (node.has("operators")) error(path.key("operators"), "unexpected if-chain branch operators field");
+                }
                 if (pending.switchSection() && !(control && "case".equals(call)))
                     error(path, "expected a ctrl/case switch section");
                 if (control && "case".equals(call)) {
@@ -240,7 +257,7 @@ final class AstShape {
                 if (call != null && (params != null || !node.has("param"))) operands(kind, call, params != null ? params : new JsonArray(), paramPath);
                 // A name operand is a string, never an expression node.
                 Set<Integer> names = call == null ? Set.of() : NAME_OPERANDS.getOrDefault(call, Set.of());
-                if (params != null) for (int i = 0; i < params.size(); i++) {
+                if (params != null && !ifChain) for (int i = 0; i < params.size(); i++) {
                     if (names.contains(i)) stringElement(params.get(i), paramPath.index(i));
                     else if (control && "switch".equals(call) && i == 1) switchSections(params.get(i), paramPath.index(i), children);
                     else children.add(new Pending(params.get(i), paramPath.index(i)));
@@ -255,6 +272,22 @@ final class AstShape {
         if (!value.isJsonArray()) { error(path, "expected an array of switch sections, got " + describe(value)); return; }
         JsonArray sections = value.getAsJsonArray();
         for (int i = 0; i < sections.size(); i++) children.add(new Pending(sections.get(i), path.index(i), true));
+    }
+    /** Branch records hold exactly a condition and body; only those operands are expressions. */
+    private void ifChain(JsonObject node, JsonArray params, Pointer path, List<Pending> children) {
+        if (params == null) {
+            if (!node.has("param")) missing(path.key("param"));
+        } else {
+            if (params.size() <= 128) error(path.key("param"), "if-chain needs more than 128 branches");
+            for (int i = 0; i < params.size(); i++)
+                children.add(new Pending(params.get(i), path.key("param").index(i), false, true));
+        }
+        if (node.has("operators")) error(path.key("operators"), "unexpected if-chain operators field");
+        if (node.has("else")) {
+            JsonElement otherwise = node.get("else");
+            if (otherwise == null || otherwise.isJsonNull()) error(path.key("else"), "expected a body expression, got " + describe(otherwise));
+            else children.add(new Pending(otherwise, path.key("else")));
+        }
     }
     private static final List<Set<String>> BINARY_PRECEDENCE = List.of(
             Set.of("or"), Set.of("and"), Set.of("bit_or"), Set.of("bit_xor"), Set.of("bit_and"),
