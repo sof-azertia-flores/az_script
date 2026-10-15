@@ -184,6 +184,8 @@ AbdInvoker.registerJfunction(0x12340001,
 
 The script declares `extern int host_add(int, int):0x12340001;`. Built-ins need no registration. The bridge maintains one active script per process, serializes calls, and permits same-thread reentry. Do not wait in a callback for another thread calling this runtime. Class pointers/address cross as azertia.Address; literals cannot cross JNI and returned literals fail after destruction. Return pointers instead. Address.of(long bits)/bits() retain all unsigned 64 bits. Address.NULL is address zero, distinct from void's Java null; Integer/Long cannot replace addresses implicitly. An address is a runtime reference, not an independently owned Java object. Close releases script and callback registrations; place it in finally.
 
+Class-pointer arguments and extern results remain trusted address values; member access checks object storage and bounds, not nominal class identity. Script raw memory APIs and JNI raw writes/free cannot access object storage. Use typed script wrappers for fields and `delete`; `address(p)` does not bypass these restrictions or transfer ownership. Stale aliases after heap reuse and escaped automatic objects remain known limitations.
+
 ## Multi-file assembly
 
 ```sh

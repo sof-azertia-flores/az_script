@@ -92,12 +92,20 @@ stack 的成员数量由其 frame 边界确定；固定记录必须恰好包含�
 
 `cleanup` 是编译器内部清理指令，检查视图 JSON 的字段为 `v`（正文）、`val`（清理）、`on-error`。先执行正文及其作用域清理；`on_error=true` 时只在失败后执行 finalizer，false 时无论正常结束、跳转或错误都执行。finalizer 不替换正文已有的返回值或跳转；已有错误优先保留，否则传播清理错误。继承构造用它回滚已完成的父类部分，析构用它保证父类随后执行。两个子节点都是普通表达式，类名、继承关系及布局不进入 exec 指令。清理仍受调用和指令预算约束，底层内存释放保持原有兜底保证。不认识新 opcode 的解释器会明确拒绝相应程序。
 
+## 封闭的对象存储
+
+编译器内部 `object_alloc`（`0x0abd0014`，`address(int)`）使用普通 CALL 记录，在构造之前立即标记分配。源码不能通过名称调用它，也不增加 opcode。`oa` 要求已标记的对象存储或活动的字面量/视图地址，并检查边界；普通原始分配不能充当带类型对象。
+
+原始 `mem_get`、`mem_free`、`make_free`、`mem_send_up` 拒绝已标记的起点/内部地址及字面量/视图地址，包括正在构造的对象。错误为 `<name> cannot access object storage; use typed member access`。JNI 原始 put/free 同样拒绝它们。解码器把编译器生成的 `mem_get(oa(...))` 识别为内部带类型成员访问，仍可用于 `m`/`drop` 目标；独立的原始 `mem_get` 不因此获得对象访问能力。
+
+构造完成（`ob`/`register_object`）先登记生命周期状态，再解除手动对象的自动拥有者；登记失败时仍保留清理责任，手动工厂不会对对象存储调用原始 `make_free`。释放/销毁清除对象标记，快照恢复从已验证的登记对象区间重建标记，不增加快照字段或版本。exec 保持 v10。存储标记不编码名义类身份，也不能防止堆地址复用后的旧别名。
+
 ## 字面量对象（opcode 32–35）
 
 字面量对象保存在 slot 块中：块由一个存储变量拥有，赋值、传参、返回时按运行时规则移动或复制全部 slots，拥有者的生命周期结束时运行已登记的析构并使地址失效。编译器只在自身降级中产生以下指令，源码不能直接书写：
 
 - `new_block` 创建 `size`（1…1048576）个空 slot 的块，作为当前语句的临时对象值，尚无析构。
-- `block_address` 求值为对象值后返回其存储地址，块已到期时报错。地址的最高位为 1，其余位为 `id << 24 | offset`；id 永不复用，因此过期地址永远不会指向后来的对象。`oa`、`mem_get` 与 `ob` 均接受这类地址：`ob` 只为块登记析构，`manual` 必须为 false；`od` 与 `mem_free`/`make_free`/`mem_send_up` 不管理块存储。
+- `block_address` 求值为对象值后返回其存储地址，块已到期时报错。地址的最高位为 1，其余位为 `id << 24 | offset`；id 永不复用，因此过期地址永远不会指向后来的对象。`oa`、`ob` 支持这类地址；原始 `mem_get` 拒绝它们，编译器生成的带类型成员访问使用内部成员路径。`ob` 只为块登记析构，`manual` 必须为 false；`od` 与 `mem_free`/`make_free`/`mem_send_up` 不管理块存储。
 - `mv` 读取局部或参数槽（非负），把其中拥有的块转为当前帧的临时对象，供工厂向构造转交已复制的实参。
 - `drop` 的目标与 `m` 相同（变量或 `mem_get` 调用），立即运行并结束该存储所拥有块的析构，用于析构正文之后销毁本类字面量字段。
 
@@ -147,7 +155,7 @@ JNI 快照 v9 递归保存对象已绑定的析构上下文，包括 ABI、kind�
 
 记录严格为 `[49, type:int, value:E]`，目标类型为 int=0、string=1、float=2、double=3 或 address=7；读取方拒绝其他目标以及缺失/多余字段。检查 JSON 使用 `type`、`v`。源值只求值一次，再执行转换。静态已知的同类型源码转换只保留源表达式；动态 any 源总是生成此指令，这五种目标在运行时遇到同标签值时均为恒等转换。
 
-数值标签可以转为 int/float/double 或 string。字符串可解析为十进制 int/float/double，或保持 string 恒等。address 只能转为无符号十进制 string 或保持 address 恒等。boolean、void 和 object 标签被拒绝。类指针和 null 在 exec 中擦除为 address，因此源码编译另行禁止显式转换类指针/null；opcode 49 不能恢复源码的类身份。不支持 int/address 互转或从字符串解析 address。
+数值标签可以转为 int/float/double 或 string。字符串可解析为十进制 int/float/double，或保持 string 恒等。address 只能转为无符号十进制 string 或保持 address 恒等。boolean、void 和 object 标签被拒绝。类指针和 null 在 exec 中擦除为 address，因此源码编译只允许显式的类指针转 address 擦除（也包括指针上界 T），不生成 opcode 49，其他类指针/null 转换仍被拒绝；opcode 49 不能恢复源码的类身份。不支持 int/address 互转或从字符串解析 address。
 
 数值转 int 先向零截断，再检查 int32 范围。float/double 转换拒绝溢出，允许次正规数及下溢为零。解析与区域设置无关：整数字符串只允许可选正负号和十进制数字；浮点字符串可含小数点与指数，不允许空白、十六进制、后缀、NaN/Infinity、嵌入 NUL 或尾部多余文字。错误格式为 `Cannot convert X to Y`，按需附加非法十进制格式或超范围原因；引用的字符串转义为 ASCII，并在 64 个 Unicode 标量后截断。源码转换配对表和示例见语言说明的显式转换一节。显式转换扩展 exec v10，不改变根记录或函数布局。
 

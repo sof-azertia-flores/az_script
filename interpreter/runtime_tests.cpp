@@ -509,7 +509,7 @@ void buffer_tests() {
             auto source=blocks::create_buffer(replacement_type,program);operation(2,source,{number(1)});operation(6,source,{number(1)});
             source_value=std::make_shared<variable>(source);
             if(mode>=4) {
-                heap_parent=heap::alloc(1);heap::set_owner(heap_parent,env.get());env->owned_pointer.push_back(heap_parent);
+                heap_parent=heap::object_alloc(1);heap::set_owner(heap_parent,env.get());env->owned_pointer.push_back(heap_parent);
                 heap::register_object(heap_parent,std::nullopt,true,env);destination=heap::getAt(heap_parent);destination->setValue(old);
             } else if(mode>=2) {
                 auto enclosing=blocks::create(1,program);destination=enclosing->slots[0];destination->setValue(old);
@@ -787,7 +787,7 @@ void runtime_trace_tests() {
         }
         check(recaught,"a recaptured non-standard exception keeps its original type");
     }
-    auto pointer=heap::alloc(1);heap::set_owner(pointer,cleanup->baseEnv.get());
+    auto pointer=heap::object_alloc(1);heap::set_owner(pointer,cleanup->baseEnv.get());
     heap::register_object(pointer,31,true,cleanup->baseEnv);
     auto member=blocks::create(1,cleanup);member->destructor=30;
     auto heap_slot=heap::getAt(pointer);heap_slot->setValue(member);member->owner=heap_slot.get();
@@ -809,6 +809,99 @@ void runtime_trace_tests() {
     primary_only([&]{shutdown->destroy();},"shutdown");
     check(shutdown->closed&&owned->state==slot_block::status::dead,"shutdown finishes owned values after a pre-destroy failure");
     clear_error_trace();
+}
+void object_storage_tests() {
+    auto field=[](R base,int offset=0){return rcall(0x0abd0006,{rx(9,{std::move(base),ri(offset)})});};
+    auto program=load_raw(rmodule({
+        rfn(800,INT_VALUE,rreturn(field(rvar(0),1)),0,{ADDRESS_VALUE}),
+        rfn(801,VOID_VALUE,rx(6,{field(rvar(0),1),rvar(1)}),0,{ADDRESS_VALUE,INT_VALUE}),
+        rfn(802,INT_VALUE,rreturn(rcall(0x0abd0006,{rvar(0)})),0,{ADDRESS_VALUE}),
+        rfn(803,VOID_VALUE,rset(-1,rx(12,{rvar(-1),rc(n(1))})),0,{ADDRESS_VALUE}),
+        rfn(804,VOID_VALUE,rblock({rdef(0,rcall(0x0abd0014,{rc(n(2))})),rdef(1,rx(32,{ri(1)})),
+            rx(10,{rx(33,{rvar(1)}),rb(true),ri(803),rb(false),raw({})}),
+            rx(6,{field(rvar(0)),rvar(1)}),rx(35,{field(rvar(0))}),
+            rx(10,{rvar(0),rb(false),rb(false),raw({})})}),2),
+    },1));
+    auto env=program->baseEnv;env->getVariable(-1)->setValue(0);
+    const auto number=[](int value){return std::make_shared<variable>(value);};
+    const auto pointer_value=[](address value){return std::make_shared<variable>(value);};
+    check(getiFunction(0x0abd0014)->return_type()==ADDRESS_VALUE,"object_alloc reports address return type");
+    auto object_allocator=getiFunction(0x0abd0014);
+    check(pointer(object_allocator->invoke(env,{number(0)}))==address{},"zero object allocation is null and untagged");
+    for(const auto& args:std::vector<std::vector<V>>{{},{number(1),number(2)},{nullptr},{pointer_value(address{1})},{std::make_shared<variable>(1.0)}})
+        rejects_message([&]{object_allocator->invoke(env,args);},"object_alloc requires one int argument","object_alloc validates exact int arity");
+    rejects([&]{object_allocator->invoke(env,{number(-1)});},"object_alloc rejects negative sizes");
+    rejects([&]{object_allocator->invoke(env,{number(heap::max_slots)});},"object_alloc rejects excessive sizes");
+    const address object=pointer(object_allocator->invoke(env,{number(3)}));
+    heap::getAt(object)->setValue(11);heap::getAt(address{object.value+1})->setValue(22);
+    const address raw=pointer(getiFunction(0x0abd0003)->invoke(env,{number(3)}));
+    check(!heap::is_object_storage(address{})&&!heap::is_object_storage(raw),"ordinary raw allocations remain untagged");
+    auto raw_get=getiFunction(0x0abd0006);
+    raw_get->invoke(env,{pointer_value(raw)})->setValue(91);
+    check(integer(raw_get->invoke(env,{pointer_value(raw)}))==91,"raw mem_get retains mutable raw storage access");
+    rejects_message([&]{heap::object_address(raw,0);},"Object member access requires object storage","oa rejects raw allocation starts");
+    rejects([&]{heap::register_object(raw,std::nullopt,false,env);},"raw allocations cannot be registered as objects");
+    const std::vector<std::pair<int,std::string>> guards={{6,"mem_get"},{2,"mem_free"},{4,"make_free"},{5,"mem_send_up"}};
+    auto reject_raw=[&](address at) {
+        for(const auto& [id,name]:guards) {
+            bool caught=false;
+            try {getiFunction(0x0abd0000+id)->invoke(env,{pointer_value(at)});}
+            catch(const std::runtime_error& error) {
+                caught=true;check(typeid(error)==typeid(std::runtime_error)&&error.what()==name+" cannot access object storage; use typed member access",
+                                  "raw object guards have stable runtime_error diagnostics");
+            }
+            check(caught,"every raw memory entry rejects object storage");
+        }
+    };
+    for(int offset=0;offset<3;++offset) {
+        const address at{object.value+static_cast<unsigned>(offset)};
+        check(heap::is_object_storage(at),"the whole object range is tagged before registration");reject_raw(at);
+    }
+    check(heap::owner_of(object)==env.get()&&integer(heap::getAt(object))==11,"rejected construction-time raw access preserves owner and data");
+    check(integer(program->invoke(800,{pointer_value(object)}))==22,"decoder member access works during construction");
+    program->invoke(801,{pointer_value(object),number(42)});
+    check(integer(program->invoke(800,{pointer_value(object)}))==42,"decoder member access is a writable mov target");
+    rejects_message([&]{program->invoke(802,{pointer_value(object)});},"mem_get cannot access object storage; use typed member access","erasing a pointer retains the raw guard");
+    rejects([&]{heap::object_address(object,3);},"oa bounds checks tagged ranges");
+    rejects([&]{heap::object_address(address{object.value+1},0);},"oa requires an object start");
+    rejects([&]{heap::register_object(object,800,true,env);},"invalid destructor prevents registration");
+    check(heap::owner_of(object)==env.get()&&std::find(env->owned_pointer.begin(),env->owned_pointer.end(),object)!=env->owned_pointer.end(),
+          "failed manual registration preserves construction ownership");
+    heap::register_object(object,std::nullopt,true,env);
+    check(heap::owner_of(object)==nullptr&&std::find(env->owned_pointer.begin(),env->owned_pointer.end(),object)==env->owned_pointer.end(),
+          "successful manual registration detaches automatic ownership itself");
+    reject_raw(object);reject_raw(address{object.value+2});
+    std::vector<V> saved_slots;for(int i=0;i<heap::lenHeap();++i)saved_slots.push_back(heap::getSlot(i));
+    std::vector<heap::heap_allocation> saved_ranges;for(int i=0;i<heap::lenAlloc();++i)saved_ranges.push_back(heap::allocAt(i));
+    auto saved_objects=heap::object_records();auto saved_owned=env->owned_pointer;
+    heap::clearHeap();check(!heap::is_object_storage(object),"clearing the heap discards all object tags");
+    heap::restore(std::move(saved_slots),std::move(saved_ranges),std::move(saved_objects),env,std::move(saved_owned));
+    check(heap::is_object_storage(object)&&heap::is_object_storage(address{object.value+2})&&!heap::is_object_storage(raw),
+          "snapshot restore retags registered object ranges without tagging raw memory");
+    reject_raw(address{object.value+1});
+    heap::delete_object(object,env);check(!heap::is_object_storage(object),"delete clears an object's range tag");
+    const address reused=heap::alloc(3);
+    check(reused==object&&!heap::is_object_storage(reused),"same-address raw allocation does not inherit a deleted object's tag");
+    raw_get->invoke(env,{pointer_value(reused)})->setValue(7);
+    check(integer(raw_get->invoke(env,{pointer_value(reused)}))==7,"raw access works after tagged storage is released and reused");
+    heap::free(reused);
+    for(bool view:{false,true}) {
+        auto literal=blocks::create(3,program);literal->is_view=view;
+        const address start=blocks::address_of(literal);
+        for(int offset=0;offset<3;++offset) {
+            const address at{start.value+static_cast<unsigned>(offset)};
+            check(heap::is_object_storage(at),"literal and view interiors are object storage");reject_raw(at);
+        }
+        heap::getAt(heap::object_address(start,1))->setValue(13);
+        check(integer(program->invoke(800,{pointer_value(start)}))==13,"literal/view members use the same guarded decoder bypass");
+    }
+    program->invoke(804);
+    check(integer(env->getVariable(-1))==2,"member-access nodes support drop and preserve copied object ownership");
+    program->destroy();check(heap::lenAlloc()==0,"closed object-storage tests release all automatic and manual ranges");
+    const auto construction=heap::object_alloc(2);heap::free(construction);
+    const auto reused_construction=heap::alloc(2);
+    check(reused_construction==construction&&!heap::is_object_storage(reused_construction),"failed-construction release also clears tags");
+    heap::free(reused_construction);
 }
 void string_tests() {
     constexpr int builtin_base=0x0abd0000;
@@ -937,7 +1030,7 @@ void select_tests() {
     auto divide=[](){return rx(15,{rc(n(1)),rc(n(0))});};
     auto overflow=[](){return rx(12,{rc(n(std::numeric_limits<int>::max())),rc(n(1))});};
     auto literal_address=[](R value){return rx(33,{std::move(value)});};
-    auto field=[](R value){return rcall(0x0abd0006,{std::move(value)});};
+    auto field=[](R value){return rcall(0x0abd0006,{rx(9,{std::move(value),ri(0)})});};
     auto bind=[](R value,int destructor){return rx(10,{std::move(value),rb(true),ri(destructor),rb(false),raw({})});};
     auto lifetime_body=[](std::initializer_list<R> body) {
         AbdStack statements;statements.vs={rset(-2,rc(n(0))),rset(-3,rc(n(0)))};
@@ -945,7 +1038,7 @@ void select_tests() {
     };
     auto append_destructor=[&](){return rset(-2,rx(12,{rx(14,{rvar(-2),rc(n(10))}),field(rvar(0))}));};
     auto factory=[&](int id,int destructor,bool pointer) {
-        R allocation=pointer?rcall(0x0abd0003,{rc(n(1))}):rx(32,{ri(1)});
+        R allocation=pointer?rcall(0x0abd0014,{rc(n(1))}):rx(32,{ri(1)});
         R address=pointer?rvar(1):literal_address(rvar(1));
         R returned=pointer?rx(8,{rvar(1)}):rreturn(rvar(1));
         return rfn(id,pointer?ADDRESS_VALUE:OBJECT_VALUE,rblock({
@@ -1542,6 +1635,7 @@ void boolean_condition_equality_tests() {
     program->destroy();
 }
 int main(){try{
+    object_storage_tests();
     string_tests();
     select_tests();
     checked_return_tests();
@@ -1586,7 +1680,7 @@ int main(){try{
             rfn(37,INT_VALUE,rreturn(reflect(INT_VALUE,30,{rc(s("wrong"))}))),
             rfn(38,VOID_VALUE,gcall(101,{}, {cfixed(OBJECT_VALUE,3)})),
             gfn(200,OBJECT_VALUE,rblock({rdef(0,rx(32,{ri(1)})),
-                rx(6,{rcall(0x0abd0006,{rx(33,{rvar(0)})}),rx(37,{cref(0)})}),
+                rx(6,{rcall(0x0abd0006,{rx(9,{rx(33,{rvar(0)}),ri(0)})}),rx(37,{cref(0)})}),
                 rx(10,{rx(33,{rvar(0)}),rb(true),ri(201),rb(false),raw({cref(0)})}),rreturn(rvar(0))}),1,1,{},1),
             gfn(201,VOID_VALUE,rblock({rset(-1,rx(12,{rvar(-1),rc(n(1))})),rset(-2,rx(36,{cref(0)}))}),1,0,{ADDRESS_VALUE},1),
             rfn(202,OBJECT_VALUE,rreturn(gcall(200,{}, {ci}))),
@@ -1595,11 +1689,11 @@ int main(){try{
             rfn(212,INT_VALUE,rreturn(reflect(INT_VALUE,200))),
             rfn(213,VOID_VALUE,rblock({rdef(0,gcall(101,{}, {co})),rx(15,{rc(n(1)),rc(n(0))})}),1),
             rfn(214,INT_VALUE,rreturn(reflect(INT_VALUE,202))),
-            gfn(400,ANY_VALUE,rblock({rdef(0,rcall(0x0abd0003,{rc(n(1))})),
-                rx(6,{rcall(0x0abd0006,{rvar(0)}),rc(n(42))}),
+            gfn(400,ANY_VALUE,rblock({rdef(0,rcall(0x0abd0014,{rc(n(1))})),
+                rx(6,{rcall(0x0abd0006,{rx(9,{rvar(0),ri(0)})}),rc(n(42))}),
                 rx(10,{rvar(0),rb(true),ri(201),rb(false),raw({cref(0)})}),greturn(rvar(0),cref(0))}),1,1),
-            rfn(500,INT_VALUE,rreturn(rcall(0x0abd0006,{gcall(400,{}, {cfixed(ADDRESS_VALUE,2)})}))),
-            rfn(501,INT_VALUE,rreturn(rcall(0x0abd0006,{gcall(400,{}, {ca})}))),
+            rfn(500,INT_VALUE,rreturn(rcall(0x0abd0006,{rx(9,{gcall(400,{}, {cfixed(ADDRESS_VALUE,2)}),ri(0)})}))),
+            rfn(501,INT_VALUE,rreturn(rcall(0x0abd0006,{rx(9,{gcall(400,{}, {ca}),ri(0)})}))),
             gfn(600,ANY_VALUE,greturn(gcall(600,{}, {cref(0)}),cref(0)),1),
             rfn(601,INT_VALUE,rreturn(gcall(600,{}, {ci})))
         },2));
@@ -1670,7 +1764,7 @@ int main(){try{
         auto provider=rhint("GenericFactory",{
             rfn(0,VOID_VALUE,rset(-1,rc(n(0)))),
             gfn(2,OBJECT_VALUE,rblock({rdef(0,rx(32,{ri(1)})),
-                rx(6,{rcall(0x0abd0006,{rx(33,{rvar(0)})}),rx(37,{cref(0)})}),
+                rx(6,{rcall(0x0abd0006,{rx(9,{rx(33,{rvar(0)}),ri(0)})}),rx(37,{cref(0)})}),
                 rx(10,{rx(33,{rvar(0)}),rb(true),ri(alias+1),rb(false),raw({cref(0)})}),rreturn(rvar(0))}),1,1,{},1),
             gfn(3,VOID_VALUE,rset(-1,rx(12,{rx(36,{cref(0)}),rc(n(1))})),1,0,{ADDRESS_VALUE},1),
             rfn(4,INT_VALUE,rreturn(rvar(-1)))
@@ -1863,11 +1957,11 @@ int main(){try{
 
         initializing_script=load_raw(rhint("Future",{rfn(0,VOID_VALUE,log(30)),rfn(1,VOID_VALUE,log(-30))},
             0,raw({assume("Bad",0x4001)}),signatures),false);
-        insert_raw(initializing_script,rhint("Bad",{rfn(0,VOID_VALUE,rblock({log(20),rdef(0,rcall(0x0abd0003,{rc(n(1))})),
+        insert_raw(initializing_script,rhint("Bad",{rfn(0,VOID_VALUE,rblock({log(20),rdef(0,rcall(0x0abd0014,{rc(n(1))})),
             rx(10,{rvar(0),rb(false),rb(false),raw({})}),rx(15,{rc(n(1)),rc(n(0))})}),1),rfn(1,VOID_VALUE,log(-20))},
             0,raw({assume("Good",0x4001)}),signatures),false);
         insert_raw(initializing_script,rhint("Good",{rfn(0,VOID_VALUE,rblock({log(10),rcall(reentry_id),
-            rdef(0,rcall(0x0abd0003,{rc(n(1))})),rx(10,{rvar(0),rb(false),rb(false),raw({})}),rcall(0x0abd0005,{rvar(0)})}),1),
+            rdef(0,rcall(0x0abd0003,{rc(n(1))})),rcall(0x0abd0005,{rvar(0)})}),1),
             rfn(1,VOID_VALUE,log(-10)),rfn(2,INT_VALUE,rreturn(rc(n(8))))},0,nullptr,signatures),false);
         rejects_containing([&]{initializing_script->flush();},"Division by zero","onload preserves its runtime failure");
         check(initializing_script->faulted&&!initializing_script->setup&&events==std::vector<int>({10,20})&&heap::lenAlloc()==1,
@@ -1907,8 +2001,8 @@ int main(){try{
         const int maker=static_cast<int>(0xffff0002u);
         auto high=load_raw(rmodule({rfn(0,VOID_VALUE,rset(-1,rc(n(0)))),
             rfn(-1,VOID_VALUE,rset(-1,rx(12,{rvar(-1),rc(n(1))})),0,{ADDRESS_VALUE}),
-            rfn(maker,VOID_VALUE,rblock({rdef(0,rcall(0x0abd0003,{rc(n(1))})),
-                rx(10,{rvar(0),rb(true),ri(-1),rb(true),raw({})}),rcall(0x0abd0004,{rvar(0)}),rx(11,{rvar(0)})}),1)
+            rfn(maker,VOID_VALUE,rblock({rdef(0,rcall(0x0abd0014,{rc(n(1))})),
+                rx(10,{rvar(0),rb(true),ri(-1),rb(true),raw({})}),rx(11,{rvar(0)})}),1)
         },1));
         high->invoke(maker);check(integer(high->baseEnv->getVariable(-1))==1&&heap::lenAlloc()==0,
               "optional destructor supports the full 0xffffffff function address");high->destroy();
@@ -2133,7 +2227,7 @@ int main(){try{
             slot_fn(200,INT_VALUE,block({ret(var(-1))})),
             slot_fn(201,INT_VALUE,block({ret(binary("add",call(100),var(-1)))})),
             slot_fn(203,VOID_VALUE,block({set(-1,binary("add",var(-1),n(1)))}),0,{ADDRESS_VALUE}),
-            slot_fn(204,ADDRESS_VALUE,block({def(0,call(0x0abd0003,{n(1)})),object_bind(var(0),203,false),object_return(var(0))}),1)
+            slot_fn(204,ADDRESS_VALUE,block({def(0,call(0x0abd0014,{n(1)})),object_bind(var(0),203,false),object_return(var(0))}),1)
         },1));
         auto second=numeric->baseEnv->getVariable(-3);
         auto inserted=std::dynamic_pointer_cast<ofunction>(numeric->functions.at(200));
@@ -2178,8 +2272,7 @@ int main(){try{
         auto field=[](MV pointer){return call(0x0abd0006,{object_address(pointer)});};
         auto append=[&]{return set("log",binary("add",binary("multiply",var("log"),n(10)),field(var("__func_param0"))));};
         auto factory=[&](int id,int destructor,bool manual) {
-            auto body=block({def("p",call(0x0abd0003,{n(1)})),binary("m",field(var("p")),var("__func_param0")),object_bind(var("p"),destructor,manual)});
-            if(manual)body->push_back(call(0x0abd0004,{var("p")}));
+            auto body=block({def("p",call(0x0abd0014,{n(1)})),binary("m",field(var("p")),var("__func_param0")),object_bind(var("p"),destructor,manual)});
             body->push_back(object_return(var("p")));
             return typed_fn(id,ADDRESS_VALUE,body,{id==29?ADDRESS_VALUE:INT_VALUE});
         };
@@ -2194,7 +2287,7 @@ int main(){try{
             fn(17,VOID_VALUE,block({set("log",n(0)),def("a",call(20,{n(5)})),block({call(16,{var("a")})}),set("observed",field(var("a")))})),
             typed_fn(18,BOOLEAN_VALUE,block({ret(call(0x0abd0002,{var("__func_param0")}))}),{ADDRESS_VALUE}),
             factory(20,30,false),factory(21,30,true),factory(22,31,false),factory(23,33,true),factory(28,34,true),factory(29,35,true),factory(36,37,true),
-            fn(24,ADDRESS_VALUE,block({def("p",call(0x0abd0003,{n(1)})),binary("m",field(var("p")),n(9)),binary("divide",n(1),n(0)),object_bind(var("p"),30,false),object_return(var("p"))})),
+            fn(24,ADDRESS_VALUE,block({def("p",call(0x0abd0014,{n(1)})),binary("m",field(var("p")),n(9)),binary("divide",n(1),n(0)),object_bind(var("p"),30,false),object_return(var("p"))})),
             fn(25,VOID_VALUE,block({set("log",n(0)),call(24)})),
             fn(26,VOID_VALUE,block({set("log",n(0)),loop(boolean(true),block({def("a",call(20,{n(6)})),brk()}))})),
             fn(27,VOID_VALUE,block({set("log",n(0)),def("a",call(20,{n(7)})),loop(boolean(true),block({}))})),
@@ -2204,9 +2297,9 @@ int main(){try{
             typed_fn(34,VOID_VALUE,block({call(0x0abd0002,{var("__func_param0")})}),{ADDRESS_VALUE}),
             typed_fn(35,VOID_VALUE,block({object_delete(field(var("__func_param0")))}),{ADDRESS_VALUE}),
             typed_fn(37,VOID_VALUE,block({set("observed",field(call(41,{var("__func_param0")})))}),{ADDRESS_VALUE}),
-            fn(40,ADDRESS_VALUE,block({def("p",call(0x0abd0003,{n(1)})),binary("m",field(call(41,{var("p")})),n(9)),object_bind(var("p"),-1,false),object_return(var("p"))})),
+            fn(40,ADDRESS_VALUE,block({def("p",call(0x0abd0014,{n(1)})),binary("m",field(call(41,{var("p")})),n(9)),object_bind(var("p"),-1,false),object_return(var("p"))})),
             typed_fn(41,ADDRESS_VALUE,block({object_return(var("__func_param0"))}),{ADDRESS_VALUE}),
-            fn(42,ADDRESS_VALUE,block({def("p",call(0x0abd0003,{n(1)})),object_return(var("p"))}))
+            fn(42,ADDRESS_VALUE,block({def("p",call(0x0abd0014,{n(1)})),object_return(var("p"))}))
         },block({s("log"),s("observed")}));
         auto log=objects->baseEnv->getVariable("log");
         objects->invoke(10);check(integer(log)==21&&heap::lenAlloc()==0,"automatic objects destruct in reverse construction order");
@@ -2234,13 +2327,15 @@ int main(){try{
         objects->invoke(15,{std::make_shared<variable>(address{})});
         rejects([&]{objects->invoke(15,{std::make_shared<variable>(manual)});},"second delete rejects freed object");
         manual=pointer(objects->invoke(14));
-        objects->invoke(18,{std::make_shared<variable>(manual)});
-        check(integer(log)==4&&heap::object_records().size()==1,"raw free bypasses destructor and removes object registration");
+        rejects_message([&]{objects->invoke(18,{std::make_shared<variable>(manual)});},
+                        "mem_free cannot access object storage; use typed member access","raw free preserves a manual object");
+        check(integer(log)==4&&heap::object_records().size()==2,"rejected raw free preserves registration and destructor state");
+        objects->invoke(15,{std::make_shared<variable>(manual)});log->setValue(4);
         address reentrant=pointer(objects->invoke(23,{std::make_shared<variable>(8)}));
         rejects_containing([&]{objects->invoke(15,{std::make_shared<variable>(reentrant)});},"being destroyed","recursive self-delete rejected");
         check(heap::lenAlloc()==1,"failed recursive destructor still frees object once");
         reentrant=pointer(objects->invoke(28,{std::make_shared<variable>(8)}));
-        rejects_containing([&]{objects->invoke(15,{std::make_shared<variable>(reentrant)});},"being destroyed","raw free cannot invalidate a running destructor");
+        rejects_containing([&]{objects->invoke(15,{std::make_shared<variable>(reentrant)});},"cannot access object storage","raw free cannot invalidate a running destructor");
         check(heap::lenAlloc()==1,"raw-free reentry still releases the object once");
         manual=pointer(objects->invoke(14));
         address parent=pointer(objects->invoke(29,{std::make_shared<variable>(manual)}));
@@ -2255,14 +2350,14 @@ int main(){try{
         objects->destroy();check(integer(log)==443&&heap::lenAlloc()==0,"base owned returned objects destruct before script unload");
         objects->destroy();
 
-        auto limited=program({fn(10,VOID_VALUE,block({def("p",call(0x0abd0003,{n(1)})),object_bind(var("p"),11,false),loop(boolean(true),block({}))})),
+        auto limited=program({fn(10,VOID_VALUE,block({def("p",call(0x0abd0014,{n(1)})),object_bind(var("p"),11,false),loop(boolean(true),block({}))})),
             typed_fn(11,VOID_VALUE,block({loop(boolean(true),block({}))}),{ADDRESS_VALUE})});
         limited->max_steps=40;
         rejects_containing([&]{limited->invoke(10);},"step limit","cleanup never resets an exhausted execution budget");
         check(heap::lenAlloc()==0,"budget failure still releases object storage");limited->destroy();
 
         auto shutdown=program({
-            fn(10,ADDRESS_VALUE,block({set("log",n(0)),def("p",call(0x0abd0003,{n(1)})),object_bind(var("p"),30,false),object_return(var("p"))})),
+            fn(10,ADDRESS_VALUE,block({set("log",n(0)),def("p",call(0x0abd0014,{n(1)})),object_bind(var("p"),30,false),object_return(var("p"))})),
             typed_fn(30,VOID_VALUE,block({set("log",binary("add",var("log"),n(1)))}),{ADDRESS_VALUE}),
             fn(1,VOID_VALUE,block({binary("divide",n(1),n(0))}))
         },block({s("log")}));
@@ -2271,14 +2366,14 @@ int main(){try{
         check(integer(shutdown_log)==1&&heap::lenAlloc()==0&&shutdown->closed,"pre-destroy error cannot skip object destructors");
         shutdown->destroy();
 
-        auto shutdown_budget=program({fn(10,ADDRESS_VALUE,block({def("p",call(0x0abd0003,{n(1)})),object_bind(var("p"),11,false),object_return(var("p"))})),
+        auto shutdown_budget=program({fn(10,ADDRESS_VALUE,block({def("p",call(0x0abd0014,{n(1)})),object_bind(var("p"),11,false),object_return(var("p"))})),
             typed_fn(11,VOID_VALUE,block({loop(boolean(true),block({}))}),{ADDRESS_VALUE})});
         shutdown_budget->invoke(10);shutdown_budget->max_steps=40;
         rejects_containing([&]{shutdown_budget->destroy();},"step limit","base destructor respects shutdown execution budget");
         check(heap::lenAlloc()==0&&shutdown_budget->closed,"shutdown budget exhaustion releases all storage");
 
         auto undeleted=program({
-            fn(10,VOID_VALUE,block({def("p",call(0x0abd0003,{n(1)})),object_bind(var("p"),30,true),call(0x0abd0004,{var("p")})})),
+            fn(10,VOID_VALUE,block({def("p",call(0x0abd0014,{n(1)})),object_bind(var("p"),30,true)})),
             typed_fn(30,VOID_VALUE,block({set("log",n(7))}),{ADDRESS_VALUE})
         },block({s("log")}));
         auto undeleted_log=undeleted->baseEnv->getVariable("log");undeleted_log->setValue(0);
@@ -2290,7 +2385,7 @@ int main(){try{
 
         auto host_block=heap::alloc(1);heap::getAt(host_block)->setValue(99);
         rejects_containing([&]{program({
-            fn(0,VOID_VALUE,block({def("p",call(0x0abd0003,{n(1)})),object_bind(var("p"),-1,true),call(0x0abd0004,{var("p")}),binary("divide",n(1),n(0))}))
+            fn(0,VOID_VALUE,block({def("p",call(0x0abd0014,{n(1)})),object_bind(var("p"),-1,true),binary("divide",n(1),n(0))}))
         });},"Division by zero","onload failure propagates");
         check(heap::object_records().empty()&&heap::lenAlloc()==1&&integer(heap::getAt(host_block))==99,
               "failed initial load discards its manual objects without touching host memory");
@@ -2458,7 +2553,7 @@ int main(){try{
                 const int pointer=static_cast<int>(next(static_cast<unsigned>(heap::lenHeap())+3));
                 bool found=true;try{heap::getAt(address{static_cast<std::uint64_t>(pointer)});}catch(const std::out_of_range&){found=false;}
                 same=found==model_contains(pointer);
-                if(same&&model.count(pointer))same=heap::object_address(address{static_cast<std::uint64_t>(pointer)},model[pointer]-1).value==static_cast<std::uint64_t>(pointer+model[pointer]-1);
+                if(same&&model.count(pointer))same=static_cast<bool>(heap::getAt(address{static_cast<std::uint64_t>(pointer+model[pointer]-1)}));
             }
             same=same&&heap::lenAlloc()==static_cast<int>(model.size());
         }
@@ -2546,26 +2641,26 @@ int main(){try{
 
         // log = log*10 + field for each destructor run.
         auto value_log=[](int destructor){return typed_fn(destructor,VOID_VALUE,block({set("log",binary("add",binary("multiply",var("log"),n(10)),
-            call(0x0abd0006,{var("__func_param0")})))}),{ADDRESS_VALUE});};
+            call(0x0abd0006,{object_address(var("__func_param0"))})))}),{ADDRESS_VALUE});};
         auto literal=program({
-            typed_fn(20,OBJECT_VALUE,block({def("o",new_block(1)),binary("m",call(0x0abd0006,{block_address(var("o"))}),var("__func_param0")),
+            typed_fn(20,OBJECT_VALUE,block({def("o",new_block(1)),binary("m",call(0x0abd0006,{object_address(block_address(var("o")))}),var("__func_param0")),
                 object_bind(block_address(var("o")),30,false),object_return(var("o"))}),{INT_VALUE}),
             value_log(30),
             typed_fn(31,VOID_VALUE,block({set("log",binary("add",binary("multiply",var("log"),n(10)),n(9)))}),{ADDRESS_VALUE}),
             fn(10,INT_VALUE,block({def("a",call(20,{n(1)})),def("b",call(20,{n(2)})),ret(n(0))})),
-            fn(11,INT_VALUE,block({def("a",call(20,{n(1)})),def("b",var("a")),binary("m",call(0x0abd0006,{block_address(var("b"))}),n(5)),
-                ret(call(0x0abd0006,{block_address(var("a"))}))})),
+            fn(11,INT_VALUE,block({def("a",call(20,{n(1)})),def("b",var("a")),binary("m",call(0x0abd0006,{object_address(block_address(var("b")))}),n(5)),
+                ret(call(0x0abd0006,{object_address(block_address(var("a")))}))})),
             fn(12,INT_VALUE,block({def("a",call(20,{n(1)})),def("p",block_address(var("a"))),def("b",call(20,{n(7)})),set("a",var("b")),
-                ret(call(0x0abd0006,{var("p")}))})),
+                ret(call(0x0abd0006,{object_address(var("p"))}))})),
             typed_fn(13,OBJECT_VALUE,block({def("x",call(20,{n(4)})),object_return(var("x"))}),{}),
-            fn(14,INT_VALUE,block({def("y",call(13)),ret(call(0x0abd0006,{block_address(var("y"))}))})),
+            fn(14,INT_VALUE,block({def("y",call(13)),ret(call(0x0abd0006,{object_address(block_address(var("y")))}))})),
             typed_fn(15,ADDRESS_VALUE,block({def("x",call(20,{n(4)})),ret(block_address(var("x")))}),{}),
-            fn(16,INT_VALUE,block({ret(call(0x0abd0006,{call(15)}))})),
+            fn(16,INT_VALUE,block({ret(call(0x0abd0006,{object_address(call(15))}))})),
             fn(17,INT_VALUE,block({set("log",n(0)),call(20,{n(3)}),ret(var("log"))})),
             fn(18,INT_VALUE,block({def("i",n(0)),def("seen",n(0)),
-                loop(binary("lt",binary("add",var("i"),call(0x0abd0006,{block_address(call(33))})),n(100)),
+                loop(binary("lt",binary("add",var("i"),call(0x0abd0006,{object_address(block_address(call(33)))})),n(100)),
                      block({set("seen",var("log")),set("i",binary("add",var("i"),n(1)))})),ret(var("seen"))})),
-            fn(19,INT_VALUE,block({def("p",call(0x0abd0003,{n(1)})),binary("m",call(0x0abd0006,{var("p")}),call(20,{n(5)})),
+            fn(19,INT_VALUE,block({def("p",call(0x0abd0014,{n(1)})),binary("m",call(0x0abd0006,{object_address(var("p"))}),call(20,{n(5)})),
                 object_bind(var("p"),31,false),ret(n(0))})),
             fn(21,INT_VALUE,block({def("p",call(0x0abd0003,{n(1)})),binary("m",call(0x0abd0006,{var("p")}),call(20,{n(5)})),
                 call(0x0abd0002,{var("p")}),ret(var("log"))})),
@@ -2574,14 +2669,14 @@ int main(){try{
             fn(34,VOID_VALUE,block({def("a",call(20,{n(1)})),call(0x0abd0004,{block_address(var("a"))})})),
             fn(23,INT_VALUE,block({def("a",call(20,{n(1)})),object_delete(block_address(var("a"))),ret(n(0))})),
             fn(24,INT_VALUE,block({def("a",call(20,{n(1)})),def("b",call(20,{n(2)})),drop(var("a")),set("log",binary("multiply",var("log"),n(10))),ret(n(0))})),
-            fn(25,VOID_VALUE,block({def("o",new_block(1)),binary("m",call(0x0abd0006,{block_address(var("o"))}),call(20,{n(6)})),
+            fn(25,VOID_VALUE,block({def("o",new_block(1)),binary("m",call(0x0abd0006,{object_address(block_address(var("o")))}),call(20,{n(6)})),
                 binary("divide",n(1),n(0))})),
-            typed_fn(26,INT_VALUE,block({ret(call(0x0abd0006,{block_address(var("__func_param0"))}))}),{OBJECT_VALUE}),
+            typed_fn(26,INT_VALUE,block({ret(call(0x0abd0006,{object_address(block_address(var("__func_param0")))}))}),{OBJECT_VALUE}),
             fn(27,INT_VALUE,block({def("a",call(20,{n(8)})),def("r",call(26,{var("a")})),ret(var("r"))})),
             typed_fn(32,VOID_VALUE,block({set("log",binary("add",var("log"),n(1)))}),{ADDRESS_VALUE}),
-            typed_fn(33,OBJECT_VALUE,block({def("o",new_block(1)),binary("m",call(0x0abd0006,{block_address(var("o"))}),n(0)),
+            typed_fn(33,OBJECT_VALUE,block({def("o",new_block(1)),binary("m",call(0x0abd0006,{object_address(block_address(var("o")))}),n(0)),
                 object_bind(block_address(var("o")),32,false),object_return(var("o"))}),{}),
-            typed_fn(28,INT_VALUE,block({def("t",move_out("__func_param0")),ret(call(0x0abd0006,{block_address(var("t"))}))}),{OBJECT_VALUE}),
+            typed_fn(28,INT_VALUE,block({def("t",move_out("__func_param0")),ret(call(0x0abd0006,{object_address(block_address(var("t")))}))}),{OBJECT_VALUE}),
             fn(29,INT_VALUE,block({ret(call(28,{call(20,{n(3)})}))}))
         },block({s("log")}));
         auto log=literal->baseEnv->getVariable("log");
@@ -2595,8 +2690,9 @@ int main(){try{
         check(run(18)==100,"loop-condition temporaries end after each evaluation");
         run(19);check(integer(log)==95,"value fields end after the containing heap object's destructor");
         check(run(21)==0&&heap::lenAlloc()==0,"raw free releases value fields without destructors");
-        check(run(22)==0&&integer(log)==1,"mem_free does not release literal-object storage");
-        rejects_containing([&]{literal->invoke(34);},"literal object address","make_free rejects literal objects");
+        rejects_message([&]{run(22);},"mem_free cannot access object storage; use typed member access","mem_free rejects literal storage");
+        check(integer(log)==1,"rejected raw free still destroys the literal at scope exit");
+        rejects_containing([&]{literal->invoke(34);},"make_free cannot access object storage","make_free rejects literal objects");
         rejects_containing([&]{run(23);},"literal object","delete rejects literal objects");
         run(24);check(integer(log)==102,"drop ends a value immediately and scope cleanup skips it");
         log->setValue(0);rejects_containing([&]{literal->invoke(25);},"Division by zero","construction failure propagates");

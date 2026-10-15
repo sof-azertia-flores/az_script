@@ -143,10 +143,34 @@ def main():
             address next(address p){evaluations+=1;return p;}
             void main(){evaluations=0;address p=alloc(1);mem_get(p)=-0.0;
             print(+mem_get(next(p)));print(evaluations);}''', '-0\n1\n')
-        execute('dynamic-class-reference-erases-to-address', '''class C{int x=17;}
-            void main(){var raw=new C();print(mem_get(raw));print(mem_free(raw));}''', '17\ntrue\n')
+        execute('explicit-class-erasure-raw-read-rejected', '''class C{int x=17;}
+            void main(){C* object=new C();address raw=address(object);print(mem_get(raw));}''',
+                error='mem_get cannot access object storage; use typed member access')
+
+        # Address erasure preserves the storage guard at object starts,
+        # interiors, literal blocks and allocations still in construction.
+        for storage, declaration in [('manual', 'C* object=new C();address raw=address(object);'),
+                                     ('automatic', 'C* object();address raw=address(object);'),
+                                     ('literal', 'C object;address raw=address(object.self());')]:
+            for offset in (0, 1):
+                for operation in ('mem_get', 'mem_free', 'make_free', 'mem_send_up'):
+                    source = 'class C{int first=7;int second=9;C* self(){return this;}}void main(){' + declaration
+                    source += operation + '(raw+' + str(offset) + ');}'
+                    execute(f'closed-object-{storage}-{offset}-{operation}', source,
+                            error=operation + ' cannot access object storage; use typed member access')
+        for operation in ('mem_get', 'mem_free', 'make_free', 'mem_send_up'):
+            source = 'class C{int first;int second;C(){' + operation + '(address(this)+1);}}void main(){C* object=new C();}'
+            execute('closed-object-construction-' + operation, source,
+                    error=operation + ' cannot access object storage; use typed member access')
+        execute('typed-object-members-still-work', 'class C{int first=7;int second=9;}void main(){C* object=new C();object.first=11;print(object.first+object.second);delete object;}', '20\n')
 
         bad_sources = {
+            'internal-object-allocator': 'void main(){object_alloc(1);}',
+            'class-pointer-var': 'class C{int n;}void main(){var p=new C();}',
+            'class-pointer-def': 'class C{int n;}void main(){C* p();def(raw,p);}',
+            'class-pointer-global': '#gvar raw\nclass C{int n;}void main(){C* p();raw=p;}',
+            'class-pointer-untyped-argument': 'class C{int n;}void take(value){}void main(){C* p();take(p);}',
+            'class-pointer-raw-store': 'class C{int n;}void main(){C* p();address raw=alloc(1);mem_get(raw)=p;}',
             'dynamic-address-argument': 'address take(address p){return p;}void main(){var n=null;take(n);}',
             'dynamic-int-argument': 'int take(int p){return p;}void main(){var n=1;take(n);}',
             'dynamic-address-initializer': 'void main(){address slot=alloc(1);mem_get(slot)=null;address p=mem_get(slot);}',
@@ -224,11 +248,11 @@ def main():
             ('overflow-add', 'print(maximum()+1);', 'Address overflow'),
             ('overflow-negative-subtract', 'print(maximum()-(-1));', 'Address overflow'),
             ('overflow-increment', 'address p=maximum();p++;', 'Address overflow'),
-            # Bit 63 marks literal-object storage; no object has id 0, so the address never resolves.
-            ('high-address-access', 'address p=alloc(1);mem_get(p)=17;print(mem_get(high()));', 'Invalid or expired object address'),
+            # Bit 63 marks object storage, so raw builtins reject even expired literal IDs.
+            ('high-address-access', 'address p=alloc(1);mem_get(p)=17;print(mem_get(high()));', 'mem_get cannot access object storage; use typed member access'),
         ]:
             execute(name, IMPORTS + 'void main(){' + body + '}', error=message, libraries=(library,))
-        execute('high-address-free', IMPORTS + 'void main(){print(mem_free(maximum()));}', 'false\n', libraries=(library,))
+        execute('high-address-free', IMPORTS + 'void main(){print(mem_free(maximum()));}', error='mem_free cannot access object storage; use typed member access', libraries=(library,))
 
         # ABI type erasure still distinguishes object/raw-address values
         # from ordinary integer values in every runtime function signature.

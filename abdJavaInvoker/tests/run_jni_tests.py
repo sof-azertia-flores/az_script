@@ -213,11 +213,9 @@ def main():
 
     def object_factory(manual):
         body = [
-            {'t': 0, 'c': 'vd', 'v': 'p', 'val': call(0x0ABD0003, 1)},
-            {'t': 0, 'c': 'm', 'v1': call(0x0ABD0006, var('p')), 'v2': var('__func_param0')},
+            {'t': 0, 'c': 'vd', 'v': 'p', 'val': call(0x0ABD0014, 1)},
+            {'t': 0, 'c': 'm', 'v1': call(0x0ABD0006, {'t': 0, 'c': 'oa', 'v': var('p'), 'offset': 0}), 'v2': var('__func_param0')},
             {'t': 0, 'c': 'ob', 'v': var('p'), 'destructor': 205, 'manual': manual}]
-        if manual:
-            body.append(call(0x0ABD0004, var('p')))
         return body + [{'t': 0, 'c': 'ro', 'r': var('p')}]
 
     checked_address = {'t': 0, 'c': 'oa', 'v': var('__func_param0'), 'offset': 0}
@@ -386,14 +384,15 @@ def main():
         {'t': 0, 'c': 'vs', 'v': -1, 'val': 7},
         {'t': 0, 'c': 'vs', 'v': -2, 'val': 'numeric\0中文🐈'},
         {'t': 0, 'c': 'vs', 'v': -3, 'val': True},
-        {'t': 0, 'c': 'vs', 'v': -4, 'val': call(201, 11)},
-        call(0x0ABD0005, var(-4)),
+        {'t': 0, 'c': 'vs', 'v': -4, 'val': {'address': 0}},
         {'t': 0, 'c': 'vs', 'v': -5, 'val': call(202, 33)}]
     for ident, kind, index in [(220, 1, -2), (222, 4, -3), (224, 7, -4), (225, 7, -5)]:
         numeric_fixture['f'].append({**object_function(ident, kind, [ret(var(index))]), 'local-count': 0})
     for ident, kind, index in [(221, 1, -2), (223, 4, -3)]:
         numeric_fixture['f'].append({**object_function(ident, kind, [
             {'t': 0, 'c': 'vs', 'v': index, 'val': var(0)}, ret(var(index))], [kind]), 'local-count': 0})
+    numeric_fixture['f'].append({**object_function(226, 5, [
+        {'t': 0, 'c': 'vs', 'v': -4, 'val': var(0)}], [7]), 'local-count': 0})
     write_abd(work / 'numeric.exec.abd', numeric_fixture)
     numeric_other = copy.deepcopy(numeric_fixture)
     numeric_other['ext'] = {'fixture': 'different numeric bytecode'}
@@ -441,11 +440,9 @@ def main():
     event = 0x34560010
     def hinted_factory(manual):
         body = [
-            {'t': 0, 'c': 'vd', 'v': 1, 'val': call(0x0ABD0003, 1)},
-            {'t': 0, 'c': 'm', 'v1': call(0x0ABD0006, var(1)), 'v2': var(0)},
+            {'t': 0, 'c': 'vd', 'v': 1, 'val': call(0x0ABD0014, 1)},
+            {'t': 0, 'c': 'm', 'v1': call(0x0ABD0006, {'t': 0, 'c': 'oa', 'v': var(1), 'offset': 0}), 'v2': var(0)},
             {'t': 0, 'c': 'ob', 'v': var(1), 'destructor': self_alias + 5, 'manual': manual}]
-        if manual:
-            body.append(call(0x0ABD0004, var(1)))
         return body + [{'t': 0, 'c': 'ro', 'r': var(1)}]
 
     hint_library = {'gvs': 1, 'namespace-hint': 'PointLibrary',
@@ -469,15 +466,15 @@ def main():
                               signature(alias + 8, 5, [7])],
         'f': [object_function(0, 5, [
             {'t': 0, 'c': 'vs', 'v': -1, 'val': call(alias + 2)},
-            {'t': 0, 'c': 'vs', 'v': -2, 'val': call(alias + 3, 11)},
-            call(0x0ABD0005, var(-2)),
+            {'t': 0, 'c': 'vs', 'v': -2, 'val': {'address': 0}},
             {'t': 0, 'c': 'vs', 'v': -3, 'val': call(alias + 4, 33)}, call(event, 100)]),
             object_function(1, 5, [call(event, 110)]),
             object_function(0x12000002, 0, [ret(var(-1))]),
             object_function(0x12000003, 7, [ret(var(-2))]),
             object_function(0x12000004, 7, [ret(var(-3))]),
             object_function(0x12000005, 0, [ret(call(alias + 7, var(0)))], [7]),
-            object_function(0x12000006, 5, [call(alias + 8, var(0))], [7])]}
+            object_function(0x12000006, 5, [call(alias + 8, var(0))], [7]),
+            object_function(0x12000007, 5, [{'t': 0, 'c': 'vs', 'v': -2, 'val': var(0)}], [7])]}
     hint_extra = {'gvs': 1, 'namespace-hint': 'ExtraLibrary',
         'assume-hints': [{'hint': 'ExtraLibrary', 'namespace': 0x5EEE}], 'f': [
         object_function(0, 5, [{'t': 0, 'c': 'vs', 'v': -1, 'val': 88}, call(event, 200)]),
@@ -489,13 +486,41 @@ def main():
     modified_library['ext'] = {'identity': 'same schema, different original bytes'}
     write_abd(work / 'hints.changed-library.exec.abd', modified_library)
     high_destructor = {'gvs': 0, 'f': [
-        object_function(-1, 5, [call(0x34560004, call(0x0ABD0006, var(0)))], [7]),
+        object_function(-1, 5, [call(0x34560004, call(0x0ABD0006,
+            {'t': 0, 'c': 'oa', 'v': var(0), 'offset': 0}))], [7]),
         {**object_function(0x7FFF0002, 7, [
-            {'t': 0, 'c': 'vd', 'v': 0, 'val': call(0x0ABD0003, 1)},
-            {'t': 0, 'c': 'm', 'v1': call(0x0ABD0006, var(0)), 'v2': 55},
+            {'t': 0, 'c': 'vd', 'v': 0, 'val': call(0x0ABD0014, 1)},
+            {'t': 0, 'c': 'm', 'v1': call(0x0ABD0006,
+                {'t': 0, 'c': 'oa', 'v': var(0), 'offset': 0}), 'v2': 55},
             {'t': 0, 'c': 'ob', 'v': var(0), 'destructor': -1, 'manual': False},
             {'t': 0, 'c': 'ro', 'r': var(0)}]), 'local-count': 1}]}
     write_abd(work / 'high-destructor.exec.abd', high_destructor)
+    # Object tags exist from allocation, before ob registration, and survive a
+    # v9 snapshot restore without adding a serialized object-storage field.
+    def member(pointer, offset):
+        return call(0x0ABD0006, {'t': 0, 'c': 'oa', 'v': pointer, 'offset': offset})
+
+    def guarded_factory(manual):
+        return {**object_function(402 if manual else 401, 7, [
+            {'t': 0, 'c': 'vd', 'v': 0, 'val': call(0x0ABD0014, 2)},
+            {'t': 0, 'c': 'm', 'v1': member(var(0), 0), 'v2': 11},
+            {'t': 0, 'c': 'm', 'v1': member(var(0), 1), 'v2': 22},
+            call(0x34560011, var(0)),
+            {'t': 0, 'c': 'ob', 'v': var(0), 'manual': manual},
+            {'t': 0, 'c': 'ro', 'r': var(0)}]), 'local-count': 1}
+
+    literal_address = {'t': 0, 'c': 'block_address', 'v': var(0)}
+    write_abd(work / 'object-guards.exec.abd', {'gvs': 0, 'f': [
+        guarded_factory(False), guarded_factory(True),
+        object_function(403, 0, [ret(member(var(0), 0))], [7]),
+        object_function(404, 0, [ret(member(var(0), 1))], [7]),
+        object_function(405, 5, [{'t': 0, 'c': 'od', 'v': var(0)}], [7]),
+        {**object_function(410, 5, [
+            {'t': 0, 'c': 'vd', 'v': 0, 'val': {'t': 0, 'c': 'new_block', 'size': 2}},
+            {'t': 0, 'c': 'm', 'v1': member(literal_address, 0), 'v2': 11},
+            {'t': 0, 'c': 'm', 'v1': member(literal_address, 1), 'v2': 22},
+            call(0x34560011, literal_address)]), 'local-count': 1},
+    ]})
     # A deep dependency graph is independent of the expression nesting limit.
     # Resolve it on a small JVM stack so a recursive native SCC walk fails here.
     deep_count = 1000
@@ -542,10 +567,16 @@ def main():
     assert len(snapshot['global owned allocations']) == 2
     assert set(snapshot['global owned allocations']) == {
         item['begin position'] for item in snapshot['objects'] if not item['manual']}
-    detached = read_abd(work / 'objects.detached.snapshot.abd')
-    assert detached['snapshot version'] == 9
-    assert len(detached['objects']) == 1 and detached['objects'][0]['manual'] is False
-    assert detached['global owned allocations'] == []
+    guarded = read_abd(work / 'objects.guarded.snapshot.abd')
+    assert guarded['snapshot version'] == 9
+    assert guarded['objects'] == [] and guarded['global owned allocations'] == []
+    guards = read_abd(work / 'object-guards.snapshot.abd')
+    assert guards['snapshot version'] == 9
+    assert len(guards['objects']) == 2
+    assert sorted(item['manual'] for item in guards['objects']) == [False, True]
+    assert len(guards['global owned allocations']) == 1
+    assert all(set(item) == {'begin position', 'has destructor', 'destructor contexts', 'manual'}
+               for item in guards['objects']), 'C22 tags must not change the v9 object record'
     numeric = read_abd(work / 'numeric.saved.snapshot.abd')
     assert numeric['snapshot version'] == 9
     assert numeric['module manifest'] == [manifest('numeric.exec.abd', 5)]

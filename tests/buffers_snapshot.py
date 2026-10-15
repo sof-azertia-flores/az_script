@@ -72,17 +72,17 @@ def main():
         function(BASE + 4, placement, params=[7], hidden=1, internal=1),
         function(BASE + 5, [setvar(-3, {'t': 0, 'c': 'add', 'v1': var(-3), 'v2': 1}),
                             {'t': 0, 'c': 'context_default', 'context': {'ref': 0}}], params=[7], hidden=1, internal=1),
-        function(BASE + 10, [ret(memory(var(-2)))], returns=0),
+        function(BASE + 10, [ret(memory(address(var(-2), 0)))], returns=0),
         function(BASE + 11, [ret(var(-3))], returns=0),
         function(BASE + 12, [ret(op(1, var(-1)))], returns=0),
         function(BASE + 13, [ret(op(0, var(-1)))], returns=0),
         function(BASE + 14, [ret(var(-2))], returns=7),
         function(BASE + 15, [ret(op(3, op(3, var(-4), 0), 0))], returns=0),
         function(BASE + 16, [ret(op(1, var(-5)))], returns=0),
-        function(BASE + 20, [put(var(-2), var(0))], params=[0]),
+        function(BASE + 20, [put(address(var(-2), 0), var(0))], params=[0]),
         function(BASE + 21, [op(6, var(-1), 0)]),
         function(BASE + 22, [op(6, var(-1), 3)]),
-        function(BASE + 23, [ret(memory(var(0)))], returns=0, params=[7])
+        function(BASE + 23, [ret(memory(address(var(0), 0)))], returns=0, params=[7])
     ]}
     with tempfile.TemporaryDirectory(prefix='buffer-snapshot-', dir=ROOT / 'build') as directory:
         work = Path(directory)

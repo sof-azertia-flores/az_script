@@ -88,7 +88,8 @@ def main():
             void main(){Point* p=make();{Point* alias=p;}print(p.x);delete p;}''', '5\n5\n')
         execute('manual-survives-block', POINT + '''void main(){Point* p=null;{p=new Point(2);}print(p.x);delete p;}''', '2\n2\n')
         execute('manual-not-auto-destroyed', POINT + '''void main(){Point* p=new Point(2);}''')
-        execute('raw-free-unregisters', POINT + '''void main(){var raw=new Point(8);mem_free(raw);}''')
+        execute('raw-free-object-rejected', POINT + '''void main(){Point* raw(8);mem_free(address(raw));}''',
+                '8\n', error='cannot access object storage')
         execute('reassigned-binding', POINT + '''void main(){Point* p=new Point(2);{Point * local(1);local=p;}print(p.x);delete p;}''', '1\n2\n2\n')
         execute('null-and-equality', POINT + '''void main(){Point* p=null;delete p;delete null;
             Point * a(1);Point* b=a;print(p==null);print(a==b);print(a!=null);}''', 'true\ntrue\ntrue\n1\n')
@@ -164,7 +165,7 @@ def main():
         allocations = []
         def inspect(value):
             if isinstance(value, dict):
-                if value.get('t') == 1 and value.get('id') == 0x0ABD0003:
+                if value.get('t') == 1 and value.get('id') == 0x0ABD0014:
                     allocations.append(value['param'])
                 for child in value.values():
                     inspect(child)

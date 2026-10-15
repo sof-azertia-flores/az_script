@@ -670,7 +670,6 @@ class LanguageOpsTest {
         record Case(String source, String message) {}
         for (Case item : List.of(
                 new Case("class P{int n;}int main(){P value;return int(value);}", "Cannot convert P to int"),
-                new Case("class P{int n;}address main(){P* p=null;return address(p);}", "Cannot convert P * to address"),
                 new Case("class P{int n;}string main(){P* p=null;return string(p);}", "Cannot convert P * to string"),
                 new Case("string main(){buffer<int> b;return string(b);}", "Cannot convert buffer<int> to string"),
                 new Case("address main(){return address(null);}", "Cannot convert null to address"),
@@ -678,6 +677,33 @@ class LanguageOpsTest {
                 new Case("int main(){return int(print(1));}", "Cannot convert void to int"))) {
             String message = failure(item.source()).getMessage();
             assertTrue(message.endsWith(item.message()), message);
+        }
+    }
+
+    @Test void explicitAddressErasureKeepsConcreteFlexibleAndPointerBoundOperands() throws Exception {
+        String declaration = "class P{int n;}";
+        for (String parameter : List.of("P* p", "P(*) p")) {
+            String source = declaration + "address main(" + parameter + "){return address(p);}";
+            JsonObject returned = execReturn(source);
+            assertEquals(ExecOpcodes.VARIABLE, returned.get("c").getAsInt());
+            assertEquals(0, returned.get("v").getAsInt());
+            assertEquals(0, opcodeCount(Compiler.compile(tree(source)).toJson(), ExecOpcodes.CONVERT));
+            roundTrip(source);
+        }
+        String generic = declaration + "<T extends P*> address erase(T p){return address(p);}void main(){}";
+        assertEquals(0, opcodeCount(Compiler.compile(tree(generic)).toJson(), ExecOpcodes.CONVERT));
+        roundTrip(generic);
+        String call = declaration + "P* produce():0002{return null;}address main(){return address(produce());}";
+        builtinCall(execReturn(call), 0x0fff0002, 0);
+        roundTrip(call);
+        roundTrip(declaration + "address main(){return address(new P());}");
+        for (String source : List.of(
+                declaration + "address main(){P value;return address(value);}",
+                declaration + "<T extends P> address erase(T value){return address(value);}void main(){}",
+                "<T> address erase(T value){return address(value);}void main(){}",
+                "address main(){return address(null);}")) {
+            String message = failure(source).getMessage();
+            assertTrue(message.contains("Cannot convert") && message.endsWith(" to address"), message);
         }
     }
 

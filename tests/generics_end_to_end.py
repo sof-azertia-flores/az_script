@@ -295,10 +295,11 @@ def main():
                 Cell<T>::Cell():0002{}
                 Cell<T>::~Cell():0003{Holder<T> temporary;T copy=identity(value);print("drop");}
             ''')
-            artifact = compile_case('jni-generic', '#namespace 1234\n#gvar saved\n' + BOX + '''
+            artifact = compile_case('jni-generic', '#namespace 1234\n' + BOX + '''
                 #include "cell.include.azs"
+                Cell<Box<int>>* saved;
                 void __script_onload(){saved=new Cell<Box<int>>();}
-                address savedAddress():0010{return saved;}
+                address savedAddress():0010{return address(saved);}
                 Cell<Box<int>>* cell(){return reflect_invoke_function<Cell<Box<int>>*>(305397776);}
                 int read(){return cell().value.value;}
                 void mutate(int n){cell().value.value=n;}

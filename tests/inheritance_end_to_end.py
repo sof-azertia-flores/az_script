@@ -219,7 +219,7 @@ def main():
         allocations = []
         def inspect(value):
             if isinstance(value, dict):
-                if value.get('t') == 1 and value.get('id') == 0x0ABD0003:
+                if value.get('t') == 1 and value.get('id') == 0x0ABD0014:
                     allocations.append(value['param'])
                 for child in value.values():
                     inspect(child)

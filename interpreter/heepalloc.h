@@ -4,6 +4,7 @@
 namespace azertian {
 #define AZ_HEAP_FUNCTION(Name) class Name: public function {public: int return_type() override; std::shared_ptr<variable> invoke(std::shared_ptr<environment> env,std::vector<std::shared_ptr<variable>> arguments) override;};
 AZ_HEAP_FUNCTION(f_heepalloc)
+AZ_HEAP_FUNCTION(f_object_alloc)
 AZ_HEAP_FUNCTION(f_free)
 AZ_HEAP_FUNCTION(f_make_free)
 AZ_HEAP_FUNCTION(f_send_up)
@@ -22,6 +23,10 @@ inline constexpr int max_slots=1048576;
 int resize_heap();
 void resize_heap(int size);
 address alloc(int size);
+// Compiler object storage is tagged before construction starts.
+address object_alloc(int size);
+// Includes tagged range interiors and literal/view addresses.
+bool is_object_storage(address pointer);
 bool free(address startpos);
 std::shared_ptr<variable> getAt(address pointer);
 // Raw slot access is for snapshots only; getAt checks allocation membership.

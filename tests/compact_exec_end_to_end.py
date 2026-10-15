@@ -876,6 +876,43 @@ def main():
             execute_wire('string-invalid-' + str(index), module([function(returning(call), return_type=0)]),
                          invalid=True, error=error)
 
+        def wire_call(ident, *arguments):
+            return expression(2, integer(ident), stack(*arguments), stack())
+
+        pointer = expression(3, integer(0))
+        allocation = expression(4, integer(0), integer(7), b'\1', wire_call(0x0abd0014, constant(2)))
+        member = lambda offset: expression(9, pointer, integer(offset))
+        field = lambda offset: wire_call(0x0abd0006, member(offset))
+        bind_manual = expression(10, pointer, b'\0', b'\1', stack())
+        object_body = block(allocation, expression(6, field(0), constant(41)), bind_manual,
+                            expression(4, integer(1), integer(0), b'\1', field(0)),
+                            expression(11, pointer), returning(expression(3, integer(1))))
+        object_module = module([function(object_body, locals_count=2)])
+        object_bytes = frame(stack(*object_module))
+        assert encode_compact_module(WireReader().read(object_bytes)) == object_bytes, 'independent tagged-object/member reconstruction'
+        execute_wire('object-allocator-member-access', object_module, expected='41\n')
+        for ident, name in [(0x0abd0006, 'mem_get'), (0x0abd0002, 'mem_free'),
+                            (0x0abd0004, 'make_free'), (0x0abd0005, 'mem_send_up')]:
+            for offset in (0, 1):
+                raw_pointer = expression(12, pointer, constant(offset))
+                body = block(allocation, wire_call(ident, raw_pointer), returning(constant(0)))
+                execute_wire(f'object-construction-guard-{name}-{offset}', module([function(body, locals_count=1)]),
+                             invalid=True, error=name + ' cannot access object storage; use typed member access')
+        raw_allocation = expression(4, integer(0), integer(7), b'\1', wire_call(0x0abd0003, constant(1)))
+        execute_wire('object-address-rejects-raw-allocation', module([function(block(raw_allocation, returning(field(0))), locals_count=1)]),
+                     invalid=True, error='Object member access requires object storage')
+        escaped_member = expression(4, integer(1), integer(7), b'\1', member(1))
+        body = block(allocation, escaped_member, returning(wire_call(0x0abd0006, expression(3, integer(1)))))
+        execute_wire('object-member-address-cannot-launder-raw-read', module([function(body, locals_count=2)]),
+                     invalid=True, error='mem_get cannot access object storage; use typed member access')
+        literal = expression(4, integer(0), integer(8), b'\1', expression(32, integer(1)))
+        literal_pointer = expression(33, pointer)
+        execute_wire('literal-block-rejects-raw-read', module([function(block(literal, returning(wire_call(0x0abd0006, literal_pointer))), locals_count=1)]),
+                     invalid=True, error='mem_get cannot access object storage; use typed member access')
+        for label, arguments in [('missing', []), ('extra', [constant(1), constant(2)]),
+                                 ('wrong-type', [constant(True)]), ('negative', [constant(-1)])]:
+            execute_wire('object-allocator-' + label, module([function(returning(wire_call(0x0abd0014, *arguments)), return_type=7)]), invalid=True)
+
         mutations = [('root-missing', minimum[:-1]), ('root-extra', minimum + [b''])]
         for index, value, label in [(0, b'AZSCRIPX', 'magic'), (1, integer(5), 'version'), (1, integer(6), 'address-only-version'), (1, integer(7), 'literal-only-version'), (1, integer(8), 'v8-version'), (1, integer(9), 'previous-version'),
                 (1, b'\4', 'version-width'), (2, b'\2', 'source-version-width'),

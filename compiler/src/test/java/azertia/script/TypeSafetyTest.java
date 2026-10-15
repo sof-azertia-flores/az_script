@@ -423,6 +423,104 @@ class TypeSafetyTest {
         }
     }
 
+    private static void pointerRoundTrip(String source) throws Exception {
+        JsonObject ast = tree(source), restored = JsonParser.parseString(ast.toString()).getAsJsonObject();
+        String original = ast.toString();
+        for (boolean debug : List.of(false, true)) {
+            byte[] encoded = Compiler.compile(ast, debug).toValue().toAbdFormat();
+            assertArrayEquals(encoded, Compiler.compile(restored, debug).toValue().toAbdFormat(), source);
+            assertArrayEquals(encoded, ExecCodec.decode(encoded).toValue().toAbdFormat(), source);
+            assertEquals(original, ast.toString());
+        }
+    }
+    private static String pointerSinkMessage(String context, String type) {
+        return context + " cannot hold a class pointer (" + type + "); declare it as " + type
+                + " or convert explicitly with address(p)";
+    }
+
+    @Test void classPointersCannotEnterUntypedVariablesGlobalsArgumentsOrRawStores() throws Exception {
+        String declaration = "class P{int value;}";
+        record Case(String source, String context, String type) {}
+        for (Case item : List.of(
+                new Case("void main(P* p){var loose=p;}", "Untyped variable loose", "P *"),
+                new Case("void main(P* p){def(loose,p);}", "Untyped variable loose", "P *"),
+                new Case("void main(P* p){var loose=0;loose=p;}", "Untyped variable loose", "P *"),
+                new Case("void main(P* p){def(loose);loose=p;}", "Untyped variable loose", "P *"),
+                new Case("void sink(loose,P* p){loose=p;}void main(){}", "Untyped variable loose", "P *"),
+                new Case("#gvar loose\nvoid main(P* p){loose=p;}", "Untyped variable loose", "P *"),
+                new Case("void sink(value){}void main(P* p){sink(p);}", "sink argument 1", "P *"),
+                new Case("void main(P* p){address raw=alloc(1);mem_get(raw)=p;}", "Raw memory", "P *"),
+                new Case("void main(){var loose=new P();}", "Untyped variable loose", "P *"),
+                new Case("void check(P(*) p){var loose=p;}void main(){}", "Untyped variable loose", "P *"),
+                new Case("<T extends P*> void check(T p){var loose=p;}void main(){}", "Untyped variable loose", "T"),
+                new Case("<T extends P*> void check(T p){def(loose);loose=p;}void main(){}", "Untyped variable loose", "T"),
+                new Case("<T extends P*> void check(T p){address raw=alloc(1);mem_get(raw)=p;}void main(){}", "Raw memory", "T"),
+                new Case("void sink(value){}<T extends P*> void check(T p){sink(p);}void main(){}", "sink argument 1", "T"))) {
+            String source = item.source().startsWith("#gvar") ? item.source().replace("\n", "\n" + declaration) : declaration + item.source();
+            JsonObject ast = tree(source);
+            CompileException error = assertThrows(CompileException.class, () -> bytes(ast), source);
+            String message = pointerSinkMessage(item.context(), item.type());
+            assertTrue(error.getMessage().contains(message), error.getMessage());
+            assertFalse(error.internal(), error::getMessage);
+            assertEquals(error.getMessage(), failure(source).getMessage());
+            assertEquals(error.getMessage(), assertThrows(CompileException.class,
+                    () -> bytes(JsonParser.parseString(ast.toString()).getAsJsonObject())).getMessage());
+        }
+    }
+
+    @Test void typedPointersAndExplicitErasureRemainUsableAcrossEverySupportedSink() throws Exception {
+        String declaration = "class P{int value;}";
+        for (String source : List.of(
+                declaration + "P* shared;P* identity(P* value){return value;}void main(){P* p=new P();P* q=identity(p);shared=q;print(p);print(q);delete p;}",
+                declaration + "class Box{P* pointer;address raw;}void main(P* p){Box box;box.pointer=p;box.raw=address(p);}",
+                declaration + "void sink(value){}void main(){P* p=new P();var loose=address(p);sink(address(p));address raw=alloc(1);mem_get(raw)=address(p);mem_free(raw);delete p;}",
+                "#gvar loose\n" + declaration + "void main(P* p){loose=address(p);}",
+                declaration + "void check(P(*) p){print(p);address raw=address(p);}void main(){P value;check(value);}",
+                declaration + "<T extends P*> address erase(T p){return address(p);}void main(){P* p=new P();address raw=erase(p);delete p;}",
+                declaration + "void main(P* p){reflect_invoke_function<int>(2,p);}",
+                declaration + "<T extends P*> void check(T p){reflect_invoke_function<int>(2,p);}void main(){}",
+                declaration + "void main(){P value;buffer<int> values;reflect_invoke_function<int>(2,value,values);}")) pointerRoundTrip(source);
+    }
+
+    @Test void printAndReflectionRetainTheirExistingObjectAndVoidRestrictions() {
+        for (String source : List.of(
+                "class P{int value;}void main(){P value;print(value);}",
+                "void main(){buffer<int> values;print(values);}",
+                "class P{int value;}<T extends P*> void check(T p){print(p);}void main(){}",
+                "<T> void check(T value){print(value);}void main(){}")) {
+            String message = failure(source).getMessage();
+            assertTrue(message.contains("print argument cannot take an object or type parameter without a declared type"), message);
+        }
+        String reflection = failure("void main(){reflect_invoke_function<int>(2,print(1));}").getMessage();
+        assertTrue(reflection.contains("Reflection argument cannot use a void value"), reflection);
+    }
+
+    @Test void compileJsonCannotErasePointerTypesThroughDeclarationsOrClassFields() throws Exception {
+        JsonObject typed = tree("class P{int value;}void main(P* p){P* local=p;}");
+        String message = rejected(typed, copy -> function(copy, "main").getAsJsonArray("script").get(0).getAsJsonObject().remove("declared-type")).getMessage();
+        assertTrue(message.contains(pointerSinkMessage("Untyped variable local", "P *")), message);
+        JsonObject call = tree("class P{int value;}void sink(P* p){}void main(P* p){sink(p);}");
+        message = rejected(call, copy -> function(copy, "sink").getAsJsonObject("metadata").getAsJsonArray("param-types").set(0, new JsonPrimitive("any"))).getMessage();
+        assertTrue(message.contains(pointerSinkMessage("sink argument 1", "P *")), message);
+        JsonObject member = tree("class P{int value;}class Box{P* pointer;}void main(P* p){Box box;box.pointer=p;}");
+        message = rejected(member, copy -> copy.getAsJsonArray("classes").get(1).getAsJsonObject()
+                .getAsJsonArray("fields").get(0).getAsJsonObject().addProperty("type", "any")).getMessage();
+        assertTrue(message.contains("Field requires a concrete type"), message);
+        message = rejected(member, copy -> copy.getAsJsonArray("classes").get(1).getAsJsonObject()
+                .getAsJsonArray("fields").get(0).getAsJsonObject().addProperty("type", "address")).getMessage();
+        assertTrue(message.contains("Assignment to member pointer expected address, got P *"), message);
+    }
+
+    @Test void objectAllocatorIsNotCallableFromSourceOrForgedAst() throws Exception {
+        String direct = failure("void main(){object_alloc(1);}").getMessage();
+        assertTrue(direct.contains("object_alloc"), direct);
+        String declaration = failure("address object_alloc(int size){return alloc(size);}void main(){}").getMessage();
+        assertTrue(declaration.contains("Reserved function name: object_alloc"), declaration);
+        JsonObject ast = tree("void main(){alloc(1);}");
+        String forged = rejected(ast, copy -> function(copy, "main").getAsJsonArray("script").get(0).getAsJsonObject().addProperty("call", "object_alloc")).getMessage();
+        assertTrue(forged.contains("object_alloc"), forged);
+    }
+
     @Test void hexadecimalIdsAndReservedNamespacesMatchBetweenSourceAndAst() throws Exception {
         // Source accepts a 0x prefix and leading zeros; the AST always holds the canonical spelling.
         JsonObject tree = tree("#namespace 0x0005151\nint f():00000000abcd {return 1;}\nextern int g():00000000abcd;\nextern int h():0X00051510002;\n"

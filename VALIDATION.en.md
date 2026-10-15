@@ -1,3 +1,11 @@
+# C22 Typed Pointers and Object Storage (2026-10-15)
+
+[中文](VALIDATION.md) | English
+
+Class pointers now require typed positions or explicit address(p) erasure. Internal object_alloc tags complete ranges before construction; raw memory operations and JNI writes/free reject object starts, interiors and literal/view addresses. Typed member decoding retains checked access, manual registration detaches ownership only on success, and snapshot restore rebuilds tags without a version change. Trusted host construction and the agreed heap-safety limitations are documented.
+
+V0–V3 passed sequentially with JAVA_TOOL_OPTIONS unset:270 Java tests,5768 native checks,2940 JNI assertions,800 calls from four workers and1000-module linking. Operator suites passed362 ordinary/354 sanitizer cases; address suites119 each and independent wire suites330 each. No ASan/UBSan reports occurred. Independent review found no production blocker. Obsolete allocator-ID assertions and one destructor-log reset in test fixtures were corrected before complete reruns. Export passed26 relocation/consumer checks; all174 manifest file sizes/SHA-256 digests matched. Exec remains v10 and snapshots v9. Logs: build/c22/v1.log,build/c22/v2.log,build/c22/v3.log.
+
 # C21 Unicode String Functions (2026-10-15)
 
 [中文](VALIDATION.md) | English

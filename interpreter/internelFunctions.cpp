@@ -144,7 +144,8 @@ std::shared_ptr<function> builtin(int id) {
         std::make_shared<hint_query_function>(false),std::make_shared<hint_query_function>(true),
         std::make_shared<string_function>(0x0b),std::make_shared<string_function>(0x0c),std::make_shared<string_function>(0x0d),
         std::make_shared<string_function>(0x0e),std::make_shared<string_function>(0x0f),std::make_shared<string_function>(0x10),
-        std::make_shared<string_function>(0x11),std::make_shared<string_function>(0x12),std::make_shared<string_function>(0x13)};
+        std::make_shared<string_function>(0x11),std::make_shared<string_function>(0x12),std::make_shared<string_function>(0x13),
+        std::make_shared<f_object_alloc>()};
     int i=id&0xffff;
     return i<static_cast<int>(functions.size())?functions[i]:nullptr;
 }

@@ -82,7 +82,7 @@ double value = ready ? 1 : 2.5; // double 1
 
 ### 显式转换
 
-使用 `int(x)`、`float(x)`、`double(x)` 做数值转换或严格十进制字符串解析；`string(x)` 接受数值、address 或 string。`address(x)` 只对已有 address 做恒等转换。每种形式恰好接受一个参数，只求值一次。布尔、类值/指针、buffer、null 和类型参数不能转换，整数/字符串也不能变成 address。
+使用 `int(x)`、`float(x)`、`double(x)` 做数值转换或严格十进制字符串解析；`string(x)` 接受数值、address 或 string。`address(x)` 保留已有 address，或显式擦除类指针、`C (*)` 借用及指针上界 T，不改变所有权。每种形式恰好接受一个参数，只求值一次。布尔、类值、buffer、裸 null 及无界/值上界类型参数不能转换；其他类指针转换及整数/字符串转 address 均不支持。
 
 `int(2.9)` 为 2，`int(2147483647.9)` 为 2147483647，`int("+7")` 为 7。数值转 int 先向零截断再检查范围。浮点转换可能舍入、下溢为零或次正规数，但溢出会失败。整数字符串只允许可选正负号和十进制数字；float/double 字符串还允许小数点和指数。解析不受区域设置影响，小数点固定为 `.`，拒绝空格、十六进制、后缀、NaN/Infinity 和尾部多余文字，即使参数是字符串字面量也如此。使用 `int(x)` 而不是 `(int)x`，使用比较而不是 `bool(x)`；详见[转换配对表](LANGUAGE.md#显式转换)。
 
@@ -132,7 +132,7 @@ void main() {
 
 `Point a(3);`（或 `Point a;`、`Point a();`）创建字面量对象：它是一个值，赋值、传参和返回都会复制全部字段，每个副本到期时各自析构；返回局部字面量对象直接交给调用方，不额外复制。`Point * p(3);` 创建离块自动销毁的指针对象，无参也要写 `Point * p();`。`Point * b = new Point(5);` 创建需要显式 `delete b;` 的手动对象；单写 `Point * q;` 是空指针，等同 `Point * q = null;`。参数写成 `Point (*) p` 时函数同时接受 `Point *` 和字面量 `Point`：字面量对象按地址借入，不复制，函数内 `p` 就是 `Point *`。指针赋值、别名与传参只复制地址；指针字段不拥有目标对象。同一块中的对象按创建逆序析构，未绑定变量的临时对象在语句结束时析构。`delete` 只接受指针，`delete null;` 无操作，删除自动指针对象或使用失效地址会报错。脚本只能通过方法中的 `this` 或 `Point (*)` 参数（类型均为 `Point *`）拿到字面量对象的地址，对象到期后再经它访问会报错。字面量对象不能与 `null` 比较、不能存进 `var` 或全局变量。
 
-访问成员使用 `object.field`、`object.method()`、`this.field`。接收对象和实参从左到右各求值一次。类内先找局部变量和参数，再找成员，最后找全局变量。成员赋值支持 `=`，暂不支持成员 `+=`。类按名称区分：指针只能在同一个类之间赋值和相等比较，子类指针可以转为父类指针，字段布局相同的其他类不能互换；指针也能与 `null` 比较；整数 `0` 不能代替 `null`。对象须写显式类类型，`var object = new Point(1); object.get();` 不能编译，应写 `Point * object = new Point(1);`。
+访问成员使用 `object.field`、`object.method()`、`this.field`。接收对象和实参从左到右各求值一次。类内先找局部变量和参数，再找成员，最后找全局变量。成员赋值支持 `=`，暂不支持成员 `+=`。类按名称区分：指针只能在同一个类之间赋值和相等比较，子类指针可以转为父类指针，字段布局相同的其他类不能互换；指针也能与 `null` 比较；整数 `0` 不能代替 `null`。对象须写显式类类型，`var object = new Point(1);` 声明本身被拒绝，应写成 `Point * object = new Point(1);`。类指针不能进入 var/def、#gvar、无类型参数或原始内存存储；应保留明确类型，或在需要地址数据时使用 `address(object)`。
 
 类继承写作 `class Child : Base` 或 `class Child : public Base`。父类字段位于对象 slots 前部，子类字段追加在后；继承方法直接使用同一个对象地址。子类指针可赋给父类指针变量、参数或返回值（字面量对象不做切片），父类方法的调用按静态类型绑定；同名字段和方法可由子类遮蔽，没有虚函数派发；在类函数中可用 `Base::method(args)` 对 `this` 调用被遮蔽的父类方法。
 
@@ -179,7 +179,7 @@ int main() { return math_round(math_hypot(3.0, 4.0)); }
 
 宿主函数写完整签名，例如 `extern int host_add(int, int):0x12340001;`；宿主必须注册相同 ID 与对应参数和返回值。独立解释器没有应用专属的宿主回调，使用此类脚本时应嵌入 C++ 或 Java 宿主。
 
-内置 `print(value)`、`getDepth()`、`alloc(count)`、`mem_get(pointer)`、`mem_free(pointer)`、`make_free(pointer)`、`mem_send_up(pointer)` 和 `load_extern_library(name)` 无需声明。`load_extern_library` 加载当前系统的已签名动态库，见 [外部动态库](EXTERN_LIBRARY.md)。`alloc(int)` 返回 address，后四个内存接口接收 address。例如 `address p = alloc(2); mem_get(p + 1) = 42; mem_free(p);`，分配数量和偏移仍是 int。地址支持 `address + int`、`int + address`、`address - int`，以及地址间的无符号相等和大小比较；溢出和下溢报错，空地址使用 `p == null` 判断。地址仍不能与普通整数互相转换或作相等比较，也不能直接作为 if 条件；`address(a)` 只保留 address，`string(a)` 格式化其无符号值。类指针仍保留静态类类型与继承规则，只在执行文件中擦除为 address；通常通过构造和 delete 管理，原始内存释放不会调用用户析构。
+内置 `print(value)`、`getDepth()`、`alloc(count)`、`mem_get(pointer)`、`mem_free(pointer)`、`make_free(pointer)`、`mem_send_up(pointer)` 和 `load_extern_library(name)` 无需声明。`load_extern_library` 加载当前系统的已签名动态库，见 [外部动态库](EXTERN_LIBRARY.md)。`alloc(int)` 返回 address，后四个内存接口接收 address。例如 `address p = alloc(2); mem_get(p + 1) = 42; mem_free(p);`，分配数量和偏移仍是 int。地址支持 `address + int`、`int + address`、`address - int`，以及地址间的无符号相等和大小比较；溢出和下溢报错，空地址使用 `p == null` 判断。地址仍不能与普通整数互相转换或作相等比较，也不能直接作为 if 条件；`address(a)` 保留 address，`address(p)` 擦除类指针且不改变所有权，`string(a)` 格式化地址的无符号值。类指针仍保留静态类类型与继承规则，只在执行文件中擦除为 address；通常通过构造和 delete 管理，原始 mem_get/free/make_free/send_up 和 JNI 原始写入/释放拒绝对象存储，擦除为 address 后也不例外；对象使用带类型成员及 delete。宿主指针仍受信任，旧别名、地址复用和自动对象逃逸仍需由调用方避免，见[已知限制](LANGUAGE.md#对象存储与已知限制)。
 
 本发行包使用 exec v10 和 JNI 快照 v9，不读取旧执行文件或快照。所有模块须重新编译；编译时加 `-g` 可在执行文件中写入函数名和源码位置，默认执行文件不含这些名称；旧代码中的 `int p = alloc(...)` 须改为 `address p = alloc(...)`，依赖引用语义的 `Point p(...)` 须改为 `Point * p(...)`，`Point p = new Point(...)` 改为 `Point * p = new Point(...)`。64 位地址目前仍表示 slot 位置，既有堆容量和生命周期规则不变。
 

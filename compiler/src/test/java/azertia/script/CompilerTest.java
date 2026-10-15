@@ -694,7 +694,7 @@ class CompilerTest {
         assertTrue(instructions.contains("\"c\":" + ExecOpcodes.code("od")));
         assertTrue(instructions.contains("\"c\":" + ExecOpcodes.code("ro")));
         assertTrue(instructions.contains("\"offset\":1"));
-        assertTrue(instructions.contains("\"id\":" + 0x0abd0003 + ",\"param\":[2]"), instructions);
+        assertTrue(instructions.contains("\"id\":" + 0x0abd0014 + ",\"param\":[2]"), instructions);
     }
     @Test void classFieldsKeepTheirTypesThroughReadsCallsAndDefaults() throws Exception {
         String source = "class Values{int i;float f;double d;boolean b;string s;Values* next;Values* self(){return this;}}"
@@ -835,14 +835,16 @@ class CompilerTest {
                 assertEquals("new_block", ExecOpcodes.name(allocation.get("c").getAsInt()));
                 assertEquals(1, allocation.get("size").getAsInt());
             } else {
-                assertEquals(0x0abd0003, allocation.get("id").getAsInt());
+                assertEquals(0x0abd0014, allocation.get("id").getAsInt());
                 assertEquals(1, allocation.getAsJsonArray("param").get(0).getAsInt());
             }
             assertEquals(1, statements.get(1).getAsJsonObject().get("t").getAsInt(), "factory directly calls the constructor");
             JsonObject binding = statements.asList().stream().filter(JsonElement::isJsonObject).map(JsonElement::getAsJsonObject)
                     .filter(statement -> statement.has("c") && ExecOpcodes.name(statement.get("c").getAsInt()).equals("ob")).findFirst().orElseThrow();
-            if (binding.get("manual").getAsBoolean())
-                assertEquals(0x0abd0004, statements.get(statements.size() - 2).getAsJsonObject().get("id").getAsInt());
+            assertSame(binding, statements.get(statements.size() - 2), "binding completes construction and manual ownership transfer");
+            assertTrue(statements.asList().stream().filter(JsonElement::isJsonObject).map(JsonElement::getAsJsonObject)
+                    .noneMatch(statement -> statement.has("id") && statement.get("id").getAsInt() == 0x0abd0004),
+                    "object factories must not use raw make_free");
         }
         assertEquals(3, generatedFactories);
     }

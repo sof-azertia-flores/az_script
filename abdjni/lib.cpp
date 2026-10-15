@@ -216,6 +216,15 @@ std::vector<unsigned char> readFile(const std::string& name) {
     if (!stream) throw std::runtime_error("Cannot read complete file: " + name);
     return bytes;
 }
+void requireJavaRawMemory(address pointer) {
+    if (heap::is_object_storage(pointer))
+        throw std::invalid_argument("Java raw memory access cannot access object storage; use typed member access");
+}
+std::shared_ptr<variable> writableRawSlot(jlong pointer) {
+    const address nativePointer = fromJAddress(pointer);
+    requireJavaRawMemory(nativePointer);
+    return heap::getAt(nativePointer);
+}
 std::shared_ptr<variable> typedSlot(jlong pointer, int type) {
     auto value = heap::getAt(fromJAddress(pointer));
     if (value->type != type) throw std::invalid_argument("Heap value has the wrong type");
@@ -782,6 +791,7 @@ JNIEXPORT void JNICALL Java_azertia_jni_Caller20_memFree(JNIEnv* env, jclass, jl
     boundary(env, [&] {
         if (!pointer) return;
         const address nativePointer = fromJAddress(pointer);
+        requireJavaRawMemory(nativePointer);
         // Java may release its own blocks and global (base scope) allocations. A block
         // that a running script scope will release itself must stay with that scope.
         const environment* owner = heap::owner_of(nativePointer);
@@ -805,25 +815,25 @@ JNIEXPORT void JNICALL Java_azertia_jni_Caller20_destroyScript(JNIEnv* env, jcla
     });
 }
 JNIEXPORT void JNICALL Java_azertia_jni_Caller220_ACputMem__JI(JNIEnv* env, jclass, jlong pointer, jint value) {
-    boundary(env, [&] { heap::getAt(fromJAddress(pointer))->setValue(static_cast<int>(value)); });
+    boundary(env, [&] { writableRawSlot(pointer)->setValue(static_cast<int>(value)); });
 }
 JNIEXPORT void JNICALL Java_azertia_jni_Caller220_ACputMem__JF(JNIEnv* env, jclass, jlong pointer, jfloat value) {
-    boundary(env, [&] { heap::getAt(fromJAddress(pointer))->setValue(static_cast<float>(value)); });
+    boundary(env, [&] { writableRawSlot(pointer)->setValue(static_cast<float>(value)); });
 }
 JNIEXPORT void JNICALL Java_azertia_jni_Caller220_ACputMem__JD(JNIEnv* env, jclass, jlong pointer, jdouble value) {
-    boundary(env, [&] { heap::getAt(fromJAddress(pointer))->setValue(static_cast<double>(value)); });
+    boundary(env, [&] { writableRawSlot(pointer)->setValue(static_cast<double>(value)); });
 }
 JNIEXPORT void JNICALL Java_azertia_jni_Caller220_ACputMem__JZ(JNIEnv* env, jclass, jlong pointer, jboolean value) {
-    boundary(env, [&] { heap::getAt(fromJAddress(pointer))->setValue(value == JNI_TRUE); });
+    boundary(env, [&] { writableRawSlot(pointer)->setValue(value == JNI_TRUE); });
 }
 JNIEXPORT void JNICALL Java_azertia_jni_Caller220_ACputMem__JLjava_lang_String_2(JNIEnv* env, jclass, jlong pointer, jstring value) {
-    boundary(env, [&] { heap::getAt(fromJAddress(pointer))->setValue(fromJava(env, value)); });
+    boundary(env, [&] { writableRawSlot(pointer)->setValue(fromJava(env, value)); });
 }
 JNIEXPORT void JNICALL Java_azertia_jni_Caller220_ACputMemAddress(JNIEnv* env, jclass, jlong pointer, jlong bits) {
-    boundary(env, [&] { heap::getAt(fromJAddress(pointer))->setValue(fromJAddress(bits)); });
+    boundary(env, [&] { writableRawSlot(pointer)->setValue(fromJAddress(bits)); });
 }
 JNIEXPORT void JNICALL Java_azertia_jni_Caller220_ACputMemNull(JNIEnv* env, jclass, jlong pointer) {
-    boundary(env, [&] { heap::getAt(fromJAddress(pointer))->setValue(nullptr); });
+    boundary(env, [&] { writableRawSlot(pointer)->setValue(nullptr); });
 }
 JNIEXPORT void JNICALL Java_azertia_jni_Caller2220_bindNamespace(JNIEnv* env, jclass, jint ns) {
     boundary(env, [&] { if (ns < 0 || ns > 65535) throw std::invalid_argument("Namespace must be an unsigned 16-bit integer"); registerExecutor(std::make_shared<JavaExecutor>(ns, env)); });

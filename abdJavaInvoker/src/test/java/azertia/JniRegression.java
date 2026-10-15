@@ -61,7 +61,8 @@ public final class JniRegression {
         Address second = (Address) AbdInvoker.invoke(201, 22);
         Address manual = (Address) AbdInvoker.invoke(202, 33);
         equal(true, AbdInvoker.saveStatus(saved));
-        Caller220.ACputMem(first.bits(), 71);
+        rejectsObjectRaw(() -> Caller220.ACputMem(first.bits(), 71));
+        equal(11, AbdInvoker.invoke(204, first));
         Address extra = (Address) AbdInvoker.invoke(201, 44);
         AbdInvoker.invoke(202, 55);
         AbdInvoker.invoke(206, 99);
@@ -104,8 +105,8 @@ public final class JniRegression {
         equal(66, AbdInvoker.invoke(207));
         equal(11, AbdInvoker.invoke(204, Address.of(1)));
         equal(22, AbdInvoker.invoke(204, Address.of(2)));
-        Caller20.memFree(3); // Raw Java release must remove registration without invoking user code.
-        fails(RuntimeException.class, () -> AbdInvoker.invoke(203, Address.of(3)));
+        rejectsObjectRaw(() -> Caller20.memFree(3));
+        equal(33, AbdInvoker.invoke(204, Address.of(3)));
         equal(List.of(), destructed);
         AbdInvoker.loadStatus(new File(work, "objects.valid.snapshot.abd"));
         AbdInvoker.invoke(203, Address.of(3));
@@ -128,21 +129,17 @@ public final class JniRegression {
         AbdInvoker.destroyScript();
         equal(List.of(11, 22), destructed);
 
-        // make_free may detach an automatic object without changing how it was
-        // created: snapshot that state, keep rejecting delete, and use raw free.
+        // Raw ownership operations cannot detach a registered object. The
+        // rejected operation still runs the object's normal error cleanup.
         destructed.clear();
         loadAndFlush(script);
-        Address detached = (Address) AbdInvoker.invoke(208, 77);
-        File detachedSnapshot = new File(work, "objects.detached.snapshot.abd");
-        equal(true, AbdInvoker.saveStatus(detachedSnapshot));
-        Caller20.memFree(detached.bits());
-        AbdInvoker.loadStatus(detachedSnapshot);
-        equal(77, AbdInvoker.invoke(204, detached));
-        fails(RuntimeException.class, () -> AbdInvoker.invoke(203, detached));
-        equal(List.of(), destructed);
-        Caller20.memFree(detached.bits());
+        fails(IllegalStateException.class, () -> AbdInvoker.invoke(208, 77));
+        equal(List.of(77), destructed);
+        equal(true, Caller22220.globalMemories2Str().endsWith("Allocations: 0\n"));
+        equal(true, AbdInvoker.saveStatus(new File(work, "objects.guarded.snapshot.abd")));
         AbdInvoker.destroyScript();
-        equal(List.of(), destructed);
+        equal(List.of(77), destructed);
+        destructed.clear();
 
         UnsupportedOperationException destructorFailure = new UnsupportedOperationException("second object's destructor");
         IllegalArgumentException laterFailure = new IllegalArgumentException("first object's destructor");
@@ -177,6 +174,9 @@ public final class JniRegression {
         AbdInvoker.registerJfunction(0x34560004, values -> { destructed.add((Integer) values[0]); return null; });
         File saved = new File(work, "numeric.saved.snapshot.abd");
         loadAndFlush(new File(work, "numeric.exec.abd"));
+        // Construct through a host entry so ro transfers the automatic object
+        // directly to the base scope; raw mem_send_up is intentionally closed.
+        AbdInvoker.invoke(226, AbdInvoker.invoke(201, 11));
         equal(7, AbdInvoker.invoke(207));
         equal("numeric\0中文🐈", AbdInvoker.invoke(220));
         equal(true, AbdInvoker.invoke(222));
@@ -190,7 +190,8 @@ public final class JniRegression {
         AbdInvoker.invoke(206, 99);
         AbdInvoker.invoke(221, "changed");
         AbdInvoker.invoke(223, false);
-        Caller220.ACputMem(automatic.bits(), 77);
+        rejectsObjectRaw(() -> Caller220.ACputMem(automatic.bits(), 77));
+        equal(11, AbdInvoker.invoke(204, automatic));
         AbdInvoker.invoke(201, 44);
         AbdInvoker.loadStatus(saved);
         equal(List.of(), destructed);
@@ -224,12 +225,84 @@ public final class JniRegression {
 
         destructed.clear();
         loadAndFlush(new File(work, "numeric.other.exec.abd"));
+        AbdInvoker.invoke(226, AbdInvoker.invoke(201, 11));
         fails(IllegalArgumentException.class, () -> AbdInvoker.loadStatus(saved));
         equal(7, AbdInvoker.invoke(207));
         equal("numeric\0中文🐈", AbdInvoker.invoke(220));
         AbdInvoker.destroyScript();
         equal(List.of(11), destructed);
         AbdInvoker.unregisterJfunction(0x34560004);
+    }
+    private static void rejectsObjectRaw(Runnable operation) {
+        checks++;
+        try { operation.run(); }
+        catch (IllegalArgumentException error) {
+            equal("Java raw memory access cannot access object storage; use typed member access", error.getMessage());
+            return;
+        }
+        throw new AssertionError("Java raw memory access accepted object storage");
+    }
+    private static void objectRawWrites(Address pointer) {
+        for (int offset = 0; offset < 2; offset++) {
+            final long slot = pointer.bits() + offset;
+            rejectsObjectRaw(() -> Caller220.ACputMem(slot, 99));
+            rejectsObjectRaw(() -> Caller220.ACputMem(slot, 1.5f));
+            rejectsObjectRaw(() -> Caller220.ACputMem(slot, 2.5));
+            rejectsObjectRaw(() -> Caller220.ACputMem(slot, true));
+            rejectsObjectRaw(() -> Caller220.ACputMem(slot, "overwrite"));
+            rejectsObjectRaw(() -> Caller220.ACputMemAddress(slot, 17));
+            rejectsObjectRaw(() -> Caller220.ACputMemNull(slot));
+            // Exact text distinguishes the object guard from the ordinary
+            // "not an allocation start" rejection at the interior address.
+            rejectsObjectRaw(() -> Caller20.memFree(slot));
+        }
+        equal(11, AbdInvoker.invoke(403, pointer));
+        equal(22, AbdInvoker.invoke(404, pointer));
+    }
+    private static void objectStorageGuards(File work) {
+        List<Address> construction = new ArrayList<>();
+        AbdInvoker.registerJfunction(0x34560011, values -> {
+            Address pointer = (Address) values[0];
+            construction.add(pointer);
+            // The callback runs before ob registers a destructor, and also
+            // runs once with a literal object's tagged block address.
+            objectRawWrites(pointer);
+            return null;
+        });
+        loadAndFlush(new File(work, "object-guards.exec.abd"));
+        long raw = Caller20.memAlloc(2);
+        Caller220.ACputMem(raw, 71);
+        Caller220.ACputMem(raw + 1, 72);
+        fails(RuntimeException.class, () -> AbdInvoker.invoke(403, Address.of(raw)));
+        Address automatic = (Address) AbdInvoker.invoke(401);
+        Address manual = (Address) AbdInvoker.invoke(402);
+        AbdInvoker.invoke(410);
+        equal(3, construction.size());
+        objectRawWrites(automatic);
+        objectRawWrites(manual);
+        File saved = new File(work, "object-guards.snapshot.abd");
+        equal(true, AbdInvoker.saveStatus(saved));
+        Caller220.ACputMem(raw, 99);
+        AbdInvoker.loadStatus(saved);
+        equal(3, construction.size()); // Restore never calls constructors.
+        equal(71, Caller.getMemInt(raw));
+        equal(72, Caller.getMemInt(raw + 1));
+        // Registered heap objects are re-tagged from existing v9 records.
+        objectRawWrites(automatic);
+        objectRawWrites(manual);
+        Caller220.ACputMem(raw, 73);
+        equal(73, Caller.getMemInt(raw));
+        AbdInvoker.invoke(405, manual);
+        long reused = Caller20.memAlloc(2);
+        equal(manual.bits(), reused);
+        Caller220.ACputMem(reused, 81);
+        Caller220.ACputMem(reused + 1, 82);
+        equal(81, Caller.getMemInt(reused));
+        equal(82, Caller.getMemInt(reused + 1));
+        Caller20.memFree(reused); // Deletion clears the old object-range tag.
+        Caller20.memFree(raw);
+        AbdInvoker.destroyScript();
+        AbdInvoker.unregisterJfunction(0x34560011);
     }
     private static void runtimeTraces(File work) {
         loadAndFlush(new File(work, "traces.exec.abd"));
@@ -464,6 +537,7 @@ public final class JniRegression {
             objectSnapshots(work);
             numericSnapshots(work);
             runtimeTraces(work);
+            objectStorageGuards(work);
             checks += JniHintRegression.run(work);
             loadAndFlush(script);
             equal(42, AbdInvoker.invoke(110));

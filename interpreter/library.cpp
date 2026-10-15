@@ -796,6 +796,7 @@ public:
     }
     object_expression(std::shared_ptr<expression> value,std::optional<int> destructor,bool manual)
         :op("ob"),value(std::move(value)),destructor(destructor),manual(manual) {}
+    bool is_member_address() const noexcept {return op=="oa";}
     int* destructor_address(){return destructor?&*destructor:nullptr;}
     V execute(E env) override {
         tick(env);auto pointer=run(value,env);
@@ -805,6 +806,18 @@ public:
         if(op=="ob")heap::register_object(object_pointer,destructor,manual,env,bind_contexts(contexts,env));
         else heap::delete_object(object_pointer,env);
         return nil();
+    }
+};
+// Only the decoder can construct this member access. Raw mem_get still guards
+// object storage, including calls made before a constructor has registered it.
+class member_access_expression final:public expression {
+    std::shared_ptr<expression> pointer;
+public:
+    explicit member_access_expression(std::shared_ptr<expression> pointer):pointer(std::move(pointer)) {}
+    V execute(E env) override {
+        tick(env);const auto result=run(pointer,env);
+        if(result->type!=ADDRESS_VALUE)throw std::runtime_error("Object pointer requires address type");
+        return heap::getAt(*static_cast<address*>(result->value));
     }
 };
 // Literal object storage. The compiler emits these only for its own lowering:
@@ -1140,8 +1153,14 @@ X parse_raw_expression(raw_view view,const raw_function_layout& layout,std::size
         auto node=std::make_shared<functionInvocationExpression>();node->function_id=fields.integer();
         node->params=parse_raw_expressions(fields.take(),layout,logical_depth+2);
         node->contexts=parse_contexts(fields.take(),layout,logical_depth+1);
-        layout.references->push_back({node->function_id,&node->function_id,false,static_cast<int>(node->contexts.size())});
-        result=std::move(node);break;
+        auto member=node->params.size()==1?std::dynamic_pointer_cast<object_expression>(node->params[0]):nullptr;
+        if(node->function_id==0x0abd0006&&node->contexts.empty()&&member&&member->is_member_address())
+            result=std::make_shared<member_access_expression>(std::move(node->params[0]));
+        else {
+            layout.references->push_back({node->function_id,&node->function_id,false,static_cast<int>(node->contexts.size())});
+            result=std::move(node);
+        }
+        break;
     }
     case 3: {
         const int slot=fields.integer();layout.check_slot(slot);
@@ -1160,7 +1179,7 @@ X parse_raw_expression(raw_view view,const raw_function_layout& layout,std::size
     case 6: {
         auto target=child();auto value=child();
         auto call=std::dynamic_pointer_cast<functionInvocationExpression>(target);
-        if(!std::dynamic_pointer_cast<varExpression>(target)&&!(call&&call->function_id==0x0abd0006))
+        if(!std::dynamic_pointer_cast<varExpression>(target)&&!std::dynamic_pointer_cast<member_access_expression>(target)&&!(call&&call->function_id==0x0abd0006))
             throw std::invalid_argument("Assignment target must be a variable or mem_get(pointer)");
         result=raw_binary<movExpression>(std::move(target),std::move(value));break;
     }
@@ -1177,7 +1196,7 @@ X parse_raw_expression(raw_view view,const raw_function_layout& layout,std::size
     }
     case 35: {
         auto target=child();auto call=std::dynamic_pointer_cast<functionInvocationExpression>(target);
-        if(!std::dynamic_pointer_cast<varExpression>(target)&&!(call&&call->function_id==0x0abd0006))
+        if(!std::dynamic_pointer_cast<varExpression>(target)&&!std::dynamic_pointer_cast<member_access_expression>(target)&&!(call&&call->function_id==0x0abd0006))
             throw std::invalid_argument("Object drop target must be a variable or mem_get(pointer)");
         result=std::make_shared<drop_expression>(std::move(target));break;
     }

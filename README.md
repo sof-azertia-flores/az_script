@@ -211,7 +211,7 @@ try {
 - 条件（包括 `?:`）及 `!`/`&&`/`||` 必须使用布尔值，动态值也在运行时检查。相等比较允许混合数值类型、同类型布尔/字符串、address/null 和兼容类指针；不兼容配对报错，不再直接判为不等。详见[相等规则](compiler/LANGUAGE.md#表达式与流程)。
 - 整数是有符号 32 位；整数除法向零截断，算术溢出和除零报错。数值提升按 `double > float > int`；布尔值不隐式参与数值运算。
 - 仅适用于 int 的 `& | ^ ~ << >> >>>` 操作 32 位位模式：左移回绕，`>>` 扩展符号，`>>>` 补零；数量必须为 0…31，简单变量支持复合形式。位测试应写为 `(flags & mask) != 0`。详见[位运算](compiler/LANGUAGE.md#位运算与移位)。
-- 显式 `int/float/double/string/address(x)` 按受检查的配对表执行数值转换、严格十进制字符串解析、数值/address 转字符串及 address 恒等；不支持 int/address 互转、布尔/类转换或 C 风格强转。int 先截断再检查范围，浮点转换允许下溢但拒绝溢出。详见[显式转换](compiler/LANGUAGE.md#显式转换)。
+- 显式 `int/float/double/string/address(x)` 按受检查的配对表执行数值转换、严格十进制字符串解析、数值/address 转字符串及 address 恒等；类指针及指针上界 T 可用 `address(p)` 显式擦除，不改变所有权；其他类转换、int/address 互转、布尔转换及 C 风格强转仍不支持。int 先截断再检查范围，浮点转换允许下溢但拒绝溢出。详见[显式转换](compiler/LANGUAGE.md#显式转换)。
 - `条件 ? a : b` 在外围作用域中只计算一个分支，结果取共同类型并进行数值提升。它在赋值和 `||` 之间右结合；两个分支都须通过类型检查。详见[条件表达式](compiler/LANGUAGE.md#条件表达式)。
 - `switch` 对 int/string 值求值一次，匹配字面量标签，不允许贯穿。连续标签共享分段，default 可在任意位置，每个分段有独立作用域。详见 [switch](compiler/LANGUAGE.md#switch)。
 - 字符串是不可变 UTF-8 值。`s.length()`、`s[i]`、半开区间 `substring(begin, end)` 和搜索按 Unicode 码点计算，`byte_length()` 统计字节。NUL 合法，非法 UTF-8 被拒绝，越界映射为 Java IndexOutOfBoundsException。
@@ -223,7 +223,8 @@ try {
 - `return`、`if`、`else`、`while`、`for`、`switch`、`case`、`default`、`break`、`continue`、`def`、`var`、`class`、`new`、`this`、`null`、`delete`、`extern`、`public/private/protected/virtual`、`any`、类型名和 `true/false` 是保留字，不能作为类、字段、方法、函数、参数、变量、全局变量或宏的名字；标识符不能含控制字符或格式字符（如 U+200B、U+202E）。源码与 `compile-json` 共用这些命名规则。非 void 函数的正常退出路径都必须 `return`；条件恒真的 while/for 且体内没有属于它的 `break` 时，视为不会正常结束。
 - 数值转字符串（`print` 和 `+` 拼接）使用最短可往返表示：`0.1+0.2` 得到 `0.30000000000000004`，`123456789.0` 得到 `123456789`，`1e20` 得到 `1e+20`，负零保留为 `-0`。
 - `address` 与 int32 不隐式转换，`alloc(int)` 返回 address，内存接口接收 address。支持 `address + int`、`int + address`、`address - int`，以及地址间的无符号相等和大小比较；超出 uint64 范围报错。类指针不参与原始地址算术。堆地址仍是进程内逻辑下标，64 位表示不扩大当前堆上限；越界和已经释放的地址会拒绝，地址复用后无法识别旧引用，仍须避免悬空引用。
-- 由作用域自动回收的分配只能从拥有它的作用域链（词法父级和调用者）释放：`mem_free` 从其他活动作用域（例如宿主回调重入的脚本函数）释放它会报错，Java `memFree` 只允许无自动回收所有者或已提升到全局的块。`make_free` 之后的分配不再受此限制。
+- 原始分配与对象存储分离：脚本原始内存接口及 JNI 原始写入/释放拒绝对象起点、内部地址和字面量/视图地址。类指针须保留明确类型；`address(p)` 只擦除类型，不开放原始字段访问。对象使用带类型成员及 delete。受信任宿主指针、旧别名、重复 delete 和自动对象逃逸见[对象存储与已知限制](compiler/LANGUAGE.md#对象存储与已知限制)。
+- 由作用域自动回收的原始分配只能从拥有它的作用域链（词法父级和调用者）释放：`mem_free` 从其他活动作用域（例如宿主回调重入的脚本函数）释放它会报错，Java `memFree` 只允许无自动回收所有者或已提升到全局的块。`make_free` 之后的分配不再受此限制。
 - 命名空间 `0`、`0xfff` 和 `0xabd` 是保留空间：`0` 存放生命周期钩子和 hint 库占位，`0xabd` 存放运行时内置函数，`#namespace` 在编译期拒绝这两个值，`compile-json` 拒绝普通模块使用它们作为 namespace（hint 库保留其 0000 占位）；`0xfff` 是普通程序的默认 namespace，可以显式写出。宿主注册不能占用这三个 namespace 及活动脚本 namespace。hint 库自动分配可用位置，函数 ID 按完整32位位模式处理。
 - 当前堆和外部函数注册表仍是进程共享资源。Java 提供一个活动脚本并串行执行调用；支持同线程回调重入。回调不应等待另一个会再次调用同一运行时的线程。C++ 使用多个脚本时也须管理共享堆和注册表，不能视作独立安全沙箱。
 - 不实现集合字面量、闭包或完整静态类型系统。类型注解的具体作用和诊断格式见语法文档。

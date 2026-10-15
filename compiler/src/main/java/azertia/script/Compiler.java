@@ -60,7 +60,7 @@ public class Compiler {
             "contains", "str_index_of", "starts_with", "str_starts_with", "ends_with", "str_ends_with");
     private static final Set<String> BUILTIN_NAMES = builtinNames();
     private static Set<String> builtinNames() {
-        Set<String> names = new HashSet<>(Set.of("value_compare", "buffer"));
+        Set<String> names = new HashSet<>(Set.of("value_compare", "buffer", "object_alloc"));
         names.addAll(SourceRules.CONVERSIONS);
         for (BuiltinSpec spec : BUILTINS) names.add(spec.name());
         return Set.copyOf(names);
@@ -451,7 +451,7 @@ public class Compiler {
                     ? AsTypes.INT_VALUE : AsTypes.ANY_VALUE;
             case "if" -> branchType(params, environment);
             case "select" -> selectType(params, environment);
-            case "vardef", "return", "break", "continue", "while", "for", "switch", "#switch-loop", "increment", "decrement", "object-def", "object-delete", "#bind", "#make-free", "#drop" -> AsTypes.VOID_VALUE;
+            case "vardef", "return", "break", "continue", "while", "for", "switch", "#switch-loop", "increment", "decrement", "object-def", "object-delete", "#bind", "#drop" -> AsTypes.VOID_VALUE;
             default -> AsTypes.ANY_VALUE;
         };
     }
@@ -540,6 +540,7 @@ public class Compiler {
         if (source.has("type-args")) throw new IllegalArgumentException(name + " conversion does not take type arguments");
         JsonElement value = params.get(0);
         int target = conversionTarget(name), actual = expressionType(value, environment);
+        if (target == AsTypes.ADDRESS_VALUE && isClassPointer(actual)) return compileExpression(value, environment);
         boolean supported = actual == AsTypes.ANY_VALUE || actual == target
                 || numeric(target) && (numeric(actual) || actual == AsTypes.STRING_VALUE)
                 || target == AsTypes.STRING_VALUE && (numeric(actual) || actual == AsTypes.ADDRESS_VALUE);
@@ -912,6 +913,7 @@ public class Compiler {
                 if(signature!=null) {
                     int expected=signature.paramTypes().get(i);
                     if(expected==AsTypes.ANY_VALUE) {
+                        if(!binding.name().equals("print")) rejectUntypedPointer(label+" argument "+(i+1-hidden),actual);
                         if(isOwnedValue(actual)||isTypeParameter(actual))throw new IllegalArgumentException(label+" argument cannot take an object or type parameter without a declared type");
                     }else if(actual!=AsTypes.ANY_VALUE||signature.requireKnown())requireKnownExact(label+" argument "+(i+1-hidden),expected,actual);
                     if(isFlexibleClass(expected)&&isValueClass(typeBound(actual)))argument=internal(environment,"#address-of",argument);
@@ -1124,7 +1126,7 @@ public class Compiler {
                 requireTrusted(source, environment); arity(call, params, 1, 1);
                 ClassInfo info = classInfo(string(params.get(0), "Class name"), environment);
                 // Compiler-generated allocation must bypass the class's user method names.
-                result.put("t", 1); result.put("id", 0x0abd0003);
+                result.put("t", 1); result.put("id", 0x0abd0014);
                 AcsArray args = new AcsArray();
                 args.acsa.add(withDepth(1, () -> compileExpression(new JsonPrimitive(info.fields.size()), environment)));
                 result.put("param", args);
@@ -1139,12 +1141,6 @@ public class Compiler {
                     result.put("contexts",contexts(actual.arguments,environment));
                 }
                 result.put("manual", params.get(2).getAsBoolean());
-            }
-            case "#make-free" -> {
-                requireTrusted(source, environment); arity(call, params, 1, 1);
-                result.put("t", 1); result.put("id", 0x0abd0004);
-                JsonElement pointer = params.get(0);
-                AcsArray args = new AcsArray(); args.acsa.add(withDepth(1, () -> compileExpression(pointer, environment))); result.put("param", args);
             }
             case "#new-block" -> {
                 requireTrusted(source, environment); arity(call, params, 1, 1);
@@ -1886,6 +1882,7 @@ public class Compiler {
     private static boolean isValueClass(int type) { return isClass(type) && classKind(type) == 0; }
     private static boolean isPointerClass(int type) { return isClass(type) && classKind(type) == 1; }
     private static boolean isFlexibleClass(int type) { return isClass(type) && classKind(type) == 2; }
+    private static boolean isClassPointer(int type) { return isPointerClass(typeBound(type)) || isFlexibleClass(typeBound(type)); }
     private static int pointerTypeOf(int valueType) { return valueType + 1; }
     /** The pointer type of the same class for any class type code. */
     private static int pointerOf(int classType) { return classType - classKind(classType) + 1; }
@@ -1894,8 +1891,15 @@ public class Compiler {
         return isTypeParameter(type) ? abiType(typeBound(type)) : isOwnedValue(type) ? AsTypes.OBJECT_VALUE : isClass(type) ? AsTypes.ADDRESS_VALUE : type;
     }
     private static void rejectUntypedObject(String context, JsonElement value, LogicEnvironment environment) {
-        if (isOwnedValue(expressionType(value, environment)) || isTypeParameter(expressionType(value, environment)))
+        int type = expressionType(value, environment);
+        rejectUntypedPointer(context,type);
+        if (isOwnedValue(type) || isTypeParameter(type))
             throw new IllegalArgumentException(context + " cannot hold an object value; declare it with the class type or use a pointer");
+    }
+    private static void rejectUntypedPointer(String context, int type) {
+        if (isClassPointer(type))
+            throw new IllegalArgumentException(context + " cannot hold a class pointer (" + typeName(type)
+                    + "); declare it as " + typeName(type) + " or convert explicitly with address(p)");
     }
     /** Member access through a literal object uses the address of its storage. */
     private static JsonElement receiverAddress(JsonElement receiver, LogicEnvironment environment) {
@@ -2336,7 +2340,6 @@ public class Compiler {
                 body.add(callNode(info.constructor, ctorArgs));
                 JsonElement self = literal ? internal(global, "#address-of", variable(storage)) : variable(storage);
                 body.add(internal(global, "#bind", self, info.cleanupDestructor == null ? JsonNull.INSTANCE : new JsonPrimitive(info.cleanupDestructor), new JsonPrimitive(manual)));
-                if (manual) body.add(internal(global, "#make-free", variable(storage)));
                 body.add(node("return", variable(storage)));
                 int returns = literal ? info.valueType : info.pointerType;
                 functions.add(new Function(id, name, returns, types, metadata, body));

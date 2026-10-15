@@ -546,6 +546,9 @@ int main() {
     if (str_code_at(text, 2) != 128512 || str_from_code(128512) != "😀") return -42;
     if (str_index_of(text, "😀") != 2 || str_index_of(text, "", 5) != 5) return -43;
     if (!str_starts_with(text, "A中") || !str_ends_with(text, "Z")) return -44;
+    Item* closed = new Item(); closed.value = 9;
+    if (closed.value != 9 || address(closed) != address(closed)) return -45;
+    delete closed;
     return invoke<int>(305397826, values[0]) + value_compare<string>("b", "a");
 }
 ''', encoding="utf-8")
@@ -577,6 +580,8 @@ int main() {
 
         _require(set(range(0x0abd000b, 0x0abd0014)) <= set(builtin_calls(modern_view["f"])),
                  "String probe must exercise all nine Unicode string builtins")
+        _require(0x0abd0014 in set(builtin_calls(modern_view["f"])),
+                 "Heap object construction must use the tagged internal object allocator")
         modern_roundtrip = modern_abd.with_name("features.roundtrip.abd")
         _run([compiler, "compile-json", modern_ast, "-o", modern_roundtrip], cwd, compiler_environment)
         _require(modern_abd.read_bytes() == modern_roundtrip.read_bytes(),

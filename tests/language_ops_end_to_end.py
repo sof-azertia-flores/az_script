@@ -224,7 +224,7 @@ def main():
             compile_case('conversion-static-' + label, 'void main(){' + body + '}', error='Cannot convert')
         compile_case('conversion-static-void', 'void empty(){}void main(){int(empty());}', error='Cannot convert')
         compile_case('conversion-static-class', 'class P{int n;}void main(){P p;int(p);}', error='Cannot convert')
-        compile_case('conversion-static-pointer', 'class P{int n;}void main(){P* p();address(p);}', error='Cannot convert')
+        execute('conversion-pointer-erasure', 'class P{int n;}void main(){P* p();print(address(p)==address(p));}', 'true\n')
         compile_case('conversion-static-generic', '<T> int asInt(T value){return int(value);}void main(){}', error='Cannot convert')
         for label, expression in [('c-style-int', '(int)3.5'), ('c-style-double', '(double)7')]:
             compile_case('conversion-' + label, 'void main(){print(' + expression + ');}', error='C-style casts are not supported')

@@ -132,9 +132,9 @@ Node * head = new Node(total + 1);
 
 顶层的 `T name;` 或 `T name = expression;` 声明带类型的全局变量。T 可以是标量类型、`address` 或类指针（如 `Node *`、`Box<int> *`）。带类型全局在每次使用时都像带类型的局部变量一样检查，因此 `head.value` 可以使用，`head = 3` 编译失败。类的值和 buffer 不能作为全局（`Global g cannot hold a class value or buffer; declare a pointer`），`void`、`extern` 以及带类型参数的声明也不行。`Node * g(1);` 报告 `Global objects cannot be automatic; use = new Node(...)`；返回指针的函数（如 `Node * make(int v) { ... }`）照常解析。带类型全局不能与函数、内置函数、类或其他全局同名，也不能使用生命周期钩子的名称（`__script_onload`、`__script_pre_destroy`）。
 
-带类型全局在模块 flush 时于 onload（函数 0，即 `__script_onload`；模块没有时由编译器添加）中初始化：先把每个带类型全局设为其类型的默认值（`0`、`0.0f`、`0.0`、`false`、`""`，address 和指针为 `null`），再按声明顺序执行显式初始化表达式，最后执行 onload 正文。初始化表达式可以调用函数、读取任何全局；在它之后声明的全局仍是默认值。初始化表达式的错误会指明所属全局，如 `in global total: Initializer for global total expected int, got string`。初始化表达式在 onload 内执行，归这次调用所有的存储不会比它活得更久：`alloc()` 得到的块或返回给初始化表达式的自动对象在 onload 返回时释放，全局随之悬空；需要由全局保存的存储请用 `new`、`make_free` 或 `mem_send_up`。模块的带类型全局在其自身 onload 开始前为 void；其他模块可以通过循环依赖观察到这一点，也可以在更早初始化的模块动态调用本模块时观察到（例如在其 onload 中使用 `reflect_invoke_function`）。此时读取它，在运行时检查类型之处（例如由函数返回）会报错，但 `print`、字符串拼接以及复制到无类型变量会静默接受 void（打印为 `null`）。
+带类型全局在模块 flush 时于 onload（函数 0，即 `__script_onload`；模块没有时由编译器添加）中初始化：先把每个带类型全局设为其类型的默认值（`0`、`0.0f`、`0.0`、`false`、`""`，address 和指针为 `null`），再按声明顺序执行显式初始化表达式，最后执行 onload 正文。初始化表达式可以调用函数、读取任何全局；在它之后声明的全局仍是默认值。初始化表达式的错误会指明所属全局，如 `in global total: Initializer for global total expected int, got string`。初始化表达式在 onload 内执行，归这次调用所有的存储不会比它活得更久：`alloc()` 得到的块或返回给初始化表达式的自动对象在 onload 返回时释放，全局随之悬空；需要比 onload 活得更久的对象请用 `new`；`make_free` 和 `mem_send_up` 只可保留原始分配，不能处理对象存储。模块的带类型全局在其自身 onload 开始前为 void；其他模块可以通过循环依赖观察到这一点，也可以在更早初始化的模块动态调用本模块时观察到（例如在其 onload 中使用 `reflect_invoke_function`）。此时读取它，在运行时检查类型之处（例如由函数返回）会报错，但 `print`、字符串拼接以及复制到无类型变量会静默接受 void（打印为 `null`）。
 
-`#gvar name` 仍是无类型写法：这类全局是动态的 `any`：不能保存类的值或 buffer，不能访问成员，在赋值前为 void，通常在 onload 中赋值。AST 先列出 `#gvar` 名称（compile-json 拒绝出现在带类型条目之后的名称），它们占用最前面的全局槽，带类型全局按声明顺序随后。
+`#gvar name` 仍是无类型写法：这类全局是动态的 `any`：不能保存类指针、类值、buffer 或类型参数值，不能访问成员，在赋值前为 void，通常在 onload 中赋值。AST 先列出 `#gvar` 名称（compile-json 拒绝出现在带类型条目之后的名称），它们占用最前面的全局槽，带类型全局按声明顺序随后。
 
 ## 类、字面量对象与指针
 
@@ -177,7 +177,7 @@ void main() {
 
 字面量对象按值使用：初始化、赋值、传参和返回都会复制全部 slots，字段中的字面量对象递归复制，指针字段只复制地址。每个副本都是独立对象，到期时各自运行析构。赋值 `a = b` 原地逐字段复制，`a` 的地址不变。指针 `C * y = x;`、指针赋值和传参只复制地址，对象变量重赋值不改变先前创建对象的清理责任。单写 `C * p;` 与 `C * p = null;` 完全相同，声明一个空指针，不构造对象，也不负责清理之后赋给它的对象。
 
-值类型 `C` 与指针类型 `C *` 是不同的类型，不做隐式转换；`null` 只能赋给指针或 address。字面量对象不能直接比较，算术需声明运算符，也不能放进无类型位置：`var`、`def`、`#gvar` 全局、无类型参数、`print` 以及 `mem_get(p) = …` 都会编译失败；需要长期保存的对象请使用指针。类按名称区分：字面量对象只能赋给同一个类，字段布局相同的其他类也不行；派生类的值不能赋给父类的值（不做切片），上转型只用于指针。两种对象都用 `.` 访问成员。只有带显式类类型的变量、参数、字段及返回值能访问成员：`var p = new C(); p.method();` 会因 `p` 是动态 `any` 而失败，需写 `C * p = new C();`。
+值类型 `C` 与指针类型 `C *` 是不同的类型，不做隐式转换；`null` 只能赋给指针或 address。字面量对象不能直接比较，算术需声明运算符，也不能放进无类型位置：`var`、`def`、`#gvar` 全局、无类型参数、`print` 以及 `mem_get(p) = …` 都会编译失败；需要长期保存的对象请使用指针。类按名称区分：字面量对象只能赋给同一个类，字段布局相同的其他类也不行；派生类的值不能赋给父类的值（不做切片），上转型只用于指针。两种对象都用 `.` 访问成员。只有带显式类类型的变量、参数、字段及返回值能访问成员：`var p = new C();` 声明本身就会被拒绝，需写 `C * p = new C();`。类指针（包括 `C (*)` 借用）不能进入 `var`、`def`、`#gvar`、无类型参数或原始 `mem_get` 存储；诊断例如 `cannot hold a class pointer (P *); declare it as P * or convert explicitly with address(p)`。仍允许把类指针传给 `print` 或反射可变参数，但 print 原有的类值、buffer 和类型参数值限制不变；反射可变参数继续按原规则接受非 void 值。
 
 参数可以写成 `C (*) p`（`C(*) p` 亦可），表示这个函数同时接受 `C *` 指针和 `C` 字面量对象：
 
@@ -215,11 +215,11 @@ bump(a);                        // a.x 变为 101：字面量对象按地址借�
 
 字面量对象不跨越 JNI 边界：Java 调用返回字面量对象的函数会报错（该值先被销毁），也不能把它作为参数传入或从 Java 读取；请改用指针。C++ 宿主调用得到的字面量对象由宿主持有，不再运行析构，最后一个句柄释放时其地址报废。C++ 宿主还可以用 `blocks::create`、`blocks::resize`、`blocks::length` 和 `blocks::address_of` 直接使用 slot 块：延伸后已有地址仍然有效，缩短后超出长度的地址报错。
 
-`alloc/mem_free/make_free/mem_send_up` 仍是底层内存接口，指针参数及分配结果均为 address，分配数量仍为 int。原始释放会注销对象登记，但不调用用户析构；对象语法应使用 `delete`。这些函数不管理字面量对象的存储：`mem_free` 对它返回 `false`，`make_free`、`mem_send_up` 报错。构造、析构和成员方法均是普通脚本函数，第一个隐式参数为 `C *`（运行时是 address），类类型只供编译器使用。类是名义类型：赋值、传参、返回、相等比较和声明签名都按类本身判断，两个字段布局相同的类仍是不同的类型，唯一的隐式转换是子类指针转为父类指针。运行时不保存或检查类结构。跨模块使用共享类声明及 extern 成员，示例见 [多文件类库](../docs/HINT_LINKING.md)。可执行示例 [`examples/classes-regressions.azs`](examples/classes-regressions.azs) 成功返回 `0`。
+`alloc/mem_get/mem_free/make_free/mem_send_up` 只操作原始分配存储。不能通过这些接口读取、写入、释放对象存储或改变其所有权来绕过生命周期规则：`mem_get`、`mem_free`、`make_free`、`mem_send_up` 拒绝对象起点、内部地址及字面量/视图地址，构造期间也不例外。对象应使用带类型的成员访问和 `delete`。构造、析构及方法仍是普通函数，首个隐式参数为 C *（运行时是 address）。编译期按类的名义类型检查；运行时成员访问检查对象存储与边界，不检查类身份。跨模块使用共享类声明及 extern 成员，见[多文件类库](../docs/HINT_LINKING.md)。[类回归示例](examples/classes-regressions.azs) 返回 0。
 
 ## 地址与底层内存
 
-`address` 是独立的无符号 64 位类型，范围为 0 到 `18446744073709551615`。它可用于局部变量、字段、参数和返回类型，空地址为 `null`。显式 address 局部变量须初始化；address 字段默认是 null。`int` 仍是有符号 32 位，普通整数字面量、分配数量、字段偏移、变量槽编号和函数 ID 不会因此变成地址。地址与整数、浮点及布尔值之间没有隐式转换，整数 `0` 不能代替 null。显式转换同样拒绝 address 与数值互转：`address(a)` 只保留已有的 address，`string(a)` 将它格式化为无符号十进制；不能借此转换类指针或 null 表达式，详见[显式转换](#显式转换)。
+`address` 是独立的无符号 64 位类型，范围为 0 到 `18446744073709551615`。它可用于局部变量、字段、参数和返回类型，空地址为 `null`。显式 address 局部变量须初始化；address 字段默认是 null。`int` 仍是有符号 32 位，普通整数字面量、分配数量、字段偏移、变量槽编号和函数 ID 不会因此变成地址。地址与整数、浮点及布尔值之间没有隐式转换，整数 `0` 不能代替 null。显式转换同样拒绝 address 与数值互转：`address(a)` 保留已有 address，`string(a)` 将它格式化为无符号十进制；`address(p)` 也可显式擦除类指针、`C (*)` 借用或具有类指针上界的类型参数，不改变地址位模式或所有权。不能转换裸 null 表达式，详见[显式转换](#显式转换)。
 
 ```cpp
 void main() {
@@ -236,9 +236,17 @@ void main() {
 
 运算只计算地址值，实际读写还会验证当前分配的活跃范围；64 位地址不扩大当前 1,048,576 slots 的堆上限，也不会自动建立或延长对象生命周期。原始分配、提升所有权和手动释放仍按既有规则执行。`mem_get`、`mem_free`、`make_free`、`mem_send_up` 只接收 address，传入 int 会被拒绝。普通 address 返回沿用 `r`，不隐式提升自动分配的所有权；底层跨层传递继续使用 `mem_send_up`。
 
-类指针在编译期仍有自己的类类型，不可与原始 address 直接互相赋值，也不能用原始 address 访问成员或执行 delete。只有生成执行文件时，类指针和隐式 this 才统一擦除为运行时 address，字面量对象则以运行时对象值传递；对象返回仍通过 `ro` 转移实际拥有的对象。每个 address 字段只占一个 slot，继承的字段前缀布局不变。
+类指针在编译期仍有自己的类类型，不可与原始 address 直接互相赋值，也不能用原始 address 访问成员或执行 delete。需要原始地址数据时可显式用 `address(p)` 擦除指针，字面量仍是 object 值。这是单向擦除，不能把 address/any 强转回类指针，也不会开放通过原始内存接口访问对象槽。对象返回仍通过 `ro` 转移实际拥有的对象。每个 address 字段只占一个 slot，继承的字段前缀布局不变。
 
 完整示例见 [`examples/address-regressions.azs`](examples/address-regressions.azs)，展示按地址遍历 slots、存储地址值及显式移交原始分配，成功返回 `0`。
+
+### 对象存储与已知限制
+
+`address(p)` 可以作为原始地址数据保存，但不会开放其背后的对象。`mem_get(address(p))`（包括通过它赋值）报告 `mem_get cannot access object storage; use typed member access`；`mem_free`、`make_free`、`mem_send_up` 使用相同格式及各自函数名。类分配在构造代码执行前就已标记，因此构造期间擦除 `this` 也无法绕过检查。带类型的成员访问要求对象存储；普通 `alloc()` 区间会报告 `Object member access requires object storage`。
+
+extern 返回的类指针及 C++/Java 宿主传入的类指针仍是受信任的声明。边界检查 address 标签，成员访问要求活动对象存储并检查偏移，但不会证明名义类身份或验证全部字段。宿主应通过类型匹配的脚本包装函数取得指针，不应通过原始内存接口拼装类对象。JNI 原始写入及 `memFree` 同样拒绝对象存储。
+
+这些检查不构成完整的堆内存安全。堆地址不记录它属于哪一次分配：地址被另一个对象复用后，旧别名可能指向新对象，因此不能普遍防止 delete 后使用或重复 delete。删除不会清空别名。自动对象仍可能通过保留的别名或字段逃逸，应限制在其拥有者的生命周期内；正常的直接返回所有权转移不意味着所有逃逸都安全。这些检查不能用作沙箱或指针生命周期证明。
 
 ## 单继承
 
@@ -423,8 +431,9 @@ int safe = ready ? 7 : 10 / divisor; // 7，未选中的除法不运行
 | `int`、`float` 或 `double` | 向零截断，再检查 int32 范围 | 舍入为 float 并检查溢出 | 转为 double | 现有的最短可往返数值文本 | 拒绝 |
 | `string` | 解析十进制整数 | 按 float 解析十进制数 | 按 double 解析十进制数 | 恒等 | 拒绝 |
 | `address` | 拒绝 | 拒绝 | 拒绝 | 无符号十进制文本 | 恒等 |
+| 类指针、`C (*)` 借用或指针上界 `T` | 拒绝 | 拒绝 | 拒绝 | 拒绝 | 显式擦除，不改变所有权 |
 
-已知为 boolean、void、类值、类指针、buffer、null 或类型参数的源表达式被拒绝；也没有 boolean、void、类、buffer 或类型参数作为目标的转换。特别是 `int(addressValue)`、`address(7)`、`address("7")` 和 `address(classPointer)` 均不支持；`address(x)` 当前只接受已有的 address 值。`bool(x)` / `boolean(x)` 报告 `Boolean conversions are not supported; write a comparison`；C 风格的 `(int)x` 报告 `C-style casts are not supported; write int(x)`。
+已知的 boolean、void、类值、buffer、null，以及没有类指针上界的类型参数来源被拒绝。类指针及指针上界类型参数只允许上表中的显式 address 擦除，不生成 opcode 49；值上界和无界 T 仍被拒绝。没有 boolean、void、类、buffer 或类型参数转换目标。`int(addressValue)`、`address(7)`、`address("7")` 仍不支持。`bool(x)` / `boolean(x)` 报告 `Boolean conversions are not supported; write a comparison`；C 风格 `(int)x` 报告 `C-style casts are not supported; write int(x)`。
 
 数值转 int 先向零截断，再检查范围：`int(2147483647.9)` 为 2147483647，`int(-2.9)` 为 -2。浮点转换可能损失精度（`float(16777217)` 为 16777216），允许次正规数和下溢为零，但拒绝溢出或非有限结果。这种下溢规则适用于数值及字符串转换；上文的源码字面量范围检查仍是另一套规则。
 
