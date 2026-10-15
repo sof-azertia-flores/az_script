@@ -1,3 +1,11 @@
+# C20 switch 语句（2026-10-15）
+
+中文 | [English](VALIDATION.en.md)
+
+新增 int/string switch，支持分组字面量标签、任意位置的 default、各节独立作用域，禁止贯穿。标签比较平衡组合，各节通过 SyntheticLoop 扁平降级，不新增 opcode。break 退出 switch，continue 转向最近的真实循环。覆盖重复标签、类型和贯穿错误、返回值分析、警告、严格 AST 验证及 CLI/启动器帮助。
+
+取消 JAVA_TOOL_OPTIONS 后通过所需 V0、V1、V3：257项 Java 测试、5079项原生检查、313项操作符/switch 端到端用例、290项独立格式用例及既有 JNI/模块/生命周期套件。发行导出通过25项搬迁/消费者检查，173个清单文件的大小及 SHA-256 全部匹配。独立审查未发现阻塞问题。exec 保持 v10，快照保持 v9；运行时代码未变，本项不要求单独执行 V2。日志：build/c20/v1.log、build/c20/v3.log。
+
 # C19 三元表达式（2026-10-15）
 
 中文 | [English](VALIDATION.en.md)

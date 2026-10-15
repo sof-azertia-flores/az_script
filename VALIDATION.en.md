@@ -1,3 +1,11 @@
+# C20 Switch Statements (2026-10-15)
+
+[中文](VALIDATION.md) | English
+
+Added int/string switch statements with grouped literal labels, default anywhere, separate section scopes and no fall-through. Balanced label comparisons and sibling branches lower through SyntheticLoop without a new opcode. Break exits the switch; continue relays to the nearest real loop. Duplicate/type/fall-through errors, return analysis, warnings, strict AST validation and CLI/launcher help are covered.
+
+Required V0,V1,V3 passed with JAVA_TOOL_OPTIONS unset:257 Java tests,5079 native checks,313 operator/switch end-to-end cases,290 independent wire cases and all existing JNI/module/lifetime suites. The release export passed25 relocation/consumer checks, and all173 manifest file sizes/SHA-256 digests matched. Independent review found no blocker. Exec stays v10 and snapshots v9; runtime code was unchanged and this step requires no separate V2. Logs: build/c20/v1.log,build/c20/v3.log.
+
 # C19 Conditional Expressions (2026-10-15)
 
 [中文](VALIDATION.md) | English

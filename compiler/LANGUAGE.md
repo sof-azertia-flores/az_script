@@ -323,7 +323,7 @@ if (i == 0) { return 1; } else { return 2; }
 
 原有内存写入语法 `mem_get(pointer) = value`得到支持；指针表达式只计算一次。为避免复杂指针表达式中的副作用重复执行，`mem_get(pointer) += value` 等复合赋值会明确拒绝。可以先把指针存进变量，再写 `mem_get(p) = mem_get(p) + value`。其他函数调用不能作为赋值左侧。
 
-`return` 可以从多层 if/while/for 中立即退出函数。`break` 退出最内层循环，`continue` 跳过最内层循环当前迭代的剩余语句，两者只能写在循环体内，不能跨函数。退出经过的块仍正常清理其中的对象。`while` 的 continue 重新检查条件，`for` 的 continue 先执行步进表达式，再检查条件；break、return 和运行错误都不执行步进。
+`return` 可以从多层 if/while/for/switch 中立即退出函数。`break` 退出最内层循环或 switch；`continue` 跳过最近外围循环当前迭代的剩余语句，即使位于 switch 内也如此。break 要求处于循环或 switch 中，continue 要求外围有循环，两者都不能跨函数。退出经过的块仍正常清理其中的对象。`while` 的 continue 重新检查条件，`for` 的 continue 先执行步进表达式，再检查条件；break、return 和运行错误都不执行步进。
 
 ```c
 int total = 0;
@@ -341,6 +341,33 @@ print(total); // 9
 非 void 函数的每条正常退出路径都必须返回值：if 需要两个分支都返回；while/for 只有条件为字面量 true（for 也可以省略条件）且循环体内没有属于它的 break 时才视为不会正常结束，否则编译器报告 `non-void function can reach the end of its body without returning a value`。语句以分号结束；紧邻块结尾的最后一条语句可以省略分号。函数定义尾部的分号可选。没有数组下标、对象字面量、闭包或异常处理语法；遇到这些语法会拒绝编译。
 
 整数是有符号 32 位，编译期拒绝超范围整数字面量。小数与科学记数法字面量默认生成 double；加 `f`/`F` 后缀生成 float，例如 `1.5f`、`5f`、`2e3f`。两种浮点字面量都会拒绝溢出及下溢为零。数值参与 `print` 或字符串 `+` 拼接时使用最短可往返表示（同 Java/JavaScript 的思路）：`0.1+0.2` 得到 `0.30000000000000004`，`123456789.0` 得到 `123456789`，`1e20` 得到 `1e+20`，float 按 float 精度输出（`0.1f` 得到 `0.1`），负零得到 `-0`。`n / 0` 在除数只能运行时确定时会正常编译；执行时，int、float、double 以及浮点正零或负零都统一抛出 `Division by zero`，不会产生 Infinity 或 NaN。整数算术溢出同样在运行时报告；位移遵循下述位模式规则。
+
+### switch
+
+`switch (值) { ... }` 是语句，不是表达式。它对 int 或 string 值求值一次，再选择匹配的字面量标签。其他类型（包括动态 `any`）被拒绝；应显式转换动态值，例如 `switch (int(value))` 或 `switch (string(value))`。
+
+```c
+string action = "save";
+switch (action) {
+    case "save":
+    case "write":
+        print("saved");
+        break;
+    default:
+        print("unknown");
+        break;
+    case "quit":
+        print("bye"); // 最后一个分段隐式 break
+}
+```
+
+int switch 的 case 标签必须是 int 字面量（包括负整数），string switch 则必须是 string 字面量；表达式、变量、类型不匹配、重复标签及多个 default 均被拒绝。连续标签共享一个分段。`default` 可放在任意位置，只在所有 case 都不匹配时执行。没有匹配的 case 或 default 时，继续执行 switch 后面的语句。首个标签之前不能有语句，switch 之外也不能使用 `case`/`default`。
+
+不允许贯穿执行。每个非末尾分段都必须通过 `break`、`return`、适用的 `continue` 或其他不能正常结束的路径离开；存在到达下一个分段的路径就会报错。最后一个分段允许正常结束，并隐式补上 break。每个分段都有独立的局部变量/对象作用域，连续标签共享该作用域，离开时照常执行清理。
+
+`break` 退出最内层循环或 switch。switch 中的 `continue` 继续最近的外围循环，并执行对应的 for 步进；没有外围循环的 switch 不能使用 `continue`。嵌套 switch 也保持这个目标规则。带 default 且所有分段都返回的 switch 可满足非 void 函数的返回要求；没有 default 时仍有未匹配路径。
+
+选择通过比较完成，不使用跳转表；消耗的执行步数与匹配前检查的标签数量成正比，没有匹配时检查所有标签。不新增运行时 opcode。
 
 ### 位运算与移位
 
@@ -447,7 +474,7 @@ extern int host_add(int, int):0xccf0001;
 - 预处理后的文本（含全部 include 和宏展开）最多 16,777,216 个字符，不计最后一行的换行符，所以不含 include 和宏的最大源文件不会超出此上限；
 - 整个程序最多 4,194,304 个词法记号。
 
-源文件开头的 UTF-8 BOM 会被忽略，不影响首行指令。`return`、`if`、`else`、`while`、`for`、`break`、`continue`、`def`、`var`、`class`、`new`、`this`、`null`、`delete`、`extern`、`public/private/protected/virtual`、`any`、所有类型名以及 `true/false` 是保留字，不能声明为类、字段、方法、类型参数、函数、参数、变量、`#gvar`、`#define` 或 `extern` 的名字，报告为 `'any' is a reserved word and cannot be used as a name`。标识符的字符沿用 Java 标识符规则中基本多文种平面（BMP）的字符（字母、数字、`_`、`$` 等，不能以数字开头），但控制字符和格式字符（如零宽空格 U+200B、双向覆盖 U+202E）不能出现在标识符中，以免两个名字看起来相同，源码中报告为 `Unexpected character: U+202E`；不在文件开头的 U+FEFF 同样如此报告。诊断信息把这类字符打印为转义形式，如 `Invalid field name: x\u202e`。`compile-json` 对手写 AST 中的类、字段、方法、类型参数、函数、参数、局部变量和全局变量名应用同一套规则，例如 `in class P: 'any' is a reserved word and cannot be used as a field name`；以 `#` 开头的局部变量名留给编译器生成的变量。
+源文件开头的 UTF-8 BOM 会被忽略，不影响首行指令。`return`、`if`、`else`、`while`、`for`、`switch`、`case`、`default`、`break`、`continue`、`def`、`var`、`class`、`new`、`this`、`null`、`delete`、`extern`、`public/private/protected/virtual`、`any`、所有类型名以及 `true/false` 是保留字，不能声明为类、字段、方法、类型参数、函数、参数、变量、`#gvar`、`#define` 或 `extern` 的名字，报告为 `'any' is a reserved word and cannot be used as a name`。标识符的字符沿用 Java 标识符规则中基本多文种平面（BMP）的字符（字母、数字、`_`、`$` 等，不能以数字开头），但控制字符和格式字符（如零宽空格 U+200B、双向覆盖 U+202E）不能出现在标识符中，以免两个名字看起来相同，源码中报告为 `Unexpected character: U+202E`；不在文件开头的 U+FEFF 同样如此报告。诊断信息把这类字符打印为转义形式，如 `Invalid field name: x\u202e`。`compile-json` 对手写 AST 中的类、字段、方法、类型参数、函数、参数、局部变量和全局变量名应用同一套规则，例如 `in class P: 'any' is a reserved word and cannot be used as a field name`；以 `#` 开头的局部变量名留给编译器生成的变量。
 
 嵌套上限以 ABD 的 128 层容器嵌套为准：函数体从第 4 层开始，每个二元/一元运算、每个调用参数、每条语句和每个块各占一层，所以一个表达式大约可以串联 120 个运算符，或嵌套约 60 层块。超限时编译器报告文件、行列和所在函数，例如 `main.azs:2:8: error: in function main: Expression nesting exceeds the ABD limit of 128 levels; split the expression or statement`。泛型类型及指针的类型表达式嵌套最多 64 层，手写 AST 中的类型字符串也遵守此限制。语法递归和 JSON 容器另有 320 层防护上限，用于保护宿主，超限时报告最内层所在的语句或字段，或 JSON 行列；循环引用的 AST 会提前拒绝。错误后同一进程可以继续编译其他程序。
 
@@ -493,7 +520,7 @@ main.azs:4:9: warning: in function main: assignment used as a condition; use '==
 | 警告 | 默认 | 报告对象 |
 |---|---|---|
 | `assign-in-condition` | 开启 | 直接写作 `if`、`while` 或 `for` 条件的普通 `=` 赋值，例如 `if (done = check())`，位置为其 `=`。确需赋值时加括号表明意图：`if ((done = check()))`。 |
-| `unreachable-code` | 开启 | `return`、`break`、`continue`、各分支都会离开的 `if`/`else`，或不含 `break` 的 `while (true)`/`for (;;)` 循环之后的第一条语句；每个块只报告一次。与错误相同，赋值或 `++`/`--` 语句的位置为其运算符。 |
+| `unreachable-code` | 开启 | `return`、`break`、`continue`、各分支都会离开的 `if`/`else`、带 default 且各分段都返回的 switch，或不含 `break` 的 `while (true)`/`for (;;)` 循环之后的第一条语句；每个块只报告一次。与错误相同，赋值或 `++`/`--` 语句的位置为其运算符。 |
 | `unused-variable` | 关闭 | 声明后从未使用的局部变量；读取或赋值都算使用。参数、以 `_` 开头的名字，以及为构造和析构而声明的对象（`C c;`、`C * p(args);`、buffer 和类型参数的值）不在此列。 |
 
 `-Wall` 开启全部警告，`-W<名称>` 开启、`-Wno-<名称>` 关闭单个警告；指名某个警告的选项无论写在 `-Wall` 之前还是之后都优先，同一警告以最后一个选项为准。`-w` 关闭全部警告。`-Werror` 把已开启的警告作为错误报告，例如 `main.azs:4:9: error: in function main: ... [-Werror=assign-in-condition]`，编译随之失败。未知的警告名称属于用法错误（`Error: Unknown warning option: -Wxyz`）。
@@ -622,6 +649,8 @@ int functionId(int ns, int position) {
 ## AST 与 ABD 契约
 
 可读 AST 保持 `metadata/ext/abstract/global-variable/body` 结构，并为带签名的宿主函数增加 `extern-signatures`。`global-variable` 先以字符串列出 `#gvar` 名称，再以带位置的 `{"name", "type", "initializer"?}` 对象列出每个带类型全局；`compile-json` 按与源码相同的规则检查并初始化它们。类程序额外保存类定义、字段顺序和成员表达式等编译信息；`compile-json` 会重新执行类型检查与降级。限定的父类调用写作 `{"t":"ctrl","call":"base-call","param":["Base","method",args...]}`，可附带 `type-args`。AST 还保存模块 hint、assume、外部声明、定义名称与实际定义编号；调用绑定与定义位置分开，支持完全相同的 ABD 往返。`abstract` 是 extern 优先的源码名称绑定：有 extern 时保存声明 ID，否则保存定义 ID；hint 库的本地定义仍使用 0000 占位，实际调用的 self-assume 地址在降级时生成。函数定义的独立位置由 `body` 的 namespace 和 `metadata.position/name` 保存；每个签名另保存 `return-type` 与 `param-types`。表达式对象有 `t: "ctrl" | "call"`、`call`、`param`，块是数组。
+
+可读 switch AST 使用 `{"t":"ctrl","call":"switch","param":[value,sections]}`，sections 是数组。每个分段为 `{"t":"ctrl","call":"case","labels":[literal,...],"param":[body]}`，body 是语句数组，可附带 `default: true`；只有 default 的分段不带 case 标签。解析器保留各个标签，编译时把相邻的空分段与后续正文合并。`compile-json` 重新检查标签、作用域、跳转及贯穿路径。降级先对值求值一次，再使用一次性循环、同级 if 分段和平衡的短路标签比较；无论 default 在源码何处，都最后处理。隐藏局部变量保持源码 break/continue 的目标不变。
 
 条件表达式写作 `{"t":"ctrl","call":"select","param":[condition,thenValue,elseValue]}`，恰好包含三个表达式参数。`compile-json` 重新检查布尔条件和分支共同类型，在降为 opcode 50 前插入所需的数值转换。
 

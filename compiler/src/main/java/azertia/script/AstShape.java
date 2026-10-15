@@ -47,7 +47,9 @@ final class AstShape {
             return text.toString();
         }
     }
-    private record Pending(JsonElement node, Pointer path) {}
+    private record Pending(JsonElement node, Pointer path, boolean switchSection) {
+        Pending(JsonElement node, Pointer path) { this(node, path, false); }
+    }
     private final List<String> errors = new ArrayList<>();
     private final Deque<Pending> nodes = new ArrayDeque<>();
     private int units = 1;
@@ -186,6 +188,10 @@ final class AstShape {
     private void drainNodes() {
         while (!nodes.isEmpty()) {
             Pending pending = nodes.pop(); JsonElement value = pending.node(); Pointer path = pending.path();
+            if (pending.switchSection() && (value == null || !value.isJsonObject())) {
+                error(path, "expected a ctrl/case switch section, got " + describe(value));
+                continue;
+            }
             // Null is reported by the compiler as a value error at its context.
             if (value == null || value.isJsonNull()) continue;
             if (value.isJsonPrimitive()) { number(value.getAsJsonPrimitive(), path); continue; }
@@ -203,6 +209,19 @@ final class AstShape {
                 literalTrue(node, "compound", path);
                 literalTrue(node, "_parenthesized", path);
                 JsonArray params = array(node, "param", path, false);
+                boolean control = "ctrl".equals(kind);
+                if (pending.switchSection() && !(control && "case".equals(call)))
+                    error(path, "expected a ctrl/case switch section");
+                if (control && "case".equals(call)) {
+                    if (!pending.switchSection()) error(path, "case can only appear as a direct switch section");
+                    literalTrue(node, "default", path);
+                    JsonArray labels = array(node, "labels", path, true);
+                    if (labels != null) {
+                        if (labels.isEmpty() && !node.has("default")) error(path.key("labels"), "a case section needs a label or default:true");
+                        for (int i = 0; i < labels.size(); i++)
+                            children.add(new Pending(labels.get(i), path.key("labels").index(i)));
+                    }
+                }
                 // A missing param list is an empty one.
                 Pointer paramPath = path.key("param");
                 if (call != null && (params != null || !node.has("param"))) operands(kind, call, params != null ? params : new JsonArray(), paramPath);
@@ -210,12 +229,19 @@ final class AstShape {
                 Set<Integer> names = call == null ? Set.of() : NAME_OPERANDS.getOrDefault(call, Set.of());
                 if (params != null) for (int i = 0; i < params.size(); i++) {
                     if (names.contains(i)) stringElement(params.get(i), paramPath.index(i));
+                    else if (control && "switch".equals(call) && i == 1) switchSections(params.get(i), paramPath.index(i), children);
                     else children.add(new Pending(params.get(i), paramPath.index(i)));
                 }
             }
             // Keep document order: the first child is checked first.
             for (int i = children.size() - 1; i >= 0; i--) nodes.push(children.get(i));
         }
+    }
+    /** Only direct entries in a switch's section array may be case nodes. */
+    private void switchSections(JsonElement value, Pointer path, List<Pending> children) {
+        if (!value.isJsonArray()) { error(path, "expected an array of switch sections, got " + describe(value)); return; }
+        JsonArray sections = value.getAsJsonArray();
+        for (int i = 0; i < sections.size(); i++) children.add(new Pending(sections.get(i), path.index(i), true));
     }
     /** Operand positions that hold variable, member or class names. */
     private static final Map<String,Set<Integer>> NAME_OPERANDS = Map.of(
@@ -230,6 +256,15 @@ final class AstShape {
         switch (call) {
             case "select" -> {
                 if ("ctrl".equals(kind) && params.size() != 3) error(path, "select needs exactly three operands");
+            }
+            case "switch" -> {
+                if ("ctrl".equals(kind) && params.size() != 2) error(path, "switch needs a value and a section array");
+            }
+            case "case" -> {
+                if ("ctrl".equals(kind)) {
+                    if (params.size() != 1) error(path, "case needs exactly one body array");
+                    else if (!params.get(0).isJsonArray()) error(path.index(0), "expected a case body array, got " + describe(params.get(0)));
+                }
             }
             case "member-set" -> {
                 if (params.size() > 0 && !params.get(0).isJsonObject()) error(path.index(0), "expected an object, got " + describe(params.get(0)));

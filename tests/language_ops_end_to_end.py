@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Operators, conversions and ternary source/AST/ABD parity, lifetimes and real JNI."""
+"""Operators, conversions, ternary and switch source/AST/ABD parity, lifetimes and JNI."""
 import argparse
 import json
 import os
@@ -386,6 +386,95 @@ def main():
         execute('select-dynamic-condition', 'void main(){def(flag,1);print(flag?2:3);}',
                 error='Condition must be boolean, got int')
 
+        switched, _ = execute('switch-default-middle', '''int choose(int value){
+            switch(value){case 0:return 10;default:return 99;case 2:return 20;}
+        }
+        void main(){print(choose(0));print(choose(2));print(choose(8));}
+        ''', '10\n20\n99\n')
+        switch_ast = json.loads((work / 'switch-default-middle.ast.json').read_text(encoding='utf-8'))
+
+        def source_switches(value):
+            if isinstance(value, dict):
+                if value.get('t') == 'ctrl' and value.get('call') == 'switch':
+                    yield value
+                for child in value.values():
+                    yield from source_switches(child)
+            elif isinstance(value, list):
+                for child in value:
+                    yield from source_switches(child)
+
+        switch_nodes = list(source_switches(switch_ast))
+        assert switch_nodes and all(len(node['param']) == 2 for node in switch_nodes), switch_ast
+        sections = switch_nodes[0]['param'][1]
+        assert all(section.get('t') == 'ctrl' and section.get('call') == 'case' and len(section['param']) == 1 for section in sections)
+        assert sections[0]['labels'] == [0] and sections[1].get('default') is True and sections[2]['labels'] == [2], sections
+        assert switched[1]['exec-version'] == 10 and max(controls(switched[1])) <= 50
+        checks += 1
+        execute('switch-int-group-and-final', '''void run(int n){
+            switch(n){case -1:case 2:print("group");break;case 3:print("three");break;default:print("default");}
+            print("after");}
+            void main(){run(-1);run(2);run(3);run(8);}
+        ''', 'group\nafter\ngroup\nafter\nthree\nafter\ndefault\nafter\n')
+        execute('switch-string', r'''int choose(string value){switch(value){
+            case "a":return 1;default:return 9;case "a\u0000😀":return 2;case "":return 3;}}
+            void main(){print(choose("a"));print(choose("a\u0000😀"));print(choose(""));print(choose("absent"));}
+        ''', '1\n2\n3\n9\n')
+        execute('switch-evaluate-once', '''int calls;
+            int next(){calls+=1;return 2;}
+            void main(){switch(next()){case 1:print(10);break;case 2:print(20);break;default:print(99);}print(calls);}
+        ''', '20\n1\n')
+        execute('switch-while-control', '''void main(){int i=0;int total=0;
+            while(i<5){i+=1;switch(i){case 2:continue;case 4:break;default:total+=i;break;}total+=10;}
+            print(total);}
+        ''', '49\n')
+        execute('switch-for-continue', '''void main(){int steps=0;int total=0;
+            for(int i=0;i<4;i+=1){switch(i){case 1:continue;case 2:break;default:total+=i;break;}steps+=1;}
+            print(steps);print(total);}
+        ''', '3\n3\n')
+        execute('switch-nested-continue', '''void main(){int i=0;int total=0;
+            while(i<3){i+=1;switch(i){case 1:{switch(i){case 1:continue;default:break;}break;}
+                default:total+=i;break;}total+=10;}
+            print(total);}
+        ''', '25\n')
+        execute('switch-inner-loop', '''void main(){int total=0;
+            switch(1){case 1:{int i=0;while(i<3){i+=1;if(i==2)continue;total+=i;}break;}default:total=99;}
+            print(total);switch(1){case 1:switch(2){case 2:print(2);break;default:print(99);}print(3);break;default:print(99);}}
+        ''', '4\n2\n3\n')
+        execute('switch-scope-cleanup', '''class Tag{int n;Tag(int value){n=value;print("+"+n);}~Tag(){print("-"+n);}}
+            void main(){int i=0;while(i<3){i+=1;switch(i){
+                case 1:{Tag value(i);continue;}
+                case 2:{Tag value(i);break;}
+                default:{Tag value(i);}}
+                print("after "+i);}}
+        ''', '+1\n-1\n+2\n-2\nafter 2\n+3\n-3\nafter 3\n')
+        execute('switch-missing-return-success', '''int choose(int n){switch(n){
+            case 0:switch(n){case 0:return 4;default:return 5;}
+            default:return 6;}}
+            void main(){print(choose(0));print(choose(1));}
+        ''', '4\n6\n')
+        for label, source, expected in [
+                ('before-label', 'void main(){switch(1){print(1);case 1:break;}}', ''),
+                ('case-outside', 'void main(){case 1:break;}', ''),
+                ('default-outside', 'void main(){default:print(1);}', ''),
+                ('fallthrough', 'void main(){switch(1){case 1:print(1);case 2:print(2);}}', ''),
+                ('conditional-fallthrough', 'void run(boolean flag){switch(1){case 1:if(flag)break;case 2:print(2);}}void main(){}', ''),
+                ('duplicate-int', 'void main(){switch(1){case 1:break;case 1:break;}}', ''),
+                ('duplicate-string', 'void main(){switch("x"){case "x":break;case "x":break;}}', ''),
+                ('duplicate-default', 'void main(){switch(1){default:break;default:break;}}', ''),
+                ('wrong-label-int', 'void main(){switch(1){case "x":break;}}', ''),
+                ('wrong-label-string', 'void main(){switch("x"){case 1:break;}}', ''),
+                ('nonliteral', 'void main(){int label=1;switch(1){case label:break;}}', ''),
+                ('computed-label', 'void main(){switch(1){case 1+1:break;}}', ''),
+                ('boolean', 'void main(){switch(true){default:break;}}', ''),
+                ('double', 'void main(){switch(1.0){default:break;}}', ''),
+                ('address', 'void main(){address p=alloc(1);switch(p){default:break;}}', ''),
+                ('any', 'void main(){def(value,1);switch(value){default:break;}}', 'switch (int(value))'),
+                ('continue-without-loop', 'void main(){switch(1){case 1:continue;}}', ''),
+                ('missing-return-no-default', 'int choose(int n){switch(n){case 1:return 2;}}void main(){}', 'without returning'),
+                ('missing-return-break', 'int choose(int n){switch(n){case 1:break;default:return 2;}}void main(){}', 'without returning'),
+                ('expression', 'int main(){return switch(1){default:break;};}', '')]:
+            compile_case('switch-invalid-' + label, source, error=expected)
+
         if args.library:
             assert args.bridge, '--library requires --bridge'
             binary, _ = compile_case('jni', '''#namespace 5151
@@ -538,7 +627,7 @@ public class SelectionHost {
             assert result.returncode == 0 and not result.stdout and not result.stderr, (result.stdout, result.stderr)
             checks += 1
 
-    print(f'Language operators end-to-end checks passed: {checks} (source/AST/ABD identity, bitwise, shifts, conversions, selection, lifetimes and errors).')
+    print(f'Language operators end-to-end checks passed: {checks} (source/AST/ABD identity, bitwise, shifts, conversions, selection, switch, lifetimes and errors).')
 
 
 if __name__ == '__main__':

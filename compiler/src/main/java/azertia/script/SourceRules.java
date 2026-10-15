@@ -19,7 +19,7 @@ final class SourceRules {
      * Statement keywords and {@code any}. They are rejected even where a type name is
      * read, because the parser reads type names as identifiers.
      */
-    static final Set<String> KEYWORDS = Set.of("return", "if", "else", "while", "for", "break", "continue", "def", "var",
+    static final Set<String> KEYWORDS = Set.of("return", "if", "else", "while", "for", "switch", "case", "default", "break", "continue", "def", "var",
             "class", "new", "delete", "this", "null", "extern", "extends", "operator", "public", "private", "protected", "virtual", "any");
     /** Words that can never name a class, member, function, parameter, variable, global, macro or type parameter. */
     static final Set<String> RESERVED_WORDS;

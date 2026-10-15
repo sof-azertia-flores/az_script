@@ -522,6 +522,23 @@ int main() {
     float floatChoice = true ? 7 : 1.5f; double doubleChoice = false ? 1.5 : 7;
     double floatToDoubleChoice = true ? 1.25f : 2.5;
     if (floatChoice != 7.0f || doubleChoice != 7.0 || floatToDoubleChoice != 1.25) return -17;
+    int switched = 0;
+    for (int index = 0; index < 4; index++) {
+        switch (index) {
+            case 0: case 1: switched += index + 1; break;
+            default: switched += 10; break;
+            case 2: continue;
+        }
+        switched += 100;
+    }
+    if (switched != 313) return -18;
+    string label = "ready";
+    switch (label) {
+        case "other": return -19;
+        default: return -20;
+        case "ready": switched += 1;
+    }
+    if (switched != 314) return -21;
     return invoke<int>(305397826, values[0]) + value_compare<string>("b", "a");
 }
 ''', encoding="utf-8")
@@ -547,7 +564,7 @@ int main() {
         result = _run([runner, modern_abd], cwd, environment)
         _require(result.stdout.splitlines() == ["42"],
                  f"Packaged feature probe failed: {result.stdout!r}")
-        passed("generic contexts, owning buffers, class operators, reflection, bitwise, shifts, conversions and conditional expressions through relocated tools")
+        passed("generic contexts, owning buffers, class operators, reflection, bitwise, shifts, conversions, conditional expressions and switch through relocated tools")
 
         standalone = work / "standalone runner"
         standalone_bin = standalone / "bin"
@@ -624,7 +641,7 @@ int main() {
                  "Java JNI consumer could not execute packaged language features")
         _require("WARNING in native method" not in result.stdout + result.stderr,
                  "JVM reported a JNI contract warning for packaged language features")
-        passed("real JNI execution of generic contexts, buffers, class operators, bitwise, shifts, conversions and conditional expressions")
+        passed("real JNI execution of generic contexts, buffers, class operators, bitwise, shifts, conversions, conditional expressions and switch")
 
         native_name = "abdJ.dll" if WINDOWS else ("libabdJ.dylib" if sys.platform == "darwin" else "libabdJ.so")
         native_library = package / ("bin" if WINDOWS else "lib") / native_name

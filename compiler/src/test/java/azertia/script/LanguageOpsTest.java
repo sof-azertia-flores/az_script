@@ -7,9 +7,10 @@ import azertia.binary.complexBinary.*;
 import com.google.gson.*;
 import org.junit.jupiter.api.Test;
 import java.util.List;
+import java.util.function.Consumer;
 import static org.junit.jupiter.api.Assertions.*;
 
-/** Bitwise syntax, static checks and exec records stay consistent through compile-json. */
+/** Language operators, control flow and exec records stay consistent through compile-json. */
 class LanguageOpsTest {
     private static JsonObject tree(String source) throws Exception {
         var script = new GeneraterJson.AzScript(); script.execute(source); return script.toObj();
@@ -235,6 +236,213 @@ class LanguageOpsTest {
                 .getAsAcsArray("script").acsa.get(0)).getAsAcsObject("r");
         selectedView.mmp.remove("else"); assertThrows(IllegalArgumentException.class, program::toValue);
         roundTrip("double main(boolean c){return c?1:2.0;}");
+    }
+
+    private static JsonObject switchStatement(JsonObject ast) {
+        return main(ast).getAsJsonArray("script").get(0).getAsJsonObject();
+    }
+    private static JsonArray switchSections(JsonObject ast) {
+        return switchStatement(ast).getAsJsonArray("param").get(1).getAsJsonArray();
+    }
+    private static int opcodeCount(JsonElement value, int opcode) {
+        int count = 0;
+        if (value.isJsonArray()) for (JsonElement child : value.getAsJsonArray()) count += opcodeCount(child, opcode);
+        else if (value.isJsonObject()) {
+            JsonObject node = value.getAsJsonObject();
+            if (node.has("t") && node.has("c") && node.get("c").getAsInt() == opcode) count++;
+            for (JsonElement child : node.asMap().values()) count += opcodeCount(child, opcode);
+        }
+        return count;
+    }
+    private static int opcodeDepth(JsonElement value, int opcode) {
+        int depth = 0;
+        if (value.isJsonArray()) for (JsonElement child : value.getAsJsonArray()) depth = Math.max(depth, opcodeDepth(child, opcode));
+        else if (value.isJsonObject()) {
+            JsonObject node = value.getAsJsonObject();
+            for (JsonElement child : node.asMap().values()) depth = Math.max(depth, opcodeDepth(child, opcode));
+            if (node.has("t") && node.has("c") && node.get("c").getAsInt() == opcode) depth++;
+        }
+        return depth;
+    }
+
+    @Test void switchAstPreservesEachLabelAndItsOwnPosition() throws Exception {
+        String source = """
+                int main(int value){
+                    switch(value){
+                        case -1:
+                        case 0:return 10;
+                        default:return 20;
+                        case 2:return 30;
+                    }
+                }
+                """;
+        JsonObject ast = tree(source), selected = switchStatement(ast);
+        assertEquals("ctrl", selected.get("t").getAsString());
+        assertEquals("switch", selected.get("call").getAsString());
+        assertEquals(2, selected.getAsJsonArray("param").size());
+        JsonArray sections = switchSections(ast);
+        assertEquals(4, sections.size());
+        for (int i = 0; i < sections.size(); i++) {
+            JsonObject section = sections.get(i).getAsJsonObject();
+            assertEquals("ctrl", section.get("t").getAsString());
+            assertEquals("case", section.get("call").getAsString());
+            assertEquals(i + 3, section.get("_line").getAsInt());
+            assertEquals(1, section.getAsJsonArray("param").size());
+        }
+        assertEquals(-1, sections.get(0).getAsJsonObject().getAsJsonArray("labels").get(0).getAsInt());
+        assertTrue(sections.get(0).getAsJsonObject().getAsJsonArray("param").get(0).getAsJsonArray().isEmpty());
+        assertEquals(1, sections.get(1).getAsJsonObject().getAsJsonArray("param").get(0).getAsJsonArray().size());
+        JsonObject fallback = sections.get(2).getAsJsonObject();
+        assertTrue(fallback.get("default").getAsBoolean());
+        assertTrue(fallback.getAsJsonArray("labels").isEmpty());
+        assertEquals(2, sections.get(3).getAsJsonObject().getAsJsonArray("labels").get(0).getAsInt());
+        assertFalse(Compiler.canCompleteNormally(selected));
+        roundTrip(source);
+        String strings = "int main(string value){switch(value){case \"a\\0b\":return 1;default:return 0;}}";
+        JsonObject label = switchSections(tree(strings)).get(0).getAsJsonObject();
+        assertEquals("a" + (char) 0 + "b", label.getAsJsonArray("labels").get(0).getAsString());
+        roundTrip(strings);
+    }
+
+    @Test void switchSectionsHaveIndependentScopesAndFinalImplicitBreaks() throws Exception {
+        for (String source : List.of(
+                "int main(int value){switch(value){case 0:int local=1;return local;default:int local=2;return local;case 1:int local=3;return local;}}",
+                "int main(int value){int result=0;switch(value){case 0:result=1;break;default:result=2;}return result;}",
+                "int main(int value){switch(value){}return 0;}",
+                "int main(int value){switch(value){case 0:default:case 1:return 1;}}")) roundTrip(source);
+        String escaped = failure("void main(int value){switch(value){case 0:int local=1;break;default:local=2;}}").getMessage();
+        assertTrue(escaped.contains("Unknown variable: local"), escaped);
+    }
+
+    @Test void switchRejectsUnsupportedValuesAndNonliteralOrMismatchedLabels() {
+        record Case(String source, String message) {}
+        for (Case item : List.of(
+                new Case("void main(){switch(true){default:break;}}", "switch value must be int or string, got boolean"),
+                new Case("void main(){switch(1.0){default:break;}}", "switch value must be int or string, got double"),
+                new Case("void main(value){switch(value){default:break;}}", "switch value must be int or string, got any; convert it, e.g. switch (int(value))"),
+                new Case("void main(){switch(0){case 1+1:break;}}", "case label must be an int literal"),
+                new Case("void main(int value){switch(value){case value:break;}}", "case label must be an int literal"),
+                new Case("void main(){switch(0){case true:break;}}", "case label must be an int literal"),
+                new Case("void main(){switch(0){case 1.0:break;}}", "case label must be an int literal"),
+                new Case("void main(){switch(0){case \"x\":break;}}", "case label must be an int literal"),
+                new Case("void main(){switch(\"x\"){case 1:break;}}", "case label must be a string literal"),
+                new Case("void main(){switch(\"x\"){case \"x\"+\"y\":break;}}", "case label must be a string literal"),
+                new Case("void main(){switch(0){case 2147483648:break;}}", "case label is outside signed 32-bit range"))) {
+            String message = failure(item.source()).getMessage();
+            assertTrue(message.contains(item.message()), message);
+            assertFalse(message.contains("Malformed script JSON"), message);
+        }
+    }
+
+    @Test void switchDuplicatesAreReportedAtTheSecondLabel() {
+        for (String source : List.of(
+                "void main(){\nswitch(0){\ncase -1:break;\ncase 0:break;\ncase -1:break;\n}}",
+                "void main(){\nswitch(0){\ndefault:break;\ncase 0:break;\ndefault:break;\n}}")) {
+            CompileException error = failure(source);
+            assertEquals(5, error.errors().get(0).position().line(), error.getMessage());
+            assertTrue(error.getMessage().contains(source.contains("case -1") ? "Duplicate case label -1" : "Duplicate default label"), error.getMessage());
+        }
+        String strings = failure("void main(){switch(\"x\"){case \"same\":break;case \"same\":break;}}").getMessage();
+        assertTrue(strings.contains("Duplicate case label \"same\""), strings);
+    }
+
+    @Test void nonfinalSwitchSectionsMustTerminateAndNestedLoopBreaksStayLocal() throws Exception {
+        for (String source : List.of(
+                "void main(int value){switch(value){case 0:int local=1;case 1:break;}}",
+                "void main(int value,boolean c){switch(value){case 0:if(c){break;}case 1:break;}}",
+                "void main(int value){switch(value){case 0:while(true){break;}case 1:break;}}",
+                "void main(int value){switch(value){case 0:switch(value){default:break;}case 1:break;}}")) {
+            String message = failure(source).getMessage();
+            assertTrue(message.contains("Switch section can fall through; end it with break, continue or return"), message);
+        }
+        String source = "int main(int value){switch(value){case 0:while(true){break;}return 1;default:return 2;}}";
+        assertFalse(Compiler.canCompleteNormally(switchStatement(tree(source))));
+        roundTrip(source);
+    }
+
+    @Test void switchReturnAnalysisRequiresACompleteReturningFallback() throws Exception {
+        for (String source : List.of(
+                "int main(int value){switch(value){case 0:return 1;default:return 2;}}",
+                "int main(int value){switch(value){case 0:case 1:return 1;default:switch(value){case 2:return 2;default:return 3;}}}",
+                "int main(){while(true){switch(0){case 0:break;}}}")) roundTrip(source);
+        for (String source : List.of(
+                "int main(int value){switch(value){case 0:return 1;}}",
+                "int main(int value){switch(value){case 0:return 1;default:break;}}",
+                "int main(int value){switch(value){case 0:return 1;default:while(true){break;}}}")) {
+            String message = failure(source).getMessage();
+            assertTrue(message.contains("non-void function can reach the end of its body without returning a value"), message);
+        }
+    }
+
+    @Test void nestedSwitchContinuesReachTheEnclosingRealLoop() throws Exception {
+        for (String source : List.of(
+                "int main(){int result=0;for(int i=0;i<3;i+=1){switch(i){case 0:switch(i){default:continue;}default:break;}result+=1;}return result;}",
+                "int main(){int i=0;while(i<3){i+=1;switch(i){case 1:continue;case 2:switch(i){default:continue;}default:break;}}return i;}",
+                "int main(){while(true){switch(0){default:return 1;continue;}}}",
+                "void main(int value){switch(value){case 0:while(true){break;}break;default:for(int i=0;i<2;i+=1){continue;}break;}}")) roundTrip(source);
+        String source = "void main(){\nswitch(0){\ndefault:switch(0){\ndefault:continue;\n}}}";
+        CompileException error = failure(source);
+        assertTrue(error.getMessage().contains("continue can only be used inside a loop"), error.getMessage());
+        assertEquals(4, error.errors().get(0).position().line(), error.getMessage());
+    }
+
+    @Test void largeGroupedSwitchLabelsProduceBalancedConditionsAndLeaveTheAstReadOnly() throws Exception {
+        StringBuilder source = new StringBuilder("int main(int value){switch(value){");
+        for (int label = 0; label < 64; label++) source.append("case ").append(label).append(':');
+        source.append("return 1;default:return 0;}}");
+        JsonObject ast = tree(source.toString()); String original = ast.toString();
+        assertEquals(65, switchSections(ast).size());
+        for (boolean debug : List.of(false, true)) {
+            JsonElement program = Compiler.compile(ast, debug).toJson();
+            assertEquals(64, opcodeCount(program, ExecOpcodes.EQUAL));
+            assertEquals(63, opcodeCount(program, ExecOpcodes.OR));
+            assertEquals(6, opcodeDepth(program, ExecOpcodes.OR));
+            assertEquals(original, ast.toString());
+        }
+        roundTrip(source.toString());
+        assertEquals(original, ast.toString());
+    }
+
+    @Test void switchKeywordsAndLabelPlacementHaveTargetedSourceErrors() {
+        for (String keyword : List.of("switch", "case", "default")) assertTrue(SourceRules.RESERVED_WORDS.contains(keyword), keyword);
+        for (String keyword : List.of("case", "default")) {
+            String message = failure("void main(){" + keyword + (keyword.equals("case") ? " 0" : "") + ":break;}").getMessage();
+            assertTrue(message.contains("'" + keyword + "' can only be used directly inside a switch"), message);
+        }
+        for (String prefix : List.of("int value=1;", ";")) {
+            String message = failure("void main(){switch(0){" + prefix + "case 0:break;}}").getMessage();
+            assertTrue(message.contains("before its first case or default label"), message);
+        }
+        String expression = failure("int main(){return switch(0){default:return 1;};}").getMessage();
+        assertTrue(expression.contains("cannot be used in an expression"), expression);
+    }
+
+    @Test void compileJsonValidatesSwitchSectionShapeAndCasePlacement() throws Exception {
+        record Mutation(String message, Consumer<JsonObject> change) {}
+        List<Mutation> mutations = List.of(
+                new Mutation("switch needs a value and a section array", ast -> switchStatement(ast).getAsJsonArray("param").remove(1)),
+                new Mutation("expected an array of switch sections", ast -> switchStatement(ast).getAsJsonArray("param").set(1, new JsonPrimitive(0))),
+                new Mutation("expected a ctrl/case switch section", ast -> switchSections(ast).set(0, new JsonArray())),
+                new Mutation("expected a ctrl/case switch section", ast -> switchSections(ast).get(0).getAsJsonObject().addProperty("call", "if")),
+                new Mutation("case needs exactly one body array", ast -> switchSections(ast).get(0).getAsJsonObject().getAsJsonArray("param").remove(0)),
+                new Mutation("expected a case body array", ast -> switchSections(ast).get(0).getAsJsonObject().getAsJsonArray("param").set(0, new JsonPrimitive(0))),
+                new Mutation("required field is missing", ast -> switchSections(ast).get(0).getAsJsonObject().remove("labels")),
+                new Mutation("expected an array", ast -> switchSections(ast).get(0).getAsJsonObject().addProperty("labels", 0)),
+                new Mutation("expected true", ast -> switchSections(ast).get(1).getAsJsonObject().addProperty("default", false)),
+                new Mutation("a case section needs a label or default:true", ast -> switchSections(ast).get(0).getAsJsonObject().getAsJsonArray("labels").remove(0)),
+                new Mutation("case can only appear as a direct switch section", ast -> main(ast).getAsJsonArray("script").set(0, switchSections(ast).get(0).deepCopy())),
+                new Mutation("case can only appear as a direct switch section", ast -> switchSections(ast).get(0).getAsJsonObject().getAsJsonArray("param").get(0).getAsJsonArray().add(switchSections(ast).get(1).deepCopy())));
+        for (Mutation mutation : mutations) {
+            JsonObject ast = tree("void main(int value){switch(value){case 0:break;default:break;}}");
+            mutation.change().accept(ast);
+            String message = assertThrows(CompileException.class, () -> Compiler.compile(ast)).getMessage();
+            assertTrue(message.contains("Malformed script JSON") && message.contains(mutation.message()), message);
+        }
+        JsonObject ast = tree("void main(){switch(0){case 1:break;}}");
+        switchSections(ast).get(0).getAsJsonObject().getAsJsonArray("labels").set(0, returned("1+1"));
+        String message = assertThrows(CompileException.class, () -> Compiler.compile(ast)).getMessage();
+        assertTrue(message.contains("case label must be an int literal"), message);
+        assertFalse(message.contains("Malformed script JSON"), message);
     }
 
     private static int targetCode(String target) {

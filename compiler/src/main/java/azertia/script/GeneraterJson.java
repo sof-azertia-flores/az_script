@@ -1147,6 +1147,7 @@ public class GeneraterJson {
         private int index;
         private int recursionDepth;
         private int loopDepth;
+        private int switchDepth;
         private int nextFunctionPosition = 1;
         private final Set<String> classNames = new LinkedHashSet<>();
         /** The first definition of every class in {@code script.classes}, by name. */
@@ -1901,8 +1902,8 @@ public class GeneraterJson {
                 }
             } else {
                 if(inClass&&!script.namespaceHint.isEmpty())throw error("Hinted library class functions must use extern declarations and out-of-class definitions");
-                function.explicitPosition=suffix;int enclosingLoop=loopDepth;loopDepth=0;
-                JsonElement body;try{body=block();}finally{loopDepth=enclosingLoop;}function.body=()->body;
+                function.explicitPosition=suffix;int enclosingLoop=loopDepth,enclosingSwitch=switchDepth;loopDepth=0;switchDepth=0;
+                JsonElement body;try{body=block();}finally{loopDepth=enclosingLoop;switchDepth=enclosingSwitch;}function.body=()->body;
                 Token end=tokens.get(index-1);
                 if(end.unit()==function.file){function.endLine=end.line();function.endColumn=end.column();}
                 addDefinition(function);match(";");
@@ -1934,6 +1935,9 @@ public class GeneraterJson {
             if (match(";")) return new JsonArray();
             if (at("{")) return block();
             Token start = current();
+            if (at("case") || at("default"))
+                throw error("'" + start.text() + "' can only be used directly inside a switch", start);
+            if (match("switch")) return switchStatement(start);
             if (match("return")) {
                 JsonElement result;
                 if (at(";") || at("}")) result = operation("ctrl", "return", start);
@@ -1944,7 +1948,8 @@ public class GeneraterJson {
             }
             if (at("break") || at("continue")) {
                 String control = advance().text();
-                if (loopDepth == 0) throw error("'" + control + "' can only be used inside a loop");
+                if (loopDepth == 0 && switchDepth == 0)
+                    throw error("'" + control + "' can only be used inside a loop" + (control.equals("break") ? " or switch" : ""), start);
                 JsonElement result = operation("ctrl", control, start);
                 endStatement(); return result;
             }
@@ -2028,6 +2033,33 @@ public class GeneraterJson {
                 return definition;
             }
             JsonElement expression = statementExpression(); endStatement(); return expression;
+        }
+        private JsonElement switchStatement(Token start) {
+            expect("("); JsonElement value = expression(); expect(")"); expect("{");
+            JsonArray sections = new JsonArray(), body = null;
+            switchDepth++;
+            try {
+                while (!at("}")) {
+                    if (at("<eof>")) throw error("Unterminated switch");
+                    if (at("case") || at("default")) {
+                        Token label = advance(); JsonArray labels = new JsonArray();
+                        boolean fallback = label.text().equals("default");
+                        if (!fallback) labels.add(expression());
+                        expect(":"); body = new JsonArray();
+                        JsonObject section = operation("ctrl", "case", label, body);
+                        section.add("labels", labels);
+                        if (fallback) section.addProperty("default", true);
+                        sections.add(section);
+                    } else {
+                        if (body == null) throw error("A switch statement cannot contain statements before its first case or default label");
+                        int statementStart = index;
+                        try { body.add(statement()); }
+                        catch (IllegalArgumentException e) { recover(e, statementStart, Sync.STATEMENT); }
+                    }
+                }
+                expect("}");
+            } finally { switchDepth--; }
+            return operation("ctrl", "switch", start, value, sections);
         }
         /** Update operators are statement sugar, so prefix and postfix have no result-value distinction. */
         private JsonElement statementExpression() {
@@ -2223,6 +2255,8 @@ public class GeneraterJson {
         }
         private JsonElement primary() {
             Token token = current();
+            if (at("case") || at("default"))
+                throw error("'" + token.text() + "' can only be used directly inside a switch", token);
             if (match("null")) return operation("ctrl", "null", token);
             if (match("this")) return operation("ctrl", "var", token, new JsonPrimitive("this"));
             if (match("new")) {
@@ -2300,7 +2334,7 @@ public class GeneraterJson {
         Parser parser = new Parser(source.substring(offset), SourceMap.single("<expression>"), script, Diagnostics.failFast());
         JsonElement result;
         if (parser.at("{")) result = parser.block();
-        else if (Set.of("return", "break", "continue", "def", "var", "if", "while", "for", "delete", "++", "--").contains(parser.current().text())
+        else if (Set.of("return", "break", "continue", "def", "var", "if", "while", "for", "switch", "case", "default", "delete", "++", "--").contains(parser.current().text())
                 || parser.declarationAhead()) result = parser.statement();
         else result = parser.expression();
         parser.match(";"); parser.expect("<eof>");

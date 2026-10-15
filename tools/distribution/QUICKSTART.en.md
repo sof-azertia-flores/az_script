@@ -49,11 +49,27 @@ void main() {
 }
 ```
 
-Functions support forward calls and recursion. Primitive parameter types may be omitted, but object parameters need explicit class names for member access. Blocks create scopes; declare variables before use, with inner shadowing allowed. Every normal exit from a nonvoid function must return. If/else, while, for, break, continue, and return are supported; closures and exception catching are not.
+Functions support forward calls and recursion. Primitive parameter types may be omitted, but object parameters need explicit class names for member access. Blocks create scopes; declare variables before use, with inner shadowing allowed. Every normal exit from a nonvoid function must return. If/else, while, for, switch, break, continue, and return are supported; closures and exception catching are not.
 
 `for (int i = 0; i < 5; i++) { ... }` scopes i to the loop. Initializer, condition, and step are optional; an omitted condition is true. Continue cleans the current iteration's objects, then runs a for step and checks its condition; while continue directly rechecks the condition. Break and return skip the step. ++/-- work only on simple numeric/address variables as standalone statements or for steps, never results or arguments.
 
 Operators include arithmetic `+ - * / %`, comparison `== != < <= > >=`, boolean `&& || !`, int-only bitwise `& | ^ ~`, shifts `<< >> >>>`, conditional `?:`, and assignment. Simple variables support `+= -= *= /= %= &= |= ^= <<= >>= >>>=`. From higher to lower precedence: unary, multiply/divide/remainder, add/subtract, shifts, ordering, equality, `&`, `^`, `|`, `&&`, `||`, conditional `?:`, assignment. `&&`/`||` short-circuit; `?:` evaluates one arm. Shifts use 32-bit patterns: left shift wraps, `>>` sign-extends, `>>>` zero-fills; counts outside 0…31 fail instead of wrapping. Write `(flags & mask) != 0` for a bit test. Shift characters must touch (`a > > b` is invalid); nested generic closers such as `buffer<buffer<int>>` still work. See [bitwise operators](LANGUAGE.en.md#bitwise-and-shift-operators). Strings use single/double quotes and escapes including `\n`, `\t`, `\\`, `\"`, `\'`, and `\uXXXX`. Comments use // or /* ... */.
+
+### switch
+
+```c
+int mode = 2;
+switch (mode) {
+    case 1:
+    case 2:
+        print("ready");
+        break;
+    default:
+        print("unknown");
+}
+```
+
+The int/string value is evaluated once; case labels must be matching-type literals. Stacked labels share a scoped section. There is no fall-through: non-final sections must leave explicitly, and the final section has an implicit break. `default` may appear anywhere and handles only unmatched values. Break exits the nearest switch/loop; continue still targets an enclosing loop. Convert dynamic values explicitly before switching. See [switch](LANGUAGE.en.md#switch).
 
 ### Conditional expressions
 

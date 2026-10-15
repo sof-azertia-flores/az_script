@@ -96,7 +96,9 @@ public class Compiler {
             return field;
         }
     }
-    private static class Counter { int next; }
+    private static class Counter { int next, hidden; }
+    /** A synthetic loop can relay control to the nearest enclosing real loop. */
+    private record SyntheticLoop(String breakFlag, String continueFlag, int outerLoopDepth) {}
     /** Per-compilation state shared through the root environment. */
     static final class CompilationState {
         final Diagnostics diagnostics;
@@ -111,6 +113,7 @@ public class Compiler {
         final Set<JsonObject> synthesized = Collections.newSetFromMap(new IdentityHashMap<>());
         /** Source-level labels for checks performed by lowered nodes, such as a for condition. */
         final IdentityHashMap<JsonObject,String> diagnosticLabels = new IdentityHashMap<>();
+        final IdentityHashMap<JsonObject,SyntheticLoop> syntheticLoops = new IdentityHashMap<>();
         /** The memo of the running outermost type query (see expressionType), reused by the next query. */
         final TypeQuery typeQuery = new TypeQuery();
         /**
@@ -208,6 +211,7 @@ public class Compiler {
         private String context;
         private int returnType = -1;
         private int loopDepth;
+        private SyntheticLoop syntheticLoop;
         private String ownerClass;
         private int moduleNamespace = SourceRules.DEFAULT_NAMESPACE;
         public LogicEnvironment() {
@@ -223,10 +227,11 @@ public class Compiler {
         LogicEnvironment child() {
             LogicEnvironment child = new LogicEnvironment(root()); child.parent = this; child.counter = counter;
             child.context = context; child.returnType = returnType; child.loopDepth = loopDepth; child.ownerClass = ownerClass;
+            child.syntheticLoop = syntheticLoop;
             child.typeScope = typeScope; child.typeParameters = typeParameters; return child;
         }
         LogicEnvironment loopChild() {
-            LogicEnvironment child = child(); child.loopDepth++; return child;
+            LogicEnvironment child = child(); child.loopDepth++; child.syntheticLoop = null; return child;
         }
         LogicEnvironment root() {
             if (parent == null) return this;
@@ -420,7 +425,7 @@ public class Compiler {
                     ? AsTypes.INT_VALUE : AsTypes.ANY_VALUE;
             case "if" -> branchType(params, environment);
             case "select" -> selectType(params, environment);
-            case "vardef", "return", "break", "continue", "while", "for", "increment", "decrement", "object-def", "object-delete", "#bind", "#make-free", "#drop" -> AsTypes.VOID_VALUE;
+            case "vardef", "return", "break", "continue", "while", "for", "switch", "#switch-loop", "increment", "decrement", "object-def", "object-delete", "#bind", "#make-free", "#drop" -> AsTypes.VOID_VALUE;
             default -> AsTypes.ANY_VALUE;
         };
     }
@@ -1254,8 +1259,24 @@ public class Compiler {
             }
             case "break", "continue" -> {
                 arity(call, params, 0, 0);
-                if (environment.loopDepth == 0) throw new IllegalArgumentException(call + " can only be used inside a loop");
+                if (call.equals("continue") && environment.syntheticLoop != null) {
+                    SyntheticLoop loop = environment.syntheticLoop;
+                    if (loop.outerLoopDepth() == 0) throw new IllegalArgumentException("continue can only be used inside a loop");
+                    return compileExpression(array(node("varset", new JsonPrimitive(loop.continueFlag()), new JsonPrimitive(true)), node("break")), environment);
+                }
+                if (environment.loopDepth == 0 && environment.syntheticLoop == null)
+                    throw new IllegalArgumentException(call + " can only be used inside " + (call.equals("break") ? "a loop or switch" : "a loop"));
                 result.put("c", ExecOpcodes.code(call.equals("break") ? "brk" : "cont"));
+            }
+            case "switch" -> { return compileSwitch(source, environment); }
+            case "case" -> throw new IllegalArgumentException("case/default can only be used inside a switch");
+            case "#switch-loop" -> {
+                requireTrusted(source, environment); arity(call, params, 1, 1);
+                SyntheticLoop descriptor = environment.state().syntheticLoops.get(source);
+                if (descriptor == null) throw new IllegalArgumentException("Missing synthetic loop descriptor");
+                LogicEnvironment loop = environment.child(); loop.syntheticLoop = descriptor;
+                result.put("c", ExecOpcodes.WHILE); result.put("v", new AcsBooleanElement(true));
+                result.put("val", compileExpression(params.get(0), loop)); finishScope(loop);
             }
             case "increment", "decrement" -> {
                 arity(call, params, 1, 1); JsonElement target = params.get(0);
@@ -1319,6 +1340,89 @@ public class Compiler {
             default -> throw new IllegalArgumentException("Unknown control operation: " + call);
         }
         return result;
+    }
+    private record SwitchSection(List<JsonElement> labels, JsonArray body, boolean fallback, JsonObject anchor) {}
+    private static AcsElement compileSwitch(JsonObject source, LogicEnvironment environment) {
+        JsonArray params = parameters(source); arity("switch", params, 2, 2);
+        int type = expressionType(params.get(0), environment);
+        if (type != AsTypes.INT_VALUE && type != AsTypes.STRING_VALUE)
+            throw new IllegalArgumentException("switch value must be int or string, got " + typeName(type)
+                    + (type == AsTypes.ANY_VALUE ? "; convert it, e.g. switch (int(value))" : ""));
+        if (!params.get(1).isJsonArray()) throw new IllegalArgumentException("switch sections must be an array");
+        JsonArray sections = params.get(1).getAsJsonArray();
+        Set<Object> seen = new HashSet<>(); boolean defaultSeen = false;
+        List<SwitchSection> groups = new ArrayList<>(); List<JsonElement> labels = new ArrayList<>();
+        boolean fallback = false; JsonObject anchor = null;
+        for (int i = 0; i < sections.size(); i++) {
+            JsonObject section = sections.get(i).getAsJsonObject(); JsonArray sectionParams = parameters(section);
+            if (!isControl(section) || !section.get("call").getAsString().equals("case"))
+                throw relocate(new IllegalArgumentException("Invalid switch section"), section, environment);
+            arity("case", sectionParams, 1, 1);
+            if (anchor == null) anchor = section;
+            if (section.has("default")) {
+                if (defaultSeen) throw relocate(new IllegalArgumentException("Duplicate default label"), section, environment);
+                defaultSeen = true; fallback = true;
+            }
+            for (JsonElement label : section.getAsJsonArray("labels")) {
+                boolean valid = label.isJsonPrimitive() && (type == AsTypes.INT_VALUE
+                        ? label.getAsJsonPrimitive().isNumber() && integerLiteral(label.getAsString()) : label.getAsJsonPrimitive().isString());
+                if (!valid) throw relocate(new IllegalArgumentException("case label must be " + (type == AsTypes.INT_VALUE ? "an int" : "a string") + " literal"), section, environment);
+                Object key;
+                if (type == AsTypes.INT_VALUE) {
+                    try { key = label.getAsBigDecimal().intValueExact(); }
+                    catch (ArithmeticException error) { throw relocate(new IllegalArgumentException("case label is outside signed 32-bit range"), section, environment); }
+                } else key = label.getAsString();
+                if (!seen.add(key)) throw relocate(new IllegalArgumentException("Duplicate case label "
+                        + (type == AsTypes.INT_VALUE ? key : label.toString())), section, environment);
+                labels.add(label);
+            }
+            JsonArray body = sectionParams.get(0).getAsJsonArray();
+            if (!body.isEmpty() || i == sections.size() - 1) {
+                groups.add(new SwitchSection(List.copyOf(labels), body, fallback, anchor));
+                labels.clear(); fallback = false; anchor = null;
+            }
+        }
+        for (int i = 0; i + 1 < groups.size(); i++) if (canCompleteNormally(groups.get(i).body()))
+            throw relocate(new IllegalArgumentException("Switch section can fall through; end it with break, continue or return"), groups.get(i).anchor(), environment);
+        int serial = environment.counter.hidden++;
+        String value = "#switch-value-" + serial, continued = "#switch-continue-" + serial;
+        // breakFlag is reserved for transparent synthetic loops (C27); source
+        // switch breaks already target this wrapper directly.
+        SyntheticLoop descriptor = new SyntheticLoop("#switch-break-" + serial, continued, environment.loopDepth);
+        JsonObject saved = node("vardef", new JsonPrimitive(value), params.get(0)); saved.addProperty("declared-type", typeName(type));
+        copyPosition(source, saved, environment);
+        JsonArray wrapper = array(saved); boolean relayContinue = groups.stream().anyMatch(group -> containsContinue(group.body()));
+        if (relayContinue) {
+            JsonObject flag = node("vardef", new JsonPrimitive(continued), new JsonPrimitive(false)); flag.addProperty("declared-type", "boolean");
+            copyPosition(source, flag, environment); wrapper.add(flag);
+        }
+        JsonArray iteration = new JsonArray(); SwitchSection defaultSection = null;
+        for (SwitchSection group : groups) {
+            if (group.fallback()) defaultSection = group;
+            if (group.labels().isEmpty()) continue;
+            List<JsonElement> matches = new ArrayList<>();
+            for (JsonElement label : group.labels()) matches.add(node("cmp", variable(value), label));
+            JsonObject branch = node("if", balancedOr(matches, 0, matches.size()), switchBody(group.body()));
+            copyPosition(group.anchor(), branch, environment); iteration.add(branch);
+        }
+        if (defaultSection != null) iteration.add(switchBody(defaultSection.body()));
+        iteration.add(node("break"));
+        JsonObject loop = internal(environment, "#switch-loop", iteration); copyPosition(source, loop, environment);
+        environment.state().syntheticLoops.put(loop, descriptor); wrapper.add(loop);
+        if (relayContinue && descriptor.outerLoopDepth() > 0) {
+            JsonObject relay = node("if", variable(continued), node("continue")); copyPosition(source, relay, environment); wrapper.add(relay);
+        }
+        return compileExpression(wrapper, environment);
+    }
+    private static JsonArray switchBody(JsonArray body) {
+        JsonArray result = new JsonArray(); result.addAll(body);
+        if (canCompleteNormally(body)) result.add(node("break"));
+        return result;
+    }
+    private static JsonElement balancedOr(List<JsonElement> values, int begin, int end) {
+        if (end - begin == 1) return values.get(begin);
+        int middle = (begin + end) >>> 1;
+        return node("or", balancedOr(values, begin, middle), balancedOr(values, middle, end));
     }
     private static int valueType(String type, boolean valueOnly) {
         int[] holder=TYPE_DEPTH.get();int depth=holder[0];
@@ -2324,6 +2428,7 @@ public class Compiler {
             case "if" -> params.size() < 3 || canCompleteNormally(params.get(1)) || canCompleteNormally(params.get(2));
             case "while" -> params.size() < 2 || !isTrueLiteral(params.get(0)) || containsBreak(params.get(1));
             case "for" -> params.size() < 4 || !isTrueLiteral(params.get(1)) || containsBreak(params.get(3));
+            case "switch" -> switchCanComplete(params);
             default -> true;
         };
     }
@@ -2342,16 +2447,45 @@ public class Compiler {
     private static boolean containsBreak(JsonElement node) {
         if (node == null || node.isJsonNull() || node.isJsonPrimitive()) return false;
         if (node.isJsonArray()) {
-            for (JsonElement statement : node.getAsJsonArray()) if (containsBreak(statement)) return true;
+            for (JsonElement statement : node.getAsJsonArray()) {
+                if (containsBreak(statement)) return true;
+                if (!canCompleteNormally(statement)) break;
+            }
             return false;
         }
         JsonObject object = node.getAsJsonObject();
         if (!isControl(object)) return false;
         String call = object.get("call").getAsString();
         if (call.equals("break")) return true;
-        if (call.equals("while") || call.equals("for")) return false; // a nested loop owns its own breaks
+        if (call.equals("while") || call.equals("for") || call.equals("switch")) return false;
         if (!object.has("param") || !object.get("param").isJsonArray()) return false;
         for (JsonElement child : object.getAsJsonArray("param")) if (containsBreak(child)) return true;
+        return false;
+    }
+    private static boolean switchCanComplete(JsonArray params) {
+        if (params.size() != 2 || !params.get(1).isJsonArray()) return true;
+        JsonArray sections = params.get(1).getAsJsonArray(); boolean fallback = false, completes = false;
+        for (int i = 0; i < sections.size(); i++) {
+            JsonObject section = sections.get(i).getAsJsonObject(); fallback |= section.has("default");
+            JsonArray body = parameters(section).get(0).getAsJsonArray();
+            if (body.isEmpty() && i + 1 < sections.size()) continue;
+            completes |= canCompleteNormally(body) || containsBreak(body);
+        }
+        return !fallback || completes;
+    }
+    private static boolean containsContinue(JsonElement node) {
+        if (node == null || node.isJsonNull() || node.isJsonPrimitive()) return false;
+        if (node.isJsonArray()) {
+            for (JsonElement statement : node.getAsJsonArray()) {
+                if (containsContinue(statement)) return true;
+            }
+            return false;
+        }
+        JsonObject object = node.getAsJsonObject(); if (!isControl(object)) return false;
+        String call = object.get("call").getAsString();
+        if (call.equals("continue")) return true;
+        if (call.equals("while") || call.equals("for")) return false;
+        for (JsonElement child : parameters(object)) if (containsContinue(child)) return true;
         return false;
     }
     /**

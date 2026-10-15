@@ -62,7 +62,7 @@ cd /path/to/azscript
 3. 递归下降解析明确处理优先级、左右结合性、嵌套调用、代码块和控制流。
 4. 校验变量和函数、作用域、函数签名、参数类型与数量、重复定义和返回形式，再生成 JSON/ABD 指令树。
 
-完整语法见 [compiler/LANGUAGE.md](compiler/LANGUAGE.md)。保留了原来的 `def(x)`、`return(x)`、`while(condition,{...})`、`if(condition,{...})` 和 `mem_get(pointer)=value` 写法；支持普通 `if/else/while`、变量初始化、一元运算、比较、短路逻辑、int32 位运算/移位、条件表达式 `?:` 和变量复合赋值。
+完整语法见 [compiler/LANGUAGE.md](compiler/LANGUAGE.md)。保留了原来的 `def(x)`、`return(x)`、`while(condition,{...})`、`if(condition,{...})` 和 `mem_get(pointer)=value` 写法；支持普通 `if/else/while`、int/string switch、变量初始化、一元运算、比较、短路逻辑、int32 位运算/移位、条件表达式 `?:` 和变量复合赋值。
 
 ```c
 #namespace 123
@@ -213,12 +213,13 @@ try {
 - 仅适用于 int 的 `& | ^ ~ << >> >>>` 操作 32 位位模式：左移回绕，`>>` 扩展符号，`>>>` 补零；数量必须为 0…31，简单变量支持复合形式。位测试应写为 `(flags & mask) != 0`。详见[位运算](compiler/LANGUAGE.md#位运算与移位)。
 - 显式 `int/float/double/string/address(x)` 按受检查的配对表执行数值转换、严格十进制字符串解析、数值/address 转字符串及 address 恒等；不支持 int/address 互转、布尔/类转换或 C 风格强转。int 先截断再检查范围，浮点转换允许下溢但拒绝溢出。详见[显式转换](compiler/LANGUAGE.md#显式转换)。
 - `条件 ? a : b` 在外围作用域中只计算一个分支，结果取共同类型并进行数值提升。它在赋值和 `||` 之间右结合；两个分支都须通过类型检查。详见[条件表达式](compiler/LANGUAGE.md#条件表达式)。
+- `switch` 对 int/string 值求值一次，匹配字面量标签，不允许贯穿。连续标签共享分段，default 可在任意位置，每个分段有独立作用域。详见 [switch](compiler/LANGUAGE.md#switch)。
 - 小数默认是 double；`1.5f`、`5f`、`2e3f` 是 float 字面量。
 - `extern int host_add(int, int):0xccf0001;` 以完整签名绑定宿主函数；类型必填，旧 `#extern` 指令已删除。参数和回调返回值按实际类型精确匹配，`int`、`float`、`double` 之间不隐式转换。`#namespace 1234` 支持1～4位，拒绝保留的 `0000` 和 `0abd`；独立库用 `#namespace_hint` 声明，`#assume_hint` 绑定调用。
 - 函数按值传参，参数从左到右求值；函数只能访问自己的局部变量和全局变量。块有独立作用域，循环每次创建新的块作用域。`for` 初始化变量的作用域包含整个循环，循环结束后不可见。
-- `return` 穿透当前函数内的循环和条件块；`break` 退出最内层循环，`continue` 结束最内层循环的本轮执行，均执行必要的块清理。数值返回必须精确匹配，或从 int 扩宽到 float/double、从 float 扩宽到 double；int 转 float 可能舍入。收窄须显式使用受检查的 `int(x)` 或 `float(x)` 转换，动态返回类型在运行时检查。
+- `return` 穿透当前函数内的循环和条件块；`break` 退出最内层循环/switch，`continue` 结束最近循环的本轮执行，均执行必要的块清理。数值返回必须精确匹配，或从 int 扩宽到 float/double、从 float 扩宽到 double；int 转 float 可能舍入。收窄须显式使用受检查的 `int(x)` 或 `float(x)` 转换，动态返回类型在运行时检查。
 - 编译器按 ABD 的 128 层容器嵌套限制检查函数体：同时检查逻辑表达式和实际 wire 容器深度，函数体从第 4 层开始；调用实参列表、块内语句列表和常量封装各另占一层，超限时报告函数名和行列（大约 120 个串联运算符或 60 层嵌套块）。语法递归和 JSON 容器另有 320 层防护上限，循环代码树会报错。默认每次顶层脚本调用最多执行 1,000,000 步、嵌套 256 层；脚本文件最多 64 MiB，堆最多 1,048,576 个槽（含保留槽 0）。宿主回调本身的执行时间不受指令预算控制。
-- `return`、`if`、`else`、`while`、`for`、`break`、`continue`、`def`、`var`、`class`、`new`、`this`、`null`、`delete`、`extern`、`public/private/protected/virtual`、`any`、类型名和 `true/false` 是保留字，不能作为类、字段、方法、函数、参数、变量、全局变量或宏的名字；标识符不能含控制字符或格式字符（如 U+200B、U+202E）。源码与 `compile-json` 共用这些命名规则。非 void 函数的正常退出路径都必须 `return`；条件恒真的 while/for 且体内没有属于它的 `break` 时，视为不会正常结束。
+- `return`、`if`、`else`、`while`、`for`、`switch`、`case`、`default`、`break`、`continue`、`def`、`var`、`class`、`new`、`this`、`null`、`delete`、`extern`、`public/private/protected/virtual`、`any`、类型名和 `true/false` 是保留字，不能作为类、字段、方法、函数、参数、变量、全局变量或宏的名字；标识符不能含控制字符或格式字符（如 U+200B、U+202E）。源码与 `compile-json` 共用这些命名规则。非 void 函数的正常退出路径都必须 `return`；条件恒真的 while/for 且体内没有属于它的 `break` 时，视为不会正常结束。
 - 数值转字符串（`print` 和 `+` 拼接）使用最短可往返表示：`0.1+0.2` 得到 `0.30000000000000004`，`123456789.0` 得到 `123456789`，`1e20` 得到 `1e+20`，负零保留为 `-0`。
 - `address` 与 int32 不隐式转换，`alloc(int)` 返回 address，内存接口接收 address。支持 `address + int`、`int + address`、`address - int`，以及地址间的无符号相等和大小比较；超出 uint64 范围报错。类指针不参与原始地址算术。堆地址仍是进程内逻辑下标，64 位表示不扩大当前堆上限；越界和已经释放的地址会拒绝，地址复用后无法识别旧引用，仍须避免悬空引用。
 - 由作用域自动回收的分配只能从拥有它的作用域链（词法父级和调用者）释放：`mem_free` 从其他活动作用域（例如宿主回调重入的脚本函数）释放它会报错，Java `memFree` 只允许无自动回收所有者或已提升到全局的块。`make_free` 之后的分配不再受此限制。

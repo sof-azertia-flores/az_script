@@ -711,6 +711,18 @@ def main():
         assert encode_compact_module(selection_view) == selected.read_bytes(), 'independent select reconstruction'
         run([args.runner, selected], '42\n')
 
+        # A grouped 160-label section must stay shallow enough for exec v10:
+        # the switch lowering uses a balanced disjunction of comparisons.
+        labels = ''.join(f'case {value}:' for value in range(160))
+        switch_source = 'int main(){int result=0;switch(159){' + labels + 'result=42;break;default:result=0;}return result;}'
+        switched, _, switched_json = compile_source('switch-coverage', switch_source)
+        switch_reader = WireReader()
+        switch_view = switch_reader.read(switched.read_bytes())
+        assert {19, 27, 28, 29} <= switch_reader.opcodes, switch_reader.opcodes
+        assert switched_json['exec-version'] == 10 and max(switch_reader.opcodes) <= 50
+        assert encode_compact_module(switch_view) == switched.read_bytes(), 'independent lowered-switch reconstruction'
+        run([args.runner, switched], '42\n')
+
         minimum = module([function(block(returning(constant(42))))])
         checks = 0
 

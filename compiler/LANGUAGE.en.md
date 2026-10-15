@@ -321,7 +321,7 @@ if (i == 0) { return 1; } else { return 2; }
 
 `mem_get(pointer) = value` is supported and evaluates its pointer once. Compound memory assignments such as += are rejected to prevent duplicate side effects. Store the pointer first, then write `mem_get(p) = mem_get(p) + value`. Other calls cannot be assignment targets.
 
-Return exits through nested if/while/for blocks. Break exits the innermost loop; continue skips the rest of its iteration. Both require a loop body and cannot cross functions. Exited blocks still clean their objects. While continue rechecks its condition; for continue runs its step before the condition. Break, return, and errors skip the step.
+Return exits through nested if/while/for/switch blocks. Break exits the innermost loop or switch; continue skips the rest of the nearest enclosing loop iteration, even from inside a switch. Break requires a loop or switch, and continue requires a loop; neither can cross functions. Exited blocks still clean their objects. While continue rechecks its condition; for continue runs its step before the condition. Break, return, and errors skip the step.
 
 ```c
 int total = 0;
@@ -339,6 +339,33 @@ print(total); // 9
 Every normal exit of a nonvoid function must return. Both if branches must return. While/for counts as nonterminating only with literal true conditions (or an omitted for condition) and no break belonging to that loop; otherwise compilation reports `non-void function can reach the end of its body without returning a value`. Statements end in semicolons, optional immediately before block end; function-definition trailing semicolons are optional. Array subscripts, object-literal expression syntax, closures, and exception handling are unsupported and rejected.
 
 Integers are signed 32-bit; out-of-range literals fail compilation. Decimal/scientific literals default to double; f/F produces float, e.g. 1.5f, 5f, 2e3f. Both reject overflow and underflow to zero. Numeric print/string concatenation uses shortest round-trippable text: `0.1+0.2` → `0.30000000000000004`, `123456789.0` → `123456789`, `1e20` → `1e+20`; float uses its own precision (0.1f → 0.1), and negative zero prints -0. Runtime-only zero divisors compile but int/float/double division, including positive/negative floating zero, throws `Division by zero`, never Infinity/NaN. Arithmetic integer overflow also fails at runtime; bitwise shifts use the bit-pattern rules below.
+
+### switch
+
+`switch (value) { ... }` is a statement, not an expression. It evaluates its int or string value once and selects a matching literal label. Other types, including dynamic `any`, are rejected; convert a dynamic value explicitly, for example `switch (int(value))` or `switch (string(value))`.
+
+```c
+string action = "save";
+switch (action) {
+    case "save":
+    case "write":
+        print("saved");
+        break;
+    default:
+        print("unknown");
+        break;
+    case "quit":
+        print("bye"); // final section has an implicit break
+}
+```
+
+Case labels must be int literals (including negative integers) for an int switch or string literals for a string switch; expressions, variables, mismatched types, duplicate labels, and multiple defaults are rejected. Stacked labels share one section. `default` may appear anywhere and runs only when no case label matches. Without a matching case or default, execution continues after the switch. Statements before the first label and `case`/`default` outside a switch are errors.
+
+There is no fall-through. Every non-final section must leave via `break`, `return`, an applicable `continue`, or another path that cannot complete normally; a branch that can reach the next section is an error. The final section may finish normally and gets an implicit break. Each section has its own local/object scope; stacked labels share that scope, and leaving it performs normal cleanup.
+
+`break` exits the innermost enclosing loop or switch. `continue` inside a switch continues the nearest enclosing loop, including its for-step; a switch without an enclosing loop cannot use `continue`. Nested switches preserve this targeting. A switch with a default and every section returning can satisfy a nonvoid function's return requirement; without a default, an unmatched path remains.
+
+Selection uses comparisons rather than a jump table and consumes execution steps proportional to the labels checked before a match, or all labels when none matches. No new runtime opcode is introduced.
 
 ### Bitwise and shift operators
 
@@ -445,7 +472,7 @@ Source files, main and included, must be regular files: directories, FIFOs and d
 - 16,777,216 characters of preprocessed text, with every include and macro expanded, not counting the newline that ends the last line, so a source file of the largest size without includes or macros stays within it;
 - 4,194,304 lexical tokens per program.
 
-A leading UTF-8 BOM is ignored. Reserved words include return, if, else, while, for, break, continue, def, var, class, new, this, null, delete, extern, public/private/protected/virtual, any, all type names, and true/false; none may name classes, fields, methods, type parameters, functions, parameters, variables, globals, macros, or externs (`'any' is a reserved word and cannot be used as a name`). Identifier characters follow the Java identifier rules for characters of the Basic Multilingual Plane (letters, digits, `_`, `$` and the like, not starting with a digit), except that control and format characters, such as the zero-width space U+200B or the bidirectional override U+202E, are never part of one, so two names cannot look alike; in source they are reported as `Unexpected character: U+202E`, and so is a U+FEFF anywhere but at the start of a file. Diagnostics print such characters as escapes, e.g. `Invalid field name: x\u202e`. `compile-json` applies the same rules to class, field, method, type-parameter, function, parameter, local, and global names in a handwritten AST, e.g. `in class P: 'any' is a reserved word and cannot be used as a field name`; local names starting with `#` are left to compiler-generated variables.
+A leading UTF-8 BOM is ignored. Reserved words include return, if, else, while, for, switch, case, default, break, continue, def, var, class, new, this, null, delete, extern, public/private/protected/virtual, any, all type names, and true/false; none may name classes, fields, methods, type parameters, functions, parameters, variables, globals, macros, or externs (`'any' is a reserved word and cannot be used as a name`). Identifier characters follow the Java identifier rules for characters of the Basic Multilingual Plane (letters, digits, `_`, `$` and the like, not starting with a digit), except that control and format characters, such as the zero-width space U+200B or the bidirectional override U+202E, are never part of one, so two names cannot look alike; in source they are reported as `Unexpected character: U+202E`, and so is a U+FEFF anywhere but at the start of a file. Diagnostics print such characters as escapes, e.g. `Invalid field name: x\u202e`. `compile-json` applies the same rules to class, field, method, type-parameter, function, parameter, local, and global names in a handwritten AST, e.g. `in class P: 'any' is a reserved word and cannot be used as a field name`; local names starting with `#` are left to compiler-generated variables.
 
 ABD's 128-level container bound governs nesting. Function bodies start at level 4; expression nodes, arguments, statements, and blocks consume levels, allowing roughly 120 chained operators or 60 nested blocks. Excess depth reports the file, line/column and function, e.g. `main.azs:2:8: error: in function main: Expression nesting exceeds the ABD limit of 128 levels; split the expression or statement`. Generic and pointer type expressions have a separate 64-level nesting limit, including type strings in handwritten ASTs. Parser recursion and JSON containers have an additional 320-level guard, reported at the innermost enclosing statement or field, or at the JSON line/column; cyclic ASTs are rejected early. Compilation may continue with other programs in the same process after errors.
 
@@ -491,7 +518,7 @@ main.azs:4:9: warning: in function main: assignment used as a condition; use '==
 | Warning | Default | Reported for |
 |---|---|---|
 | `assign-in-condition` | on | A plain `=` assignment written directly as the condition of `if`, `while` or `for`, e.g. `if (done = check())`, at its `=`. Parentheses mark an intended assignment: `if ((done = check()))`. |
-| `unreachable-code` | on | The first statement after `return`, `break`, `continue`, an `if`/`else` whose branches all leave, or a `while (true)`/`for (;;)` loop without `break`; once per block. As in errors, an assignment or `++`/`--` statement is located at its operator. |
+| `unreachable-code` | on | The first statement after `return`, `break`, `continue`, an `if`/`else` whose branches all leave, a switch with default whose sections all return, or a `while (true)`/`for (;;)` loop without `break`; once per block. As in errors, an assignment or `++`/`--` statement is located at its operator. |
 | `unused-variable` | off | A local variable that is never used after its declaration; reading or assigning it counts as a use. Parameters, names starting with `_`, and objects declared for their construction and destruction (`C c;`, `C * p(args);`, buffers and type-parameter values) are exempt. |
 
 `-Wall` enables every warning, `-W<name>` enables one and `-Wno-<name>` disables one; an option naming a warning wins over `-Wall` in either order, and the last option for the same warning wins. `-w` suppresses all warnings. `-Werror` reports enabled warnings as errors, e.g. `main.azs:4:9: error: in function main: ... [-Werror=assign-in-condition]`, so the compilation fails. An unknown warning name is a usage error (`Error: Unknown warning option: -Wxyz`).
@@ -620,6 +647,8 @@ int functionId(int ns, int position) {
 ## AST and ABD contract
 
 Readable AST retains metadata/ext/abstract/global-variable/body, plus extern-signatures. `global-variable` lists the `#gvar` names as strings, then each typed global as `{"name", "type", "initializer"?}` with its position; compile-json checks and initializes them like source. Class programs retain definitions, ordered fields, member expressions, and other compile-time data; compile-json reruns checks/lowering. A qualified base call is `{"t":"ctrl","call":"base-call","param":["Base","method",args...]}` with optional `type-args`. Hint, assumes, extern declarations, definition names, and actual definition numbers are retained for byte-identical roundtrips. Abstract maps source names with extern priority: declaration ID when present, otherwise definition ID. Hint definitions retain placeholder 0000; self-assume call addresses are produced during lowering. Independent definition positions live in body namespaces and metadata.position/name. Signatures store return-type and param-types. Expression objects use `t: "ctrl" | "call"`, call, param; blocks are arrays.
+
+Readable switch AST uses `{"t":"ctrl","call":"switch","param":[value,sections]}`, where sections is an array. Each section is `{"t":"ctrl","call":"case","labels":[literal,...],"param":[body]}` with a statement-array body and optional `default: true`; a default-only section has no case labels. The parser retains individual labels; compilation groups adjacent empty sections with the following body. compile-json repeats label, scope, jump, and fall-through checks. Lowering evaluates the value once, then uses a one-shot loop with sibling if sections and balanced short-circuit label comparisons; default is checked last regardless of its source position. Hidden locals keep source break/continue targets intact.
 
 A conditional expression is `{"t":"ctrl","call":"select","param":[condition,thenValue,elseValue]}` with exactly three expression parameters. compile-json repeats the boolean-condition and common-arm-type checks, then inserts any numeric conversions before lowering to opcode 50.
 
