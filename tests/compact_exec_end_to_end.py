@@ -788,6 +788,43 @@ def main():
                 assert result.returncode == 0 and result.stdout == expected and not result.stderr, (name, result.stdout, result.stderr)
             checks += 1
 
+        if args.host:
+            # Structural specimens are loaded and flushed without invocation;
+            # their types need only be valid wire/link metadata, not arithmetic.
+            boundary_id, factory_id, generic_id, plain_id = 0x34560002, 0x34560003, 0x34560004, 0x34560005
+            scalar_context = {'abi': 0, 'kind': 0}
+            deep_context = scalar_context
+            for _ in range(59):
+                deep_context = {'abi': 8, 'kind': 3, 'width': 1, 'factory': factory_id, 'contexts': [deep_context]}
+            auxiliary = [function(expression(32, integer(1)), factory_id, return_type=8, hidden_count=1, entry_kind=1),
+                         function(constant(0), generic_id, params=[7], hidden_count=1),
+                         function(constant(0), plain_id, params=[7])]
+            entry_empty = stack(integer(plain_id), encode_contexts([]))
+            entry_fixed = stack(integer(generic_id), encode_contexts([deep_context]))
+            specimens = [
+                ('scalar-payload', constant(1), 1),
+                ('call-argument-list', expression(2, integer(plain_id), stack(constant(Address(0))), stack()), 3),
+                ('fixed-context-empty-lists', expression(36, encode_context(scalar_context)), 2),
+                ('factory-context-list', expression(36, encode_context(deep_context)), 120),
+                ('call-context-list', expression(2, integer(generic_id), stack(constant(Address(0))), encode_contexts([deep_context])), 121),
+                ('method-entry-empty-contexts', expression(52, constant(Address(0)), stack(entry_empty)), 3),
+                ('method-entry-fixed-context', expression(52, constant(Address(0)), stack(entry_fixed)), 123),
+                ('virtual-argument-list', expression(53, integer(0), integer(0), stack(constant(Address(0)))), 3),
+            ]
+            for label, specimen, height in specimens:
+                for deepest in (128, 129):
+                    body = specimen
+                    for _ in range(deepest - 4 - height):
+                        body = expression(26, body)
+                    binary = work / f'depth-boundary-{label}-{deepest}.abd'
+                    binary.write_bytes(frame(stack(*module([function(body, boundary_id, return_type=5, params=[7], hidden_count=1), *auxiliary]))))
+                    result = subprocess.run([str(args.host), str(binary), 'flush'], cwd=ROOT, capture_output=True, text=True, timeout=10)
+                    if deepest == 128:
+                        assert result.returncode == 0 and not result.stdout and not result.stderr, (label, deepest, result.stdout, result.stderr)
+                    else:
+                        assert result.returncode != 0 and 'nesting' in result.stderr.lower(), (label, deepest, result.stdout, result.stderr)
+                    checks += 1
+
         execute_wire('independent-minimum', expected='42\n')
         for name, value, kind, expected in [('float', Scalar(FLOAT, struct.pack('<f', 1.25)), 2, '1.25\n'),
                 ('double', Scalar(DOUBLE, struct.pack('<d', 2.5)), 3, '2.5\n'),

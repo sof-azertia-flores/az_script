@@ -138,7 +138,7 @@ public final class Diagnostics {
      */
     public static boolean userError(Throwable failure) {
         if (failure instanceof CompileException compiled) return !compiled.internal();
-        return failure != null && (failure.getClass() == IllegalArgumentException.class || failure instanceof TreeLimits.LimitExceeded);
+        return failure != null && (failure.getClass() == IllegalArgumentException.class || failure instanceof TreeLimits.LimitExceeded || failure instanceof AbdLinearizer.LimitExceeded);
     }
 
     /**

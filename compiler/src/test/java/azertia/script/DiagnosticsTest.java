@@ -718,13 +718,13 @@ class DiagnosticsTest {
         JsonObject node = JsonParser.parseString("{\"t\":\"ctrl\",\"call\":\"var\",\"param\":[\"x\"],\"_file\":1,\"_line\":3,\"_column\":10}").getAsJsonObject();
         SourceMap sources = SourceMap.fromJson(JsonParser.parseString("[{\"name\":\"main.azs\"},{\"name\":\"inc/lib.azs\",\"included-from\":{\"source\":0,\"line\":2,\"column\":1}}]"), "<source>").input("tree.json");
         NullPointerException cause = new NullPointerException("boom");
-        CompileException internal = Compiler.unexpected(cause, node, "function main", new Compiler.CompilationState(new Diagnostics(), sources, true));
+        CompileException internal = Compiler.unexpected(cause, node, "function main", new Compiler.CompilationState(new Diagnostics(), sources, true, TreeLimits.MAX_ABD_NESTING));
         assertEquals("inc/lib.azs:3:10: error: in function main: internal compiler error: NullPointerException: boom\n"
                 + "main.azs:2:1: note: in file included from here\n"
                 + "note: this is a compiler bug; rerun with --debug-compiler for a stack trace", internal.getMessage());
         assertTrue(internal.internal() && internal.fatal());
         assertSame(cause, internal.getCause());
-        CompileException malformed = Compiler.unexpected(cause, node, "function main", new Compiler.CompilationState(new Diagnostics(), sources, false));
+        CompileException malformed = Compiler.unexpected(cause, node, "function main", new Compiler.CompilationState(new Diagnostics(), sources, false, TreeLimits.MAX_ABD_NESTING));
         assertEquals("tree.json: error: in function main: Malformed script JSON near inc/lib.azs:3:10", malformed.getMessage());
         assertTrue(malformed.fatal() && !malformed.internal());
         // A stack overflow while compiling a parsed program is an internal compiler error with exit status 2.

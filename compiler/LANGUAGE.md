@@ -556,7 +556,21 @@ extern int host_add(int, int):0xccf0001;
 
 源文件开头的 UTF-8 BOM 会被忽略，不影响首行指令。`return`、`if`、`else`、`while`、`for`、`switch`、`case`、`default`、`break`、`continue`、`def`、`var`、`class`、`new`、`this`、`null`、`delete`、`extern`、`public/private/protected/virtual`、`override`、`final`、`any`、所有类型名以及 `true/false` 是保留字，不能声明为类、字段、方法、类型参数、函数、参数、变量、`#gvar`、`#define` 或 `extern` 的名字，报告为 `'any' is a reserved word and cannot be used as a name`。标识符的字符沿用 Java 标识符规则中基本多文种平面（BMP）的字符（字母、数字、`_`、`$` 等，不能以数字开头），但控制字符和格式字符（如零宽空格 U+200B、双向覆盖 U+202E）不能出现在标识符中，以免两个名字看起来相同，源码中报告为 `Unexpected character: U+202E`；不在文件开头的 U+FEFF 同样如此报告。诊断信息把这类字符打印为转义形式，如 `Invalid field name: x\u202e`。`compile-json` 对手写 AST 中的类、字段、方法、类型参数、函数、参数、局部变量和全局变量名应用同一套规则，例如 `in class P: 'any' is a reserved word and cannot be used as a field name`；以 `#` 开头的局部变量名留给编译器生成的变量。
 
-嵌套上限以 ABD 的 128 层容器嵌套为准：函数体从第 4 层开始，每个二元/一元运算、每个调用参数、每条语句和每个块各占一层，所以一个表达式大约可以串联 120 个运算符，或嵌套约 60 层块。超限时编译器报告文件、行列和所在函数，例如 `main.azs:2:8: error: in function main: Expression nesting exceeds the ABD limit of 128 levels; split the expression or statement`。泛型类型及指针的类型表达式嵌套最多 64 层，手写 AST 中的类型字符串也遵守此限制。语法递归和 JSON 容器另有 320 层防护上限，用于保护宿主，超限时报告最内层所在的语句或字段，或 JSON 行列；循环引用的 AST 会提前拒绝。错误后同一进程可以继续编译其他程序。
+### 表达式大小与嵌套
+
+执行文件仍限制为 128 层物理 ABD 容器。编译器按实际编码结构计数，包括表达式记录、实参/语句列表、常量封装、操作上下文及其子列表；函数体从第 4 层开始。因此源码运算符数量本身不是深度上限：安全时，编译器把中间结果存入隐藏局部变量，生成较浅的语句。
+
+拆分适用于初始化、返回、表达式语句、if 条件及 for 每轮条件/步进中符合条件的立即求值部分；每次切分都必须保持求值、复制和生命周期规则。拥有型捕获在原语句后释放，返回时先保留结果再清理捕获。if 条件在进入任一分支前完成检查并释放其拥有型临时值；`?:` 和布尔表达式的临时值保留通常的表达式/语句生命周期。
+
+借用的拥有型值或动态 any 值只能在原操作已经产生实参/值副本的位置捕获：普通或虚调用的参数、buffer 实参或比较操作数。借用的 buffer 接收对象不能捕获，因为复制会改变别名身份。标量前缀不能把原生/extern 调用的拥有型实参或比较/buffer 的拥有型快照移入更早的语句。若要让新产生的拥有型接收对象跨越后续脚本调用保留，必须传递检查这些函数及其被调用者，证明其不改变作用域和生命周期；仅有标量返回类型并不足够。`mem_send_up`、反射/加载库、未知宿主或虚调用、未证明安全的类/成员/buffer/泛型操作及类型未知的 any 值都会阻止此证明，后续可能返回自动指针的调用也会使切分不安全。这些情况报告 `Expression nesting exceeds the ABD limit of 128 levels; this cut would change object lifetime or copying; store this operand in a local variable first`。
+
+原始内存或带类型成员赋值的 RHS 若需拆分，就不能含调用或修改。否则诊断以 `; store RHS in a local variable first` 结尾，因为现有指令无法在任意 RHS 副作用期间保留原存储引用。纯 RHS 可在捕获并验证目标后拆分；带类型成员访问保留对象基址及原字段偏移，不会变成原始内存访问。
+
+惰性操作数（`&&`/`||` 右侧、任一 `?:` 分支或函数式 if 分支）内部及 while 条件内部的切分不能移到外围语句之前。需要这种切分时，编译器在源码位置报告原因，并提示先存入局部变量。诊断以 `Expression nesting exceeds the ABD limit of 128 levels` 开头，并附加 `; store this operand in a local variable first` 或 `; store this condition in a local variable first`。惰性分支的计算应放在实际选中的分支内；while 条件可在循环体内计算，再显式检查并 break，确保每轮重新计算。较深的后缀/成员/调用链及真正嵌套的语法仍消耗深度，自动拆分不保证无限嵌套。
+
+泛型及指针类型表达式仍有独立的 64 层上限。语法递归和 JSON 容器有 320 层防护，编译表达式递归有 640 层防护；循环 AST 会被拒绝。错误仍有位置，同一进程之后可以继续编译。Java `Compiler.compileExpression` API 同样校验代码树和编码深度，可以降级语句数组；独立表达式若需要兄弟语句，则报告 `Expression requires statement-level spilling; store this operand in a local variable first`，应把相关计算放进语句数组或函数。
+
+`getDepth()` 返回实现定义的运行时作用域深度，不等同于源码花括号层数，编译器生成的作用域也可能影响它。
 
 ### 诊断
 

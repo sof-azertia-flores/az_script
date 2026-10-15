@@ -64,6 +64,7 @@ def main():
         execute('string main(){return "n="+16777217.0f;}','n=16777216\n')
         # Flat operator chains are limited by the ABD depth, not the old syntax budget.
         execute('int main(){return '+'+'.join(['1']*100)+';}','100\n')
+        execute('int main(){return '+'+'.join(['1']*130)+';}','130\n')
         execute('int main(){return f();}int f(){while(true){return 5;}}','5\n')
         execute('﻿#define X 5\nint main(){return X;}','5\n')
         for zero_division in [
@@ -86,8 +87,7 @@ def main():
                        'extern int host_add(int, int):0xccf0001;\nint main(){return host_add(1);}',
                        'int f(){} int main(){return f();}',
                        'int while(){return 1;} int main(){return 2;}',
-                       'int main(){def(if,1);return 1;}',
-                       'int main(){return '+'+'.join(['1']*130)+';}']:
+                       'int main(){def(if,1);return 1;}']:
             path=work/'bad.azs';path.write_text(source,encoding='utf-8')
             result=compiler('compile',path,'-o',work/'bad.abd',success=False)
             assert 'Error:' in result.stderr and 'Exception in thread' not in result.stderr,result.stderr

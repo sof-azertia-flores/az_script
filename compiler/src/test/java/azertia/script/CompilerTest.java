@@ -614,18 +614,17 @@ class CompilerTest {
         assertEquals(1, Main.run(new String[]{"compile", source.toString(), "-o", source.toString()}, messages, messages));
         assertEquals("int main(){return 6*7;}", Files.readString(source));
     }
-    @Test void flatOperatorChainsFitTheAbdLimitAndDeeperOnesAreLocated() throws Exception {
+    @Test void eagerChainsAndNestedCallsSpillWhileTrueNestingStaysLocated() throws Exception {
         assertDoesNotThrow(() -> compile("int main(){return " + "1+".repeat(100) + "1;}"));
         assertDoesNotThrow(() -> compile("boolean main(){return " + "true&&".repeat(100) + "true;}"));
         assertDoesNotThrow(() -> compile("string main(){return " + "\"a\"+".repeat(100) + "\"b\";}"));
         assertDoesNotThrow(() -> compile("int main(){" + "if(true){".repeat(40) + "return 1;" + "}".repeat(40) + "return 0;}"));
+        assertDoesNotThrow(() -> compile("int main(){\nreturn " + "1+".repeat(130) + "1;}"));
+        assertDoesNotThrow(() -> compile("int id(int v){return v;} int main(){return " + "id(".repeat(70) + "1" + ")".repeat(70) + ";}"));
         var failure = assertThrows(IllegalArgumentException.class,
-                () -> compile("int main(){\nreturn " + "1+".repeat(130) + "1;}"));
-        assertTrue(failure.getMessage().contains("ABD limit"), failure::getMessage);
+                () -> compile("boolean main(){\nreturn " + "!".repeat(700) + "true;}"));
+        assertTrue(failure.getMessage().contains("nesting"), failure::getMessage);
         assertTrue(failure.getMessage().contains("<source>:2:"), failure::getMessage);
-        var calls = assertThrows(IllegalArgumentException.class,
-                () -> compile("int id(int v){return v;} int main(){return " + "id(".repeat(70) + "1" + ")".repeat(70) + ";}"));
-        assertTrue(calls.getMessage().contains("ABD limit"), calls::getMessage);
     }
     @Test void reservedWordsCannotBeDeclaredAndByteOrderMarkIsIgnored() throws Exception {
         for (String source : new String[]{"int while(){return 1;} int main(){return 2;}",
@@ -785,12 +784,11 @@ class CompilerTest {
         assertRejected(withoutClass);
         assertDoesNotThrow(() -> compile("int main(){return 1;}"));
     }
-    @Test void memberLoweringCountsAdditionalAbdAddressContainers() throws Exception {
+    @Test void memberLoweringSpillsAdditionalAbdAddressContainers() throws Exception {
         String prefix = "class P{P* next;int x;}int main(){P p;return p";
         assertDoesNotThrow(() -> compile(prefix + ".next".repeat(10) + ".x;}"));
-        var error = assertThrows(IllegalArgumentException.class, () -> compile(prefix + ".next".repeat(40) + ".x;}"));
-        assertTrue(error.getMessage().contains("ABD limit"), error::getMessage);
-        assertTrue(error.getMessage().contains("main:"), error::getMessage);
+        assertDoesNotThrow(() -> compile(prefix + ".next".repeat(40) + ".x;}"));
+        assertDoesNotThrow(() -> compile(prefix + ".next".repeat(70) + ".x;}"));
     }
     @Test void fieldInitializationDiagnosticsRetainTheDeclarationLocation() {
         var error = assertThrows(IllegalArgumentException.class,
@@ -976,7 +974,7 @@ class CompilerTest {
         var sourceDepth = assertThrows(IllegalArgumentException.class,
                 () -> compile("void main(){" + "if(true){".repeat(45) + "print(1);" + "}".repeat(45) + "}"));
         assertTrue(sourceDepth.getMessage().contains("<source>:1:"), sourceDepth::getMessage);
-        assertTrue(sourceDepth.getMessage().contains("ABD limit"), sourceDepth::getMessage);
+        assertTrue(sourceDepth.getMessage().contains("ABD"), sourceDepth::getMessage);
         AbdValue program = Compiler.compile(newTree("void main(){}")).toValue();
         AbdValue body = rawStack(AbdBasicType.int2Abd(ExecOpcodes.BREAK));
         for(int i=0;i<64;i++) body=rawStack(AbdBasicType.int2Abd(ExecOpcodes.BLOCK),rawStack(body));

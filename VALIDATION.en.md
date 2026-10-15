@@ -1,3 +1,13 @@
+# C25 Exact ABD Depth and Statement Spilling (2026-10-15)
+
+[中文](VALIDATION.md) | English
+
+Added exhaustive iterative ExecShape measurement, per-function lowering metadata and sibling-statement cuts for eligible eager expressions. Cuts preserve order, typed OA offsets/target validation and owned temporaries; lazy/while/standalone or unproved copy/lifetime/scope cuts report located local-variable hints. Transitive scope-effect analysis is iterative. IF condition captures end before branches; constructor completion records remain atomic. No wire/runtime/version change was required.
+
+Required V0–V2 passed sequentially with JAVA_TOOL_OPTIONS unset:316 Java tests,5944 native checks,405 independent wire cases and all existing JNI/module/lifetime suites. Each complete ordinary/sanitizer run passed152 depth/differential checks; forced96/64/48 exercised extra locals/defines in12/13/13 cases. Feasible examples retained exact output;35 infeasible records per report carry explicit reasons, and16 declaration/library records are not standalone. Real fresh OBJECT retention added one DROP and preserved destructor order. After both full builds,20 supplemental owned-return checks passed separately on each runtime, covering retained-buffer copies, consumed call arguments, returned OBJECT/MOVE_OUT and primary-error preservation; no production change followed the full runs. No ASan/UBSan reports occurred.
+
+Integration corrected source-anchor typing, explicit user-error classification for AbdLinearizer limits, old diagnostic-fixture constructor arguments and two raw-read initializer casts before successful runs. Independent reviews found no remaining blocker. Logs/reports: build/c25/v1.log,v2.log,limits-v1.json,limits-v2.json,owned-return-normal.log,owned-return-sanitize.log. This step requires no V3; C24's verified export remains available and C28 reruns final distribution validation.
+
 # C24 Virtual Methods and Snapshot v10 (2026-10-15)
 
 [中文](VALIDATION.md) | English

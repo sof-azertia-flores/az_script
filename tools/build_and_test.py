@@ -168,6 +168,8 @@ def main():
               '--runner', native/'interpreter/azscript-run', '--host', native/'interpreter/numeric-module-host']
     if jni:virtuals += ['--bridge', bridge, '--library', native/'abdjni'/libname]
     run(virtuals)
+    run([sys.executable, ROOT/'tests/limits_end_to_end.py', '--classpath', classpath,
+         '--runner', native/'interpreter/azscript-run', '--host', native/'interpreter/numeric-module-host'])
     types=[sys.executable, ROOT/'tests/type_safety_end_to_end.py', '--classpath', classpath,
            '--runner', native/'interpreter/azscript-run']
     if jni:types += ['--bridge', bridge, '--library', native/'abdjni'/libname]

@@ -127,6 +127,7 @@ public class Compiler {
         final Diagnostics diagnostics;
         final SourceMap sources;
         final CompilerMetrics metrics;
+        final int abdLimit;
         /** Whether the in-process parser produced the AST, which makes unexpected exceptions internal compiler errors. */
         final boolean parsed;
         /**
@@ -149,8 +150,9 @@ public class Compiler {
         /** With debug info: the exec debug file table, and the index of each source unit's name in it. */
         List<String> debugFiles = List.of();
         int[] unitFiles;
-        CompilationState(Diagnostics diagnostics, SourceMap sources, boolean parsed) {
+        CompilationState(Diagnostics diagnostics, SourceMap sources, boolean parsed, int abdLimit) {
             this.diagnostics = diagnostics; this.sources = sources; this.parsed = parsed; metrics = diagnostics.metrics();
+            this.abdLimit=abdLimit;
         }
         /**
          * Turns debug info on: the debug file table holds each distinct source unit name,
@@ -228,6 +230,7 @@ public class Compiler {
         /** The outermost environment, cached; null until a scope with a parent first needs it. */
         private LogicEnvironment root;
         private Map<String,Integer> typeScope = Map.of();
+        private FunctionTables tables;
         private List<Integer> typeParameters = List.of();
         private Counter counter = new Counter();
         /** Root only: diagnostics and the source table; a bare environment stops at the first error and names its source {@code <expression>}. */
@@ -243,17 +246,19 @@ public class Compiler {
             arities = new HashMap<>(); functionReturnTypes = new HashMap<>(); externSignatures = new LinkedHashMap<>();
             scriptSignatures = new LinkedHashMap<>(); builtinSignatures = new LinkedHashMap<>(); namedSignatures = new LinkedHashMap<>();
             classes = new LinkedHashMap<>(); trustedNodes = Collections.newSetFromMap(new IdentityHashMap<>()); callOwners = new IdentityHashMap<>();
+            tables=new FunctionTables(Map.of(),null);
         }
         private LogicEnvironment(LogicEnvironment root) {
             arities = root.arities; functionReturnTypes = root.functionReturnTypes; externSignatures = root.externSignatures;
             scriptSignatures = root.scriptSignatures; builtinSignatures = root.builtinSignatures; namedSignatures = root.namedSignatures;
             classes = root.classes; trustedNodes = root.trustedNodes; callOwners = root.callOwners; this.root = root;
+            tables=root.tables;
         }
         LogicEnvironment child() {
             LogicEnvironment child = new LogicEnvironment(root()); child.parent = this; child.counter = counter;
             child.context = context; child.returnType = returnType; child.loopDepth = loopDepth; child.ownerClass = ownerClass;
             child.syntheticLoop = syntheticLoop;
-            child.typeScope = typeScope; child.typeParameters = typeParameters; return child;
+            child.typeScope = typeScope; child.typeParameters = typeParameters;child.tables=tables;return child;
         }
         LogicEnvironment loopChild() {
             LogicEnvironment child = child(); child.loopDepth++; child.syntheticLoop = null; return child;
@@ -270,7 +275,7 @@ public class Compiler {
         }
         CompilationState state() {
             LogicEnvironment root = root();
-            if (root.state == null) root.state = new CompilationState(Diagnostics.failFast(), SourceMap.single("<expression>"), false);
+            if (root.state == null) root.state = new CompilationState(Diagnostics.failFast(), SourceMap.single("<expression>"), false, abdLimit());
             return root.state;
         }
         public int getFunctionId(String name) {
@@ -324,6 +329,7 @@ public class Compiler {
             if (local(alias) != null) throw new IllegalArgumentException("Duplicate variable in the same scope: " + alias);
             LogicVariable variable = new LogicVariable(); variable.name = alias; variable.slot = slot; variable.type = type;
             variable.alias.add(alias);
+            tables.slots.put(slot,abiType(type));
             index.put(alias, vars.size()); vars.add(variable); indexed++; return variable;
         }
     }
@@ -481,9 +487,9 @@ public class Compiler {
         if (numeric(target) && numeric(actual) && actual != target) {
             JsonObject conversion = callNode(typeName(target), array(arm));
             copyPosition(arm.isJsonObject() ? arm : source, conversion, environment);
-            return compileExpression(conversion, environment);
+            return compileNode(conversion, environment);
         }
-        return compileExpression(arm, environment);
+        return compileNode(arm, environment);
     }
     /**
      * The type of a value that is either branch: identical types, a pointer for null,
@@ -548,14 +554,14 @@ public class Compiler {
         if (source.has("type-args")) throw new IllegalArgumentException(name + " conversion does not take type arguments");
         JsonElement value = params.get(0);
         int target = conversionTarget(name), actual = expressionType(value, environment);
-        if (target == AsTypes.ADDRESS_VALUE && isClassPointer(actual)) return compileExpression(value, environment);
+        if (target == AsTypes.ADDRESS_VALUE && isClassPointer(actual)) return compileNode(value, environment);
         boolean supported = actual == AsTypes.ANY_VALUE || actual == target
                 || numeric(target) && (numeric(actual) || actual == AsTypes.STRING_VALUE)
                 || target == AsTypes.STRING_VALUE && (numeric(actual) || actual == AsTypes.ADDRESS_VALUE);
         if (!supported) throw new IllegalArgumentException("Cannot convert " + typeName(actual) + " to " + typeName(target));
-        if (actual == target) return compileExpression(value, environment);
+        if (actual == target) return compileNode(value, environment);
         AcsObject result = new AcsObject(); result.put("t", 0); result.put("c", ExecOpcodes.CONVERT);
-        result.put("type", target); result.put("v", compileExpression(value, environment)); return result;
+        result.put("type", target); result.put("v", compileNode(value, environment)); return result;
     }
     private static boolean returnCompatible(int expected, int actual) {
         return assignable(expected, actual)
@@ -696,14 +702,28 @@ public class Compiler {
      */
     private static <T> T withDepth(int levels, java.util.function.Supplier<T> action) {
         int[] holder = EXPRESSION_DEPTH.get(); int depth = holder[0];
-        if (depth + levels + TreeLimits.ABD_LEVELS_ABOVE_FUNCTION_BODY > TreeLimits.MAX_ABD_NESTING)
-            throw new IllegalArgumentException("Expression nesting exceeds the ABD limit of "
-                    + TreeLimits.MAX_ABD_NESTING + " levels; split the expression or statement");
+        if (depth + levels > 2*TreeLimits.MAX_NESTING)
+            throw new IllegalArgumentException("Expression nesting exceeds the compiler limit of " + 2*TreeLimits.MAX_NESTING + " levels");
         holder[0] = depth + levels;
         try { return action.get(); }
         finally { holder[0] = depth; }
     }
-    public static AcsElement compileExpression(JsonElement input, LogicEnvironment environment) {
+    public static AcsElement compileExpression(JsonElement input,LogicEnvironment environment) {
+        TreeLimits.validate(input);
+        AcsElement compiled=compileNode(input,environment);
+        environment.tables.nextSlot=environment.counter.next;
+        try { return new AbdLinearizer(environment.tables,environment.state().abdLimit).standalone(compiled); }
+        catch(AbdLinearizer.LimitExceeded error) { throw relocate(error,environment.tables.origins.getOrDefault(error.node,input),environment); }
+        finally { environment.counter.next=environment.tables.nextSlot; }
+    }
+    private static int abdLimit() {
+        String configured=System.getProperty("azscript.internal.abdLimit");
+        if(configured==null)return TreeLimits.MAX_ABD_NESTING;
+        try { int value=Integer.parseInt(configured);if(value>=32&&value<=TreeLimits.MAX_ABD_NESTING)return value; }
+        catch(NumberFormatException ignored) { }
+        throw new IllegalArgumentException("azscript.internal.abdLimit must be an integer between 32 and 128");
+    }
+    private static AcsElement compileNode(JsonElement input, LogicEnvironment environment) {
         environment.state().metrics.compiledNodes++;
         // Nested expressions almost always share their function's type scope; set it only when it changes.
         Map<String,Integer> previousScope=TYPE_SCOPE.get();boolean changed=previousScope!=environment.typeScope;
@@ -719,6 +739,7 @@ public class Compiler {
      */
     private static AcsElement recordPosition(JsonElement input, AcsElement result, LogicEnvironment environment) {
         CompilationState state = environment.state();
+        if(input instanceof JsonObject)environment.tables.origins.putIfAbsent(result,input);
         if (state.positions == null || !(result instanceof AcsObject || result instanceof AcsArray)) return result;
         if (result instanceof AcsObject object && object.mmp.get("t") instanceof AcsIntegerElement kind && kind.s == 0
                 && object.mmp.get("c") instanceof AcsIntegerElement code && code.s == ExecOpcodes.VARIABLE) return result;
@@ -889,7 +910,7 @@ public class Compiler {
                 JsonElement end = null; boolean reported = !checkReachability;
                 for (JsonElement statement : input.getAsJsonArray()) {
                     if (end != null && !reported) reported = warnUnreachable(end, statement, scope);
-                    block.acsa.add(compileExpression(statement, scope));
+                    block.acsa.add(compileNode(statement, scope));
                     if (end == null && !reported && !canCompleteNormally(statement)) end = statement;
                 }
                 return null;
@@ -936,7 +957,7 @@ public class Compiler {
             AcsArray args=new AcsArray();
             for(JsonElement argument:converted) {
                 rejectVoidValue(label+" argument",argument,environment);
-                args.acsa.add(withDepth(1,()->compileExpression(argument,environment)));
+                args.acsa.add(withDepth(1,()->compileNode(argument,environment)));
             }
             result.put("param",args);if(virtualSlot==null)result.put("contexts",contexts(binding.types(),environment));
             if(binding.genericReturn())return typeCheck(result,binding.signature().returnType(),environment);
@@ -982,7 +1003,7 @@ public class Compiler {
                         requireKnownExact("Initializer for " + alias, declaredType,
                                 expressionType(params.get(1), environment));
                     else rejectUntypedObject("Untyped variable " + alias, params.get(1), environment);
-                    initializer = compileExpression(params.get(1), environment);
+                    initializer = compileNode(params.get(1), environment);
                 }
                 if (environment.counter.next >= MAX_VARIABLE_SLOTS)
                     throw new IllegalArgumentException("Function frame exceeds " + MAX_VARIABLE_SLOTS + " variable slots");
@@ -1012,7 +1033,8 @@ public class Compiler {
                             expressionType(params.get(1), environment));
                 else rejectUntypedObject("Untyped variable " + alias, params.get(1), environment);
                 result.put("v", variable.slot);
-                result.put("val", compileExpression(params.get(1), environment));
+                result.put("val", compileNode(params.get(1), environment));
+                environment.tables.results.put(result,isOwnedValue(variable.type)||isTypeParameter(variable.type)||variable.type==AsTypes.ANY_VALUE);
             }
             case "mov" -> {
                 arity(call, params, 2, 2);
@@ -1029,7 +1051,7 @@ public class Compiler {
                         return compileInstruction(assignment, environment);
                     }
                 }
-                AcsElement left = compileExpression(params.get(0), environment);
+                AcsElement left = compileNode(params.get(0), environment);
                 boolean variable = left instanceof AcsObject target && target.getAsInt("t") == 0
                         && target.getAsInt("c") == ExecOpcodes.VARIABLE;
                 boolean memory = left instanceof AcsObject target && target.getAsInt("t") == 1
@@ -1040,7 +1062,7 @@ public class Compiler {
                 rejectVoidValue("Assignment", params.get(1), environment);
                 rejectUntypedObject("Raw memory", params.get(1), environment);
                 result.put("c", ExecOpcodes.code("m")); result.put("v1", left);
-                result.put("v2", compileExpression(params.get(1), environment));
+                result.put("v2", compileNode(params.get(1), environment));
             }
             case "return" -> {
                 arity(call, params, 0, 1);
@@ -1061,7 +1083,7 @@ public class Compiler {
                                 + ", got " + typeName(actual)
                                 + (numeric(environment.returnType) && numeric(actual)
                                 ? "; narrowing requires an explicit cast such as " + typeName(environment.returnType) + "(x)" : ""));
-                    result.put(isTypeParameter(environment.returnType)?"v":"r", compileExpression(params.get(0), environment));
+                    result.put(isTypeParameter(environment.returnType)?"v":"r", compileNode(params.get(0), environment));
                 }
             }
             case "null" -> { arity(call, params, 0, 0); return withDepth(1, () -> new AcsAddress(0L)); }
@@ -1070,10 +1092,11 @@ public class Compiler {
                 ClassInfo info = receiverClass(params.get(0), environment);
                 AcsObject address = new AcsObject(); address.put("t", 0); address.put("c", ExecOpcodes.code("oa"));
                 JsonElement receiver = receiverAddress(params.get(0), environment);
-                address.put("v", withDepth(2, () -> compileExpression(receiver, environment))); address.put("offset", (int) info.fieldOffsets.get(field.name()));
+                address.put("v", withDepth(2, () -> compileNode(receiver, environment))); address.put("offset", (int) info.fieldOffsets.get(field.name()));
                 environment.state().metrics.tableProbes++;
                 result.put("t", 1); result.put("id", 0x0abd0006);
                 AcsArray args = new AcsArray(); args.acsa.add(address); result.put("param", args);
+                environment.tables.results.put(result,isOwnedValue(field.type())||isTypeParameter(field.type())||field.type()==AsTypes.ANY_VALUE);
             }
             case "member-set" -> {
                 arity(call, params, 2, 2);
@@ -1084,8 +1107,9 @@ public class Compiler {
                 requireWritableReceiver(parameters(member).get(0),environment);
                 Field field = memberField(parameters(member), environment);
                 requireKnownExact("Assignment to member " + field.name(), field.type(), expressionType(params.get(1), environment));
-                result.put("c", ExecOpcodes.code("m")); result.put("v1", compileExpression(member, environment));
-                result.put("v2", compileExpression(params.get(1), environment));
+                result.put("c", ExecOpcodes.code("m")); result.put("v1", compileNode(member, environment));
+                result.put("v2", compileNode(params.get(1), environment));
+                environment.tables.results.put(result,isOwnedValue(field.type())||isTypeParameter(field.type())||field.type()==AsTypes.ANY_VALUE);
             }
             case "member-call" -> { return isStringReceiver(source,environment) ? compileStringMethod(source,environment)
                     : isBufferReceiver(source,environment)?compileBufferCall(source,environment):compileInstruction(memberCall(source,environment),environment); }
@@ -1128,7 +1152,7 @@ public class Compiler {
                 if (!isPointerClass(objectType) && objectType != NULL_TYPE)
                     throw new IllegalArgumentException(isValueClass(objectType) ? "delete requires a class pointer; a literal object ends with its variable"
                             : "delete requires a known class pointer or null");
-                result.put("c", ExecOpcodes.code("od")); result.put("v", compileExpression(params.get(0), environment));
+                result.put("c", ExecOpcodes.code("od")); result.put("v", compileNode(params.get(0), environment));
             }
             case "#context-abi", "#context-default" -> {
                 requireTrusted(source,environment);arity(call,params,1,1);
@@ -1140,12 +1164,12 @@ public class Compiler {
                 // Compiler-generated allocation must bypass the class's user method names.
                 result.put("t", 1); result.put("id", 0x0abd0014);
                 AcsArray args = new AcsArray();
-                args.acsa.add(withDepth(1, () -> compileExpression(new JsonPrimitive(info.fields.size()), environment)));
+                args.acsa.add(withDepth(1, () -> compileNode(new JsonPrimitive(info.fields.size()), environment)));
                 result.put("param", args);
             }
             case "#bind" -> {
                 requireTrusted(source, environment); arity(call, params, 3, 3);
-                result.put("c", ExecOpcodes.code("ob")); result.put("v", compileExpression(params.get(0), environment));
+                result.put("c", ExecOpcodes.code("ob")); result.put("v", compileNode(params.get(0), environment));
                 if (!params.get(1).isJsonNull()) {
                     String destructor=string(params.get(1),"Destructor name");result.put("destructor",environment.getFunctionId(destructor));
                     ClassInfo owner=environment.root().classes.get(destructor.substring(0,destructor.indexOf("::")));
@@ -1157,7 +1181,7 @@ public class Compiler {
             case "#set-methods" -> {
                 requireTrusted(source,environment);arity(call,params,0,0);
                 ClassInfo info=classInfo(environment.ownerClass,environment);
-                result.put("c",ExecOpcodes.SET_METHODS);result.put("v",compileExpression(variable("this"),environment));
+                result.put("c",ExecOpcodes.SET_METHODS);result.put("v",compileNode(variable("this"),environment));
                 AcsArray entries=new AcsArray();
                 for(VirtualMethod method:info.vtable) {
                     AcsObject entry=new AcsObject();entry.put("id",environment.getFunctionId(method.function()));
@@ -1176,9 +1200,9 @@ public class Compiler {
                 // argument temporaries. Comparing two actual VOID values yields true.
                 AcsObject completed=new AcsObject();completed.put("t",0);completed.put("c",ExecOpcodes.EQUAL);
                 JsonElement baseCall=params.get(1);
-                completed.put("v1",withDepth(1,()->compileExpression(baseCall,environment)));
+                completed.put("v1",withDepth(1,()->compileNode(baseCall,environment)));
                 completed.put("v2",withDepth(3,()->new AcsByteArray(new byte[]{(byte)0xff})));
-                result.put("val",completed);
+                result.put("val",completed);environment.tables.atomic.add(result);
             }
             case "#new-block" -> {
                 requireTrusted(source, environment); arity(call, params, 1, 1);
@@ -1187,7 +1211,7 @@ public class Compiler {
             }
             case "#address-of" -> {
                 requireTrusted(source, environment); arity(call, params, 1, 1);
-                result.put("c", ExecOpcodes.code("block_address")); result.put("v", compileExpression(params.get(0), environment));
+                result.put("c", ExecOpcodes.code("block_address")); result.put("v", compileNode(params.get(0), environment));
             }
             case "#move" -> {
                 requireTrusted(source, environment); arity(call, params, 1, 1);
@@ -1196,11 +1220,11 @@ public class Compiler {
             }
             case "#drop" -> {
                 requireTrusted(source, environment); arity(call, params, 1, 1);
-                result.put("c", ExecOpcodes.code("drop")); result.put("v", compileExpression(params.get(0), environment));
+                result.put("c", ExecOpcodes.code("drop")); result.put("v", compileNode(params.get(0), environment));
             }
             case "#check-this" -> {
                 requireTrusted(source, environment); arity(call, params, 0, 0);
-                result.put("c", ExecOpcodes.code("oa")); result.put("v", compileExpression(variable("this"), environment)); result.put("offset", 0);
+                result.put("c", ExecOpcodes.code("oa")); result.put("v", compileNode(variable("this"), environment)); result.put("offset", 0);
             }
             case "#field-initialize" -> {
                 requireTrusted(source, environment); arity(call, params, 1, 1);
@@ -1209,7 +1233,7 @@ public class Compiler {
                 LogicEnvironment initialization = environment.root().child();
                 initialization.ownerClass = environment.ownerClass;initialization.typeScope=environment.typeScope;initialization.typeParameters=environment.typeParameters;
                 initialization.context = "initializer of class " + environment.ownerClass;
-                initialization.returnType = AsTypes.VOID_VALUE; initialization.counter = environment.counter;
+                initialization.returnType = AsTypes.VOID_VALUE; initialization.counter = environment.counter;initialization.tables=environment.tables;
                 initialization.define("this", 0, classInfo(environment.ownerClass, environment).pointerType);
                 try { return compileInstruction(params.get(0).getAsJsonObject(), initialization); }
                 catch (RuntimeException error) { throw relocate(error, source, initialization); }
@@ -1221,7 +1245,7 @@ public class Compiler {
                 String name = string(params.get(0), "Global name");
                 LogicEnvironment initialization = environment.root().child();
                 initialization.context = "global " + name;
-                initialization.returnType = AsTypes.VOID_VALUE; initialization.counter = environment.counter;
+                initialization.returnType = AsTypes.VOID_VALUE; initialization.counter = environment.counter;initialization.tables=environment.tables;
                 try {
                     JsonElement value = params.get(1);
                     rejectVoidValue("Initializer for global " + name, value, initialization);
@@ -1236,8 +1260,8 @@ public class Compiler {
             case "#cleanup" -> {
                 requireTrusted(source, environment); arity(call, params, 3, 3);
                 result.put("c", ExecOpcodes.code("cleanup"));
-                result.put("v", compileExpression(params.get(0), environment));
-                result.put("val", compileExpression(params.get(1), environment));
+                result.put("v", compileNode(params.get(0), environment));
+                result.put("val", compileNode(params.get(1), environment));
                 result.put("on-error", params.get(2).getAsBoolean());
             }
             case "bit_and", "bit_or", "bit_xor", "shl", "shr", "ushr" -> {
@@ -1250,8 +1274,8 @@ public class Compiler {
                         throw new IllegalArgumentException("Shift count must be between 0 and 31, got " + count.toPlainString());
                 }
                 result.put("c", ExecOpcodes.code(call));
-                result.put("v1", compileExpression(params.get(0), environment));
-                result.put("v2", compileExpression(params.get(1), environment));
+                result.put("v1", compileNode(params.get(0), environment));
+                result.put("v2", compileNode(params.get(1), environment));
             }
             case "add", "minus", "multiply", "divide", "mod", "greater", "lower", "cmp", "ne", "ge", "le", "and", "or" -> {
                 arity(call, params, 2, 2);
@@ -1294,8 +1318,8 @@ public class Compiler {
                     default -> requireComparable(params.get(0), params.get(1), environment);
                 }
                 result.put("c", ExecOpcodes.code(switch (call) { case "greater" -> "gt"; case "lower" -> "lt"; case "cmp" -> "eq"; default -> call; }));
-                result.put("v1", compileExpression(params.get(0), environment));
-                result.put("v2", compileExpression(params.get(1), environment));
+                result.put("v1", compileNode(params.get(0), environment));
+                result.put("v2", compileNode(params.get(1), environment));
             }
             case "neg", "pos", "not" -> {
                 arity(call, params, 1, 1);
@@ -1310,9 +1334,9 @@ public class Compiler {
                         JsonObject product = node("multiply", params.get(0), new JsonPrimitive(1)); copyPosition(source, product, environment);
                         return compileInstruction(product, environment);
                     }
-                    return compileExpression(params.get(0), environment);
+                    return compileNode(params.get(0), environment);
                 }
-                result.put("c", ExecOpcodes.code(call)); result.put("v", compileExpression(params.get(0), environment));
+                result.put("c", ExecOpcodes.code(call)); result.put("v", compileNode(params.get(0), environment));
             }
             case "float" -> {
                 arity(call, params, 1, 1);
@@ -1330,7 +1354,7 @@ public class Compiler {
                 if (call.equals("continue") && environment.syntheticLoop != null) {
                     SyntheticLoop loop = environment.syntheticLoop;
                     if (loop.outerLoopDepth() == 0) throw new IllegalArgumentException("continue can only be used inside a loop");
-                    return compileExpression(array(node("varset", new JsonPrimitive(loop.continueFlag()), new JsonPrimitive(true)), node("break")), environment);
+                    return compileNode(array(node("varset", new JsonPrimitive(loop.continueFlag()), new JsonPrimitive(true)), node("break")), environment);
                 }
                 if (environment.loopDepth == 0 && environment.syntheticLoop == null)
                     throw new IllegalArgumentException(call + " can only be used inside " + (call.equals("break") ? "a loop or switch" : "a loop"));
@@ -1344,7 +1368,7 @@ public class Compiler {
                 if (descriptor == null) throw new IllegalArgumentException("Missing synthetic loop descriptor");
                 LogicEnvironment loop = environment.child(); loop.syntheticLoop = descriptor;
                 result.put("c", ExecOpcodes.WHILE); result.put("v", new AcsBooleanElement(true));
-                result.put("val", compileExpression(params.get(0), loop)); finishScope(loop);
+                result.put("val", compileNode(params.get(0), loop)); finishScope(loop);
             }
             case "increment", "decrement" -> {
                 arity(call, params, 1, 1); JsonElement target = params.get(0);
@@ -1357,7 +1381,7 @@ public class Compiler {
                 JsonObject assignment = node("varset", targetParams.get(0), node("minus", target,
                         new JsonPrimitive(call.equals("increment") ? -1 : 1)));
                 assignment.addProperty("compound", true); copyPosition(source, assignment, environment);
-                return compileExpression(assignment, environment);
+                return compileNode(assignment, environment);
             }
             case "for" -> {
                 arity(call, params, 4, 4);
@@ -1376,7 +1400,7 @@ public class Compiler {
                 JsonArray iteration = array(
                         node("if", variable(first), node("varset", new JsonPrimitive(first), new JsonPrimitive(false)), params.get(2)),
                         exit, array(params.get(3)));
-                return compileExpression(array(params.get(0), firstDefinition,
+                return compileNode(array(params.get(0), firstDefinition,
                         node("while", new JsonPrimitive(true), iteration)), environment);
             }
             case "select" -> {
@@ -1384,7 +1408,7 @@ public class Compiler {
                 warnAssignmentCondition(params.get(0), environment);
                 int selectedType = selectType(params, environment);
                 result.put("c", ExecOpcodes.SELECT);
-                result.put("v", compileExpression(params.get(0), environment));
+                result.put("v", compileNode(params.get(0), environment));
                 // The selected arm's owned temporaries belong to this statement's
                 // existing scope. A statement-if would end an extra branch scope.
                 result.put("then", selectArm(params.get(1), selectedType, source, environment));
@@ -1396,13 +1420,13 @@ public class Compiler {
                 rejectVoidValue(call + " condition", params.get(0), environment);
                 requireConditionOrUnknown(call + " condition", params.get(0), environment);
                 result.put("c", ExecOpcodes.code(call.equals("if") ? "if" : "wi"));
-                result.put("v", compileExpression(params.get(0), environment));
+                result.put("v", compileNode(params.get(0), environment));
                 LogicEnvironment body = call.equals("while") ? environment.loopChild() : environment.child();
                 // A body without braces, e.g. "if (c) int x = f();", still ends its own scope.
-                result.put("val", compileExpression(params.get(1), body)); finishScope(body);
+                result.put("val", compileNode(params.get(1), body)); finishScope(body);
                 if (params.size() == 3) {
                     LogicEnvironment otherwise = environment.child();
-                    result.put("else", compileExpression(params.get(2), otherwise)); finishScope(otherwise);
+                    result.put("else", compileNode(params.get(2), otherwise)); finishScope(otherwise);
                 }
             }
             default -> throw new IllegalArgumentException("Unknown control operation: " + call);
@@ -1480,7 +1504,7 @@ public class Compiler {
         if (relayContinue && descriptor.outerLoopDepth() > 0) {
             JsonObject relay = node("if", variable(continued), node("continue")); copyPosition(source, relay, environment); wrapper.add(relay);
         }
-        return compileExpression(wrapper, environment);
+        return compileNode(wrapper, environment);
     }
     private static JsonArray switchBody(JsonArray body) {
         JsonArray result = new JsonArray(); result.addAll(body);
@@ -1722,7 +1746,7 @@ public class Compiler {
             rejectVoidValue(label,argument,environment);
             int actual = expressionType(argument,environment);
             if (actual != AsTypes.ANY_VALUE) requireKnownExact(label,spec.paramTypes().get(i),actual);
-            arguments.acsa.add(withDepth(1,()->compileExpression(argument,environment)));
+            arguments.acsa.add(withDepth(1,()->compileNode(argument,environment)));
         }
         // Constant IDs keep an enclosing class's same-named method from capturing
         // a primitive string operation through implicit-this name resolution.
@@ -1740,7 +1764,7 @@ public class Compiler {
         if (!method.equals("contains")) return compileStringBuiltin(builtin,arguments,false,environment);
         AcsElement result = withDepth(1,()->compileStringBuiltin(builtin,arguments,false,environment));
         AcsObject found = new AcsObject(); found.put("t",0); found.put("c",ExecOpcodes.GREATER_EQUAL); found.put("v1",result);
-        found.put("v2",compileExpression(new JsonPrimitive(0),environment));
+        found.put("v2",compileNode(new JsonPrimitive(0),environment));
         return found;
     }
     private static boolean isBufferReceiver(JsonObject source,LogicEnvironment environment) {
@@ -1767,9 +1791,9 @@ public class Compiler {
             requireKnownExact("Buffer index or capacity",AsTypes.INT_VALUE,expressionType(params.get(2),environment));
         if(action==4||action==5)requireKnownExact("Buffer element",element,expressionType(params.get(action==4?3:2),environment));
         AcsObject result=new AcsObject();result.put("t",0);result.put("c",ExecOpcodes.BUFFER_OP);result.put("op",action);
-        result.put("v",compileExpression(params.get(0),environment));AcsArray args=new AcsArray();
-        for(int i=2;i<params.size();i++){JsonElement arg=params.get(i);args.acsa.add(withDepth(1,()->compileExpression(arg,environment)));}
-        result.put("args",args);return result;
+        result.put("v",compileNode(params.get(0),environment));AcsArray args=new AcsArray();
+        for(int i=2;i<params.size();i++){JsonElement arg=params.get(i);args.acsa.add(withDepth(1,()->compileNode(arg,environment)));}
+        result.put("args",args);if(action==3)environment.tables.results.put(result,isOwnedValue(element)||isTypeParameter(element)||element==AsTypes.ANY_VALUE);return result;
     }
     private static AcsElement compileCompare(JsonObject source,LogicEnvironment environment) {
         if(!source.has("type-args")||source.getAsJsonArray("type-args").size()!=1)
@@ -1779,7 +1803,7 @@ public class Compiler {
         JsonArray params=parameters(source);arity("value_compare",params,2,2);
         for(JsonElement value:params)requireKnownExact("Comparison operand",type,expressionType(value,environment));
         AcsObject result=new AcsObject();result.put("t",0);result.put("c",ExecOpcodes.VALUE_COMPARE);result.put("context",context(type,environment,0));
-        result.put("v1",compileExpression(params.get(0),environment));result.put("v2",compileExpression(params.get(1),environment));return result;
+        result.put("v1",compileNode(params.get(0),environment));result.put("v2",compileNode(params.get(1),environment));return result;
     }
     private static void infer(int formal,int actual,Set<Integer> parameters,Map<Integer,Integer> known) {
         if(parameters.contains(formal)) {
@@ -1868,7 +1892,7 @@ public class Compiler {
         AcsArray args=new AcsArray();
         if(isTypeParameter(returns)){AcsObject abi=new AcsObject();abi.put("t",0);abi.put("c",36);abi.put("context",context(returns,environment,0));args.acsa.add(abi);}
         else args.acsa.add(new AcsIntegerElement(abiType(returns)));
-        for(JsonElement arg:params){rejectVoidValue("Reflection argument",arg,environment);args.acsa.add(withDepth(1,()->compileExpression(arg,environment)));}
+        for(JsonElement arg:params){rejectVoidValue("Reflection argument",arg,environment);args.acsa.add(withDepth(1,()->compileNode(arg,environment)));}
         result.put("param",args);return result;
     }
     private static AcsArray contexts(List<Integer> types,LogicEnvironment environment) {
@@ -2753,6 +2777,7 @@ public class Compiler {
      * changes the instructions.
      */
     public static AcsObject compile(JsonObject source, Diagnostics diagnostics, boolean debugInfo) {
+        int limit=abdLimit();
         boolean parsed = diagnostics.startCompile();
         Map<Integer,ClassInfo> previousLayouts = CLASS_LAYOUTS.get();
         var previousParameters=TYPE_PARAMETERS.get();var previousScope=TYPE_SCOPE.get();var previousDeclarations=CLASS_DECLARATIONS.get();
@@ -2767,7 +2792,7 @@ public class Compiler {
         catch (IllegalArgumentException malformed) { /* reported below */ }
         if (diagnostics.namesInput()) sources.input(diagnostics.defaultFile());
         diagnostics.sources(sources);
-        CompilationState state = new CompilationState(diagnostics, sources, parsed);
+        CompilationState state = new CompilationState(diagnostics, sources, parsed, limit);
         if (debugInfo) state.enableDebugInfo();
         try {
             // Bound nesting and reject cycles first: the shape check walks the whole tree.
@@ -3004,6 +3029,11 @@ public class Compiler {
             global.arities.put(id, signature.paramTypes().size()); global.functionReturnTypes.put(id, signature.returnType());
             global.scriptSignatures.put(id, signature);
         }
+        Map<Integer,Integer> returnAbis=new HashMap<>();global.functionReturnTypes.forEach((id,type)->returnAbis.put(id,abiType(type)));
+        global.tables=new FunctionTables(returnAbis,state.positions);
+        Set<Integer> scriptIds=new HashSet<>();
+        for(Function function:functions){scriptIds.add(function.id());scriptIds.add(global.getFunctionId(function.name()));}
+        global.tables.scriptIds=Set.copyOf(scriptIds);global.tables.scopeSafeCalls=scopeSafeCalls(functions,global);
         AcsArray signatures = new AcsArray();
         for (var entry : importIds.entrySet()) {
             Signature signature = entry.getValue(); AcsObject compiled = new AcsObject();compiled.put("id", entry.getKey().intValue());compiled.put("return-type", abiType(signature.returnType()));
@@ -3065,8 +3095,71 @@ public class Compiler {
         }
         return contextName(function).substring("function ".length());
     }
+    private static final Set<String> SCOPE_SCALAR_CONTROLS=Set.of(
+            "var","vardef","varset","mov","return","null","float","neg","pos","not",
+            "add","minus","multiply","divide","mod","greater","lower","cmp","ne","ge","le","and","or",
+            "bit_and","bit_or","bit_xor","shl","shr","ushr","if","while","for","switch","case","break","continue",
+            "increment","decrement","select","chain","if-chain");
+    /** Conservative transitive proof: helpers cannot promote allocations into a caller scope. */
+    private static Set<Integer> scopeSafeCalls(List<Function> functions,LogicEnvironment global) {
+        Map<Integer,Set<Integer>> dependencies=new HashMap<>();
+        for(Function function:functions) {
+            if(function.internal()||function.metadata().has("owner-class")||!function.typeParameters().isEmpty()
+                    ||isClass(function.returnType())||isBuffer(function.returnType())||isTypeParameter(function.returnType()))continue;
+            boolean scalar=true;for(int type:function.paramTypes())if(type==AsTypes.ANY_VALUE||isClass(type)||isBuffer(type)||isTypeParameter(type)){scalar=false;break;}
+            Set<Integer> called=new HashSet<>();
+            if(scalar&&scopeDependencies(function.script(),global,called)) {
+                dependencies.put(function.id(),called);dependencies.put(global.getFunctionId(function.name()),called);
+            }
+        }
+        Set<Integer> safe=new HashSet<>(dependencies.keySet());Map<Integer,List<Integer>> callers=new HashMap<>();Deque<Integer> unsafe=new ArrayDeque<>();
+        for(var entry:dependencies.entrySet())for(int callee:entry.getValue()) {
+            callers.computeIfAbsent(callee,ignored->new ArrayList<>()).add(entry.getKey());
+            if(!safe.contains(callee))unsafe.addLast(entry.getKey());
+        }
+        while(!unsafe.isEmpty()) {
+            int id=unsafe.removeFirst();if(!safe.remove(id))continue;
+            for(int caller:callers.getOrDefault(id,List.of()))unsafe.addLast(caller);
+        }
+        for(BuiltinSpec builtin:BUILTINS)if(builtin.id()!=0x0abd0005&&builtin.id()!=0x0abd0007&&builtin.id()!=0x0abd0008)safe.add(builtin.id());
+        return Set.copyOf(safe);
+    }
+    private static LogicVariable scopeVariable(LogicEnvironment environment,String name) {
+        for(LogicEnvironment scope=environment;scope!=null;scope=scope.parent){LogicVariable variable=scope.local(name);if(variable!=null)return variable;}
+        return null;
+    }
+    private static boolean scopeDependencies(JsonElement source,LogicEnvironment environment,Set<Integer> dependencies) {
+        Deque<JsonElement> pending=new ArrayDeque<>();if(source!=null)pending.push(source);
+        while(!pending.isEmpty()) {
+            JsonElement value=pending.pop();if(value.isJsonNull()||value.isJsonPrimitive())continue;
+            if(value.isJsonArray()){for(JsonElement child:value.getAsJsonArray())pending.push(child);continue;}
+            JsonObject node=value.getAsJsonObject();String kind=node.get("t").getAsString(),call=node.get("call").getAsString();
+            if(kind.equals("call")) {
+                String resolved=resolveCall(call,environment);
+                if(!SourceRules.CONVERSIONS.contains(call)||!resolved.equals(call)) {
+                    Integer id=environment.root().abs.get(resolved);if(id==null)return false;
+                    if(SourceRules.runtimeId(id)) {
+                        if(id==0x0abd0005||id==0x0abd0007||id==0x0abd0008)return false;
+                    } else if(environment.tables.scriptIds.contains(id))dependencies.add(id);else return false;
+                }
+            } else if(!kind.equals("ctrl")||!SCOPE_SCALAR_CONTROLS.contains(call))return false;
+            if(call.equals("vardef")) {
+                if(!node.has("declared-type"))return false;
+                String type=node.get("declared-type").getAsString();if(!SourceRules.TYPES.contains(type)||type.equals("buffer"))return false;
+            }
+            if((call.equals("var")||call.equals("varset"))&&!parameters(node).isEmpty()) {
+                LogicVariable variable=scopeVariable(environment,parameters(node).get(0).getAsString());
+                if(variable!=null&&variable.type==AsTypes.ANY_VALUE)return false;
+            }
+            for(JsonElement child:parameters(node))pending.push(child);
+            if(call.equals("if-chain")&&node.has("else"))pending.push(node.get("else"));
+        }
+        return true;
+    }
     private static AcsObject compileFunction(Function function, LogicEnvironment global, String context) {
         LogicEnvironment scope = global.child();scope.counter = new Counter();scope.context = context;scope.returnType = function.returnType();
+        scope.tables=new FunctionTables(global.tables.returns,global.state().positions);scope.tables.scriptIds=global.tables.scriptIds;scope.tables.scopeSafeCalls=global.tables.scopeSafeCalls;
+        for(LogicVariable variable:global.vars)scope.tables.slots.put(variable.slot,abiType(variable.type));
         scope.typeScope=function.typeScope();scope.typeParameters=function.typeParameters();TYPE_SCOPE.set(scope.typeScope);
         if (function.metadata().has("owner-class")) scope.ownerClass = string(function.metadata().get("owner-class"), "Function owner");
         int parameter = 0; AcsArray parameterTypes = new AcsArray();
@@ -3077,7 +3170,7 @@ public class Compiler {
         }
         scope.counter.next = parameter; AcsObject compiled = new AcsObject();compiled.put("id",function.id());compiled.put("return-type",abiType(scope.returnType));
         compiled.put("param-count",parameter);compiled.put("param-types",parameterTypes);compiled.put("hidden-count",scope.typeParameters.size());compiled.put("entry-kind",function.internal()?1:0);
-        compiled.put("script",compileExpression(classFunctionBody(function, global), scope));
+        AcsElement body=compileNode(classFunctionBody(function, global), scope);
         if (function.returnType() != AsTypes.VOID_VALUE && canCompleteNormally(function.script())) {
             // Reported at the closing brace that execution can reach.
             CompilationState state = global.state(); JsonObject meta = function.metadata();
@@ -3086,6 +3179,16 @@ public class Compiler {
             throw new CompileException(end == null ? state.sources.error(meta, context, text)
                     : Diagnostic.error(end, context, text, state.sources.includeNotes(state.sources.unitOf(meta))).inUnit(state.sources.unitOf(meta)));
         }
+        scope.tables.nextSlot=scope.counter.next;
+        try {
+            body=new AbdLinearizer(scope.tables,global.state().abdLimit).function(body);
+            ExecShape.requireFits(body,4,global.state().abdLimit);
+        } catch(AbdLinearizer.LimitExceeded error) {
+            JsonElement anchor=scope.tables.origins.get(error.node);
+            if(anchor==null||!anchor.isJsonObject()||global.state().sources.position(anchor.getAsJsonObject())==null)anchor=function.metadata();
+            throw relocate(error,anchor,scope);
+        }
+        scope.counter.next=scope.tables.nextSlot;compiled.put("script",body);
         compiled.put("local-count",scope.counter.next-parameter);return compiled;
     }
 }

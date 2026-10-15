@@ -603,6 +603,24 @@ int main() {
                  f"Packaged feature probe failed: {result.stdout!r}")
         passed("generic contexts, owning buffers, class operators, reflection, bitwise, shifts, conversions, conditional expressions, switch and Unicode strings through relocated tools")
 
+        # This nested expression exceeds the wire budget before C25 spilling.
+        limits_source = source_directory / "spilled expression.azs"
+        limits_source.write_text("int main(){int one=1;return " + "+".join(["one"] * 130) + ";}\n", encoding="utf-8")
+        limits_abd = cwd / "limits output/depth.exec.abd"
+        limits_ast = limits_abd.with_name("depth.ast.json")
+        limits_json = limits_abd.with_name("depth.exec.json")
+        _run([compiler, limits_source, "-o", limits_abd], cwd, compiler_environment)
+        _outputs(limits_abd, limits_ast, limits_json)
+        limits_view = json.loads(limits_json.read_text(encoding="utf-8"))
+        _require(any(fn["local-count"] > 1 for fn in limits_view["f"] if fn["id"] == 0x0fff0000),
+                 "The packaged compiler must spill an expression that exceeds the wire budget")
+        rebuilt_limits = limits_abd.with_name("depth.roundtrip.abd")
+        _run([compiler, "compile-json", limits_ast, "-o", rebuilt_limits], cwd, compiler_environment)
+        _require(limits_abd.read_bytes() == rebuilt_limits.read_bytes(), "Spilled package AST roundtrip differs")
+        limits_result = _run([runner, limits_abd], cwd, environment)
+        _require(limits_result.stdout == "130\n", f"Spilled package expression failed: {limits_result.stdout!r}")
+        passed("statement spilling through relocated compiler and runner")
+
         standalone = work / "standalone runner"
         standalone_bin = standalone / "bin"
         standalone_bin.mkdir(parents=True)
