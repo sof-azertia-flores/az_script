@@ -190,7 +190,7 @@ Literal objects do not cross JNI: Java calls returning them fail after destructi
 
 ## Addresses and low-level memory
 
-`address` is an independent uint64 type ranging from 0 to `18446744073709551615`, usable in locals, fields, parameters, and returns. Null is address zero. Explicit address locals require initialization; fields default to null. Int stays signed 32-bit; integer literals, allocation counts, offsets, variable IDs, and function IDs do not become addresses. No implicit conversions exist with integers, floating values, or booleans; integer 0 cannot replace null.
+`address` is an independent uint64 type ranging from 0 to `18446744073709551615`, usable in locals, fields, parameters, and returns. Null is address zero. Explicit address locals require initialization; fields default to null. Int stays signed 32-bit; integer literals, allocation counts, offsets, variable IDs, and function IDs do not become addresses. No implicit conversions exist with integers, floating values, or booleans; integer 0 cannot replace null. Explicit conversion also rejects address/numeric pairs: `address(a)` only preserves an existing address, while `string(a)` formats it as unsigned decimal. It does not convert a class pointer or null expression; see [explicit conversions](#explicit-conversions).
 
 ```cpp
 void main() {
@@ -330,6 +330,33 @@ Operations use 32-bit bit patterns and return signed int32. Left shift discards 
 Shift operators bind less tightly than addition/subtraction and more tightly than comparisons. Equality binds more tightly than bitwise `&`, then `^`, then `|`; all three bind more tightly than `&&` and `||`. Parenthesize a bit test as `(flags & mask) == 0`; `flags & mask == 0` attempts to apply `&` to a boolean and is rejected with a hint to parenthesize the comparison.
 
 Shift characters must be adjacent in the preprocessed text: `a >> b` is a shift, but `a > > b` is not and is rejected. Generic type closers remain separate in type syntax, so `buffer<buffer<int>>` and generic calls followed by shifts remain valid. Simple variables also support `&=`, `|=`, `^=`, `<<=`, `>>=`, and `>>>=`; members, subscripts, and `mem_get` are not compound-assignment targets. Unary `~x` lowers to `bit_xor(x, -1)` and introduces no separate unary opcode.
+
+### Explicit conversions
+
+`int(x)`, `float(x)`, `double(x)`, `string(x)`, and `address(x)` take exactly one expression and evaluate it once. They are reserved compiler built-ins, not user-overridable functions. These are the supported source/target pairs:
+
+| Source | `int` | `float` | `double` | `string` | `address` |
+| --- | --- | --- | --- | --- | --- |
+| `int`, `float`, or `double` | Truncate toward zero, then check int32 range | Round to float; check overflow | Convert to double | Existing shortest round-trip numeric text | Rejected |
+| `string` | Parse decimal integer | Parse decimal number as float | Parse decimal number as double | Identity | Rejected |
+| `address` | Rejected | Rejected | Rejected | Unsigned decimal text | Identity |
+
+Known boolean, void, class-value, class-pointer, buffer, null, and type-parameter sources are rejected. There are no boolean, void, class, buffer, or type-parameter conversion targets. In particular, `int(addressValue)`, `address(7)`, `address("7")`, and `address(classPointer)` are unsupported; `address(x)` currently only accepts an existing address value. `bool(x)` / `boolean(x)` report `Boolean conversions are not supported; write a comparison`. A C-style `(int)x` reports `C-style casts are not supported; write int(x)`.
+
+Numeric-to-int truncation happens before the range check: `int(2147483647.9)` is 2147483647 and `int(-2.9)` is -2. Floating conversions may lose precision (`float(16777217)` is 16777216), allow subnormals and underflow to zero, and reject overflow or non-finite results. These underflow rules apply to conversions from both numbers and strings; the source-literal range checks described above remain separate.
+
+Integer strings must match `[+-]?[0-9]+`, with no decimal point or exponent. Float/double strings allow an optional sign, decimal digits with an optional point (at least one digit), and an optional `e`/`E` exponent with an optional sign and at least one digit. Parsing is locale-independent and uses `.` as the decimal point. Whitespace, hex, `f` suffixes, NaN/Infinity, embedded NUL, and trailing text are rejected. For example, `int("+7")` and `double("2.5e-3")` succeed; `int("1e2")` and `float(" 1")` fail. String contents and range are checked at runtime even when the argument is a string literal.
+
+Unsupported known type pairs fail compilation with `Cannot convert X to Y`; dynamic `any` arguments are checked using their actual runtime tag. A known same-type conversion is an identity and emits no conversion opcode, while `any` always emits opcode 49, including when its actual type already matches. Runtime error messages include:
+
+```text
+Cannot convert double to int: value is out of range
+Cannot convert string " 1" to int: invalid decimal integer
+Cannot convert string "1f" to float: invalid decimal number
+Cannot convert string "1e400" to double: value is out of range
+```
+
+Quoted string values in errors are limited to the first 64 Unicode scalar characters, followed by `...` inside the quotes if truncated. Quotes/backslashes are escaped; non-ASCII characters and NUL use ASCII UTF-16 escapes, such as `\ud83d\ude00` and `\u0000`, so messages remain safe to carry through JNI.
 
 ## Strings, comments, and preprocessing
 
@@ -586,6 +613,7 @@ Generated exec/ABD uses `exec-version: 10`, independent of source version. All c
 | Buffer operation c=41 (buffer_op) | op, v, args; operations 0–6 are length/capacity/reserve/get/set/push/resize |
 | Default comparison c=42 (value_compare) | context, v1, v2 |
 | Bitwise/shift c=43…48 | v1, v2: bit_and/bit_or/bit_xor/shl/shr/ushr; int operands/results |
+| Explicit conversion c=49 (convert) | type: target 0/1/2/3/7, v: source expression |
 
 Root, functions, signatures, expressions, function/type/argument/statement lists use raw AbdStack. Fields retain length boundaries without names or known-type tags. Dynamic constants use single-element AbdArray preserving int/float/double/bool/string/void/address; extension metadata uses AbdMap. JSON constants and block arrays use binary opcodes 0 and 1. `Compiler.compile()` returns ExecProgram, still inspectable as AcsObject; toValue emits the wire format. Use ExecCodec.decode to recover the inspection view, not direct root AcsObject decoding.
 

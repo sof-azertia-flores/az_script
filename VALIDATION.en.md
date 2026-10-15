@@ -1,3 +1,11 @@
+# C17 Explicit Scalar Conversions (2026-10-15)
+
+[中文](VALIDATION.md) | English
+
+Added checked `int()`, `float()`, `double()`, `string()` and `address()` conversions and opcode 49. Numeric-to-int truncates before range validation; strings use strict decimal grammar and private C-locale floating parsing, with permitted underflow. Invalid pairs, overflow and malformed text throw located runtime errors. Same-type static conversions emit no instruction. Boolean, class and int/address cross-conversions remain rejected at this stage. Exec stays v10 and JNI snapshots v9.
+
+V0–V3 passed sequentially with `JAVA_TOOL_OPTIONS` unset. Both complete builds passed 238 Java tests and 4824 native checks. The operator/conversion suite passed 226 ordinary cases (including real JNI) and 222 sanitizer cases; all 273 independent wire cases passed. Existing cross-language, lifetime, math, module and JNI suites passed without ASan/UBSan reports. One new Java assertion initially expected a reserved-word diagnostic where the parser correctly reports a type-name declaration error; its exact expectation was fixed before the complete rerun. Independent review found no production blocker. The release export passed 25 relocation/consumer checks, and all 173 manifest file sizes and SHA-256 digests matched. Logs: `build/c17/v1.log`, `build/c17/v2.log`, `build/c17/v3.log`.
+
 # C16 Bitwise and Shift Operators (2026-10-15)
 
 [中文](VALIDATION.md) | English

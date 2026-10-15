@@ -1199,7 +1199,8 @@ public class GeneraterJson {
          */
         private boolean declarationAhead() {
             return knownType(current().text()) && !at("void") && classOwnerEnd(index) < 0
-                    && !(index + 1 < tokens.size() && tokens.get(index + 1).text().equals("::"));
+                    && !(index + 1 < tokens.size() && (tokens.get(index + 1).text().equals("::")
+                    || SourceRules.TYPES.contains(current().text()) && tokens.get(index + 1).text().equals("(")));
         }
         private String sourceType(String value, boolean allowVoid) {
             if (classNames.contains(value) || typeParameters.contains(value)) return value;
@@ -2210,6 +2211,7 @@ public class GeneraterJson {
                 expect(")"); return operation("ctrl", "object-new", token, args.toArray(JsonElement[]::new));
             }
             if (token.literal() != null) { advance(); return token.literal(); }
+            if (at("(") && cStyleCastAhead()) throw error("C-style casts are not supported; write int(x)", token);
             if (match("(")) {
                 JsonElement value = expression(); expect(")");
                 // Diagnostic-only marker: a parenthesized assignment is an intentional value.
@@ -2220,6 +2222,8 @@ public class GeneraterJson {
             if (at("{")) return block();
             if (token.identifier()) {
                 String name = advance().text();
+                if ((name.equals("boolean") || name.equals("bool")) && at("("))
+                    throw error("Boolean conversions are not supported; write a comparison", token);
                 if (KEYWORDS.contains(name))
                     throw error("'" + name + "' is " + (name.equals("any") ? "a reserved word" : "a statement") + " and cannot be used in an expression", token);
                 if (classNames.contains(name) && classOwnerEnd(index - 1) >= 0) return baseCall(token);
@@ -2238,6 +2242,25 @@ public class GeneraterJson {
                 return operation("ctrl", "var", token, new JsonPrimitive(name));
             }
             throw error("Expected expression, found '" + token.text() + "'");
+        }
+        /** Recognises cast-looking parentheses without changing the parser or declaration state. */
+        private boolean cStyleCastAhead() {
+            if (index + 2 >= tokens.size() || !knownType(tokens.get(index + 1).text())) return false;
+            int depth = 0;
+            for (int cursor = index + 1; cursor < tokens.size(); cursor++) {
+                String text = tokens.get(cursor).text();
+                if (text.equals(")") && depth == 0) {
+                    if (cursor + 1 >= tokens.size()) return false;
+                    Token next = tokens.get(cursor + 1);
+                    return next.literal() != null || next.identifier() && (!KEYWORDS.contains(next.text())
+                            || Set.of("new", "this", "null").contains(next.text()))
+                            || Set.of("(", "+", "-", "!", "~", "{").contains(next.text());
+                }
+                if (text.equals("<")) depth++;
+                else if (text.equals(">")) { if (depth == 0) return false; depth--; }
+                else if (!knownType(text) && !text.equals("*") && !text.equals(",")) return false;
+            }
+            return false;
         }
     }
     public static AzExpression getExpression(String source, int offset, AzScript script) {

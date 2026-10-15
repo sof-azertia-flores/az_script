@@ -128,6 +128,144 @@ class LanguageOpsTest {
         assertTrue(message.contains("shr expects 2 arguments, got 1"), message);
     }
 
+    private static int targetCode(String target) {
+        return switch (target) { case "int" -> 0; case "float" -> 2; case "double" -> 3; case "string" -> 1; case "address" -> 7; default -> throw new AssertionError(target); };
+    }
+    private static JsonObject execReturn(String source) throws Exception {
+        JsonObject program = Compiler.compile(tree(source)).toJson().getAsJsonObject();
+        for (JsonElement item : program.getAsJsonArray("f")) {
+            JsonObject function = item.getAsJsonObject();
+            if (function.get("id").getAsInt() == 0x0fff0000)
+                return function.getAsJsonArray("script").get(0).getAsJsonObject().getAsJsonObject("r");
+        }
+        throw new AssertionError("Missing main");
+    }
+
+    @Test void explicitConversionsFollowTheScalarMatrixAndRoundTrip() throws Exception {
+        List<String> numeric = List.of("int", "float", "double");
+        List<String> targets = List.of("int", "float", "double", "string", "address");
+        for (String target : targets) for (String from : List.of("int", "float", "double", "string", "address", "boolean")) {
+            String source = target + " main(" + from + " value){return " + target + "(value);}";
+            boolean supported = target.equals(from) || numeric.contains(target) && (numeric.contains(from) || from.equals("string"))
+                    || target.equals("string") && (numeric.contains(from) || from.equals("address"));
+            if (!supported) {
+                String message = failure(source).getMessage();
+                assertTrue(message.endsWith("Cannot convert " + from + " to " + target), message);
+                continue;
+            }
+            JsonObject converted = execReturn(source);
+            if (target.equals(from)) assertEquals(ExecOpcodes.VARIABLE, converted.get("c").getAsInt(), source);
+            else {
+                assertEquals(ExecOpcodes.CONVERT, converted.get("c").getAsInt(), source);
+                assertEquals(targetCode(target), converted.get("type").getAsInt(), source);
+                assertEquals(ExecOpcodes.VARIABLE, converted.getAsJsonObject("v").get("c").getAsInt(), source);
+            }
+            roundTrip(source);
+        }
+        // Content/range errors belong to execution, including malformed literal strings.
+        for (String source : List.of("int main(){return int(2147483647.9);}", "int main(){return int(\"+7\");}",
+                "float main(){return float(16777217);}", "int main(){return int(\" 1\");}",
+                "double main(){return double(\"1e400\");}")) roundTrip(source);
+    }
+
+    @Test void anyAlwaysEmitsConversionWhileKnownIdentityKeepsOneEvaluation() throws Exception {
+        for (String target : List.of("int", "float", "double", "string", "address")) {
+            String source = target + " main(value){return " + target + "(value);}";
+            JsonObject converted = execReturn(source);
+            assertEquals(ExecOpcodes.CONVERT, converted.get("c").getAsInt());
+            assertEquals(targetCode(target), converted.get("type").getAsInt());
+            roundTrip(source);
+        }
+        JsonObject identity = execReturn("int main(){return int(getDepth());}");
+        assertEquals(1, identity.get("t").getAsInt());
+        assertEquals(0x0abd0001, identity.get("id").getAsInt());
+        roundTrip("void main(){int(1);float(1);double(1);string(1);address(alloc(1));}");
+        roundTrip("int main(){int x=1;for(int(x);true;int(x)){break;}return x;}");
+    }
+
+    @Test void referencesNullAndTypeParametersCannotUseScalarConversions() {
+        record Case(String source, String message) {}
+        for (Case item : List.of(
+                new Case("class P{int n;}int main(){P value;return int(value);}", "Cannot convert P to int"),
+                new Case("class P{int n;}address main(){P* p=null;return address(p);}", "Cannot convert P * to address"),
+                new Case("class P{int n;}string main(){P* p=null;return string(p);}", "Cannot convert P * to string"),
+                new Case("string main(){buffer<int> b;return string(b);}", "Cannot convert buffer<int> to string"),
+                new Case("address main(){return address(null);}", "Cannot convert null to address"),
+                new Case("<T> int convert(T value){return int(value);}void main(){}", "Cannot convert T to int"),
+                new Case("int main(){return int(print(1));}", "Cannot convert void to int"))) {
+            String message = failure(item.source()).getMessage();
+            assertTrue(message.endsWith(item.message()), message);
+        }
+    }
+
+    @Test void conversionSyntaxGivesTargetedDiagnosticsAndKeepsNamesReserved() throws Exception {
+        for (String name : List.of("boolean", "bool")) {
+            String message = failure("void main(){" + name + "(1);}").getMessage();
+            assertTrue(message.endsWith("Boolean conversions are not supported; write a comparison"), message);
+        }
+        for (String source : List.of("int main(){double x=1.5;return (int)x;}",
+                "int main(){return (int) -2.0;}", "class P{int n;}void main(){P* p=null;(P*)p;}",
+                "int main(){return ((int)3.5);}")) {
+            String message = failure(source).getMessage();
+            assertTrue(message.contains("C-style casts are not supported; write int(x)"), message);
+        }
+        for (String name : SourceRules.CONVERSIONS) {
+            assertTrue(Compiler.isBuiltinName(name), name);
+            String message = failure("void " + name + "(){}void main(){}").getMessage();
+            assertTrue(message.endsWith("'" + name + "' is a type name and cannot be declared as a name"), message);
+        }
+        for (String call : List.of("int()", "int(1,2)", "int<int>(1)")) {
+            String message = failure("int main(){return " + call + ";}").getMessage();
+            assertTrue(message.contains("expects 1 arguments") || message.contains("does not take type arguments"), message);
+        }
+        roundTrip("int main(){int n=1;return (int(n))+(n);}");
+    }
+
+    @Test void conversionChecksApplyToHandWrittenAstCalls() throws Exception {
+        JsonObject ast = tree("int main(){return int(1);}");
+        JsonObject call = main(ast).getAsJsonArray("script").get(0).getAsJsonObject().getAsJsonArray("param").get(0).getAsJsonObject();
+        call.getAsJsonArray("param").set(0, new JsonPrimitive(true));
+        String message = assertThrows(CompileException.class, () -> Compiler.compile(ast)).getMessage();
+        assertTrue(message.endsWith("Cannot convert boolean to int"), message);
+        call.addProperty("call", "bool");
+        message = assertThrows(CompileException.class, () -> Compiler.compile(ast)).getMessage();
+        assertTrue(message.endsWith("Boolean conversions are not supported; write a comparison"), message);
+    }
+
+    @Test void conversionWireHasAValidatedIntegerTargetAndOneOperand() throws Exception {
+        for (String target : List.of("int", "float", "double", "string", "address")) {
+            String source = target + " main(value){return " + target + "(value);}";
+            AcsObject program = Compiler.compile(tree(source)); AbdValue wire = program.toValue();
+            var returned = body(wire).getAsAss().values.get(1).getAsAss().values.get(0).getAsAss();
+            var conversion = returned.values.get(2).getAsAss();
+            assertEquals(3, conversion.values.size());
+            assertEquals(ExecOpcodes.CONVERT, AbdBasicType.abd2int(conversion.values.get(0)));
+            assertEquals(targetCode(target), AbdBasicType.abd2int(conversion.values.get(1)));
+            AbdValue truncated = raw(conversion.values.subList(0, 2));
+            assertThrows(IllegalArgumentException.class, () -> ExecCodec.decode(replaceBody(wire, truncated)));
+            conversion.values.add(conversion.values.get(2)); AbdValue overlong = conversion.toAbd();
+            assertThrows(IllegalArgumentException.class, () -> ExecCodec.decode(replaceBody(wire, overlong)));
+        }
+        AcsObject program = Compiler.compile(tree("int main(value){return int(value);}"));
+        AbdValue wire = program.toValue();
+        var returned = body(wire).getAsAss().values.get(1).getAsAss().values.get(0).getAsAss();
+        var conversion = returned.values.get(2).getAsAss();
+        for (int bad : List.of(-1, 4, 5, 6, 8, 100)) {
+            AbdValue invalid = raw(List.of(conversion.values.get(0), AbdBasicType.int2Abd(bad), conversion.values.get(2)));
+            assertThrows(IllegalArgumentException.class, () -> ExecCodec.decode(replaceBody(wire, invalid)));
+        }
+        AbdValue shortType = raw(List.of(conversion.values.get(0), new AbdValue(new byte[]{0}), conversion.values.get(2)));
+        assertThrows(IllegalArgumentException.class, () -> ExecCodec.decode(replaceBody(wire, shortType)));
+        AcsObject converted = ((AcsObject) ((AcsObject) program.getAsAcsArray("f").acsa.get(0))
+                .getAsAcsArray("script").acsa.get(0)).getAsAcsObject("r");
+        converted.put("type", 4);
+        assertThrows(IllegalArgumentException.class, program::toValue);
+        converted.put("type", "int");
+        assertThrows(IllegalArgumentException.class, program::toValue);
+        converted.mmp.remove("type");
+        assertThrows(IllegalArgumentException.class, program::toValue);
+    }
+
     private static AbdValue raw(List<AbdValue> values) { AbdSimpleStack stack = new AbdSimpleStack(); stack.values.addAll(values); return stack.toAbd(); }
     private static AbdValue body(AbdValue wire) { return wire.getAsAss().values.get(7).getAsAss().values.get(0).getAsAss().values.get(5); }
     private static AbdValue replaceBody(AbdValue wire, AbdValue body) {

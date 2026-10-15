@@ -55,6 +55,12 @@ void main() {
 
 支持算术 `+ - * / %`、比较 `== != < <= > >=`、布尔 `&& || !`、仅用于 int 的位运算 `& | ^ ~`、移位 `<< >> >>>` 和赋值。简单变量支持 `+= -= *= /= %= &= |= ^= <<= >>= >>>=`。优先级从高到低为：一元、乘除取余、加减、移位、大小比较、相等比较、`&`、`^`、`|`、`&&`、`||`、赋值；仅 `&&`/`||` 短路。移位采用 32 位位模式：左移回绕，`>>` 扩展符号，`>>>` 补零；数量超出 0…31 会报错，不取模。位测试应写成 `(flags & mask) != 0`。移位符号必须相邻（`a > > b` 无效），`buffer<buffer<int>>` 等嵌套泛型结束符仍然有效，详见[位运算](LANGUAGE.md#位运算与移位)。字符串可用单引号或双引号，支持 `\n`、`\t`、`\\`、`\"`、`\'`、`\uXXXX` 等转义。注释使用 `//` 或 `/* ... */`。
 
+### 显式转换
+
+使用 `int(x)`、`float(x)`、`double(x)` 做数值转换或严格十进制字符串解析；`string(x)` 接受数值、address 或 string。`address(x)` 只对已有 address 做恒等转换。每种形式恰好接受一个参数，只求值一次。布尔、类值/指针、buffer、null 和类型参数不能转换，整数/字符串也不能变成 address。
+
+`int(2.9)` 为 2，`int(2147483647.9)` 为 2147483647，`int("+7")` 为 7。数值转 int 先向零截断再检查范围。浮点转换可能舍入、下溢为零或次正规数，但溢出会失败。整数字符串只允许可选正负号和十进制数字；float/double 字符串还允许小数点和指数。解析不受区域设置影响，小数点固定为 `.`，拒绝空格、十六进制、后缀、NaN/Infinity 和尾部多余文字，即使参数是字符串字面量也如此。使用 `int(x)` 而不是 `(int)x`，使用比较而不是 `bool(x)`；详见[转换配对表](LANGUAGE.md#显式转换)。
+
 ## 类、对象与析构
 
 ```cpp
@@ -118,7 +124,7 @@ int main() { return math_round(math_hypot(3.0, 4.0)); }
 ./run.sh examples/math-regressions.exec.abd --insert stdlib/math.exec.abd
 ```
 
-浮点 API 的实参必须为 `double`，如 `3.0`；整数 API 必须传 `int`。整数表达式可乘 `1.0` 后传给浮点 API。动态变量须先绑定到显式类型的局部变量。库以 `AZSCRIPT_MATH` hint 链接，头文件中的假定 namespace `4d41` 不代表实际运行地址。
+浮点 API 的实参必须为 `double`，如 `3.0`；整数 API 必须传 `int`。可使用 `double(value)` 将整数或动态数值实参转为浮点 API 所需类型。库以 `AZSCRIPT_MATH` hint 链接，头文件中的假定 namespace `4d41` 不代表实际运行地址。
 
 容器库同样只 include 声明。`List<int> * xs = new List<int>();` 创建链表，`delete xs;` 释放节点。`Vector<int> * xs = new Vector<int>();` 是连续数组，`Set` 和 `Map` 按默认比较保持有序。发行包附带 `stdlib/containers.exec.abd`：
 
@@ -133,7 +139,7 @@ int main() { return math_round(math_hypot(3.0, 4.0)); }
 
 宿主函数写完整签名，例如 `extern int host_add(int, int):0x12340001;`；宿主必须注册相同 ID 与对应参数和返回值。独立解释器没有应用专属的宿主回调，使用此类脚本时应嵌入 C++ 或 Java 宿主。
 
-内置 `print(value)`、`getDepth()`、`alloc(count)`、`mem_get(pointer)`、`mem_free(pointer)`、`make_free(pointer)`、`mem_send_up(pointer)` 和 `load_extern_library(name)` 无需声明。`load_extern_library` 加载当前系统的已签名动态库，见 [外部动态库](EXTERN_LIBRARY.md)。`alloc(int)` 返回 address，后四个内存接口接收 address。例如 `address p = alloc(2); mem_get(p + 1) = 42; mem_free(p);`，分配数量和偏移仍是 int。地址支持 `address + int`、`int + address`、`address - int`，以及地址间的无符号相等和大小比较；溢出和下溢报错，空地址使用 `p == null` 判断。地址不能与普通整数互相转换或作相等比较，也不能直接作为 if 条件。类指针仍保留静态类类型与继承规则，只在执行文件中擦除为 address；通常通过构造和 delete 管理，原始内存释放不会调用用户析构。
+内置 `print(value)`、`getDepth()`、`alloc(count)`、`mem_get(pointer)`、`mem_free(pointer)`、`make_free(pointer)`、`mem_send_up(pointer)` 和 `load_extern_library(name)` 无需声明。`load_extern_library` 加载当前系统的已签名动态库，见 [外部动态库](EXTERN_LIBRARY.md)。`alloc(int)` 返回 address，后四个内存接口接收 address。例如 `address p = alloc(2); mem_get(p + 1) = 42; mem_free(p);`，分配数量和偏移仍是 int。地址支持 `address + int`、`int + address`、`address - int`，以及地址间的无符号相等和大小比较；溢出和下溢报错，空地址使用 `p == null` 判断。地址仍不能与普通整数互相转换或作相等比较，也不能直接作为 if 条件；`address(a)` 只保留 address，`string(a)` 格式化其无符号值。类指针仍保留静态类类型与继承规则，只在执行文件中擦除为 address；通常通过构造和 delete 管理，原始内存释放不会调用用户析构。
 
 本发行包使用 exec v10 和 JNI 快照 v9，不读取旧执行文件或快照。所有模块须重新编译；编译时加 `-g` 可在执行文件中写入函数名和源码位置，默认执行文件不含这些名称；旧代码中的 `int p = alloc(...)` 须改为 `address p = alloc(...)`，依赖引用语义的 `Point p(...)` 须改为 `Point * p(...)`，`Point p = new Point(...)` 改为 `Point * p = new Point(...)`。64 位地址目前仍表示 slot 位置，既有堆容量和生命周期规则不变。
 

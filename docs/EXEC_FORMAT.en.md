@@ -79,6 +79,7 @@ Each expression is also a raw stack, beginning with an int32 opcode. `E` denotes
 | 46 | shl | `left:E, right:E` |
 | 47 | shr | `left:E, right:E` |
 | 48 | ushr | `left:E, right:E` |
+| 49 | convert | `type:int, value:E` |
 
 `if`/`wi` conditions and every evaluated operand of `and`/`or`/`not` must have BOOLEAN_VALUE (4). Numeric zero/nonzero and void are not truth values; a wrong tag throws `Condition must be boolean, got <type>`. `and`/`or` remain left-to-right and short-circuit, so a skipped right operand is not evaluated or checked at runtime. Source compilation also rejects statically known non-boolean operands, including the lowered `for` condition.
 
@@ -138,6 +139,14 @@ Snapshot v9 adds width, placement bindings, and recursive element contexts. Buff
 Each instruction is exactly `[opcode:int, left:E, right:E]`: 43 `bit_and`, 44 `bit_or`, 45 `bit_xor`, 46 `shl`, 47 `shr`, and 48 `ushr`. The inspection JSON uses `v1` and `v2` for the operands. Both evaluate once, left to right, and must be INT_VALUE (0), including shift counts; no numeric or boolean conversion applies. The result is also int32.
 
 Operations use uint32 bit patterns, then interpret the result as signed int32. `shl` discards high bits and fills with zero, `shr` sign-extends, and `ushr` fills with zero. Counts must be 0…31, inclusive, without masking; an invalid count throws `std::runtime_error` (JNI `IllegalStateException`), for example `Shift count must be between 0 and 31, got 32`. Shift wrap does not trigger arithmetic overflow. Source `~x` lowers to `bit_xor(x, -1)`; compound assignments lower to ordinary variable assignment of the corresponding binary operation. These opcodes extend exec v10 without changing its version or root/function layout; consumers must support opcodes through 48.
+
+## Explicit conversion (opcode 49)
+
+The record is exactly `[49, type:int, value:E]`, where the target type is int=0, string=1, float=2, double=3, or address=7; readers reject all other targets and missing/extra fields. The inspection JSON uses `type` and `v`. The value evaluates once before conversion. A statically known same-type source conversion emits only its source expression; a dynamic any source always emits this instruction, and same-tag runtime conversion is identity for these five targets.
+
+Numeric tags convert to int/float/double or string. Strings parse as decimal int/float/double or retain string identity. Address converts only to unsigned-decimal string or address identity. Boolean, void, and object tags are rejected. Class pointers and null are erased addresses in exec, so source compilation must enforce its separate ban on explicit class-pointer/null conversions; opcode 49 does not recover source class identity. int/address conversion and string-to-address parsing are unsupported.
+
+Numeric-to-int truncates toward zero before checking int32 range. Float/double conversions reject overflow and permit subnormals and underflow to zero. Parsing is locale-independent: integer strings require an optional sign and decimal digits only; floating strings permit a decimal point and exponent, with no whitespace, hex, suffix, NaN/Infinity, embedded NUL, or trailing text. Errors use `Cannot convert X to Y` with an invalid-decimal or out-of-range reason as appropriate; quoted strings are ASCII-escaped and truncated after 64 Unicode scalars. The language guide gives the source conversion matrix and examples. Exec remains v10; only the supported opcode set grows through 49.
 
 ## Type numbers and constants
 

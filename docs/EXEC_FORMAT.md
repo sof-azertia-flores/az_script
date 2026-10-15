@@ -79,6 +79,7 @@ stack 的成员数量由其 frame 边界确定；固定记录必须恰好包含�
 | 46 | shl | `left:E, right:E` |
 | 47 | shr | `left:E, right:E` |
 | 48 | ushr | `left:E, right:E` |
+| 49 | convert | `type:int, value:E` |
 
 `if`/`wi` 的条件，以及 `and`/`or`/`not` 中实际求值的每个操作数，必须为 BOOLEAN_VALUE（4）。数值零/非零与 void 不再表示真假；类型错误时抛出 `Condition must be boolean, got <type>`。`and`/`or` 仍从左到右短路，被跳过的右操作数在运行时不求值也不检查。源码编译还会拒绝静态已知的非布尔操作数，包括降级后的 `for` 条件。
 
@@ -138,6 +139,14 @@ JNI 快照 v9 递归保存对象已绑定的析构上下文，包括 ABI、kind�
 每条指令严格为 `[opcode:int, left:E, right:E]`：43 `bit_and`、44 `bit_or`、45 `bit_xor`、46 `shl`、47 `shr`、48 `ushr`。检查 JSON 用 `v1`、`v2` 表示操作数。两侧从左到右各求值一次，且必须为 INT_VALUE（0），移位量也不例外；不进行数值或布尔转换。结果同样为 int32。
 
 运算采用 uint32 位模式，再把结果解释为 signed int32。`shl` 丢弃高位并补零，`shr` 进行符号扩展，`ushr` 补零。移位量必须为 0…31（含端点），不做掩码截断；非法数量抛出 `std::runtime_error`（JNI 映射为 `IllegalStateException`），例如 `Shift count must be between 0 and 31, got 32`。移位回绕不触发算术溢出。源码 `~x` 降为 `bit_xor(x, -1)`；复合赋值降为对应二元运算后的普通变量赋值。这些 opcode 扩展 exec v10，不改变版本号、根记录或函数布局；消费方须支持到 opcode 48。
+
+## 显式转换（opcode 49）
+
+记录严格为 `[49, type:int, value:E]`，目标类型为 int=0、string=1、float=2、double=3 或 address=7；读取方拒绝其他目标以及缺失/多余字段。检查 JSON 使用 `type`、`v`。源值只求值一次，再执行转换。静态已知的同类型源码转换只保留源表达式；动态 any 源总是生成此指令，这五种目标在运行时遇到同标签值时均为恒等转换。
+
+数值标签可以转为 int/float/double 或 string。字符串可解析为十进制 int/float/double，或保持 string 恒等。address 只能转为无符号十进制 string 或保持 address 恒等。boolean、void 和 object 标签被拒绝。类指针和 null 在 exec 中擦除为 address，因此源码编译另行禁止显式转换类指针/null；opcode 49 不能恢复源码的类身份。不支持 int/address 互转或从字符串解析 address。
+
+数值转 int 先向零截断，再检查 int32 范围。float/double 转换拒绝溢出，允许次正规数及下溢为零。解析与区域设置无关：整数字符串只允许可选正负号和十进制数字；浮点字符串可含小数点与指数，不允许空白、十六进制、后缀、NaN/Infinity、嵌入 NUL 或尾部多余文字。错误格式为 `Cannot convert X to Y`，按需附加非法十进制格式或超范围原因；引用的字符串转义为 ASCII，并在 64 个 Unicode 标量后截断。源码转换配对表和示例见语言说明的显式转换一节。exec 仍为 v10，仅支持的 opcode 集合扩展到 49。
 
 ## 类型编号与常量
 

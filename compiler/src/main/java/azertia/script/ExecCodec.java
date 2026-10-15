@@ -100,6 +100,7 @@ public final class ExecCodec {
             TYPED_OPERAND=KeySpec.of("t c v context",""),
             BUFFER_OPERATION=KeySpec.of("t c op v args",""),
             VALUE_COMPARE=KeySpec.of("t c context v1 v2",""),
+            CONVERSION=KeySpec.of("t c type v",""),
             BINARY=KeySpec.of("t c v1 v2","");
     private static void keys(AcsObject object,KeySpec keys) {
         for(String name:keys.required())if(!object.mmp.containsKey(name)||object.mmp.get(name)==null)throw invalid("missing field "+name);
@@ -124,6 +125,9 @@ public final class ExecCodec {
     private static void type(int value,boolean parameter,boolean external) {
         if(value<0||value>8||value==5&&parameter)
             throw invalid("invalid "+(parameter?"parameter":"return")+" type "+value);
+    }
+    private static void conversionType(int type) {
+        if(type<0||type>3&&type!=7)throw invalid("invalid conversion target type "+type);
     }
     private static void scriptId(int id) {
         if(SourceRules.runtimeId(id))throw invalid("invalid script function id "+Diagnostic.hexId(id));
@@ -446,6 +450,10 @@ public final class ExecCodec {
                 keys(object,VALUE_COMPARE);fields.add(context(object.mmp.get("context"),layout,level+1));
                 fields.add(expression(object.mmp.get("v1"),layout,level+1));fields.add(expression(object.mmp.get("v2"),layout,level+1));
             }
+            case ExecOpcodes.CONVERT -> {
+                keys(object,CONVERSION);int type=integer(object,"type");conversionType(type);
+                fields.add(n(type));fields.add(expression(object.mmp.get("v"),layout,level+1));
+            }
             default -> {
                 if(!binaryOpcode(op))throw invalid("invalid control opcode "+op);
                 keys(object,BINARY);
@@ -639,6 +647,10 @@ public final class ExecCodec {
             case ExecOpcodes.VALUE_COMPARE -> {
                 view.put("context",decodeContext(record.next(),level+1));view.put("v1",decodeExpression(record.next(),level+1));
                 view.put("v2",decodeExpression(record.next(),level+1));
+            }
+            case ExecOpcodes.CONVERT -> {
+                int type=record.integer();conversionType(type);view.put("type",type);
+                view.put("v",decodeExpression(record.next(),level+1));
             }
             default -> {
                 if(!binaryOpcode(op))throw invalid("invalid control opcode "+op);

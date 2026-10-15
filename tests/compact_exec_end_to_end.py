@@ -24,7 +24,7 @@ OP_NAMES = {3: 'v', 4: 'vd', 5: 'vs', 6: 'm', 7: 'r', 8: 'ro', 9: 'oa',
             32: 'new_block', 33: 'block_address', 34: 'mv', 35: 'drop',
             36: 'context_abi', 37: 'context_default', 38: 'return_typed', 39: 'check_type',
             40: 'buffer_new', 41: 'buffer_op', 42: 'value_compare',
-            43: 'bit_and', 44: 'bit_or', 45: 'bit_xor', 46: 'shl', 47: 'shr', 48: 'ushr'}
+            43: 'bit_and', 44: 'bit_or', 45: 'bit_xor', 46: 'shl', 47: 'shr', 48: 'ushr', 49: 'convert'}
 EXEC_VERSION = 10
 
 
@@ -268,6 +268,9 @@ def encode_compact_expression(value):
         fields = [integer(value['op']), child('v'), stack(*(encode_compact_expression(arg) for arg in value['args']))]
     elif opcode == 42:
         fields = [encode_context(value['context']), child('v1'), child('v2')]
+    elif opcode == 49:
+        assert value['type'] in (0, 1, 2, 3, 7)
+        fields = [integer(value['type']), child('v')]
     else:
         assert opcode in (29, 30)
         fields = []
@@ -471,6 +474,11 @@ class WireReader:
         elif opcode == 42:
             assert len(fields) == 3
             result.update(context=self.context(fields[0]), v1=self.expression(fields[1]), v2=self.expression(fields[2]))
+        elif opcode == 49:
+            assert len(fields) == 2
+            kind = int_value(fields[0])
+            assert kind in (0, 1, 2, 3, 7)
+            result.update(type=kind, v=self.expression(fields[1]))
         else:
             assert opcode in (29, 30) and not fields
         return result
@@ -679,6 +687,16 @@ def main():
         assert encode_compact_module(bitwise_view) == bitwise.read_bytes(), 'independent bitwise reconstruction'
         run([args.runner, bitwise], '-2147483648\n-6\n2147483642\n15\n')
 
+        conversion_source = '''int main(){address p=alloc(1);def(raw,p);
+            print(address(raw)==p);print(string(p)==(""+p));
+            print(float("1.25"));print(double("2.5"));mem_free(p);return int("42");}'''
+        converted, _, _ = compile_source('conversion-coverage', conversion_source)
+        conversion_reader = WireReader()
+        conversion_view = conversion_reader.read(converted.read_bytes())
+        assert 49 in conversion_reader.opcodes, conversion_reader.opcodes
+        assert encode_compact_module(conversion_view) == converted.read_bytes(), 'independent conversion reconstruction'
+        run([args.runner, converted], 'true\ntrue\n1.25\n2.5\n42\n')
+
         minimum = module([function(block(returning(constant(42))))])
         checks = 0
 
@@ -728,6 +746,52 @@ def main():
                 body = returning(expression(opcode, constant(-1), constant(count)))
                 execute_wire(f'shift-count-{opcode}-{count}', module([function(body)]), invalid=True,
                              error=f'Shift count must be between 0 and 31, got {count}')
+
+        # The expected result is checked only after check_type validates the
+        # exact ABI tag; numeric equality alone would accept an incorrect tag.
+        def f32(value):
+            return Scalar(FLOAT, struct.pack('<f', value))
+
+        def f64(value):
+            return Scalar(DOUBLE, struct.pack('<d', value))
+
+        conversion_cases = [(0, 7, 7), (0, f32(3.75), 3), (0, f64(-3.75), -3),
+                            (0, f64(2147483647.9), 2147483647), (0, f64(-2147483648.9), -2147483648),
+                            (0, '+7', 7), (0, '-2147483648', -2147483648),
+                            (2, 16777217, f32(16777216)), (2, f32(1.25), f32(1.25)),
+                            (2, f64(1.25), f32(1.25)), (2, '1.25e1', f32(12.5)),
+                            (2, f64(1e-300), f32(0)), (2, '1e-1000', f32(0)), (2, '1e-45', f32(1e-45)),
+                            (3, 7, f64(7)), (3, f32(1.25), f64(1.25)), (3, f64(1.25), f64(1.25)),
+                            (3, '.5e+1', f64(5)), (3, '1e-1000', f64(0)), (3, '1e-320', f64(1e-320)),
+                            (1, 7, '7'), (1, f32(1.25), '1.25'), (1, f64(2.5), '2.5'),
+                            (1, Address(2**64-1), '18446744073709551615'), (1, 'a\0😀', 'a\0😀'),
+                            (7, Address(2**64-1), Address(2**64-1))]
+        for index, (target, value, expected) in enumerate(conversion_cases):
+            converted_value = expression(49, integer(target), constant(value))
+            context = encode_context({'abi': target, 'kind': 1 if target == 7 else 0})
+            checked_value = expression(39, converted_value, context)
+            equal = expression(19, checked_value, constant(expected))
+            fields = module([function(returning(equal), return_type=4)])
+            payload = frame(stack(*fields))
+            view = WireReader().read(payload)
+            assert encode_compact_module(view) == payload, ('conversion independent roundtrip', target)
+            execute_wire('independent-conversion-' + str(index), fields, expected='true\n')
+        for target in (0, 1, 2, 3, 7):
+            for label, value in [('boolean', True), ('void', b'\xff')]:
+                body = returning(expression(49, integer(target), constant(value)))
+                execute_wire(f'conversion-{target}-{label}', module([function(body, return_type=target)]),
+                             invalid=True, error='Cannot convert')
+        for target, value in [(7, 0), (7, '1'), (0, Address(1)), (2, Address(1)), (3, Address(1)),
+                              (0, f64(2147483648)), (0, f64(-2147483649)), (2, f64(1e40)),
+                              (0, '2147483648'), (2, '1e40'), (3, '1e400')]:
+            body = returning(expression(49, integer(target), constant(value)))
+            execute_wire(f'conversion-invalid-{target}-{len(str(value))}-{checks}',
+                         module([function(body, return_type=target)]), invalid=True, error='Cannot convert')
+        for target in (0, 2, 3):
+            for index, value in enumerate(['', '+', ' 1', '1 ', '0x10', '1f', 'nan', 'inf', '1junk', '1\0😀']):
+                body = returning(expression(49, integer(target), constant(value)))
+                execute_wire(f'conversion-lexical-{target}-{index}', module([function(body, return_type=target)]),
+                             invalid=True, error='Cannot convert string')
 
         mutations = [('root-missing', minimum[:-1]), ('root-extra', minimum + [b''])]
         for index, value, label in [(0, b'AZSCRIPX', 'magic'), (1, integer(5), 'version'), (1, integer(6), 'address-only-version'), (1, integer(7), 'literal-only-version'), (1, integer(8), 'v8-version'), (1, integer(9), 'previous-version'),
@@ -853,6 +917,13 @@ def main():
                                     ('extra', (constant(1), constant(2), constant(3))),
                                     ('malformed-child', (stack(b'\0'), constant(1)))]:
                 bad_expressions[f'bitwise-{opcode}-{label}'] = expression(opcode, *operands)
+        for label, fields in [('missing', ()), ('target-only', (integer(0),)),
+                              ('target-width', (b'\0', constant(1))),
+                              ('extra', (integer(0), constant(1), constant(2))),
+                              ('malformed-child', (integer(0), stack(b'\0')))]:
+            bad_expressions['conversion-' + label] = expression(49, *fields)
+        for target in (-1, 4, 5, 6, 8, 2147483647):
+            bad_expressions[f'conversion-target-{target}'] = expression(49, integer(target), constant(1))
         for label, body in bad_expressions.items():
             execute_wire(label, module([function(body)]), invalid=True)
         complete = frame(stack(*minimum))

@@ -43,6 +43,11 @@ class DistributionOutputTests(unittest.TestCase):
             with self.subTest(opcode=opcode):
                 self.check_output([{'t': 0, 'c': opcode}])
 
+    def test_conversion_instruction_is_accepted_for_all_target_types(self):
+        for target, value in ((0, 3.5), (1, 42), (2, '1.5'), (3, '2.5'), (7, {'address': '0'})):
+            with self.subTest(target=target):
+                self.check_output([{'t': 0, 'c': 49, 'type': target, 'v': value}])
+
     def test_invalid_controls_report_the_actual_value_and_location(self):
         # The first opcode past the registry is unknown.
         for opcode in (None, True, 'return_typed', 38.0, -1, 0, 2, max(verifier.CONTROL_OPCODES) + 1):

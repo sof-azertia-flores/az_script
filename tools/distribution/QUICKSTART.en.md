@@ -55,6 +55,12 @@ Functions support forward calls and recursion. Primitive parameter types may be 
 
 Operators include arithmetic `+ - * / %`, comparison `== != < <= > >=`, boolean `&& || !`, int-only bitwise `& | ^ ~`, shifts `<< >> >>>`, and assignment. Simple variables support `+= -= *= /= %= &= |= ^= <<= >>= >>>=`. From higher to lower precedence: unary, multiply/divide/remainder, add/subtract, shifts, ordering, equality, `&`, `^`, `|`, `&&`, `||`, assignment. Only `&&`/`||` short-circuit. Shifts use 32-bit patterns: left shift wraps, `>>` sign-extends, `>>>` zero-fills; counts outside 0…31 fail instead of wrapping. Write `(flags & mask) != 0` for a bit test. Shift characters must touch (`a > > b` is invalid); nested generic closers such as `buffer<buffer<int>>` still work. See [bitwise operators](LANGUAGE.en.md#bitwise-and-shift-operators). Strings use single/double quotes and escapes including `\n`, `\t`, `\\`, `\"`, `\'`, and `\uXXXX`. Comments use // or /* ... */.
 
+### Explicit conversions
+
+Use `int(x)`, `float(x)`, or `double(x)` for numeric conversion or strict decimal string parsing; `string(x)` accepts numeric, address, or string values. `address(x)` is only identity for an existing address. Each takes one argument, evaluated once. Booleans, class values/pointers, buffers, null, and type parameters cannot be converted, and integers/strings cannot become addresses.
+
+`int(2.9)` is 2, `int(2147483647.9)` is 2147483647, and `int("+7")` is 7. Numeric-to-int truncates toward zero before checking its range. Floating conversion can round and underflow to zero or a subnormal, but overflow fails. Integer strings allow only an optional sign and decimal digits; float/double strings also allow a point and exponent. Parsing uses `.` regardless of locale and rejects spaces, hex, suffixes, NaN/Infinity, and trailing text, even for literal string arguments. Use `int(x)`, not `(int)x`, and a comparison instead of `bool(x)`. See the [conversion matrix](LANGUAGE.en.md#explicit-conversions).
+
 ## Classes, objects, and destruction
 
 ```cpp
@@ -118,7 +124,7 @@ Clients include declarations only. The independently assembled math ABD is bundl
 ./run.sh examples/math-regressions.exec.abd --insert stdlib/math.exec.abd
 ```
 
-Floating APIs require double, e.g. 3.0; integer APIs require int. Multiply integer expressions by 1.0 for floating APIs. Bind dynamic variables to explicitly typed locals first. The library links through AZSCRIPT_MATH; assumed namespace 4d41 is not its actual runtime address.
+Floating APIs require double, e.g. 3.0; integer APIs require int. Use `double(value)` to convert integer or dynamic numeric arguments for floating APIs. The library links through AZSCRIPT_MATH; assumed namespace 4d41 is not its actual runtime address.
 
 The container library is also declarations-only. `List<int> * xs = new List<int>();` creates a list, and `delete xs;` releases its nodes. `Vector<int> * xs = new Vector<int>();` is a contiguous array. `Set` and `Map` stay ordered by the default comparison. The package includes stdlib/containers.exec.abd:
 
@@ -133,7 +139,7 @@ Declare typed globals at the top level: `int total;`, `string label = "a";` or `
 
 Host declarations require complete signatures, e.g. `extern int host_add(int, int):0x12340001;`, matching host IDs, arguments, and results. The standalone interpreter has no application-specific callbacks; embed C++ or Java for these scripts.
 
-Built-ins print, getDepth, alloc, mem_get, mem_free, make_free, mem_send_up, and load_extern_library need no declaration. [External libraries](EXTERN_LIBRARY.en.md) describes signed native loading. Alloc(int) returns address; mem_get/mem_free/make_free/mem_send_up accept address. For example: `address p = alloc(2); mem_get(p + 1) = 42; mem_free(p);`. Counts/offsets remain int. Addresses support address+int, int+address, address-int, unsigned equality/order, with checked overflow/underflow. Test null with p == null. No integer conversions/equality or direct if conditions exist. Class pointers retain static class/inheritance rules until runtime erasure; normally manage them with constructors/delete. Raw release runs no user destructor.
+Built-ins print, getDepth, alloc, mem_get, mem_free, make_free, mem_send_up, and load_extern_library need no declaration. [External libraries](EXTERN_LIBRARY.en.md) describes signed native loading. Alloc(int) returns address; mem_get/mem_free/make_free/mem_send_up accept address. For example: `address p = alloc(2); mem_get(p + 1) = 42; mem_free(p);`. Counts/offsets remain int. Addresses support address+int, int+address, address-int, unsigned equality/order, with checked overflow/underflow. Test null with p == null. Address/integer conversions and equality remain unsupported, as do direct address conditions; `address(a)` only preserves an address and `string(a)` formats its unsigned value. Class pointers retain static class/inheritance rules until runtime erasure; normally manage them with constructors/delete. Raw release runs no user destructor.
 
 This distribution uses exec v10 and JNI snapshot v9 only. Recompile all modules. Add `-g` when compiling to include function names and source positions in the executable; executables carry no names by default. Migrate `int p = alloc(...)` to address; reference-semantics `Point p(...)` to `Point * p(...)`; and `Point p = new Point(...)` to `Point * p = new Point(...)`. Addresses still represent slot positions; capacity/lifetime rules are unchanged.
 

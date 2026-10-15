@@ -42,6 +42,7 @@ public class Compiler {
     private static final Set<String> BUILTIN_NAMES = builtinNames();
     private static Set<String> builtinNames() {
         Set<String> names = new HashSet<>(Set.of("value_compare", "buffer"));
+        names.addAll(SourceRules.CONVERSIONS);
         for (BuiltinSpec spec : BUILTINS) names.add(spec.name());
         return Set.copyOf(names);
     }
@@ -363,6 +364,9 @@ public class Compiler {
         JsonObject overloaded = overloadedCall(object, environment);
         if (overloaded != null) return expressionType(overloaded, environment);
         if(kind.equals("call")) {
+            if (SourceRules.CONVERSIONS.contains(operation)) return conversionTarget(operation);
+            if (operation.equals("boolean") || operation.equals("bool"))
+                throw new IllegalArgumentException("Boolean conversions are not supported; write a comparison");
             if(operation.equals("reflect_invoke_function"))return reflectionType(object,environment);
             if(operation.equals("value_compare"))return AsTypes.INT_VALUE;
             CallBinding binding=bindCall(object,environment);
@@ -467,6 +471,31 @@ public class Compiler {
     }
     private static boolean numeric(int type) {
         return type == AsTypes.INT_VALUE || type == AsTypes.FLOAT_VALUE || type == AsTypes.DOUBLE_VALUE;
+    }
+    private static int conversionTarget(String name) {
+        return switch (name) {
+            case "int" -> AsTypes.INT_VALUE;
+            case "float" -> AsTypes.FLOAT_VALUE;
+            case "double" -> AsTypes.DOUBLE_VALUE;
+            case "string" -> AsTypes.STRING_VALUE;
+            case "address" -> AsTypes.ADDRESS_VALUE;
+            default -> throw new IllegalArgumentException("Unknown conversion target: " + name);
+        };
+    }
+    /** Explicit scalar conversions leave all type/range checks for dynamic operands to the runtime. */
+    private static AcsElement compileConversion(JsonObject source, LogicEnvironment environment) {
+        String name = string(source.get("call"), "Conversion name");
+        JsonArray params = parameters(source); arity(name, params, 1, 1);
+        if (source.has("type-args")) throw new IllegalArgumentException(name + " conversion does not take type arguments");
+        JsonElement value = params.get(0);
+        int target = conversionTarget(name), actual = expressionType(value, environment);
+        boolean supported = actual == AsTypes.ANY_VALUE || actual == target
+                || numeric(target) && (numeric(actual) || actual == AsTypes.STRING_VALUE)
+                || target == AsTypes.STRING_VALUE && (numeric(actual) || actual == AsTypes.ADDRESS_VALUE);
+        if (!supported) throw new IllegalArgumentException("Cannot convert " + typeName(actual) + " to " + typeName(target));
+        if (actual == target) return compileExpression(value, environment);
+        AcsObject result = new AcsObject(); result.put("t", 0); result.put("c", ExecOpcodes.CONVERT);
+        result.put("type", target); result.put("v", compileExpression(value, environment)); return result;
     }
     private static boolean returnCompatible(int expected, int actual) {
         return assignable(expected, actual) || numeric(expected) && numeric(actual);
@@ -815,6 +844,9 @@ public class Compiler {
         JsonObject overloaded=overloadedCall(source,environment);
         if(overloaded!=null)return compileInstruction(overloaded,environment);
         if (type.equals("call")) {
+            if (SourceRules.CONVERSIONS.contains(call)) return compileConversion(source, environment);
+            if (call.equals("boolean") || call.equals("bool"))
+                throw new IllegalArgumentException("Boolean conversions are not supported; write a comparison");
             if(call.equals("reflect_invoke_function"))return compileReflection(source,environment);
             if(call.equals("value_compare"))return compileCompare(source,environment);
             CallBinding binding=bindCall(source,environment);Signature signature=binding.signature();

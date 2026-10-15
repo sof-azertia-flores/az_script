@@ -5,15 +5,19 @@
 #include <charconv>
 #include <algorithm>
 #include <bit>
+#include <cerrno>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <exception>
 #include <limits>
+#include <locale.h>
 #include <new>
 #include <stdexcept>
 #include <system_error>
 #include <typeinfo>
+#include <type_traits>
 #include <utility>
 
 namespace azertian {
@@ -444,6 +448,154 @@ V binary(const std::string& op,const V& a,const V& b) {
     if(!std::isfinite(f)) throw std::overflow_error("Float overflow");
     return std::make_shared<variable>(f);
 }
+std::string quoted_conversion_text(const std::string& value) {
+    static constexpr char hex[]="0123456789abcdef";
+    std::string result="\"";
+    auto unicode=[&](std::uint32_t code) {
+        result+="\\u";
+        for(int shift=12;shift>=0;shift-=4)result+=hex[(code>>shift)&15u];
+    };
+    std::size_t offset=0;
+    for(std::size_t count=0;offset<value.size()&&count<64;++count) {
+        const auto first=static_cast<unsigned char>(value[offset]);
+        std::uint32_t code=first;std::size_t width=1;
+        if(first>=0xc2&&first<=0xdf){width=2;code=first&0x1fu;}
+        else if(first>=0xe0&&first<=0xef){width=3;code=first&0x0fu;}
+        else if(first>=0xf0&&first<=0xf4){width=4;code=first&7u;}
+        bool valid=first<0x80||width>1;
+        if(width>value.size()-offset)valid=false;
+        if(valid)for(std::size_t i=1;i<width;++i) {
+            const auto next=static_cast<unsigned char>(value[offset+i]);
+            if((next&0xc0u)!=0x80u){valid=false;break;}
+            code=(code<<6)|(next&0x3fu);
+        }
+        if(valid&&((width==2&&code<0x80)||(width==3&&code<0x800)||(width==4&&code<0x10000)||
+           code>0x10ffff||(code>=0xd800&&code<=0xdfff)))valid=false;
+        if(!valid) {
+            result+="\\x";result+=hex[first>>4];result+=hex[first&15u];++offset;continue;
+        }
+        offset+=width;
+        if(code=='"'||code=='\\'){result+='\\';result+=static_cast<char>(code);}
+        else if(code>=0x20&&code<=0x7e)result+=static_cast<char>(code);
+        else if(code<=0xffff)unicode(code);
+        else {code-=0x10000;unicode(0xd800+(code>>10));unicode(0xdc00+(code&0x3ff));}
+    }
+    if(offset<value.size())result+="...";
+    return result+'"';
+}
+[[noreturn]] void conversion_error(const V& value,int target,const char* reason=nullptr) {
+    std::string source=type_name(value->type);
+    if(reason&&value->type==STRING_VALUE)source+=' '+quoted_conversion_text(*static_cast<std::string*>(value->value));
+    std::string message="Cannot convert "+source+" to "+type_name(target);
+    if(reason)message+=std::string(": ")+reason;
+    throw std::runtime_error(message);
+}
+bool decimal_text(const std::string& text,bool integer) {
+    std::size_t offset=0;
+    if(offset<text.size()&&(text[offset]=='+'||text[offset]=='-'))++offset;
+    const auto start=offset;
+    while(offset<text.size()&&text[offset]>='0'&&text[offset]<='9')++offset;
+    bool digits=offset>start;
+    if(!integer&&offset<text.size()&&text[offset]=='.') {
+        const auto fraction=++offset;
+        while(offset<text.size()&&text[offset]>='0'&&text[offset]<='9')++offset;
+        digits=digits||offset>fraction;
+    }
+    if(!digits)return false;
+    if(!integer&&offset<text.size()&&(text[offset]=='e'||text[offset]=='E')) {
+        ++offset;if(offset<text.size()&&(text[offset]=='+'||text[offset]=='-'))++offset;
+        const auto exponent=offset;
+        while(offset<text.size()&&text[offset]>='0'&&text[offset]<='9')++offset;
+        if(offset==exponent)return false;
+    }
+    return offset==text.size();
+}
+class conversion_locale {
+#if defined(_WIN32)
+    _locale_t locale=_create_locale(LC_NUMERIC,"C");
+#else
+    locale_t locale=newlocale(LC_NUMERIC_MASK,"C",nullptr);
+#endif
+public:
+    conversion_locale() {if(!locale)throw std::runtime_error("Cannot create C numeric locale");}
+    conversion_locale(const conversion_locale&)=delete;
+    conversion_locale& operator=(const conversion_locale&)=delete;
+    ~conversion_locale() {
+#if defined(_WIN32)
+        _free_locale(locale);
+#else
+        freelocale(locale);
+#endif
+    }
+    template<class T> T parse(const char* text,char** end) const {
+#if defined(_WIN32)
+        if constexpr(std::is_same_v<T,float>)return _strtof_l(text,end,locale);
+        else return _strtod_l(text,end,locale);
+#else
+        if constexpr(std::is_same_v<T,float>)return strtof_l(text,end,locale);
+        else return strtod_l(text,end,locale);
+#endif
+    }
+};
+template<class T> T parsed_real(const V& value,int target) {
+    const auto& text=*static_cast<std::string*>(value->value);
+    if(!decimal_text(text,false))conversion_error(value,target,"invalid decimal number");
+    conversion_locale locale;char* end=nullptr;errno=0;
+    const auto result=locale.parse<T>(text.c_str(),&end);
+    const bool range=errno==ERANGE;
+    if(end!=text.c_str()+text.size())conversion_error(value,target,"invalid decimal number");
+    // ERANGE also signals permitted underflow. Some libraries report it when
+    // rounding a tiny value up to the least normal value, which is allowed too.
+    if(!std::isfinite(result)||(range&&std::abs(result)>std::numeric_limits<T>::min()))
+        conversion_error(value,target,"value is out of range");
+    return result;
+}
+V convert_value(const V& value,int target) {
+    if(!value)throw std::runtime_error("Null host value");
+    if(value->type==target)return value->deepCopy();
+    if(target==STRING_VALUE) {
+        if(numeric(value)||value->type==ADDRESS_VALUE)return std::make_shared<variable>(value_to_string(value));
+        conversion_error(value,target);
+    }
+    if(target==ADDRESS_VALUE)conversion_error(value,target);
+    if(value->type==STRING_VALUE) {
+        if(target==INT_VALUE) {
+            const auto& text=*static_cast<std::string*>(value->value);
+            if(!decimal_text(text,true))conversion_error(value,target,"invalid decimal integer");
+            const char* first=text.data();const char* last=first+text.size();
+            if(*first=='+')++first;
+            int result=0;const auto parsed=std::from_chars(first,last,result,10);
+            if(parsed.ec==std::errc::result_out_of_range)conversion_error(value,target,"value is out of range");
+            if(parsed.ec!=std::errc()||parsed.ptr!=last)conversion_error(value,target,"invalid decimal integer");
+            return std::make_shared<variable>(result);
+        }
+        if(target==FLOAT_VALUE)return std::make_shared<variable>(parsed_real<float>(value,target));
+        if(target==DOUBLE_VALUE)return std::make_shared<variable>(parsed_real<double>(value,target));
+    }
+    if(numeric(value)) {
+        const double input=number(value);
+        if(!std::isfinite(input))conversion_error(value,target,"value is out of range");
+        if(target==INT_VALUE) {
+            const double truncated=std::trunc(input);
+            if(truncated<std::numeric_limits<int>::min()||truncated>std::numeric_limits<int>::max())
+                conversion_error(value,target,"value is out of range");
+            return std::make_shared<variable>(static_cast<int>(truncated));
+        }
+        if(target==FLOAT_VALUE) {
+            if(std::abs(input)>std::numeric_limits<float>::max())conversion_error(value,target,"value is out of range");
+            return std::make_shared<variable>(static_cast<float>(input));
+        }
+        if(target==DOUBLE_VALUE)return std::make_shared<variable>(input);
+    }
+    conversion_error(value,target);
+}
+class convert_expression final:public expression {
+    int target;
+    std::shared_ptr<expression> value;
+public:
+    convert_expression(int target,std::shared_ptr<expression> value):target(target),value(std::move(value)) {}
+    V execute(E env) override {tick(env);return convert_value(run(value,env),target);}
+};
 V bitwise(int opcode,const V& left,const V& right) {
     static constexpr const char* names[]{"bit_and","bit_or","bit_xor","shl","shr","ushr"};
     if(left->type!=INT_VALUE||right->type!=INT_VALUE)
@@ -1035,6 +1187,12 @@ X parse_raw_expression(raw_view view,const raw_function_layout& layout,std::size
     case 43:case 44:case 45:case 46:case 47:case 48: {
         auto left=child();auto right=child();
         result=std::make_shared<bitwise_expression>(opcode,std::move(left),std::move(right));break;
+    }
+    case 49: {
+        const int target=fields.integer();
+        if(target!=INT_VALUE&&target!=STRING_VALUE&&target!=FLOAT_VALUE&&target!=DOUBLE_VALUE&&target!=ADDRESS_VALUE)
+            throw std::invalid_argument("Invalid conversion target type: "+std::to_string(target));
+        result=std::make_shared<convert_expression>(target,child());break;
     }
     case 7:case 8: {
         auto node=std::make_shared<returnExpression>();node->object_return=opcode==8;

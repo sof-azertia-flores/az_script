@@ -192,7 +192,7 @@ bump(a);                        // a.x 变为 101：字面量对象按地址借�
 
 ## 地址与底层内存
 
-`address` 是独立的无符号 64 位类型，范围为 0 到 `18446744073709551615`。它可用于局部变量、字段、参数和返回类型，空地址为 `null`。显式 address 局部变量须初始化；address 字段默认是 null。`int` 仍是有符号 32 位，普通整数字面量、分配数量、字段偏移、变量槽编号和函数 ID 不会因此变成地址。地址与整数、浮点及布尔值之间没有隐式转换，整数 `0` 不能代替 null。
+`address` 是独立的无符号 64 位类型，范围为 0 到 `18446744073709551615`。它可用于局部变量、字段、参数和返回类型，空地址为 `null`。显式 address 局部变量须初始化；address 字段默认是 null。`int` 仍是有符号 32 位，普通整数字面量、分配数量、字段偏移、变量槽编号和函数 ID 不会因此变成地址。地址与整数、浮点及布尔值之间没有隐式转换，整数 `0` 不能代替 null。显式转换同样拒绝 address 与数值互转：`address(a)` 只保留已有的 address，`string(a)` 将它格式化为无符号十进制；不能借此转换类指针或 null 表达式，详见[显式转换](#显式转换)。
 
 ```cpp
 void main() {
@@ -332,6 +332,33 @@ print(total); // 9
 移位优先级低于加减、高于比较。相等比较优先于按位 `&`，随后依次是 `^`、`|`；三者均优先于 `&&`、`||`。位测试应加括号写成 `(flags & mask) == 0`；`flags & mask == 0` 会尝试对 boolean 做 `&`，因此被拒绝并提示为比较添加括号。
 
 移位符号必须在预处理后的文本中相邻：`a >> b` 是移位，`a > > b` 不是，会被拒绝。类型语法中的泛型结束符仍单独解释，因此 `buffer<buffer<int>>` 及泛型调用后接移位仍然有效。简单变量还支持 `&=`、`|=`、`^=`、`<<=`、`>>=`、`>>>=`；成员、下标和 `mem_get` 不是复合赋值目标。一元 `~x` 降为 `bit_xor(x, -1)`，没有单独的一元 opcode。
+
+### 显式转换
+
+`int(x)`、`float(x)`、`double(x)`、`string(x)` 和 `address(x)` 恰好接受一个表达式，只求值一次。它们是保留的编译器内置形式，不能由用户函数覆盖。支持的源类型/目标类型配对如下：
+
+| 源类型 | `int` | `float` | `double` | `string` | `address` |
+| --- | --- | --- | --- | --- | --- |
+| `int`、`float` 或 `double` | 向零截断，再检查 int32 范围 | 舍入为 float 并检查溢出 | 转为 double | 现有的最短可往返数值文本 | 拒绝 |
+| `string` | 解析十进制整数 | 按 float 解析十进制数 | 按 double 解析十进制数 | 恒等 | 拒绝 |
+| `address` | 拒绝 | 拒绝 | 拒绝 | 无符号十进制文本 | 恒等 |
+
+已知为 boolean、void、类值、类指针、buffer、null 或类型参数的源表达式被拒绝；也没有 boolean、void、类、buffer 或类型参数作为目标的转换。特别是 `int(addressValue)`、`address(7)`、`address("7")` 和 `address(classPointer)` 均不支持；`address(x)` 当前只接受已有的 address 值。`bool(x)` / `boolean(x)` 报告 `Boolean conversions are not supported; write a comparison`；C 风格的 `(int)x` 报告 `C-style casts are not supported; write int(x)`。
+
+数值转 int 先向零截断，再检查范围：`int(2147483647.9)` 为 2147483647，`int(-2.9)` 为 -2。浮点转换可能损失精度（`float(16777217)` 为 16777216），允许次正规数和下溢为零，但拒绝溢出或非有限结果。这种下溢规则适用于数值及字符串转换；上文的源码字面量范围检查仍是另一套规则。
+
+整数字符串必须符合 `[+-]?[0-9]+`，不能含小数点或指数。float/double 字符串允许可选正负号、可带小数点的十进制数字（至少一位），以及可选的 `e`/`E` 指数（可带正负号，至少一位数字）。解析与区域设置无关，小数点固定为 `.`。空白、十六进制、`f` 后缀、NaN/Infinity、嵌入 NUL 和尾部多余文字都会被拒绝。例如 `int("+7")`、`double("2.5e-3")` 成功，`int("1e2")`、`float(" 1")` 失败。即使参数是字符串字面量，内容和范围也在运行时检查。
+
+静态已知的不支持配对在编译时报告 `Cannot convert X to Y`；动态 `any` 参数按真实运行时标签检查。静态已知的同类型转换是恒等操作，不生成转换 opcode；`any` 总是生成 opcode 49，即使真实类型已与目标相同。运行时错误消息例如：
+
+```text
+Cannot convert double to int: value is out of range
+Cannot convert string " 1" to int: invalid decimal integer
+Cannot convert string "1f" to float: invalid decimal number
+Cannot convert string "1e400" to double: value is out of range
+```
+
+错误中引用的字符串最多显示前 64 个 Unicode 标量字符，截断时在引号内追加 `...`。引号和反斜杠会转义；非 ASCII 字符及 NUL 使用 ASCII 形式的 UTF-16 转义，例如 `\ud83d\ude00` 和 `\u0000`，保证消息可以安全地经过 JNI。
 
 ## 字符串、注释与预处理
 
@@ -588,6 +615,7 @@ int functionId(int ns, int position) {
 | buffer 操作 `c=41`（buffer_op） | `op`, `v`, `args`；操作 0…6 为 length/capacity/reserve/get/set/push/resize |
 | 默认比较 `c=42`（value_compare） | `context`, `v1`, `v2` |
 | 位运算/移位 `c=43…48` | `v1`, `v2`；依次为 bit_and/bit_or/bit_xor/shl/shr/ushr，操作数和结果均为 int |
+| 显式转换 `c=49`（convert） | `type` 为目标 0/1/2/3/7，`v` 为源表达式 |
 
 根、函数、签名和表达式记录都使用裸 `AbdStack`；每个字段本身有长度边界，固定记录不保存键名和已知的类型标签。函数列表、参数类型列表、参数表达式和块内语句也都是裸 stack。常量的实际类型不固定，使用单元素 `AbdArray` 保留 int/float/double/bool/string/void/address 标签；扩展元数据仍使用 `AbdMap`。JSON 中的裸常量和块数组在二进制中分别使用 opcode 0 和 1。Java 调用 `Compiler.compile()` 得到的 `ExecProgram` 可继续作为 `AcsObject` 检查，`toValue()` 输出新 wire 格式；从执行文件恢复检查视图使用 `ExecCodec.decode()`，不再直接把根当作 `AcsObject` 解码。
 

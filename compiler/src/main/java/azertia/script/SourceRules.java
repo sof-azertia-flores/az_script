@@ -13,6 +13,8 @@ final class SourceRules {
 
     /** Built-in type names. */
     static final Set<String> TYPES = Set.of("int", "float", "double", "string", "boolean", "bool", "void", "address", "buffer");
+    /** Scalar conversion calls. Boolean conversions are deliberately not part of the language. */
+    static final Set<String> CONVERSIONS = Set.of("int", "float", "double", "string", "address");
     /**
      * Statement keywords and {@code any}. They are rejected even where a type name is
      * read, because the parser reads type names as identifiers.

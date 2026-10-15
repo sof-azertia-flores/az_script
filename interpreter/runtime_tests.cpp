@@ -5,6 +5,8 @@
 #include "p256.h"
 #include "extern_library.h"
 #include <algorithm>
+#include <clocale>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -808,6 +810,170 @@ void runtime_trace_tests() {
     check(shutdown->closed&&owned->state==slot_block::status::dead,"shutdown finishes owned values after a pre-destroy failure");
     clear_error_trace();
 }
+void conversion_tests() {
+    auto convert=[](int target,R value){return rx(49,{ri(target),std::move(value)});};
+    AbdStack functions;
+    for(int target:{INT_VALUE,STRING_VALUE,FLOAT_VALUE,DOUBLE_VALUE,ADDRESS_VALUE})
+        functions.vs.push_back(rfn(300+target,target,rreturn(convert(target,rvar(0))),0,{ANY_VALUE}));
+    functions.vs.push_back(rfn(320,INT_VALUE,rblock({rset(-1,rc(n(0))),rreturn(convert(INT_VALUE,rcall(321)))})));
+    functions.vs.push_back(rfn(321,DOUBLE_VALUE,rblock({rset(-1,rx(12,{rvar(-1),rc(n(1))})),
+        rreturn(rc(std::make_shared<DoubleAbdValue>(1.75)))})));
+    auto debug=[](R function,const char* name,std::initializer_list<int> positions) {
+        AbdStack locations;for(int field:positions)locations.vs.push_back(ri(field));
+        return append_raw(replace_raw(function,8,rb(true)),
+            raw({rs(name),ri(0),ri(9),ri(1),locations.toAbdValue()}));
+    };
+    functions.vs.push_back(debug(rfn(323,INT_VALUE,rreturn(convert(INT_VALUE,rc(s("bad"))))),
+        "conversionError",{1,0,9,5}));
+    functions.vs.push_back(debug(rfn(324,INT_VALUE,rreturn(convert(INT_VALUE,rx(15,{rc(n(1)),rc(n(0))})))),
+        "conversionOperand",{1,0,9,5,2,0,9,17}));
+    auto module=replace_raw(replace_raw(rmodule({},1),7,functions.toAbdValue()),10,raw({rs("conversion.azs")}));
+    auto program=load_raw(module);
+    auto evaluate=[&](int target,V value){return program->invoke(300+target,{std::move(value)});};
+    auto real=[&](int target,V value) {
+        auto result=evaluate(target,std::move(value));
+        check(result->type==target,"explicit numeric conversions return the requested tag");
+        return target==FLOAT_VALUE?static_cast<double>(*static_cast<float*>(result->value)):*static_cast<double*>(result->value);
+    };
+    auto text=[](std::string value){return std::make_shared<variable>(std::move(value));};
+    auto runtime_failure=[&](int target,V value,const std::string& message) {
+        bool caught=false;
+        try {evaluate(target,std::move(value));}
+        catch(const std::runtime_error& error) {
+            caught=true;
+            check(typeid(error)==typeid(std::runtime_error)&&error.what()==message,
+                  "conversion errors retain runtime_error and their complete diagnostic");
+        }
+        check(caught,"an invalid explicit conversion must fail");
+    };
+    const std::vector<V> identities{
+        std::make_shared<variable>(std::numeric_limits<int>::min()),text(std::string("x\0\xf0\x9f\x98\x80",6)),
+        std::make_shared<variable>(-0.0f),std::make_shared<variable>(-0.0),
+        std::make_shared<variable>(address{std::numeric_limits<std::uint64_t>::max()}),
+    };
+    for(const auto& input:identities) {
+        auto result=evaluate(input->type,input);
+        check(result!=input&&result->type==input->type&&value_to_string(result)==value_to_string(input),
+              "same-tag conversions through any preserve a copied value");
+        if(input->type==FLOAT_VALUE)check(std::signbit(*static_cast<float*>(result->value)),"float identity preserves negative zero");
+        if(input->type==DOUBLE_VALUE)check(std::signbit(*static_cast<double*>(result->value)),"double identity preserves negative zero");
+    }
+    check(real(FLOAT_VALUE,std::make_shared<variable>(16777217))==16777216.0,"int to float uses float precision");
+    check(real(DOUBLE_VALUE,std::make_shared<variable>(std::numeric_limits<int>::max()))==2147483647.0,"int to double widens without loss");
+    check(real(DOUBLE_VALUE,std::make_shared<variable>(1.25f))==1.25,"float to double widens without loss");
+    check(real(FLOAT_VALUE,std::make_shared<variable>(1.25))==1.25,"double to float supports narrowing");
+    for(const auto& item:std::initializer_list<std::pair<double,int>>{
+        {1.75,1},{-1.75,-1},{0.9,0},{-0.9,0},{2147483647.9,std::numeric_limits<int>::max()},
+        {-2147483648.9,std::numeric_limits<int>::min()},
+    })check(integer(evaluate(INT_VALUE,std::make_shared<variable>(item.first)))==item.second,
+             "numeric to int truncates before checking the resulting range");
+    check(integer(evaluate(INT_VALUE,std::make_shared<variable>(-1.75f)))==-1,"float to int truncates toward zero");
+    check(real(FLOAT_VALUE,std::make_shared<variable>(std::numeric_limits<double>::denorm_min()))==0.0,
+          "numeric underflow to float zero is allowed");
+    check(std::signbit(real(FLOAT_VALUE,std::make_shared<variable>(-std::numeric_limits<double>::denorm_min()))),
+          "numeric underflow preserves the sign of zero");
+    check(real(FLOAT_VALUE,std::make_shared<variable>(static_cast<double>(std::numeric_limits<float>::denorm_min())))==
+          static_cast<double>(std::numeric_limits<float>::denorm_min()),"numeric subnormal float results are allowed");
+
+    for(const auto& item:std::initializer_list<std::pair<std::string,int>>{
+        {"0",0},{"+7",7},{"-7",-7},{"0007",7},{"2147483647",std::numeric_limits<int>::max()},
+        {"-2147483648",std::numeric_limits<int>::min()},
+    })check(integer(evaluate(INT_VALUE,text(item.first)))==item.second,"decimal integer strings parse with optional signs");
+    for(const auto& item:std::initializer_list<std::pair<std::string,double>>{
+        {"+7",7.0},{"-7",-7.0},{".5",0.5},{"1.",1.0},{"1e2",100.0},{"-2.5e-1",-0.25},{"001.5",1.5},
+    })for(int target:{FLOAT_VALUE,DOUBLE_VALUE})check(real(target,text(item.first))==item.second,
+        "decimal real strings accept optional dots, signs and exponents");
+    check(real(FLOAT_VALUE,text("16777217"))==16777216.0,"string to float rounds directly to float precision");
+    check(real(FLOAT_VALUE,text("1.0000000596046447753906250000000000000001"))==
+          static_cast<double>(std::nextafter(1.0f,2.0f)),"string to float avoids a double-rounding intermediate");
+    for(int target:{FLOAT_VALUE,DOUBLE_VALUE}) {
+        check(real(target,text("1e-9999"))==0.0,"decimal underflow to zero is allowed");
+        check(std::signbit(real(target,text("-1e-9999"))),"decimal underflow preserves negative zero");
+    }
+    auto float_subnormal=evaluate(FLOAT_VALUE,text("1e-40"));
+    check(std::fpclassify(*static_cast<float*>(float_subnormal->value))==FP_SUBNORMAL,"parsed float subnormals are accepted");
+    check(std::fpclassify(real(DOUBLE_VALUE,text("1e-310")))==FP_SUBNORMAL,"parsed double subnormals are accepted");
+    check(real(FLOAT_VALUE,text("1.401298464324817070923729583289916131280e-45"))==
+          static_cast<double>(std::numeric_limits<float>::denorm_min()),"the smallest float subnormal parses");
+    check(real(DOUBLE_VALUE,text("4.9406564584124654e-324"))==std::numeric_limits<double>::denorm_min(),
+          "the smallest double subnormal parses");
+    for(const auto& item:std::initializer_list<std::pair<V,std::string>>{
+        {std::make_shared<variable>(-7),"-7"},{std::make_shared<variable>(1.25f),"1.25"},
+        {std::make_shared<variable>(1.25),"1.25"},{std::make_shared<variable>(address{}),"0"},
+        {std::make_shared<variable>(address{std::numeric_limits<std::uint64_t>::max()}),"18446744073709551615"},
+    })check(value_to_string(evaluate(STRING_VALUE,item.first))==item.second,
+        "numeric and address string conversion uses the existing shortest formatter");
+    check(integer(program->invoke(320))==1&&integer(program->baseEnv->getVariable(-1))==1,
+          "a conversion evaluates its operand exactly once");
+
+    const std::vector<std::string> invalid_integers{"","+","-","1.0","1e2"," 1","1 ","0x10","nan","inf","1f","1abc","1_0"};
+    for(const auto& input:invalid_integers)runtime_failure(INT_VALUE,text(input),
+        "Cannot convert string \""+input+"\" to int: invalid decimal integer");
+    const std::vector<std::string> invalid_reals{"","+","-",".","+.","1e","1e+"," 1","1 ","0x1p2","nan","NaN","inf","Infinity","1f","1abc","1,5","--1"};
+    for(const auto& input:invalid_reals)for(int target:{FLOAT_VALUE,DOUBLE_VALUE})runtime_failure(target,text(input),
+        "Cannot convert string \""+input+"\" to "+(target==FLOAT_VALUE?"float":"double")+": invalid decimal number");
+    for(const auto& input:{"2147483648","-2147483649"})runtime_failure(INT_VALUE,text(input),
+        "Cannot convert string \""+std::string(input)+"\" to int: value is out of range");
+    for(const auto& input:{"1e400","-1e400"})for(int target:{FLOAT_VALUE,DOUBLE_VALUE})runtime_failure(target,text(input),
+        "Cannot convert string \""+std::string(input)+"\" to "+(target==FLOAT_VALUE?"float":"double")+": value is out of range");
+    runtime_failure(FLOAT_VALUE,text("1e40"),"Cannot convert string \"1e40\" to float: value is out of range");
+    for(double value:{2147483648.0,-2147483649.0,std::numeric_limits<double>::infinity(),std::numeric_limits<double>::quiet_NaN()})
+        runtime_failure(INT_VALUE,std::make_shared<variable>(value),"Cannot convert double to int: value is out of range");
+    runtime_failure(INT_VALUE,std::make_shared<variable>(2147483648.0f),"Cannot convert float to int: value is out of range");
+    runtime_failure(FLOAT_VALUE,std::make_shared<variable>(std::numeric_limits<double>::max()),"Cannot convert double to float: value is out of range");
+    runtime_failure(DOUBLE_VALUE,std::make_shared<variable>(std::numeric_limits<float>::infinity()),"Cannot convert float to double: value is out of range");
+    struct unsupported_value {const char* type;V value;};
+    const std::vector<unsupported_value> unsupported{
+        {"boolean",std::make_shared<variable>(false)},{"boolean",std::make_shared<variable>(true)},
+        {"void",std::make_shared<variable>(nullptr)},{"object",std::make_shared<variable>(blocks::create(1,program))},
+    };
+    for(const auto& source:unsupported)for(const auto& target:std::initializer_list<std::pair<int,const char*>>{
+        {INT_VALUE,"int"},{STRING_VALUE,"string"},{FLOAT_VALUE,"float"},{DOUBLE_VALUE,"double"},{ADDRESS_VALUE,"address"},
+    })runtime_failure(target.first,source.value,"Cannot convert "+std::string(source.type)+" to "+target.second);
+    for(const auto& target:std::initializer_list<std::pair<int,const char*>>{{INT_VALUE,"int"},{FLOAT_VALUE,"float"},{DOUBLE_VALUE,"double"}})
+        runtime_failure(target.first,std::make_shared<variable>(address{1}),"Cannot convert address to "+std::string(target.second));
+    for(const auto& source:std::initializer_list<unsupported_value>{
+        {"int",std::make_shared<variable>(1)},{"float",std::make_shared<variable>(1.0f)},
+        {"double",std::make_shared<variable>(1.0)},{"string",text("1")},
+    })runtime_failure(ADDRESS_VALUE,source.value,"Cannot convert "+std::string(source.type)+" to address");
+
+    runtime_failure(INT_VALUE,text(std::string("\"\\\n\0",4)+"\xf0\x9f\x98\x80"),
+        R"(Cannot convert string "\"\\\u000a\u0000\ud83d\ude00" to int: invalid decimal integer)");
+    runtime_failure(DOUBLE_VALUE,text(std::string(63,'a')+"\xf0\x9f\x98\x80tail"),
+        "Cannot convert string \""+std::string(63,'a')+"\\ud83d\\ude00...\" to double: invalid decimal number");
+    runtime_failure(INT_VALUE,text(std::string(100,'9')),
+        "Cannot convert string \""+std::string(64,'9')+"...\" to int: value is out of range");
+    runtime_failure(FLOAT_VALUE,text(std::string(1,static_cast<char>(0xff))),
+        "Cannot convert string \"\\xff\" to float: invalid decimal number");
+    {
+        struct numeric_locale_restore {
+            std::string original;
+            ~numeric_locale_restore(){std::setlocale(LC_NUMERIC,original.c_str());}
+        } restore{std::setlocale(LC_NUMERIC,nullptr)};
+        for(const char* locale:{"de_DE.UTF-8","fr_FR.UTF-8","de_DE","French_France.1252"})
+            if(std::setlocale(LC_NUMERIC,locale))break;
+        check(real(FLOAT_VALUE,text("1.5"))==1.5&&real(DOUBLE_VALUE,text("1.5"))==1.5,
+              "numeric conversion uses the C locale even when a host locale is available");
+        runtime_failure(DOUBLE_VALUE,text("1,5"),"Cannot convert string \"1,5\" to double: invalid decimal number");
+    }
+    for(int target:{-1,BOOLEAN_VALUE,VOID_VALUE,ANY_VALUE,OBJECT_VALUE,std::numeric_limits<int>::max()})
+        rejects_message([&]{load_raw(rmodule({rfn(10,INT_VALUE,convert(target,rc(n(1))))}));},
+                        "Invalid conversion target type: "+std::to_string(target),"exec conversions reject unsupported target tags");
+    for(auto malformed:{rx(49,{ri(INT_VALUE)}),rx(49,{rs("int"),rc(n(1))}),rx(49,{ri(INT_VALUE),rc(n(1)),rc(n(2))})})
+        rejects([&]{load_raw(rmodule({rfn(10,INT_VALUE,malformed)}));},"convert records require an integer target and one expression");
+    for(const auto& item:std::initializer_list<std::pair<int,std::string>>{
+        {323,"Cannot convert string \"bad\" to int: invalid decimal integer\n  at conversionError (conversion.azs:9:5)"},
+        {324,"Division by zero\n  at conversionOperand (conversion.azs:9:17)"},
+    }) {
+        bool caught=false;
+        try {program->invoke(item.first);}
+        catch(const std::runtime_error& error) {
+            caught=true;check(describe_error(error)==item.second,"conversion failures preserve their expression and operand locations");
+        }
+        check(caught,"conversion debug-position probes must throw");
+    }
+    program->destroy();
+}
 void bitwise_tests() {
     AbdStack functions;
     functions.vs.push_back(rfn(90,INT_VALUE,rblock({
@@ -1022,6 +1188,7 @@ void boolean_condition_equality_tests() {
     program->destroy();
 }
 int main(){try{
+    conversion_tests();
     bitwise_tests();
     boolean_condition_equality_tests();
     runtime_trace_tests();
@@ -1442,7 +1609,7 @@ int main(){try{
         auto twenty=rc(n(20));auto zero=rc(n(0));
         auto compact=load_raw(rmodule({rfn(10,INT_VALUE,rx(7,{rb(true),rx(12,{twenty,rc(n(22))})}))}));
         check(integer(compact->invoke(10))==42,"raw exec directly executes native arithmetic expressions");
-        for(int opcode=0;opcode<=48;++opcode)if(opcode!=29&&opcode!=30)
+        for(int opcode=0;opcode<=49;++opcode)if(opcode!=29&&opcode!=30)
             rejects([&]{load_raw(rmodule({rfn(10,VOID_VALUE,rx(opcode))}));},"exec opcode rejects missing fields");
         auto byte=[](unsigned char value){return std::make_shared<AbdValue>(&value,1);};
         const unsigned char bad_text[]={0xed,0xa0,0x80};
