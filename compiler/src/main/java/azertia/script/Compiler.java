@@ -498,7 +498,9 @@ public class Compiler {
         result.put("type", target); result.put("v", compileExpression(value, environment)); return result;
     }
     private static boolean returnCompatible(int expected, int actual) {
-        return assignable(expected, actual) || numeric(expected) && numeric(actual);
+        return assignable(expected, actual)
+                || actual == AsTypes.INT_VALUE && (expected == AsTypes.FLOAT_VALUE || expected == AsTypes.DOUBLE_VALUE)
+                || actual == AsTypes.FLOAT_VALUE && expected == AsTypes.DOUBLE_VALUE;
     }
     /**
      * A base pointer addresses the same prefix; no pointer adjustment or runtime type is needed.
@@ -990,7 +992,9 @@ public class Compiler {
                     if (environment.returnType >= 0 && actual != AsTypes.ANY_VALUE
                             && !returnCompatible(environment.returnType, actual))
                         throw new IllegalArgumentException("return expected " + typeName(environment.returnType)
-                                + ", got " + typeName(actual));
+                                + ", got " + typeName(actual)
+                                + (numeric(environment.returnType) && numeric(actual)
+                                ? "; narrowing requires an explicit cast such as " + typeName(environment.returnType) + "(x)" : ""));
                     result.put(isTypeParameter(environment.returnType)?"v":"r", compileExpression(params.get(0), environment));
                 }
             }

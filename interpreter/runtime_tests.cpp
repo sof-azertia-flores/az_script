@@ -810,6 +810,119 @@ void runtime_trace_tests() {
     check(shutdown->closed&&owned->state==slot_block::status::dead,"shutdown finishes owned values after a pre-destroy failure");
     clear_error_trace();
 }
+void checked_return_tests() {
+    AbdStack functions;
+    for(int target:{INT_VALUE,STRING_VALUE,FLOAT_VALUE,DOUBLE_VALUE,BOOLEAN_VALUE,VOID_VALUE,ADDRESS_VALUE,OBJECT_VALUE})
+        functions.vs.push_back(rfn(400+target,target,rreturn(rvar(0)),0,{ANY_VALUE}));
+    // ANY returns require a generic context even when the body only forwards a value.
+    functions.vs.push_back(gfn(400+ANY_VALUE,ANY_VALUE,rreturn(rvar(0)),1,0,{ANY_VALUE}));
+    functions.vs.push_back(rfn(410,INT_VALUE,rblock({})));
+    functions.vs.push_back(gfn(500,ANY_VALUE,greturn(rvar(0),cref(0)),1,0,{ANY_VALUE}));
+    for(int target:{INT_VALUE,FLOAT_VALUE,DOUBLE_VALUE})
+        functions.vs.push_back(rfn(510+target,target,rreturn(gcall(500,{rvar(0)},{cfixed(target,0)})),0,{ANY_VALUE}));
+    functions.vs.push_back(rfn(520,DOUBLE_VALUE,rreturn(gcall(500,{rvar(0)},{cfixed(INT_VALUE,0)})),0,{ANY_VALUE}));
+    auto debug=[](R function,const char* name,int line,std::initializer_list<int> positions) {
+        AbdStack locations;for(int field:positions)locations.vs.push_back(ri(field));
+        return append_raw(replace_raw(function,8,rb(true)),raw({rs(name),ri(0),ri(line),ri(1),locations.toAbdValue()}));
+    };
+    functions.vs.push_back(debug(rfn(530,INT_VALUE,rreturn(rc(std::make_shared<DoubleAbdValue>(1.0)))),
+        "ordinaryNarrow",3,{0,0,5,7,1,0,5,19}));
+    functions.vs.push_back(debug(gfn(531,INT_VALUE,greturn(rc(std::make_shared<DoubleAbdValue>(1.0)),cref(0)),1),
+        "genericNarrow",11,{0,0,13,7,1,0,13,19}));
+    functions.vs.push_back(debug(rfn(532,INT_VALUE,rreturn(gcall(531,{}, {cfixed(DOUBLE_VALUE,0)}))),
+        "genericCaller",20,{0,0,21,3,1,0,21,10}));
+    auto module=replace_raw(replace_raw(rmodule({}),7,functions.toAbdValue()),10,raw({rs("returns.azs")}));
+    auto program=load_raw(module);
+    auto dynamic_context=std::make_shared<type_context>();dynamic_context->abi=INT_VALUE;
+    auto dynamic_return=[&](V value) {
+        return invoke_bound_function(program,400+ANY_VALUE,program->baseEnv,{std::move(value)},{dynamic_context});
+    };
+    auto runtime_failure=[&](int id,std::vector<V> args,const std::string& message) {
+        bool caught=false;
+        try {program->invoke(id,std::move(args));}
+        catch(const std::runtime_error& error) {
+            caught=true;
+            check(typeid(error)==typeid(std::runtime_error)&&error.what()==message,
+                  "return type failures retain runtime_error and exact expected/actual tags");
+        }
+        check(caught,"a disallowed return conversion must fail");
+    };
+    struct numeric_value {const char* type;V value;};
+    const std::vector<numeric_value> numeric{
+        {"int",std::make_shared<variable>(std::numeric_limits<int>::min())},
+        {"int",std::make_shared<variable>(0)},{"int",std::make_shared<variable>(std::numeric_limits<int>::max())},
+        {"float",std::make_shared<variable>(1.0f)},{"float",std::make_shared<variable>(1.25f)},
+        {"float",std::make_shared<variable>(-0.0f)},{"float",std::make_shared<variable>(std::numeric_limits<float>::max())},
+        {"float",std::make_shared<variable>(std::numeric_limits<float>::denorm_min())},
+        {"double",std::make_shared<variable>(1.0)},{"double",std::make_shared<variable>(1.25)},
+        {"double",std::make_shared<variable>(-0.0)},{"double",std::make_shared<variable>(std::numeric_limits<double>::max())},
+        {"double",std::make_shared<variable>(std::numeric_limits<double>::denorm_min())},
+    };
+    auto numeric_result=[](const V& value) {
+        if(value->type==INT_VALUE)return static_cast<double>(*static_cast<int*>(value->value));
+        if(value->type==FLOAT_VALUE)return static_cast<double>(*static_cast<float*>(value->value));
+        return *static_cast<double*>(value->value);
+    };
+    for(const auto& item:numeric)for(const auto& target:std::initializer_list<std::pair<int,const char*>>{
+        {INT_VALUE,"int"},{FLOAT_VALUE,"float"},{DOUBLE_VALUE,"double"},
+    }) {
+        const bool widening=(item.value->type==INT_VALUE&&(target.first==FLOAT_VALUE||target.first==DOUBLE_VALUE))||
+                            (item.value->type==FLOAT_VALUE&&target.first==DOUBLE_VALUE);
+        if(item.value->type==target.first||widening) {
+            auto result=program->invoke(400+target.first,{item.value});
+            const double input=numeric_result(item.value);
+            const double expected=target.first==FLOAT_VALUE?static_cast<double>(static_cast<float>(input)):input;
+            check(result->type==target.first&&numeric_result(result)==expected,
+                  "numeric returns preserve exact types or apply only the approved widenings");
+            if(input==0.0)check(std::signbit(numeric_result(result))==std::signbit(input),"allowed numeric returns preserve signed zero");
+        } else runtime_failure(400+target.first,{item.value},
+            "Function return type mismatch: expected "+std::string(target.second)+", got "+item.type);
+        auto dynamic=dynamic_return(item.value);
+        check(dynamic->type==item.value->type&&numeric_result(dynamic)==numeric_result(item.value),"any returns preserve the actual numeric ABI");
+    }
+    runtime_failure(400+DOUBLE_VALUE,{std::make_shared<variable>(std::numeric_limits<float>::infinity())},"Non-finite return value");
+    runtime_failure(400+DOUBLE_VALUE,{std::make_shared<variable>(std::numeric_limits<float>::quiet_NaN())},"Non-finite return value");
+    auto nonfinite=std::make_shared<variable>(std::numeric_limits<double>::infinity());
+    check(std::isinf(numeric_result(program->invoke(400+DOUBLE_VALUE,{nonfinite})))&&
+          std::isinf(numeric_result(dynamic_return(nonfinite))),"same-type and any return handling remains unchanged for host nonfinite values");
+    for(const auto& value:std::vector<V>{std::make_shared<variable>("same"),std::make_shared<variable>(true),
+        std::make_shared<variable>(address{std::numeric_limits<std::uint64_t>::max()}),std::make_shared<variable>(nullptr)}) {
+        auto exact=program->invoke(400+value->type,{value}),dynamic=dynamic_return(value);
+        check(exact->type==value->type&&dynamic->type==value->type&&value_to_string(exact)==value_to_string(value)&&
+              value_to_string(dynamic)==value_to_string(value),"scalar identity, void and any return behavior is unchanged");
+    }
+    runtime_failure(400+VOID_VALUE,{std::make_shared<variable>(1)},"Void function returned a value");
+    runtime_failure(400+INT_VALUE,{std::make_shared<variable>("wrong")},"Function return type mismatch: expected int, got string");
+    runtime_failure(410,{},"Function return type mismatch: expected int, got void");
+    auto object=blocks::create(1,program);object->slots[0]->setValue(42);
+    for(int target:{OBJECT_VALUE,ANY_VALUE}) {
+        auto value=std::make_shared<variable>(object);
+        auto result=target==ANY_VALUE?dynamic_return(value):program->invoke(400+target,{value});auto returned=blocks::of(result);
+        check(returned&&returned!=object&&returned->state==slot_block::status::live&&integer(returned->slots[0])==42,
+              "object and any results retain their established value ownership semantics");
+        blocks::finalize(returned,program->baseEnv,true);
+    }
+    for(const auto& item:numeric) {
+        auto result=program->invoke(510+item.value->type,{item.value});
+        check(result->type==item.value->type&&numeric_result(result)==numeric_result(item.value),"generic return_typed retains exact context ABI values");
+    }
+    check(numeric_result(program->invoke(520,{std::make_shared<variable>(7)}))==7.0,"a caller may widen an exactly checked generic int result");
+    runtime_failure(510+INT_VALUE,{std::make_shared<variable>(1.0f)},"Generic value type mismatch");
+    runtime_failure(510+FLOAT_VALUE,{std::make_shared<variable>(1)},"Generic value type mismatch");
+    for(const auto& item:std::initializer_list<std::pair<int,std::string>>{
+        {530,"Function return type mismatch: expected int, got double\n  at ordinaryNarrow (returns.azs:5:7)"},
+        {532,"Function return type mismatch: expected int, got double\n  at genericNarrow (returns.azs:13:7)\n  at genericCaller (returns.azs:21:10)"},
+    }) {
+        bool caught=false;
+        try {program->invoke(item.first);}
+        catch(const std::runtime_error& error) {
+            caught=true;check(typeid(error)==typeid(std::runtime_error)&&describe_error(error)==item.second,
+                "ordinary and generic return conversions report the return statement location");
+        }
+        check(caught,"return-conversion debug probes must throw");
+    }
+    program->destroy();
+}
 void conversion_tests() {
     auto convert=[](int target,R value){return rx(49,{ri(target),std::move(value)});};
     AbdStack functions;
@@ -1188,6 +1301,7 @@ void boolean_condition_equality_tests() {
     program->destroy();
 }
 int main(){try{
+    checked_return_tests();
     conversion_tests();
     bitwise_tests();
     boolean_condition_equality_tests();

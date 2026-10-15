@@ -63,6 +63,24 @@ void __script_pre_destroy() { print("done"); }
 
 函数返回类型支持 `void/int/string/float/double/boolean/address` 和已声明的类名，`bool` 是 `boolean` 的别名。支持前向引用、递归与任意嵌套函数调用；普通函数位于顶层，成员方法可在类体或使用 `ClassName::method` 在类外定义。参数可以写 `a,b` 或 `int a,int b`，对象参数须显式写类名（`C p` 按值复制，`C * p` 传指针）。局部变量也可写 `int x = 2`；带显式基础类型的局部变量必须同时给出初始化值。显式参数和局部类型参与编译期检查；无类型参数、`var`、`def` 和 `#gvar` 全局保持动态类型，带类型的全局与带类型的局部变量一样检查。函数返回类型还会由解释器验证。
 
+脚本返回值必须符合原有的声明类型可赋值规则；数值返回另外只允许以下隐式扩宽：
+
+| 声明的返回类型 | 接受的数值结果类型 |
+| --- | --- |
+| `int` | `int` |
+| `float` | `int`、`float` |
+| `double` | `int`、`float`、`double` |
+
+int 转 float 可能舍入，与 `float(x)` 一致；例如 float 函数返回 int 值 16777217 时得到 16777216。float/double 转 int、double 转 float 均不隐式收窄，即使当前值恰好能表示也不例外。需要时写 `return int(value);` 或 `return float(value);`，明确请求受检查的[显式转换](#显式转换)，例如：
+
+```c
+float widen(int value) { return value; }
+int truncate(double value) { return int(value); }
+float narrow(double value) { return float(value); }
+```
+
+已知的收窄返回在编译时报错，例如 `return expected int, got double; narrowing requires an explicit cast such as int(x)`。动态 `any` 结果按真实运行时类型检查：int 函数返回 double 时报告 `Function return type mismatch: expected int, got double`。运行时同样只允许精确匹配或数值扩宽，不会静默截断动态返回值。类指针仍遵守原有的可赋值和所有权规则；带类型 extern 回调签名仍须精确匹配，不因此增加数值转换。
+
 块 `{}` 创建词法作用域，允许内层同名变量遮蔽外层；同一作用域重复声明报错。局部编号在整个函数内唯一，避免先前子块和兄弟块编号冲突。变量必须先声明，访问已结束作用域内的变量会编译失败。全局变量见[下文](#全局变量)。函数参数按值传递，脚本函数调用会检查参数数量。
 
 非 hint 程序保持 `__script_onload = 0`、`main = 0x0fff0000`、`__script_pre_destroy = 1`；钩子必须是无参数 `void` 函数。普通函数默认位于 `0xfff`，`#namespace 1234` 支持 1～4 位十六进制（源码中的 namespace 和函数 ID 可带 `0x` 前缀及任意个前导零，如 `#namespace 0x0005151`、`:00000000abcd`；AST 始终写成不带前缀的十六进制，`compile-json` 只接受不超过字段宽度的纯十六进制数字，namespace 为 4 位，完整 ID 为 8 位），`#namespace fff` 显式写出默认 namespace，生成的编号与省略时相同，但仍计入唯一的 namespace 指令。namespace `0000` 保留给生命周期钩子和 hint 库占位，`0abd` 保留给运行时内置函数，`#namespace` 使用这两个值时编译报错；`compile-json` 同样拒绝 `function-namespace` 为 0 的非 hint AST，以及 0000 中除生命周期函数 0/1 以外的普通定义。函数定义可写 `int add(int a,int b):0003 {return a+b;}` 固定低16位编号；先预留显式编号再分配自动编号，固定入口不能用后缀改变编号。自动编号可能随源码改变，宿主应使用同次编译的 AST 映射。需要稳定的公开 ID 时，只在共享头文件的 extern 声明中写一次完整 ID；本模块（hint 库为其自身假定的 namespace）中的实现省略编号即可继承该编号，见 [hint 链接](../docs/HINT_LINKING.md)。

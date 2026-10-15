@@ -1,3 +1,11 @@
+# C18 数值返回值只允许拓宽（2026-10-15）
+
+中文 | [English](VALIDATION.en.md)
+
+函数返回值现在只允许精确类型、相容的名义类型引用，以及 int→float/double、float→double。已知收窄产生显式转换提示，动态收窄报告预期与实际类型。math_trunc 改用受检查的 int()，整数域错误路径保持 Division by zero。公开数学库 ID、exec v10 和 JNI 快照 v9 均未改变。
+
+取消 JAVA_TOOL_OPTIONS 后顺序通过 V0–V3。两个完整构建均通过 241 项 Java 测试和 4964 项原生检查。类型安全套件普通构建通过 52 项，Sanitizer 通过 50 项；数学库回归、数值对比及错误用例全部通过。既有格式、生命周期、JNI 和模块套件均通过，无 ASan/UBSan 报告。审查在执行前将一个无效的普通 ANY 返回值测试夹具改为合法泛型上下文。发行导出通过 25 项搬迁/消费者检查，173 个清单文件的大小与 SHA-256 全部匹配。日志：build/c18/v1.log、build/c18/v2.log、build/c18/v3.log。
+
 # C17 显式标量转换（2026-10-15）
 
 中文 | [English](VALIDATION.en.md)

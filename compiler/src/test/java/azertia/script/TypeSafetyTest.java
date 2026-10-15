@@ -344,6 +344,85 @@ class TypeSafetyTest {
         assertDoesNotThrow(() -> bytes(dynamic));
     }
 
+    @Test void numericReturnsPermitOnlyExactTypesAndWidening() throws Exception {
+        List<String> numeric = List.of("int", "float", "double");
+        for (String expected : numeric) for (String actual : numeric) {
+            String source = expected + " main(" + actual + " value){return value;}";
+            JsonObject parsed = tree(source);
+            if (numeric.indexOf(actual) > numeric.indexOf(expected)) {
+                String suffix = "return expected " + expected + ", got " + actual
+                        + "; narrowing requires an explicit cast such as " + expected + "(x)";
+                String message = failure(source).getMessage();
+                assertTrue(message.endsWith(suffix), message);
+                CompileException fromJson = assertThrows(CompileException.class,
+                        () -> bytes(JsonParser.parseString(parsed.toString()).getAsJsonObject()));
+                assertEquals(message, fromJson.getMessage());
+            } else {
+                byte[] compiled = bytes(parsed);
+                assertArrayEquals(compiled, bytes(JsonParser.parseString(parsed.toString()).getAsJsonObject()));
+                JsonObject function = execFunction(exec(parsed), 0x0fff0000);
+                // The existing function ABI carries the widening target; its return
+                // operand retains the source tag and needs no explicit convert node.
+                int expectedCode = expected.equals("int") ? 0 : expected.equals("float") ? 2 : 3;
+                int actualCode = actual.equals("int") ? 0 : actual.equals("float") ? 2 : 3;
+                assertEquals(expectedCode, function.get("return-type").getAsInt());
+                assertEquals(actualCode, function.getAsJsonArray("param-types").get(0).getAsInt());
+                JsonObject returned = function.getAsJsonArray("script").get(0).getAsJsonObject();
+                assertEquals(ExecOpcodes.RETURN, returned.get("c").getAsInt());
+                assertEquals(ExecOpcodes.VARIABLE, returned.getAsJsonObject("r").get("c").getAsInt());
+            }
+        }
+        for (String source : List.of("int main(){return 3.7;}", "int main(){return 1.0;}",
+                "int main(){return 1.0f;}", "float main(){return 1.0;}",
+                "extern double produce():12340001;int main(){return produce();}"))
+            assertTrue(failure(source).getMessage().contains("narrowing requires an explicit cast"), source);
+    }
+
+    @Test void explicitReturnConversionsAndDynamicOperandsKeepTheirRuntimeChecks() throws Exception {
+        for (String target : List.of("int", "float")) {
+            JsonObject parsed = tree(target + " main(double value){return " + target + "(value);}");
+            JsonObject returned = execFunction(exec(parsed), 0x0fff0000).getAsJsonArray("script").get(0).getAsJsonObject();
+            JsonObject converted = returned.getAsJsonObject("r");
+            assertEquals(ExecOpcodes.CONVERT, converted.get("c").getAsInt());
+            assertEquals(target.equals("int") ? 0 : 2, converted.get("type").getAsInt());
+            assertArrayEquals(bytes(parsed), bytes(JsonParser.parseString(parsed.toString()).getAsJsonObject()));
+        }
+        for (String target : List.of("int", "float", "double", "boolean", "string", "address")) {
+            JsonObject parsed = tree(target + " main(value){return value;}");
+            JsonObject function = execFunction(exec(parsed), 0x0fff0000);
+            assertEquals(Compiler.AsTypes.ANY_VALUE, function.getAsJsonArray("param-types").get(0).getAsInt());
+            assertEquals(ExecOpcodes.RETURN, function.getAsJsonArray("script").get(0).getAsJsonObject().get("c").getAsInt());
+            assertArrayEquals(bytes(parsed), bytes(JsonParser.parseString(parsed.toString()).getAsJsonObject()));
+        }
+        // Editing a typed AST must not restore the historical implicit narrowing.
+        JsonObject ast = tree("double main(double value){return value;}");
+        String message = rejected(ast, copy -> function(copy, "main").getAsJsonObject("metadata").addProperty("return-type", "float")).getMessage();
+        assertTrue(message.endsWith("return expected float, got double; narrowing requires an explicit cast such as float(x)"), message);
+    }
+
+    @Test void returnConversionKeepsNonNumericAndNominalContracts() throws Exception {
+        String classes = "class A{int x;}class B:A{int y;}class C{int x;}";
+        for (String source : List.of(classes + "A* up(B* p){return p;}void main(){}",
+                classes + "A copy(A value){return value;}void main(){}",
+                classes + "A* empty(){return null;}void main(){}",
+                "address main(){return null;}",
+                "<T> T identity(T value){return value;}void main(){}")) {
+            JsonObject parsed = tree(source);
+            assertArrayEquals(bytes(parsed), bytes(JsonParser.parseString(parsed.toString()).getAsJsonObject()));
+        }
+        record Case(String source, String suffix) {}
+        for (Case item : List.of(
+                new Case(classes + "B* down(A* p){return p;}void main(){}", "return expected B *, got A *"),
+                new Case(classes + "A sliced(B value){return value;}void main(){}", "return expected A, got B"),
+                new Case(classes + "A* unrelated(C* p){return p;}void main(){}", "return expected A *, got C *"),
+                new Case("int main(){return \"1\";}", "return expected int, got string"),
+                new Case("boolean main(){return 1;}", "return expected boolean, got int"))) {
+            String message = failure(item.source()).getMessage();
+            assertTrue(message.endsWith(item.suffix()), message);
+            assertFalse(message.contains("narrowing"), message);
+        }
+    }
+
     @Test void hexadecimalIdsAndReservedNamespacesMatchBetweenSourceAndAst() throws Exception {
         // Source accepts a 0x prefix and leading zeros; the AST always holds the canonical spelling.
         JsonObject tree = tree("#namespace 0x0005151\nint f():00000000abcd {return 1;}\nextern int g():00000000abcd;\nextern int h():0X00051510002;\n"

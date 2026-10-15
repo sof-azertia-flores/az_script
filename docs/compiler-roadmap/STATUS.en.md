@@ -2,7 +2,7 @@
 
 [中文](STATUS.md) | English
 
-This branch (`claude/confident-galileo-fic3s1`) carries a planned series of 28 commits. They fix the compiler problems found in a repository review, add new language features, and add runtime line numbers. Work has resumed through C17; the next item is C18.
+This branch (`claude/confident-galileo-fic3s1`) carries a planned series of 28 commits. They fix the compiler problems found in a repository review, add new language features, and add runtime line numbers. Work has resumed through C18; the next item is C19.
 
 - [DESIGN.md](DESIGN.md): the detailed per-commit design, with file:line citations.
 - [COMPLETENESS.md](COMPLETENESS.md): the review of that design.
@@ -43,30 +43,31 @@ This branch (`claude/confident-galileo-fic3s1`) carries a planned series of 28 c
 
 | C16 | 704a0a8 | Int32 bitwise and shift operators, adjacent preprocessed-token shifts and checked counts. V0–V3 passed on Linux x86_64. |
 
-| C17 | this commit | Checked scalar conversions with strict locale-independent decimal parsing; opcode 49. V0–V3 passed on Linux x86_64. |
+| C17 | 262302f | Checked scalar conversions with strict locale-independent decimal parsing; opcode 49. V0–V3 passed on Linux x86_64. |
+
+| C18 | this commit | Exact or widening-only returns; explicit narrowing in the math library. V0–V3 passed on Linux x86_64. |
 
 ## Remaining
 
 Each item gives its validation sets (V0–V3 are defined under "How to resume"). Details for item Cxx are in the section **Cxx** of [DESIGN.md](DESIGN.md).
 
-1. **C18 Checked return conversion, widening only** (V0, V1, V2, V3). Rewrite the narrowing sites in `compiler/stdlib/math.azs` (`math_trunc` uses `int()`).
-2. **C19 Ternary `?:`** (V0–V3). Opcode 50 `select`. Fix the colon-glue lexing at `GeneraterJson` (see DESIGN R8). `ifExpression` cannot be reused because it scopes each arm.
-3. **C20 switch** (V0, V1, V3). Lowered flat through a `SyntheticLoop` descriptor, no new opcode. No fall-through.
-4. **C21 String functions** (V0–V3). Dense built-ins 0x0abd000b–13 with code-point semantics. Supports `s.length()` and `s[i]`.
-5. **C22 Typed class pointers and closed object storage** (V0–V3).
+1. **C19 Ternary `?:`** (V0–V3). Opcode 50 `select`. Fix the colon-glue lexing at `GeneraterJson` (see DESIGN R8). `ifExpression` cannot be reused because it scopes each arm.
+2. **C20 switch** (V0, V1, V3). Lowered flat through a `SyntheticLoop` descriptor, no new opcode. No fall-through.
+3. **C21 String functions** (V0–V3). Dense built-ins 0x0abd000b–13 with code-point semantics. Supports `s.length()` and `s[i]`.
+4. **C22 Typed class pointers and closed object storage** (V0–V3).
    - `object_alloc` 0x0abd0014; the heap tags object ranges.
    - `mem_get`/`mem_free`/`make_free`/`mem_send_up` and JNI raw put/free reject object storage.
    - `oa` requires object storage.
    - Add the Known limitations docs.
-6. **C23 `check_object`** (V0–V3). Opcode 51, applied to `reflect_invoke_function<R>` results.
-7. **C24 Virtual methods** (V0–V3).
+5. **C23 `check_object`** (V0–V3). Opcode 51, applied to `reflect_invoke_function<R>` results.
+6. **C24 Virtual methods** (V0–V3).
     - Keywords `virtual`, `override` and `final`; opcodes 52 `set_methods` and 53 `call_virtual`. Method tables live outside the slots.
     - **JNI snapshot v10**: update every snapshot-version site listed in COMPLETENESS §2.7.
     - Update the AGENTS wording.
-8. **C25 Exact ABD measurement and statement-level spilling** (V0, V1, V2). `ExecShape` and `AbdLinearizer`. Differential runs at internal limits 96, 64 and 48.
-9. **C26 Flat operator chains above 128 operands** (V0, V1, V2).
-10. **C27 Flat else-if ladders** (V0, V1, V2). Choose nested or flat lowering from the remaining depth budget; this covers ladders of about 120–128 branches and ladders inside loops.
-11. **C28 Validation record** (V0–V3). Add an entry to VALIDATION.md/.en.md with real results.
+7. **C25 Exact ABD measurement and statement-level spilling** (V0, V1, V2). `ExecShape` and `AbdLinearizer`. Differential runs at internal limits 96, 64 and 48.
+8. **C26 Flat operator chains above 128 operands** (V0, V1, V2).
+9. **C27 Flat else-if ladders** (V0, V1, V2). Choose nested or flat lowering from the remaining depth budget; this covers ladders of about 120–128 branches and ladders inside loops.
+10. **C28 Validation record** (V0–V3). Add an entry to VALIDATION.md/.en.md with real results.
 
 ### Follow-ups found while implementing C01–C13
 

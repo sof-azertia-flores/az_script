@@ -63,6 +63,24 @@ void __script_pre_destroy() { print("done"); }
 
 Return types are `void/int/string/float/double/boolean/address` or a declared class; `bool` aliases boolean. Forward calls, recursion, and arbitrarily nested calls are supported within nesting limits. Ordinary functions are top-level; members may be inline or defined as `ClassName::method`. Parameters may be `a,b` or `int a,int b`; object parameters need explicit class types (`C p` copies by value; `C * p` passes a pointer). Locals may use `int x = 2`; explicitly typed primitive locals require initialization. Explicit local/parameter types participate in compile-time checks; untyped parameters, var, def, and `#gvar` globals remain dynamic; typed globals are checked like typed locals. The interpreter also validates return types.
 
+Script return values must match their declared type under the existing assignability rules; numeric returns additionally allow only these implicit widenings:
+
+| Declared return type | Accepted numeric result types |
+| --- | --- |
+| `int` | `int` |
+| `float` | `int`, `float` |
+| `double` | `int`, `float`, `double` |
+
+`int` to `float` may round, just like `float(x)`; for example, returning int 16777217 from a float function yields 16777216. No implicit float/double-to-int or double-to-float narrowing is permitted, even when the particular value fits. Write `return int(value);` or `return float(value);` to request a checked [explicit conversion](#explicit-conversions). For example:
+
+```c
+float widen(int value) { return value; }
+int truncate(double value) { return int(value); }
+float narrow(double value) { return float(value); }
+```
+
+A known narrowing return fails compilation, for example `return expected int, got double; narrowing requires an explicit cast such as int(x)`. A dynamic `any` result is checked against its actual runtime type: returning a double from an int function fails with `Function return type mismatch: expected int, got double`. The same exact-or-widening numeric rule applies at runtime; it never silently truncates a dynamic return. Existing class-pointer assignability and ownership rules still apply. Typed extern callback signatures remain exact and do not gain numeric conversion.
+
 Blocks create lexical scopes and allow inner names to shadow outer names; duplicate declarations in one scope fail. Local IDs are unique across a function, avoiding sibling/earlier-child collisions. Declare before use; expired-scope access fails compilation. Globals are described [below](#global-variables). Parameters pass by value; script calls check argument counts.
 
 Non-hint programs retain `__script_onload = 0`, `main = 0x0fff0000`, and `__script_pre_destroy = 1`; hooks must be parameterless void functions. Ordinary functions default to namespace `0xfff`. `#namespace 1234` accepts one to four hex digits (in source, namespaces and function IDs may have a `0x` prefix and any number of leading zeros, e.g. `#namespace 0x0005151` or `:00000000abcd`; the AST always writes plain hex digits, and `compile-json` accepts only plain hex digits within the field width, 4 for a namespace and 8 for a full ID); `#namespace fff` names the default namespace explicitly and gives the same IDs as omitting it, but still counts as the unit's single namespace directive. Namespace `0000` is reserved for lifecycle hooks and hint-library placeholders and `0abd` for runtime built-ins, so `#namespace` rejects both. `compile-json` likewise rejects a non-hint AST whose `function-namespace` is 0, and ordinary definitions in 0000 other than the lifecycle functions 0 and 1. `int add(int a,int b):0003 {return a+b;}` fixes the low 16-bit number; explicit numbers are reserved before automatic allocation. Fixed entry IDs cannot be changed by suffix. Automatic IDs may change with source; hosts should use the AST map from the same compilation. For stable public IDs, write each full ID once in a shared header's extern declaration; implementations in the module's own namespace (a hint library's self-assumed one) omit the number and inherit it. See [hint linking](../docs/HINT_LINKING.en.md).

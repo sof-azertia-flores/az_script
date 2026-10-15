@@ -1,3 +1,11 @@
+# C18 Widening-Only Numeric Returns (2026-10-15)
+
+[中文](VALIDATION.md) | English
+
+Function returns now allow exact types, compatible nominal references, int→float/double and float→double. Known narrowing reports an explicit-conversion hint; dynamic narrowing throws an expected/actual-tag error. Updated math_trunc to use checked int() and integer domain-error paths to retain Division by zero. Public math IDs, exec v10 and JNI snapshot v9 are unchanged.
+
+V0–V3 passed sequentially with JAVA_TOOL_OPTIONS unset. Both complete builds passed 241 Java tests and 4964 native checks. The type-safety suite passed 52 ordinary and 50 sanitizer cases; all math regressions, numerical comparisons and error cases passed. Existing wire, lifetime, JNI and module suites passed without ASan/UBSan reports. Review corrected an invalid ordinary-ANY native test fixture to use a valid generic context before execution. The release export passed 25 relocation/consumer checks, with all 173 manifest file sizes and SHA-256 digests verified. Logs: build/c18/v1.log, build/c18/v2.log, build/c18/v3.log.
+
 # C17 Explicit Scalar Conversions (2026-10-15)
 
 [中文](VALIDATION.md) | English

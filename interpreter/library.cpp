@@ -911,7 +911,8 @@ V convert_return(V v,int type) {
         return v;
     }
     if(v->type==type) return v->deepCopy();
-    if(numeric(v)&&(type==INT_VALUE||type==FLOAT_VALUE||type==DOUBLE_VALUE)) {
+    if((v->type==INT_VALUE&&(type==FLOAT_VALUE||type==DOUBLE_VALUE))||
+       (v->type==FLOAT_VALUE&&type==DOUBLE_VALUE)) {
         double n=number(v);
         if(!std::isfinite(n)) throw std::runtime_error("Non-finite return value");
         if(type==DOUBLE_VALUE) return std::make_shared<variable>(n);
@@ -920,11 +921,8 @@ V convert_return(V v,int type) {
             if(!std::isfinite(f)) throw std::overflow_error("Float return value overflow");
             return std::make_shared<variable>(f);
         }
-        if(std::trunc(n)!=n||n<std::numeric_limits<int>::min()||n>std::numeric_limits<int>::max())
-            throw std::runtime_error("Return value cannot be represented as int");
-        return std::make_shared<variable>(static_cast<int>(n));
     }
-    throw std::runtime_error("Function return type mismatch or missing return");
+    throw std::runtime_error("Function return type mismatch: expected "+std::string(type_name(type))+", got "+type_name(v->type));
 }
 // Exec records are raw ABD stacks. Views borrow the caller's input only while
 // decoding; the resulting native expression tree owns all retained data.
