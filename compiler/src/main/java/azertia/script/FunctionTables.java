@@ -9,6 +9,9 @@ final class FunctionTables {
     final Map<Integer,Integer> returns;
     Set<Integer> scriptIds=Set.of();
     Set<Integer> scopeSafeCalls=Set.of();
+    record Precompiled(AcsElement value,int type) {}
+    final IdentityHashMap<com.google.gson.JsonObject,Precompiled> precompiled=new IdentityHashMap<>();
+    final Set<AcsElement> stagedCaptures=Collections.newSetFromMap(new IdentityHashMap<>());
     final Set<AcsElement> atomic=Collections.newSetFromMap(new IdentityHashMap<>());
     final Map<Integer,Integer> slots = new HashMap<>();
     final IdentityHashMap<AcsElement,JsonElement> origins = new IdentityHashMap<>();

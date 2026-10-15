@@ -13,8 +13,8 @@ import java.util.*;
  * numeric literals. Violations are reported with JSON-pointer paths, e.g.
  * {@code Malformed script JSON at /body/fff/_funcfff0000/metadata/position: expected an integer, got "abc"},
  * so a hand-written or edited AST fails with a clear message instead of an
- * exception inside the compiler. Unknown fields are ignored, and the meaning of
- * well-typed values (names, types, operations) is left to the compiler.
+ * exception inside the compiler. Unknown fields are ignored except in compact
+ * chain operator records; the meaning of well-typed names and types is left to the compiler.
  *
  * <p>The walk is iterative; it runs after {@link TreeLimits#validate} has bounded
  * the nesting and excluded cycles.
@@ -222,6 +222,7 @@ final class AstShape {
                 literalTrue(node, "_parenthesized", path);
                 JsonArray params = array(node, "param", path, false);
                 boolean control = "ctrl".equals(kind);
+                if (control && "chain".equals(call)) chain(node, params, path);
                 if (pending.switchSection() && !(control && "case".equals(call)))
                     error(path, "expected a ctrl/case switch section");
                 if (control && "case".equals(call)) {
@@ -254,6 +255,36 @@ final class AstShape {
         if (!value.isJsonArray()) { error(path, "expected an array of switch sections, got " + describe(value)); return; }
         JsonArray sections = value.getAsJsonArray();
         for (int i = 0; i < sections.size(); i++) children.add(new Pending(sections.get(i), path.index(i), true));
+    }
+    private static final List<Set<String>> BINARY_PRECEDENCE = List.of(
+            Set.of("or"), Set.of("and"), Set.of("bit_or"), Set.of("bit_xor"), Set.of("bit_and"),
+            Set.of("cmp", "ne"), Set.of("lower", "greater", "le", "ge"), Set.of("shl", "shr", "ushr"),
+            Set.of("add", "minus"), Set.of("multiply", "divide", "mod"));
+    private static final Set<String> CHAIN_OPERATOR_FIELDS = Set.of("call", "_file", "_line", "_column");
+    /** Operators are metadata, not child expressions; only the flat operands enter the node walk. */
+    private void chain(JsonObject node, JsonArray params, Pointer path) {
+        if (params == null) {
+            if (!node.has("param")) missing(path.key("param"));
+        } else if (params.size() <= 128) error(path.key("param"), "chain needs more than 128 operands");
+        JsonArray operators = array(node, "operators", path, true);
+        if (operators == null) return;
+        if (params != null && operators.size() != params.size() - 1)
+            error(path.key("operators"), "chain needs exactly one operator between each pair of operands");
+        int precedence = -1;
+        for (int i = 0; i < operators.size(); i++) {
+            Pointer at = path.key("operators").index(i); JsonObject operator = element(operators.get(i), at);
+            if (operator == null) continue;
+            String call = string(operator, "call", at, true); positions(operator, at);
+            for (String key : operator.keySet())
+                if (!CHAIN_OPERATOR_FIELDS.contains(key)) error(at.key(key), "unexpected chain operator field");
+            if (call == null) continue;
+            int group = -1;
+            for (int level = 0; level < BINARY_PRECEDENCE.size(); level++)
+                if (BINARY_PRECEDENCE.get(level).contains(call)) { group = level; break; }
+            if (group < 0) error(at.key("call"), "expected a canonical binary operator, got " + printable(call));
+            else if (precedence < 0) precedence = group;
+            else if (precedence != group) error(at.key("call"), "chain operators must have the same precedence");
+        }
     }
     /** Operand positions that hold variable, member or class names. */
     private static final Map<String,Set<Integer>> NAME_OPERANDS = Map.of(

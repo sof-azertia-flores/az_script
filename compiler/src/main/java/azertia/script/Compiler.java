@@ -413,6 +413,8 @@ public class Compiler {
         }
         if (!kind.equals("ctrl")) return AsTypes.ANY_VALUE;
         return switch (operation) {
+            case "#precompiled" -> precompiled(object,environment).type();
+            case "chain" -> chainType(object,environment);
             case "var" -> params.size() == 1 ? variableType(string(params.get(0), "Variable name"), environment) : AsTypes.ANY_VALUE;
             case "null" -> NULL_TYPE;
             case "object-new" -> classInfo(string(params.get(0), "Class name"), environment).pointerType;
@@ -966,6 +968,8 @@ public class Compiler {
         if (!type.equals("ctrl")) throw new IllegalArgumentException("Unknown instruction type: " + type);
         result.put("t", 0);
         switch (call) {
+            case "#precompiled" -> { return Objects.requireNonNull(precompiled(source,environment).value(),"Type-only precompiled value"); }
+            case "chain" -> { return compileChain(source,environment); }
             case "buffer-new" -> {
                 arity(call,params,1,1);int element=valueType(string(params.get(0),"Buffer element type"),true);bufferType(element);
                 result.put("c",ExecOpcodes.BUFFER_NEW);result.put("context",context(element,environment,0));
@@ -1432,6 +1436,90 @@ public class Compiler {
             default -> throw new IllegalArgumentException("Unknown control operation: " + call);
         }
         return result;
+    }
+    private static FunctionTables.Precompiled precompiled(JsonObject source,LogicEnvironment environment) {
+        FunctionTables.Precompiled value=environment.tables.precompiled.get(source);
+        if(value==null)throw new IllegalArgumentException("Unknown internal precompiled expression");return value;
+    }
+    private static JsonObject precompiled(AcsElement value,int type,JsonElement source,LogicEnvironment environment) {
+        JsonObject node=node("#precompiled");environment.tables.precompiled.put(node,new FunctionTables.Precompiled(value,type));
+        copyPosition(source,node,environment);return node;
+    }
+    /** Query a left fold without constructing a recursively nested source tree. */
+    private static int chainType(JsonObject source,LogicEnvironment environment) {
+        JsonArray operands=parameters(source),operators=source.getAsJsonArray("operators");
+        int type=expressionType(operands.get(0),environment);
+        for(int i=1;i<operands.size();i++) {
+            JsonObject operator=operators.get(i-1).getAsJsonObject();
+            JsonObject pair=node(operator.get("call").getAsString(),precompiled(null,type,operator,environment),operands.get(i));
+            copyPosition(operator,pair,environment);type=expressionType(pair,environment);
+        }
+        return type;
+    }
+    private static boolean checkedStringOperand(JsonElement operand,LogicEnvironment environment) {
+        if(operand.isJsonPrimitive())return operand.getAsJsonPrimitive().isString();
+        if(!operand.isJsonObject())return false;
+        JsonObject node=operand.getAsJsonObject();String kind=node.get("t").getAsString(),call=node.get("call").getAsString();
+        if(kind.equals("ctrl")&&call.equals("var")) {
+            LogicVariable local=environment.findLexicalVariable(parameters(node).get(0).getAsString());
+            return local!=null&&local.type==AsTypes.STRING_VALUE;
+        }
+        return (kind.equals("call")||kind.equals("ctrl")&&(call.equals("member-call")||call.equals("base-call")))
+                &&expressionType(operand,environment)==AsTypes.STRING_VALUE;
+    }
+    private static JsonElement balancedChain(List<JsonElement> operands,JsonArray operators,int first,int end,LogicEnvironment environment) {
+        if(end-first==1)return operands.get(first);
+        int middle=(first+end)>>>1;JsonObject operator=operators.get(middle-1).getAsJsonObject();
+        JsonObject result=node(operator.get("call").getAsString(),balancedChain(operands,operators,first,middle,environment),
+                balancedChain(operands,operators,middle,end,environment));copyPosition(operator,result,environment);return result;
+    }
+    private static AcsElement compileChain(JsonObject source,LogicEnvironment environment) {
+        JsonArray operands=parameters(source),operators=source.getAsJsonArray("operators");
+        String first=operators.get(0).getAsJsonObject().get("call").getAsString();
+        boolean uniform=true;for(JsonElement operator:operators)uniform&=operator.getAsJsonObject().get("call").getAsString().equals(first);
+        boolean logical=uniform&&(first.equals("and")||first.equals("or"));
+        boolean strings=uniform&&first.equals("add");
+        if(strings)for(JsonElement operand:operands)if(!checkedStringOperand(operand,environment)){strings=false;break;}
+        if(logical||strings) {
+            List<JsonElement> leaves=new ArrayList<>();
+            for(int i=0;i<operands.size();i++) {
+                JsonElement operand=operands.get(i);
+                if(logical) {
+                    JsonObject operator=operators.get(Math.max(0,i-1)).getAsJsonObject();
+                    try {
+                        if(isTypeParameter(expressionType(operand,environment)))throw new IllegalArgumentException("Operators are not supported on a type parameter");
+                        String label=first+(i==0?" left operand":" right operand");
+                        rejectVoidValue(label,operand,environment);requireConditionOrUnknown(label,operand,environment);
+                    }catch(RuntimeException error){throw relocate(error,operator,environment);}
+                    // Every original leaf is checked before later effects, even when
+                    // the balanced parent groups several leaves on its right.
+                    JsonObject inner=node("not",operand),checked=node("not",inner);
+                    copyPosition(operator,inner,environment);copyPosition(operator,checked,environment);operand=checked;
+                }
+                leaves.add(operand);
+            }
+            return compileNode(balancedChain(leaves,operators,0,leaves.size(),environment),environment);
+        }
+        JsonElement left=operands.get(0);AcsElement value=null;AcsArray prefixes=new AcsArray();
+        for(int i=1;i<operands.size();i++) {
+            JsonObject operator=operators.get(i-1).getAsJsonObject();
+            JsonObject pair=node(operator.get("call").getAsString(),left,operands.get(i));copyPosition(operator,pair,environment);
+            value=compileNode(pair,environment);int type=expressionType(pair,environment);
+            if(i%64==0&&i+1<operands.size()) {
+                if(environment.tables.owningResult(value))throw relocate(new IllegalArgumentException(
+                        "Expression nesting exceeds the ABD limit of "+environment.state().abdLimit
+                        +" levels; this cut would change object lifetime or copying; store this operand in a local variable first"),operator,environment);
+                if(environment.counter.next>=MAX_VARIABLE_SLOTS)throw new IllegalArgumentException("Function frame exceeds "+MAX_VARIABLE_SLOTS+" variable slots");
+                int slot=environment.counter.next++;environment.tables.slots.put(slot,0);
+                AcsObject definition=new AcsObject();definition.put("t",0);definition.put("c",ExecOpcodes.DEFINE);definition.put("v",slot);definition.put("val",value);
+                environment.tables.stagedCaptures.add(definition);recordPosition(operator,definition,environment);prefixes.acsa.add(definition);
+                AcsObject read=new AcsObject();read.put("t",0);read.put("c",ExecOpcodes.VARIABLE);read.put("v",slot);
+                left=precompiled(read,type,operator,environment);
+            } else left=precompiled(value,type,operator,environment);
+        }
+        if(prefixes.acsa.isEmpty())return value;
+        AcsObject sequence=new AcsObject();sequence.put("t",0);sequence.put("c",ExecShape.INTERNAL_SEQUENCE);sequence.put("statements",prefixes);sequence.put("v",value);
+        return sequence;
     }
     private record SwitchSection(List<JsonElement> labels, JsonArray body, boolean fallback, JsonObject anchor) {}
     private static AcsElement compileSwitch(JsonObject source, LogicEnvironment environment) {

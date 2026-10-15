@@ -2178,13 +2178,58 @@ public class GeneraterJson {
             return first == last ? first : new Token(text, null, first.unit(), first.line(), first.column(), false,
                     first.macro(), first.start(), last.end());
         }
+        /** One uninterrupted precedence group; its operands may contain completed tighter groups. */
+        private static final class BinaryGroup {
+            final int level;
+            final List<JsonElement> operands = new ArrayList<>();
+            final List<Token> operators = new ArrayList<>();
+            BinaryGroup(int level, JsonElement left) { this.level = level; operands.add(left); }
+            JsonElement finish() {
+                JsonElement left = operands.get(0);
+                if (operands.size() <= 128) {
+                    for (int i = 0; i < operators.size(); i++)
+                        left = operation("ctrl", binaryName(operators.get(i).text()), operators.get(i), left, operands.get(i + 1));
+                    return left;
+                }
+                JsonObject chain = operation("ctrl", "chain", operators.get(operators.size() - 1), operands.toArray(JsonElement[]::new));
+                JsonArray entries = new JsonArray();
+                for (Token operator : operators) {
+                    JsonObject entry = new JsonObject(); entry.addProperty("call", binaryName(operator.text()));
+                    position(entry, operator.unit(), operator.line(), operator.column()); entries.add(entry);
+                }
+                chain.add("operators", entries); return chain;
+            }
+        }
+        private static int binaryLevel(String text) {
+            for (int level = 0; level < PRECEDENCE.size(); level++)
+                if (PRECEDENCE.get(level).contains(text)) return level;
+            return -1;
+        }
         private JsonElement binary(int level) {
-            if (level == PRECEDENCE.size()) return unary();
-            JsonElement left = binary(level + 1);
-            String text = operatorText();
-            while (PRECEDENCE.get(level).contains(text)) {
-                Token operator = advanceOperator(text); left = operation("ctrl", binaryName(operator.text()), operator, left, binary(level + 1));
+            JsonElement left = unary(); String text = operatorText();
+            if (binaryLevel(text) < level) return left;
+            // Precedence is implementation structure, not logical syntax nesting.
+            // Keep its pending groups on the heap so each '(' does not retain ten Java frames.
+            Deque<BinaryGroup> groups = new ArrayDeque<>();
+            while (true) {
+                int next = binaryLevel(text);
+                if (next < level) break;
+                while (!groups.isEmpty() && groups.peek().level > next) {
+                    left = groups.pop().finish();
+                    if (!groups.isEmpty()) groups.peek().operands.add(left);
+                }
+                if (groups.isEmpty()) groups.push(new BinaryGroup(next, left));
+                else if (groups.peek().level < next) {
+                    List<JsonElement> operands = groups.peek().operands;
+                    groups.push(new BinaryGroup(next, operands.remove(operands.size() - 1)));
+                }
+                BinaryGroup group = groups.peek();
+                group.operators.add(advanceOperator(text)); group.operands.add(unary());
                 text = operatorText();
+            }
+            while (!groups.isEmpty()) {
+                left = groups.pop().finish();
+                if (!groups.isEmpty()) groups.peek().operands.add(left);
             }
             return left;
         }

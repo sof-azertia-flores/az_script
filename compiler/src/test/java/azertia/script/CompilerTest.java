@@ -575,12 +575,17 @@ class CompilerTest {
             assertFalse(Files.exists(temporary.resolve("invalid.exec.abd")));
         }
     }
+    @Test void longFlatAdditiveChainsCompileAndRoundTrip() throws Exception {
+        var script = new GeneraterJson.AzScript();
+        script.execute("int main(){return " + "1+".repeat(2000) + "1;}");
+        var instructions = Compiler.compile(script.toObj());
+        assertEquals(instructions.toJson(), ExecCodec.decode(AbdValue.fromAbd(instructions.toValue().toAbdFormat())).toJson());
+    }
     @Test void deeplyNestedSourceAndAstFailWithDiagnosticsAndLeaveCompilerReusable() throws Exception {
         for (String source : new String[]{
                 "int main(){return " + "(".repeat(2000) + "1" + ")".repeat(2000) + ";}",
                 "boolean main(){return " + "!".repeat(2000) + "true;}",
-                "int main(){var x=1;return " + "x=".repeat(2000) + "1;}",
-                "int main(){return " + "1+".repeat(2000) + "1;}"}) {
+                "int main(){var x=1;return " + "x=".repeat(2000) + "1;}"}) {
             var failure = assertThrows(IllegalArgumentException.class, () -> compile(source));
             assertTrue(failure.getMessage().contains("nesting"));
         }

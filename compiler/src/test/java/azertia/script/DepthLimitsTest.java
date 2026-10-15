@@ -343,4 +343,125 @@ class DepthLimitsTest {
         compile("void main(){}", 32); compile("void main(){}", 128);
         assertEquals(previous, System.getProperty(LIMIT));
     }
+
+    private static JsonObject returnedAst(JsonObject ast) {
+        return ast.getAsJsonObject("body").getAsJsonObject("fff").getAsJsonObject("_funcfff0000")
+                .getAsJsonArray("script").get(0).getAsJsonObject().getAsJsonArray("param").get(0).getAsJsonObject();
+    }
+    private static JsonElement legacySumAst(int operands, int prefixLength) {
+        JsonElement left = new JsonPrimitive(1);
+        for (int i = 1; i < operands; i++) {
+            JsonObject node = new JsonObject(); node.addProperty("t", "ctrl"); node.addProperty("call", "add");
+            JsonArray params = new JsonArray(); params.add(left); params.add(1); node.add("param", params);
+            node.addProperty("_line", 1); node.addProperty("_column", prefixLength + 2 * i);
+            left = node;
+        }
+        return left;
+    }
+
+    @Test void flatChainsStartAbove128OperandsAndPreserveLegacyAstAndOperatorPositions() throws Exception {
+        String prefix = "int main(){return ";
+        JsonObject old = returnedAst(tree(prefix + sum(128) + ";}"));
+        assertEquals(legacySumAst(128, prefix.length()).toString(), old.toString(), "the legacy AST is byte-identical through 128 operands");
+        for (int count : List.of(129, 10_000)) {
+            JsonObject ast = tree(prefix + sum(count) + ";}"); JsonObject chain = returnedAst(ast);
+            assertEquals("chain", chain.get("call").getAsString());
+            assertEquals(count, chain.getAsJsonArray("param").size());
+            JsonArray operators = chain.getAsJsonArray("operators"); assertEquals(count - 1, operators.size());
+            for (int i = 0; i < operators.size(); i++) {
+                JsonObject operator = operators.get(i).getAsJsonObject();
+                assertEquals(Set.of("call", "_line", "_column"), operator.keySet());
+                assertEquals("add", operator.get("call").getAsString());
+                assertFalse(operator.has("_file")); assertEquals(1, operator.get("_line").getAsInt());
+                assertEquals(prefix.length() + 2 * (i + 1), operator.get("_column").getAsInt());
+            }
+            assertEquals(operators.get(operators.size() - 1).getAsJsonObject().get("_column"), chain.get("_column"));
+            assertTrue(AstShape.validate(ast).isEmpty());
+            assertEquals(ast, JsonParser.parseString(ast.toString()));
+        }
+        compile(prefix + sum(129) + ";}", 32);
+    }
+
+    @Test void flatChainsKeepParenthesesPrecedenceAndEveryCanonicalOperatorName() throws Exception {
+        StringBuilder expression = new StringBuilder("(1+2)+3*4");
+        for (int i = 2; i < 129; i++) expression.append(i % 2 == 0 ? "+1" : "-1");
+        JsonObject chain = returnedAst(tree("int main(){return " + expression + ";}"));
+        JsonArray operands = chain.getAsJsonArray("param"), operators = chain.getAsJsonArray("operators");
+        assertEquals(129, operands.size());
+        assertEquals("add", operands.get(0).getAsJsonObject().get("call").getAsString());
+        assertEquals(JsonParser.parseString("[1,2]"), operands.get(0).getAsJsonObject().getAsJsonArray("param"));
+        assertEquals("multiply", operands.get(1).getAsJsonObject().get("call").getAsString());
+        for (int i = 0; i < operators.size(); i++)
+            assertEquals(i == 0 || i % 2 == 1 ? "add" : "minus", operators.get(i).getAsJsonObject().get("call").getAsString());
+        String[][] spellings = {{"||"}, {"&&"}, {"|"}, {"^"}, {"&"}, {"==", "!="},
+                {"<", ">", "<=", ">="}, {"<<", ">>", ">>>"}, {"+", "-"}, {"*", "/", "%"}};
+        String[][] names = {{"or"}, {"and"}, {"bit_or"}, {"bit_xor"}, {"bit_and"}, {"cmp", "ne"},
+                {"lower", "greater", "le", "ge"}, {"shl", "shr", "ushr"}, {"add", "minus"}, {"multiply", "divide", "mod"}};
+        for (int group = 0; group < spellings.length; group++) {
+            String literal = group < 2 ? "true" : "1"; StringBuilder source = new StringBuilder(literal);
+            for (int i = 0; i < 128; i++) source.append(spellings[group][i % spellings[group].length]).append(literal);
+            JsonObject parsed = GeneraterJson.getExpression(source.toString(), 0, new GeneraterJson.AzScript()).generate().getAsJsonObject();
+            assertEquals("chain", parsed.get("call").getAsString());
+            for (int i = 0; i < 128; i++) assertEquals(names[group][i % names[group].length],
+                    parsed.getAsJsonArray("operators").get(i).getAsJsonObject().get("call").getAsString());
+        }
+        compile("int chain(int left,int right){return left+right;}int main(){return chain(1,2);}", 32);
+    }
+
+    @Test void flatBooleanAndCheckedStringChainsRemainShallowAndMixedAdditionKeepsItsLeftFold() throws Exception {
+        for (String operator : List.of("&&", "||")) {
+            Compiled logical = compile("boolean mark(int n){return true;}boolean main(){return "
+                    + (operator.equals("&&") ? "false" : "true") + (operator + "mark(1)").repeat(2_000) + ";}", 32);
+            assertEquals(2_000, calls(main(logical), id(logical, "mark")).size());
+            assertEquals(0, main(logical).get("local-count").getAsInt(), "a balanced lazy chain needs no eager captures");
+        }
+        Compiled literals = compile("string main(){return " + "\"x\"+".repeat(9_999) + "\"x\";}", 32);
+        assertEquals(0, main(literals).get("local-count").getAsInt());
+        Compiled checked = compile("string piece(){return \"x\";}string main(string value){return value"
+                + "+piece()+value".repeat(1_000) + ";}", 32);
+        assertEquals(1_000, calls(main(checked), id(checked, "piece")).size());
+        assertEquals(0, main(checked).get("local-count").getAsInt());
+        Compiled mixed = compile("string main(){return 1+2+\"x\"" + "+1".repeat(126) + ";}", 32);
+        assertTrue(nodes(main(mixed), ExecOpcodes.ADD).stream().anyMatch(add -> {
+            if (!add.get("v1").isJsonObject() || !add.get("v2").isJsonPrimitive() || !add.getAsJsonPrimitive("v2").isString()) return false;
+            JsonObject first = add.getAsJsonObject("v1");
+            return first.has("c") && first.get("c").getAsInt() == ExecOpcodes.ADD
+                    && first.get("v1").equals(new JsonPrimitive(1)) && first.get("v2").equals(new JsonPrimitive(2))
+                    && add.get("v2").getAsString().equals("x");
+        }), "1+2 must complete numerically before the chain reaches its first string");
+    }
+
+    @Test void flatChainSchemaRejectsWrongCountsOperatorsAndPositionsBeforeCompilation() throws Exception {
+        JsonObject original = tree("int main(){return " + sum(129) + ";}"); String unchanged = original.toString();
+        Map<String,java.util.function.Consumer<JsonObject>> mutations = new LinkedHashMap<>();
+        mutations.put("missing operands", node -> node.remove("param"));
+        mutations.put("operand type", node -> node.addProperty("param", 1));
+        mutations.put("threshold", node -> node.getAsJsonArray("param").remove(128));
+        mutations.put("missing operators", node -> node.remove("operators"));
+        mutations.put("operator list type", node -> node.addProperty("operators", "add"));
+        mutations.put("operator count", node -> node.getAsJsonArray("operators").remove(127));
+        mutations.put("operator object", node -> node.getAsJsonArray("operators").set(0, new JsonPrimitive("add")));
+        mutations.put("missing call", node -> node.getAsJsonArray("operators").get(0).getAsJsonObject().remove("call"));
+        mutations.put("call type", node -> node.getAsJsonArray("operators").get(0).getAsJsonObject().addProperty("call", true));
+        mutations.put("canonical call", node -> node.getAsJsonArray("operators").get(0).getAsJsonObject().addProperty("call", "+"));
+        mutations.put("nonbinary call", node -> node.getAsJsonArray("operators").get(0).getAsJsonObject().addProperty("call", "select"));
+        mutations.put("mixed precedence", node -> node.getAsJsonArray("operators").get(0).getAsJsonObject().addProperty("call", "multiply"));
+        mutations.put("line", node -> node.getAsJsonArray("operators").get(0).getAsJsonObject().addProperty("_line", 0));
+        mutations.put("column", node -> node.getAsJsonArray("operators").get(0).getAsJsonObject().addProperty("_column", "1"));
+        mutations.put("file", node -> node.getAsJsonArray("operators").get(0).getAsJsonObject().addProperty("_file", 1));
+        mutations.put("expression metadata", node -> node.getAsJsonArray("operators").get(0).getAsJsonObject().add("param", new JsonArray()));
+        for (var mutation : mutations.entrySet()) {
+            JsonObject changed = JsonParser.parseString(unchanged).getAsJsonObject(); mutation.getValue().accept(returnedAst(changed));
+            List<String> problems = AstShape.validate(changed); assertFalse(problems.isEmpty(), mutation.getKey());
+            assertTrue(problems.stream().allMatch(problem -> problem.contains("/_funcfff0000/script/0/param/0/")), problems::toString);
+            CompileException error = assertThrows(CompileException.class, () -> Compiler.compile(changed), mutation.getKey());
+            assertFalse(error.internal(), error::getMessage);
+        }
+        JsonObject unpositioned = JsonParser.parseString(unchanged).getAsJsonObject();
+        for (JsonElement operator : returnedAst(unpositioned).getAsJsonArray("operators"))
+            for (String position : List.of("_file", "_line", "_column")) operator.getAsJsonObject().remove(position);
+        assertTrue(AstShape.validate(unpositioned).isEmpty(), "handwritten operator positions remain optional");
+        atLimit("32", () -> { Compiler.compile(unpositioned, true); return null; });
+        assertEquals(unchanged, original.toString());
+    }
 }

@@ -162,16 +162,18 @@ class DiagnosticsTest {
     }
 
     @Test void formerlyUnlocatedErrorsAreLocated() throws Exception {
+        // Postfix chains retain true AST nesting without consuming parser recursion.
+        String postfix = ".next".repeat(400);
         assertEquals("<source>:2:1: error: in function main: AST nesting exceeds 320 levels",
-                failure("int main(){\nreturn " + "1+".repeat(2000) + "1;}").getMessage());
+                failure("class P{P * next;int value;} int main(){P * p=null;\nreturn p" + postfix + ".value;}").getMessage());
         // The innermost enclosing statement is named, not the outer if.
         assertEquals("<source>:5:5: error: in function main: AST nesting exceeds 320 levels",
-                failure("int main(){\n  int x = 0;\n\n  if (true) {\n    int y = " + "1+".repeat(400) + "1;\n  }\n  return 0;\n}\n").getMessage());
+                failure("class P{P * next;int value;} int main(){\n  P * x = null;\n\n  if (true) {\n    int y = x" + postfix + ".value;\n  }\n  return 0;\n}\n").getMessage());
         // Field initializers and base-initializer arguments are bounded before the AST is copied.
         assertEquals("<source>:3:3: error: in initializer of class P: AST nesting exceeds 320 levels",
-                failure("class P {\n  int a;\n  int v = " + "1+".repeat(3000) + "1;\n}\nvoid main(){ P p; }\n").getMessage());
+                failure("class P {\n  P * next;\n  int v = this" + postfix + ".v;\n}\nvoid main(){ P p; }\n").getMessage());
         assertEquals("<source>:4:4: error: in function D::D: AST nesting exceeds 320 levels",
-                failure("class B{int v;B(int x){v=x;}}\nclass D:B{\n  int w;\n  D():B(" + "1+".repeat(3000) + "1){}\n}\nvoid main(){ D d; }\n").getMessage());
+                failure("class B{B * next;int v;B(int x){v=x;}}\nclass D:B{\n  int w;\n  D(B * p):B(p" + postfix + ".v){}\n}\nvoid main(){ D d(null); }\n").getMessage());
         assertEquals("<source>:2:6: error: in function A::~A: Unregistered class function: A::<dtor>",
                 failure("class A{int x;}\nA::~A(){}\nvoid main(){}").getMessage());
         assertEquals("<source>:3:1: error: in function g: non-void function can reach the end of its body without returning a value",

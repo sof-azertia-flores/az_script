@@ -2,7 +2,7 @@
 
 [中文](STATUS.md) | English
 
-This branch (`claude/confident-galileo-fic3s1`) carries a planned series of 28 commits. They fix the compiler problems found in a repository review, add new language features, and add runtime line numbers. Work has resumed through C25; the next item is C26.
+This branch (`claude/confident-galileo-fic3s1`) carries a planned series of 28 commits. They fix the compiler problems found in a repository review, add new language features, and add runtime line numbers. Work has resumed through C26; the next item is C27.
 
 - [DESIGN.md](DESIGN.md): the detailed per-commit design, with file:line citations.
 - [COMPLETENESS.md](COMPLETENESS.md): the review of that design.
@@ -59,15 +59,16 @@ This branch (`claude/confident-galileo-fic3s1`) carries a planned series of 28 c
 
 | C24 | df6a1c3 | Virtual methods and phase-bound method tables; opcodes52–53 and JNI snapshot v10. Construction rollback and cleanup preserve the first error. V0–V3 passed on Linux x86_64. |
 
-| C25 | this commit | Exact physical ABD depth, eager statement spilling and conservative lifetime/scope checks; forced96/64/48 differentials. V0–V2 passed on Linux x86_64. |
+| C25 | 9d5103f | Exact physical ABD depth, eager statement spilling and conservative lifetime/scope checks; forced96/64/48 differentials. V0–V2 passed on Linux x86_64. |
+
+| C26 | this commit | Flat chains above 128 operands, ordered segmented folds and safe string/boolean balancing; iterative precedence parsing. V0–V2 passed on Linux x86_64. |
 
 ## Remaining
 
 Each item gives its validation sets (V0–V3 are defined under "How to resume"). Details for item Cxx are in the section **Cxx** of [DESIGN.md](DESIGN.md).
 
-1. **C26 Flat operator chains above 128 operands** (V0, V1, V2).
-2. **C27 Flat else-if ladders** (V0, V1, V2). Choose nested or flat lowering from the remaining depth budget; this covers ladders of about 120–128 branches and ladders inside loops.
-3. **C28 Validation record** (V0–V3). Add an entry to VALIDATION.md/.en.md with real results.
+1. **C27 Flat else-if ladders** (V0, V1, V2). Choose nested or flat lowering from the remaining depth budget; this covers ladders of about 120–128 branches and ladders inside loops.
+2. **C28 Validation record** (V0–V3). Add an entry to VALIDATION.md/.en.md with real results.
 
 ### Follow-ups found while implementing C01–C13
 

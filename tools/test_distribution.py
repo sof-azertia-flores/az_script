@@ -621,6 +621,30 @@ int main() {
         _require(limits_result.stdout == "130\n", f"Spilled package expression failed: {limits_result.stdout!r}")
         passed("statement spilling through relocated compiler and runner")
 
+        chain_source = source_directory / "flat ten thousand operands.azs"
+        chain_source.write_text("int main(){string unit=\"x\";string value=" + "+".join(["unit"] * 10000) + ";return value.length();}\n", encoding="utf-8")
+        chain_abd = cwd / "limits output/chain.exec.abd"
+        chain_ast = chain_abd.with_name("chain.ast.json")
+        chain_json = chain_abd.with_name("chain.exec.json")
+        _run([compiler, chain_source, "-o", chain_abd], cwd, compiler_environment)
+        _outputs(chain_abd, chain_ast, chain_json)
+        pending = [json.loads(chain_ast.read_text(encoding="utf-8"))]
+        has_chain = False
+        while pending:
+            item = pending.pop()
+            if isinstance(item, dict):
+                has_chain |= item.get("call") == "chain"
+                pending.extend(item.values())
+            elif isinstance(item, list):
+                pending.extend(item)
+        _require(has_chain, "Long source operator chains must retain the flat readable AST")
+        chain_rebuilt = chain_abd.with_name("chain.roundtrip.abd")
+        _run([compiler, "compile-json", chain_ast, "-o", chain_rebuilt], cwd, compiler_environment)
+        _require(chain_abd.read_bytes() == chain_rebuilt.read_bytes(), "Flat-chain package AST roundtrip differs")
+        result = _run([runner, chain_abd], cwd, environment)
+        _require(result.stdout == "10000\n", f"Flat-chain package execution failed: {result.stdout!r}")
+        passed("ten thousand string operands through relocated tools")
+
         standalone = work / "standalone runner"
         standalone_bin = standalone / "bin"
         standalone_bin.mkdir(parents=True)

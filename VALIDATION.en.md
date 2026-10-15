@@ -1,3 +1,13 @@
+# C26 Flat Operator Chains (2026-10-15)
+
+[中文](VALIDATION.md) | English
+
+Chains above128 operands use a positioned, strictly validated flat AST; shorter ASTs remain byte-identical. Safe string/boolean chains balance, while numeric/mixed chains retain left-fold order through private typed placeholders and64-operand segments. SourceRules needs no new keyword. Language contracts, warning traversal and CLI/launcher help were reviewed together.
+
+V0–V2 passed sequentially with JAVA_TOOL_OPTIONS unset:321 Java tests,5944 native checks, existing real-JVM JNI/module suites and405 independent wire cases per build. Each ordinary/sanitizer run passed226 depth/differential checks, including10k strings, calls, mixed plus, intermediate overflow, float rounding and short circuit. Forced96/64/48 budgets exercised extra locals/defines in16/23/23 cases; each report has177 passed,38 explicitly infeasible,22 compiled dependencies and16 non-standalone records. No ASan/UBSan reports occurred.
+
+Validation exposed a JVM-state-sensitive parser stack overflow before the320 syntax guard. Explicit precedence groups removed the ten recursive precedence frames per parenthesis without changing grouping or limits. The new -Xint/-Xss512k regression fails with the old compiler and passes with the fix;91 targeted Java tests also passed before complete reruns. Interrupted runs were excluded. Final logs: build/c26/v1-final.log,v2-final.log; exit0 in final-validation.exit; reports limits-v1.json,limits-v2.json. C26 requires no V3; C28 supplies final export evidence.
+
 # C25 Exact ABD Depth and Statement Spilling (2026-10-15)
 
 [中文](VALIDATION.md) | English

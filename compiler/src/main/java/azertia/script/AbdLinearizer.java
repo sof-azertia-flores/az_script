@@ -65,7 +65,7 @@ final class AbdLinearizer {
         if(value instanceof AcsArray)return List.of(blockOrStatement(value,level));
         Statement state=new Statement(level,value);
         int opcode=FunctionTables.opcode(value);
-        if(opcode==ExecShape.INTERNAL_SEQUENCE) {
+        if(opcode==ExecShape.INTERNAL_SEQUENCE&&!stagedSequence((AcsObject)value)) {
             AcsObject sequence=(AcsObject)value;List<AcsElement> output=new ArrayList<>();
             for(AcsElement part:sequence.getAsAcsArray("statements").acsa)output.addAll(statement(part,level));
             output.addAll(statement(sequence.mmp.get("v"),level));return output;
@@ -120,7 +120,11 @@ final class AbdLinearizer {
         if(!(value instanceof AcsObject node))throw failure(value,"; statements are nested too deeply here; move inner blocks into a function");
         int opcode=FunctionTables.opcode(node);
         if(opcode==ExecShape.INTERNAL_SEQUENCE) {
-            for(AcsElement part:node.getAsAcsArray("statements").acsa)state.prefix.addAll(statement(part,state.level));
+            for(AcsElement part:node.getAsAcsArray("statements").acsa) {
+                if(tables.stagedCaptures.contains(part)) {
+                    AcsObject definition=(AcsObject)part;capture(definition.mmp.get("val"),state,false,null,definition.getAsInt("v"));
+                } else state.prefix.addAll(statement(part,state.level));
+            }
             return reduce(node.mmp.get("v"),level,state);
         }
         if(opcode==ExecOpcodes.BLOCK_ADDRESS) {
@@ -181,7 +185,11 @@ final class AbdLinearizer {
         if(validate) { require(target,state.level,"");state.prefix.add(target); }
     }
     private AcsElement capture(AcsElement value,Statement state,boolean retain) { return capture(value,state,retain,null); }
-    private AcsElement capture(AcsElement value,Statement state,boolean retain,AcsObject consumer) {
+    private boolean stagedSequence(AcsObject sequence) {
+        for(AcsElement part:sequence.getAsAcsArray("statements").acsa)if(tables.stagedCaptures.contains(part))return true;return false;
+    }
+    private AcsElement capture(AcsElement value,Statement state,boolean retain,AcsObject consumer) {return capture(value,state,retain,consumer,-1);}
+    private AcsElement capture(AcsElement value,Statement state,boolean retain,AcsObject consumer,int stagedSlot) {
         AcsElement original=value;
         if(tables.atomic.contains(value))throw failure(value,"; store this operand in a local variable first");
         value=retainReceivers(value,state);
@@ -189,7 +197,7 @@ final class AbdLinearizer {
         if(owning&&!freshOwned(value)&&consumer==null)throw failure(value,OWNERSHIP_HINT);
         if(callerTemporaries(value))throw failure(value,OWNERSHIP_HINT);
         if(owning&&unsafeLater(state.anchor,original,retain?null:consumer))throw failure(value,OWNERSHIP_HINT);
-        int slot=tables.allocate(owning);privateSlots.add(slot);
+        int slot=stagedSlot<0?tables.allocate(owning):stagedSlot;privateSlots.add(slot);
         AcsObject definition=define(slot,value);tables.inherit(definition,value);tables.inherit(definition,state.anchor);
         require(definition,state.level,"");state.prefix.add(definition);state.captures.add(new Capture(slot,owning));
         AcsObject read=read(slot,owning&&!retain);tables.inherit(read,value);return read;

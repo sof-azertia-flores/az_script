@@ -572,6 +572,14 @@ extern int host_add(int, int):0xccf0001;
 
 `getDepth()` 返回实现定义的运行时作用域深度，不等同于源码花括号层数，编译器生成的作用域也可能影响它。
 
+### 长运算符链
+
+同一优先级上的二元运算链超过 128 个操作数时，使用扁平的可读 `chain` 节点；128 个及以下仍保留既有嵌套 AST。括号、优先级变化和后缀/成员/调用嵌套仍形成独立表达式，遵守相应嵌套限制。
+
+全 `&&` 或全 `||` 链会平衡化，仍从左到右短路求值；每个操作数在原检查运算符的位置验证为 boolean，再执行后续副作用，因此保留错误位置且不引入语句作用域。字符串 `+` 链只有在每个操作数都是字符串字面量、字符串局部变量/参数或返回类型已检查为 string 的调用时才平衡化。其他链按有界分段保持左折叠，数值舍入、中间溢出、数值/字符串混合相加、调用及副作用均保持原顺序。例如 `1 + 2 + "x"` 的数值前缀仍生成 `"3x"`，不能因平衡化变成 `"12x"`；操作数和运算均不会重复执行。
+
+扁平 AST 减少编译嵌套，不增加执行 opcode 或格式版本；降级后的结果仍须符合物理 ABD 上限及前述全部语句拆分限制。左折叠分段通过同一套安全检查；重载运算符的拥有型结果若需要不安全的分段捕获，会收到生命周期/复制诊断。原本符合限制的普通表达式保持既有 AST 和 ABD 结构。
+
 ### 诊断
 
 编译错误采用 gcc/clang 格式 `文件:行:列: error: [in 上下文: ]消息`，输出到标准错误。经过 `#include` 和宏展开后，位置仍指向原始文件、行和列：
@@ -747,6 +755,8 @@ int functionId(int ns, int position) {
 ## AST 与 ABD 契约
 
 可读 AST 保持 `metadata/ext/abstract/global-variable/body` 结构，并为带签名的宿主函数增加 `extern-signatures`。`global-variable` 先以字符串列出 `#gvar` 名称，再以带位置的 `{"name", "type", "initializer"?}` 对象列出每个带类型全局；`compile-json` 按与源码相同的规则检查并初始化它们。类程序额外保存类定义、字段顺序和成员表达式等编译信息；`compile-json` 会重新执行类型检查与降级。限定的父类调用写作 `{"t":"ctrl","call":"base-call","param":["Base","method",args...]}`，可附带 `type-args`。AST 还保存模块 hint、assume、外部声明、定义名称与实际定义编号；调用绑定与定义位置分开，支持完全相同的 ABD 往返。`abstract` 是 extern 优先的源码名称绑定：有 extern 时保存声明 ID，否则保存定义 ID；hint 库的本地定义仍使用 0000 占位，实际调用的 self-assume 地址在降级时生成。函数定义的独立位置由 `body` 的 namespace 和 `metadata.position/name` 保存；每个签名另保存 `return-type` 与 `param-types`。表达式对象有 `t: "ctrl" | "call"`、`call`、`param`，块是数组。
+
+可读运算链使用 `{"t":"ctrl","call":"chain","param":[operand,...],"operators":[{"call":"add","_line":1,"_column":3},...]}`。`param` 按源码顺序保存操作数，`operators` 恰好少一项，各项用规范二元操作名（如 `add`、`minus`、`multiply`、`cmp`、`and`）及通常的 `_file/_line/_column` 元数据记录对应运算符和位置。此结构要求同一优先级超过 128 个操作数。`chain` 是 AST 操作名，不是源码保留字，普通函数仍可使用该名称。所有运算符须属于同一规范优先级组；手写 AST 可省略运算符位置，提供时会校验。`compile-json` 检查节点、运算符名称/数量及位置，再重新进行类型检查和降级；内部的分段占位和序列记录不会写入源 AST 或执行 wire 格式。
 
 可读 switch AST 使用 `{"t":"ctrl","call":"switch","param":[value,sections]}`，sections 是数组。每个分段为 `{"t":"ctrl","call":"case","labels":[literal,...],"param":[body]}`，body 是语句数组，可附带 `default: true`；只有 default 的分段不带 case 标签。解析器保留各个标签，编译时把相邻的空分段与后续正文合并。`compile-json` 重新检查标签、作用域、跳转及贯穿路径。降级先对值求值一次，再使用一次性循环、同级 if 分段和平衡的短路标签比较；无论 default 在源码何处，都最后处理。隐藏局部变量保持源码 break/continue 的目标不变。
 

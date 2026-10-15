@@ -126,6 +126,8 @@ def main():
                     assert grew, (name, limit, 'the forced budget did not exercise spilling', baseline['metrics'], artifact['metrics'])
                 checks += 1
             checks += 1
+            return baseline
+
 
         def lifetime_differential(name, source, expected=None, error=None):
             """A cut may be rejected if existing opcodes cannot preserve lifetime/identity."""
@@ -249,6 +251,52 @@ def main():
         differential('spilled-error-debug-position', f'int main(){{int n=1;int value={additive};int zero=0;return value/zero;}}',
                      error='Division by zero', debug=True)
 
+        # Above128 operands the parser must retain a flat chain. These cases
+        # distinguish safe string/boolean balancing from numeric left folds.
+        for count in (128, 129):
+            artifact = differential(f'chain-threshold-{count}', 'int main(){int n=1;return ' + '+'.join(['n'] * count) + ';}', f'{count}\n')
+            if artifact:
+                chains = [node for node in nodes(artifact['ast']) if node.get('call') == 'chain']
+                assert bool(chains) == (count > 128), (count, chains)
+                if chains:
+                    assert len(chains[0]['operators']) == len(chains[0]['param']) - 1 == count - 1, chains[0]
+                checks += 1
+        differential('chain-10k-string-literals', 'string main(){return ' + '+'.join(['"x"'] * 10000) + ';}', 'x' * 10000 + '\n')
+        differential('chain-10k-string-locals', 'int main(){string unit="x";string value=' + '+'.join(['unit'] * 10000) + ';return value.length();}', '10000\n')
+        differential('chain-10k-checked-string-calls', '#gvar seen\nstring part(){seen+=1;return "x";}' +
+                     'int main(){seen=0;string value=' + '+'.join(['part()'] * 10000) + ';print(seen);return value.length();}', '10000\n10000\n')
+        differential('chain-10k-mixed-plus', 'string main(){return ' + '+'.join(['1', '2', '"x"'] + ['0'] * 9997) + ';}', '3x' + '0' * 9997 + '\n')
+        differential('chain-10k-mid-overflow', 'int next(){print("next");return 1;}int main(){return ' +
+                     '+'.join(['0'] * 5000 + ['2147483647'] + ['next()'] * 4999) + ';}', 'next\n', error='Integer overflow')
+        differential('chain-10k-float-left-fold', 'float main(){return ' +
+                     '+'.join(['1e20f', '-1e20f', '3.0f'] + ['0.0f'] * 9997) + ';}', '3\n')
+        differential('chain-10k-float-rounded-before-widening', 'double main(){return ' +
+                     '+'.join(['16777216.0f', '1.0f', '-16777216.0f', '0.0'] + ['0.0'] * 9996) + ';}', '0\n')
+        for operation, condition, answer in [('&&', 'n<5000', 'false'), ('||', 'n==5000', 'true')]:
+            name = 'chain-10k-' + ('and' if operation == '&&' else 'or')
+            differential(name, '#gvar seen\nboolean term(int n){seen+=1;return ' + condition + ';}' +
+                         'boolean main(){seen=0;boolean value=' + operation.join(f'term({i})' for i in range(10000)) +
+                         ';print(seen);return value;}', '5001\n' + answer + '\n')
+        if selected('chain-ast-schema'):
+            path = work / 'chain-ast-schema.azs'
+            path.write_text('int main(){int n=1;return ' + '+'.join(['n'] * 129) + ';}', encoding='utf-8')
+            artifact, _ = compile_case('chain-ast-schema', path)
+            mutations = ('missing-operator', 'extra-operator', 'operator-not-object', 'unknown-operator', 'operators-not-array', 'operands-not-array', 'invalid-operator-position')
+            for mutation in mutations:
+                tree = json.loads(json.dumps(artifact['ast']))
+                chain = next(node for node in nodes(tree) if node.get('call') == 'chain')
+                if mutation == 'missing-operator': chain['operators'].pop()
+                elif mutation == 'extra-operator': chain['operators'].append(dict(chain['operators'][0]))
+                elif mutation == 'operator-not-object': chain['operators'][0] = 'add'
+                elif mutation == 'unknown-operator': chain['operators'][0]['call'] = 'varset'
+                elif mutation == 'operators-not-array': chain['operators'] = 'add'
+                elif mutation == 'operands-not-array': chain['param'] = {'wrong': 1}
+                else: chain['operators'][0]['_line'] = 'wrong'
+                invalid = work / ('chain-' + mutation + '.json');invalid.write_text(json.dumps(tree), encoding='utf-8')
+                result = command(['java', '-Xmx1g', '-cp', args.classpath, 'azertia.Main', 'compile-json', invalid, '-o', work / 'chain-invalid.abd'])
+                assert result.returncode == 1 and 'Error:' in result.stderr and 'Exception in thread' not in result.stderr, (mutation, result.stderr)
+                checks += 1
+
         # These cuts would change evaluation timing. Their rejection must identify
         # the original source and explain how the user can express the local.
         protected = {
@@ -282,6 +330,15 @@ def main():
             result = command(['java', '-Xmx1g', '-cp', args.classpath, 'azertia.Main', 'compile', path, '-o', work / 'too-deep.abd'])
             assert result.returncode == 1 and path.name in result.stderr and 'nesting' in result.stderr.lower(), result.stderr
             assert 'Exception in thread' not in result.stderr and 'StackOverflow' not in result.stderr, result.stderr
+            checks += 1
+
+        if selected('parser-stack-guard'):
+            path = work / 'parser-stack-guard.azs'
+            path.write_text('int main(){return ' + '(' * 2000 + '1' + ')' * 2000 + ';}', encoding='utf-8')
+            result = command(['java', '-Xint', '-Xss512k', '-Xmx1g', '-cp', args.classpath,
+                              'azertia.Main', 'compile', path, '-o', work / 'parser-stack-guard.abd'])
+            assert result.returncode == 1 and path.name in result.stderr and 'Syntax nesting exceeds 320 levels' in result.stderr, result.stderr
+            assert 'StackOverflow' not in result.stderr and 'internal compiler error' not in result.stderr, result.stderr
             checks += 1
 
         dependency_paths = {
