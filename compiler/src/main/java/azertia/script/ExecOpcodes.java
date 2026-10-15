@@ -14,12 +14,12 @@ public final class ExecOpcodes {
             CONTEXT_ABI=36, CONTEXT_DEFAULT=37, RETURN_TYPED=38, CHECK_TYPE=39,
             BUFFER_NEW=40, BUFFER_OP=41, VALUE_COMPARE=42,
             BIT_AND=43, BIT_OR=44, BIT_XOR=45, SHIFT_LEFT=46, SHIFT_RIGHT=47, SHIFT_UNSIGNED=48,
-            CONVERT=49, SELECT=50, CHECK_OBJECT=51;
+            CONVERT=49, SELECT=50, CHECK_OBJECT=51, SET_METHODS=52, CALL_VIRTUAL=53;
     private static final String[] NAMES={"constant","block","call","v","vd","vs","m","r","ro",
             "oa","ob","od","add","minus","multiply","divide","mod","gt","lt","eq","ne","ge","le",
             "and","or","not","neg","if","wi","brk","cont","cleanup","new_block","block_address","mv","drop",
             "context_abi","context_default","return_typed","check_type","buffer_new","buffer_op","value_compare",
-            "bit_and","bit_or","bit_xor","shl","shr","ushr","convert","select","check_object"};
+            "bit_and","bit_or","bit_xor","shl","shr","ushr","convert","select","check_object","set_methods","call_virtual"};
     private static final Map<String,Integer> CODES=new LinkedHashMap<>();
     static { for(int i=0;i<NAMES.length;i++) CODES.put(NAMES[i],i); }
     private ExecOpcodes() {}

@@ -185,7 +185,7 @@ def main():
         return entry
 
     write_abd(work / 'overlap.snapshot.abd', {
-        'snapshot version': 9, 'module manifest': [manifest('fixture.exec.abd', 2)],
+        'snapshot version': 10, 'module manifest': [manifest('fixture.exec.abd', 2)],
         'variable global': [91, bytes([255])], 'global owned allocations': [], 'objects': [],
         'length heap': 3, 'heap': [bytes([255]), 0, 0],
         'heap allocation': [{'begin position': Address(1), 'length': 2}, {'begin position': Address(2), 'length': 1}]})
@@ -260,14 +260,14 @@ def main():
         trace_function(307, 'recovered', [call(0x34560007), ret(division)], 26, 3, 12),
     ]})
     object_snapshot = {
-        'snapshot version': 9, 'module manifest': [manifest('objects.exec.abd', 1)],
+        'snapshot version': 10, 'module manifest': [manifest('objects.exec.abd', 1)],
         'variable global': [66], 'global owned allocations': [Address(2), Address(1)],
         'length heap': 4, 'heap': [bytes([255]), 11, 22, 33],
         'heap allocation': [{'begin position': Address(i), 'length': 1} for i in (1, 2, 3)],
-        'objects': [{'begin position': Address(i), 'has destructor': True, 'destructor': 205, 'destructor contexts': [], 'manual': i == 3} for i in (1, 2, 3)]}
+        'objects': [{'begin position': Address(i), 'has destructor': True, 'destructor': 205, 'destructor contexts': [], 'methods': [], 'manual': i == 3} for i in (1, 2, 3)]}
     write_abd(work / 'objects.valid.snapshot.abd', object_snapshot)
     object_empty = copy.deepcopy(object_snapshot)
-    object_empty.update({'snapshot version': 9, 'variable global': [67],
+    object_empty.update({'snapshot version': 10, 'variable global': [67],
                       'global owned allocations': [], 'length heap': 1,
                       'heap': [bytes([255])], 'heap allocation': [], 'objects': []})
     write_abd(work / 'objects.empty.snapshot.abd', object_empty)
@@ -352,12 +352,26 @@ def main():
     candidate['snapshot version'] = 8
     bad_objects.append(candidate)
     candidate = copy.deepcopy(object_snapshot)
+    candidate['snapshot version'] = 9
+    bad_objects.append(candidate)
+    candidate = copy.deepcopy(object_snapshot)
     del candidate['objects'][0]['destructor contexts']
     bad_objects.append(candidate)
     for contexts in (1, [17], [{'abi': 6, 'kind': 0, 'width': 1, 'has factory': False, 'contexts': [], 'has placement': False, 'placement contexts': [], 'has element': False}],
                      [{'abi': 0, 'kind': 0, 'width': 1, 'has factory': False, 'contexts': [], 'has placement': False, 'placement contexts': [], 'has element': False}]):
         candidate = copy.deepcopy(object_snapshot)
         candidate['objects'][0]['destructor contexts'] = contexts
+        bad_objects.append(candidate)
+    for invalid in (None, 1, [17], [{}], [{'id': 999, 'contexts': []}],
+                    [{'id': 0x34560004, 'contexts': []}], [{'id': 209, 'contexts': []}],
+                    [{'id': 211, 'contexts': []}], [{'id': '205', 'contexts': []}],
+                    [{'id': 205}], [{'id': 205, 'contexts': 1}],
+                    [{'id': 205, 'contexts': [], 'unknown': True}]):
+        candidate = copy.deepcopy(object_snapshot)
+        if invalid is None:
+            del candidate['objects'][0]['methods']
+        else:
+            candidate['objects'][0]['methods'] = invalid
         bad_objects.append(candidate)
     for i, candidate in enumerate(bad_objects):
         write_abd(work / f'objects.invalid-{i}.snapshot.abd', candidate)
@@ -398,11 +412,11 @@ def main():
     numeric_other['ext'] = {'fixture': 'different numeric bytecode'}
     write_abd(work / 'numeric.other.exec.abd', numeric_other)
     numeric_snapshot = {
-        'snapshot version': 9, 'module manifest': [manifest('numeric.exec.abd', 5)],
+        'snapshot version': 10, 'module manifest': [manifest('numeric.exec.abd', 5)],
         'variable global': [66, 'restored', False, Address(1), Address(2)], 'global owned allocations': [Address(1)],
         'length heap': 3, 'heap': [bytes([255]), 11, 33],
         'heap allocation': [{'begin position': Address(i), 'length': 1} for i in (1, 2)],
-        'objects': [{'begin position': Address(i), 'has destructor': True, 'destructor': 205, 'destructor contexts': [], 'manual': i == 2} for i in (1, 2)]}
+        'objects': [{'begin position': Address(i), 'has destructor': True, 'destructor': 205, 'destructor contexts': [], 'methods': [], 'manual': i == 2} for i in (1, 2)]}
     write_abd(work / 'numeric.valid.snapshot.abd', numeric_snapshot)
     invalid_globals = [[], [66, 'restored', False, 1], [66, 'restored', False, 1, 2, 3],
                        {'one': 66, 'two': 'restored', 'three': False, 'four': 1, 'five': 2},
@@ -415,7 +429,7 @@ def main():
     candidate = copy.deepcopy(numeric_snapshot)
     candidate['objects'][0]['destructor'] = 999
     write_abd(work / 'numeric.invalid-7.snapshot.abd', candidate)
-    for version in (0, 2, 3, 4, 5, 6):
+    for version in (0, 2, 3, 4, 5, 6, 7, 8, 9):
         candidate = copy.deepcopy(numeric_snapshot)
         candidate['variable global'] = {'g' + str(i): item for i, item in enumerate(candidate['variable global'])}
         if version:
@@ -496,7 +510,7 @@ def main():
             {'t': 0, 'c': 'ro', 'r': var(0)}]), 'local-count': 1}]}
     write_abd(work / 'high-destructor.exec.abd', high_destructor)
     # Object tags exist from allocation, before ob registration, and survive a
-    # v9 snapshot restore without adding a serialized object-storage field.
+    # v10 snapshot restore without adding a serialized object-storage field.
     def member(pointer, offset):
         return call(0x0ABD0006, {'t': 0, 'c': 'oa', 'v': pointer, 'offset': offset})
 
@@ -521,6 +535,130 @@ def main():
             {'t': 0, 'c': 'm', 'v1': member(literal_address, 1), 'v2': 22},
             call(0x34560011, literal_address)]), 'local-count': 1},
     ]})
+    # Tables and their captured generic factories survive heap, literal and
+    # buffer-view restoration. Methods use independently encoded opcodes52/53.
+    factory_context = {'abi': 8, 'kind': 3, 'width': 1, 'factory': 612}
+    methods = [{'id': 600, 'contexts': []}, {'id': 601, 'contexts': [factory_context]}]
+    changed_methods = [{'id': 603, 'contexts': []}, methods[1]]
+
+    def set_methods(pointer, entries=methods):
+        return {'t': 0, 'c': 'set_methods', 'v': pointer, 'entries': entries}
+
+    def virtual_call(pointer, slot):
+        return {'t': 0, 'c': 'call_virtual', 'slot': slot, 'type': 0, 'param': [pointer]}
+
+    def block_address(value):
+        return {'t': 0, 'c': 'block_address', 'v': value}
+
+    def new_block(width):
+        return {'t': 0, 'c': 'new_block', 'size': width}
+
+    def buffer_op(operation, receiver, *arguments):
+        return {'t': 0, 'c': 'buffer_op', 'op': operation, 'v': receiver, 'args': list(arguments)}
+
+    def addition(left, right):
+        return {'t': 0, 'c': 'add', 'v1': left, 'v2': right}
+
+    literal = block_address(var(1))
+    view_context = {**factory_context, 'placement': 613}
+    buffer = call(0x0ABD0006, var(0))
+    view = block_address(buffer_op(3, buffer, 0))
+    virtual_fixture = {'gvs': 0, 'f': [
+        object_function(600, 0, [ret(addition(member(var(0), 0), 100))], [7]),
+        {**object_function(601, 0, [ret(addition(member(var(0), 0), member(block_address(
+            {'t': 0, 'c': 'context_default', 'context': {'ref': 0}}), 0)))], [7]), 'hidden-count': 1},
+        object_function(603, 0, [ret(addition(member(var(0), 0), 200))], [7]),
+        {**object_function(612, 8, [
+            {'t': 0, 'c': 'vd', 'v': 0, 'val': new_block(1)},
+            {'t': 0, 'c': 'm', 'v1': member(block_address(var(0)), 0), 'v2': 13},
+            ret(var(0))]), 'local-count': 1},
+        {**object_function(613, 5, [
+            {'t': 0, 'c': 'm', 'v1': member(var(0), 0), 'v2': 11}, set_methods(var(0))], [7]), 'entry-kind': 1},
+        {**object_function(614, 0, [ret(0)], [7]), 'entry-kind': 1},
+        {**object_function(620, 7, [
+            {'t': 0, 'c': 'vd', 'v': 0, 'val': call(0x0ABD0014, 1)},
+            {'t': 0, 'c': 'm', 'v1': member(var(0), 0), 'v2': 11}, set_methods(var(0)),
+            {'t': 0, 'c': 'ob', 'v': var(0), 'manual': True},
+            {'t': 0, 'c': 'ro', 'r': var(0)}]), 'local-count': 1},
+        object_function(621, 5, [set_methods(var(0), changed_methods)], [7]),
+        object_function(622, 0, [ret(virtual_call(var(0), 0))], [7]),
+        object_function(623, 0, [ret(virtual_call(var(0), 1))], [7]),
+        object_function(624, 5, [{'t': 0, 'c': 'od', 'v': var(0)}], [7]),
+        {**object_function(625, 7, [
+            {'t': 0, 'c': 'vd', 'v': 0, 'val': call(0x0ABD0003, 1)},
+            {'t': 0, 'c': 'vd', 'v': 1, 'val': new_block(1)},
+            {'t': 0, 'c': 'm', 'v1': member(literal, 0), 'v2': 11}, set_methods(literal),
+            {'t': 0, 'c': 'm', 'v1': call(0x0ABD0006, var(0)), 'v2': var(1)},
+            call(0x0ABD0005, var(0)), ret(var(0))]), 'local-count': 2},
+        {**object_function(626, 7, [
+            {'t': 0, 'c': 'vd', 'v': 0, 'val': call(0x0ABD0003, 1)},
+            {'t': 0, 'c': 'vd', 'v': 1, 'val': {'t': 0, 'c': 'buffer_new', 'context': view_context}},
+            buffer_op(2, var(1), 1), buffer_op(6, var(1), 1),
+            {'t': 0, 'c': 'm', 'v1': call(0x0ABD0006, var(0)), 'v2': var(1)},
+            call(0x0ABD0005, var(0)), ret(var(0))]), 'local-count': 2},
+        object_function(627, 0, [ret(virtual_call(view, 0))], [7]),
+        object_function(628, 0, [ret(virtual_call(view, 1))], [7]),
+        object_function(629, 0, [ret(virtual_call(block_address(buffer), 0))], [7]),
+        object_function(630, 0, [ret(virtual_call(block_address(buffer), 1))], [7]),
+        object_function(631, 5, [set_methods(block_address(buffer), changed_methods)], [7]),
+    ]}
+    write_abd(work / 'virtual.snapshot.exec.abd', virtual_fixture)
+
+    def saved_context(placement=False):
+        result = {'abi': 8, 'kind': 3, 'width': 1, 'has factory': True, 'factory': 612,
+                  'contexts': [], 'has placement': placement, 'placement contexts': [], 'has element': False}
+        if placement:
+            result['placement'] = 613
+        return result
+
+    saved_methods = [{'id': 600, 'contexts': []}, {'id': 601, 'contexts': [saved_context()]}]
+
+    def literal_record(ident, value=11):
+        return {'object': Address((1 << 63) | (ident << 24)), 'has destructor': False,
+                'destructor contexts': [], 'methods': copy.deepcopy(saved_methods), 'slots': [value]}
+
+    saved_buffer = literal_record(302)
+    saved_buffer.update({'buffer': True, 'element': saved_context(True), 'length': 1, 'capacity': 1,
+                         'methods': [], 'slots': [literal_record(303)]})
+    virtual_snapshot = {'snapshot version': 10, 'module manifest': [manifest('virtual.snapshot.exec.abd', 0)],
+        'variable global': [], 'global owned allocations': [Address(2), Address(3)],
+        'length heap': 4, 'heap': [bytes([255]), 11, literal_record(301), saved_buffer],
+        'heap allocation': [{'begin position': Address(i), 'length': 1} for i in (1, 2, 3)],
+        'objects': [{'begin position': Address(1), 'has destructor': False, 'destructor contexts': [],
+                     'manual': True, 'methods': copy.deepcopy(saved_methods)}]}
+    write_abd(work / 'virtual.valid.snapshot.abd', virtual_snapshot)
+    corrupt_virtual = []
+    for location in ('heap', 'literal', 'view', 'buffer'):
+        for invalid in (None, 1, [17]):
+            candidate = copy.deepcopy(virtual_snapshot)
+            record = {'heap': candidate['objects'][0], 'literal': candidate['heap'][2],
+                      'view': candidate['heap'][3]['slots'][0], 'buffer': candidate['heap'][3]}[location]
+            if invalid is None:
+                del record['methods']
+            else:
+                record['methods'] = invalid
+            corrupt_virtual.append(candidate)
+    candidate = copy.deepcopy(virtual_snapshot)
+    candidate['heap'][3]['methods'] = copy.deepcopy(saved_methods)
+    corrupt_virtual.append(candidate)
+    for location in ('heap', 'literal', 'view'):
+        for mutation in ('unknown-id', 'native-id', 'missing-context', 'wrong-hidden-count',
+                         'bad-factory', 'bad-context-abi', 'bad-signature', 'bad-entry-kind'):
+            candidate = copy.deepcopy(virtual_snapshot)
+            record = {'heap': candidate['objects'][0], 'literal': candidate['heap'][2],
+                      'view': candidate['heap'][3]['slots'][0]}[location]
+            if mutation == 'unknown-id': record['methods'][0]['id'] = 999
+            elif mutation == 'native-id': record['methods'][0]['id'] = 0x0ABD0001
+            elif mutation == 'missing-context': del record['methods'][1]['contexts']
+            elif mutation == 'wrong-hidden-count': record['methods'][1]['contexts'] = []
+            elif mutation == 'bad-factory': record['methods'][1]['contexts'][0]['factory'] = 600
+            elif mutation == 'bad-context-abi': record['methods'][1]['contexts'][0]['abi'] = 6
+            elif mutation == 'bad-signature': record['methods'][0] = {'id': 612, 'contexts': []}
+            else: record['methods'][0] = {'id': 614, 'contexts': []}
+
+            corrupt_virtual.append(candidate)
+    for index, candidate in enumerate(corrupt_virtual):
+        write_abd(work / f'virtual.invalid-{index}.snapshot.abd', candidate)
     # A deep dependency graph is independent of the expression nesting limit.
     # Resolve it on a small JVM stack so a recursive native SCC walk fails here.
     deep_count = 1000
@@ -553,12 +691,12 @@ def main():
     deep.check_returncode()
     assert 'WARNING in native method' not in deep.stdout + deep.stderr, 'JNI checker reported a warning'
     scalars = read_abd(work / '快照 🐈.abd')
-    assert scalars['snapshot version'] == 9
+    assert scalars['snapshot version'] == 10
     assert Address(0xfedcba9876543210) in scalars['heap']
     assert Address(0) in scalars['heap']
     assert all(isinstance(entry['begin position'], Address) for entry in scalars['heap allocation'])
     snapshot = read_abd(work / 'objects.saved.snapshot.abd')
-    assert snapshot['snapshot version'] == 9
+    assert snapshot['snapshot version'] == 10
     assert snapshot['module manifest'] == [manifest('objects.exec.abd', 1)]
     assert snapshot['variable global'] == [7]
     assert len(snapshot['objects']) == 3
@@ -568,17 +706,17 @@ def main():
     assert set(snapshot['global owned allocations']) == {
         item['begin position'] for item in snapshot['objects'] if not item['manual']}
     guarded = read_abd(work / 'objects.guarded.snapshot.abd')
-    assert guarded['snapshot version'] == 9
+    assert guarded['snapshot version'] == 10
     assert guarded['objects'] == [] and guarded['global owned allocations'] == []
     guards = read_abd(work / 'object-guards.snapshot.abd')
-    assert guards['snapshot version'] == 9
+    assert guards['snapshot version'] == 10
     assert len(guards['objects']) == 2
     assert sorted(item['manual'] for item in guards['objects']) == [False, True]
     assert len(guards['global owned allocations']) == 1
-    assert all(set(item) == {'begin position', 'has destructor', 'destructor contexts', 'manual'}
-               for item in guards['objects']), 'C22 tags must not change the v9 object record'
+    assert all(set(item) == {'begin position', 'has destructor', 'destructor contexts', 'methods', 'manual'}
+               for item in guards['objects']), 'C22 tags must not change the v10 object record'
     numeric = read_abd(work / 'numeric.saved.snapshot.abd')
-    assert numeric['snapshot version'] == 9
+    assert numeric['snapshot version'] == 10
     assert numeric['module manifest'] == [manifest('numeric.exec.abd', 5)]
     assert len(numeric['variable global']) == 5
     assert numeric['variable global'][:3] == [7, 'numeric\0中文🐈', True]
@@ -586,12 +724,26 @@ def main():
     assert numeric['global owned allocations'] == [numeric['variable global'][3]]
     assert {item['begin position'] for item in numeric['objects']} == set(numeric['variable global'][3:])
     hints = read_abd(work / 'hints.all.snapshot.abd')
-    assert hints['snapshot version'] == 9
+    assert hints['snapshot version'] == 10
     assert hints['module manifest'] == [manifest('hints.consumer.exec.abd', 3),
         manifest('hints.library.exec.abd', 1, 3, 'PointLibrary', 1),
         manifest('hints.extra.exec.abd', 1, 4, 'ExtraLibrary', 2)]
     assert all(item['has destructor'] and item['destructor'] == 0x00010005 for item in hints['objects'])
+    virtual = read_abd(work / 'virtual.saved.snapshot.abd')
+    assert virtual['snapshot version'] == 10
+    assert len(virtual['objects']) == 1 and len(virtual['objects'][0]['methods']) == 2
+    captured = virtual['objects'][0]['methods'][1]['contexts'][0]
+    assert captured['factory'] == 612 and captured['abi'] == 8 and captured['kind'] == 3
+    literal_records = [value for value in virtual['heap'] if isinstance(value, dict)]
+    assert len(literal_records) == 2
+    assert sorted(len(record['methods']) for record in literal_records) == [0, 2]
+    restored_buffer = next(record for record in literal_records if record.get('buffer'))
+    assert restored_buffer['methods'] == [] and len(restored_buffer['slots'][0]['methods']) == 2
+    assert restored_buffer['slots'][0]['methods'][1]['contexts'][0]['factory'] == 612
+    after_virtual = read_abd(work / 'virtual.after-close.snapshot.abd')
+    assert after_virtual['snapshot version'] == 10 and after_virtual['objects'] == []
     high = read_abd(work / 'high-destructor.snapshot.abd')
+    assert high['snapshot version'] == 10
     assert high['objects'][0]['has destructor'] is True
     assert high['objects'][0]['destructor'] == -1
 

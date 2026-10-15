@@ -86,6 +86,7 @@ public class Compiler {
     }
     /** A class field; {@code file}/{@code line}/{@code column} locate its declaration (line 0 when unknown). */
     private record Field(String owner, String name, int type, JsonElement initializer, int file, int line, int column) {}
+    private record VirtualMethod(String name, String function, ClassInfo owner, boolean finalMethod) {}
     private static final class ClassInfo {
         String name, constructor, destructor, cleanupDestructor;
         ClassInfo base;
@@ -107,6 +108,9 @@ public class Compiler {
         final Map<String,Integer> fieldOffsets = new HashMap<>();
         final Map<String,String> ownMethods = new LinkedHashMap<>();
         final Map<String,String> methods = new LinkedHashMap<>();
+        final Set<String> virtualMethods = new LinkedHashSet<>(), overrideMethods = new LinkedHashSet<>(), finalMethods = new LinkedHashSet<>();
+        final List<VirtualMethod> vtable = new ArrayList<>();
+        final Map<String,Integer> virtualSlots = new LinkedHashMap<>();
         final Map<String,String> ownOperators = new LinkedHashMap<>();
         final Map<String,String> operators = new LinkedHashMap<>();
         Field field(String name) {
@@ -133,6 +137,8 @@ public class Compiler {
         /** Source-level labels for checks performed by lowered nodes, such as a for condition. */
         final IdentityHashMap<JsonObject,String> diagnosticLabels = new IdentityHashMap<>();
         final IdentityHashMap<JsonObject,SyntheticLoop> syntheticLoops = new IdentityHashMap<>();
+        /** Compiler-resolved dispatch metadata, never part of the readable AST. */
+        final IdentityHashMap<JsonObject,Integer> virtualCalls = new IdentityHashMap<>();
         /** The memo of the running outermost type query (see expressionType), reused by the next query. */
         final TypeQuery typeQuery = new TypeQuery();
         /**
@@ -388,12 +394,14 @@ public class Compiler {
         JsonObject overloaded = overloadedCall(object, environment);
         if (overloaded != null) return expressionType(overloaded, environment);
         if(kind.equals("call")) {
-            if (STRING_BUILTINS.containsKey(operation)) return STRING_BUILTINS.get(operation).returnType();
-            if (SourceRules.CONVERSIONS.contains(operation)) return conversionTarget(operation);
-            if (operation.equals("boolean") || operation.equals("bool"))
-                throw new IllegalArgumentException("Boolean conversions are not supported; write a comparison");
-            if(operation.equals("reflect_invoke_function"))return reflectionType(object,environment);
-            if(operation.equals("value_compare"))return AsTypes.INT_VALUE;
+            if(resolveCall(operation,environment).equals(operation)) {
+                if (STRING_BUILTINS.containsKey(operation)) return STRING_BUILTINS.get(operation).returnType();
+                if (SourceRules.CONVERSIONS.contains(operation)) return conversionTarget(operation);
+                if (operation.equals("boolean") || operation.equals("bool"))
+                    throw new IllegalArgumentException("Boolean conversions are not supported; write a comparison");
+                if(operation.equals("reflect_invoke_function"))return reflectionType(object,environment);
+                if(operation.equals("value_compare"))return AsTypes.INT_VALUE;
+            }
             CallBinding binding=bindCall(object,environment);
             return binding.signature()!=null?binding.signature().returnType():AsTypes.ANY_VALUE;
         }
@@ -451,7 +459,7 @@ public class Compiler {
                     ? AsTypes.INT_VALUE : AsTypes.ANY_VALUE;
             case "if" -> branchType(params, environment);
             case "select" -> selectType(params, environment);
-            case "vardef", "return", "break", "continue", "while", "for", "switch", "#switch-loop", "increment", "decrement", "object-def", "object-delete", "#bind", "#drop" -> AsTypes.VOID_VALUE;
+            case "vardef", "return", "break", "continue", "while", "for", "switch", "#switch-loop", "increment", "decrement", "object-def", "object-delete", "#bind", "#set-methods", "#base-completed", "#drop" -> AsTypes.VOID_VALUE;
             default -> AsTypes.ANY_VALUE;
         };
     }
@@ -898,12 +906,14 @@ public class Compiler {
         JsonObject overloaded=overloadedCall(source,environment);
         if(overloaded!=null)return compileInstruction(overloaded,environment);
         if (type.equals("call")) {
-            if (STRING_BUILTINS.containsKey(call)) return compileStringBuiltin(call, params, source.has("type-args"), environment);
-            if (SourceRules.CONVERSIONS.contains(call)) return compileConversion(source, environment);
-            if (call.equals("boolean") || call.equals("bool"))
-                throw new IllegalArgumentException("Boolean conversions are not supported; write a comparison");
-            if(call.equals("reflect_invoke_function"))return compileReflection(source,environment);
-            if(call.equals("value_compare"))return compileCompare(source,environment);
+            if(resolveCall(call,environment).equals(call)) {
+                if (STRING_BUILTINS.containsKey(call)) return compileStringBuiltin(call, params, source.has("type-args"), environment);
+                if (SourceRules.CONVERSIONS.contains(call)) return compileConversion(source, environment);
+                if (call.equals("boolean") || call.equals("bool"))
+                    throw new IllegalArgumentException("Boolean conversions are not supported; write a comparison");
+                if(call.equals("reflect_invoke_function"))return compileReflection(source,environment);
+                if(call.equals("value_compare"))return compileCompare(source,environment);
+            }
             CallBinding binding=bindCall(source,environment);Signature signature=binding.signature();
             params=binding.arguments();String label=displayName(binding.name());int hidden=binding.name().contains("::")&&!isFactory(binding.name())?1:0;
             if(signature!=null&&params.size()!=signature.paramTypes().size())throw new IllegalArgumentException(label+" expects "+(signature.paramTypes().size()-hidden)+" arguments, got "+(params.size()-hidden));
@@ -920,13 +930,15 @@ public class Compiler {
                 }
                 converted.add(argument);
             }
-            result.put("t",1);result.put("id",environment.getFunctionId(binding.name()));
+            Integer virtualSlot=environment.state().virtualCalls.get(source);
+            if(virtualSlot==null) { result.put("t",1);result.put("id",environment.getFunctionId(binding.name())); }
+            else { result.put("t",0);result.put("c",ExecOpcodes.CALL_VIRTUAL);result.put("slot",virtualSlot.intValue());result.put("type",abiType(signature.returnType())); }
             AcsArray args=new AcsArray();
             for(JsonElement argument:converted) {
                 rejectVoidValue(label+" argument",argument,environment);
                 args.acsa.add(withDepth(1,()->compileExpression(argument,environment)));
             }
-            result.put("param",args);result.put("contexts",contexts(binding.types(),environment));
+            result.put("param",args);if(virtualSlot==null)result.put("contexts",contexts(binding.types(),environment));
             if(binding.genericReturn())return typeCheck(result,binding.signature().returnType(),environment);
             return result;
         }
@@ -1141,6 +1153,32 @@ public class Compiler {
                     result.put("contexts",contexts(actual.arguments,environment));
                 }
                 result.put("manual", params.get(2).getAsBoolean());
+            }
+            case "#set-methods" -> {
+                requireTrusted(source,environment);arity(call,params,0,0);
+                ClassInfo info=classInfo(environment.ownerClass,environment);
+                result.put("c",ExecOpcodes.SET_METHODS);result.put("v",compileExpression(variable("this"),environment));
+                AcsArray entries=new AcsArray();
+                for(VirtualMethod method:info.vtable) {
+                    AcsObject entry=new AcsObject();entry.put("id",environment.getFunctionId(method.function()));
+                    AcsArray bindings=contexts(method.owner().arguments,environment);
+                    // Entry list, entry record and its contexts list are physical ABD containers.
+                    withDepth(3,()->null);
+                    for(AcsElement binding:bindings.acsa)withDepth(4+contextHeight((AcsObject)binding),()->null);
+                    entry.put("contexts",bindings);entries.acsa.add(entry);
+                }
+                result.put("entries",entries);
+            }
+            case "#base-completed" -> {
+                requireTrusted(source,environment);arity(call,params,2,2);
+                result.put("c",ExecOpcodes.SET);result.put("v",environment.getVariable(string(params.get(0),"Completion flag")).slot);
+                // Store completion before the full statement releases literal
+                // argument temporaries. Comparing two actual VOID values yields true.
+                AcsObject completed=new AcsObject();completed.put("t",0);completed.put("c",ExecOpcodes.EQUAL);
+                JsonElement baseCall=params.get(1);
+                completed.put("v1",withDepth(1,()->compileExpression(baseCall,environment)));
+                completed.put("v2",withDepth(3,()->new AcsByteArray(new byte[]{(byte)0xff})));
+                result.put("val",completed);
             }
             case "#new-block" -> {
                 requireTrusted(source, environment); arity(call, params, 1, 1);
@@ -1573,7 +1611,13 @@ public class Compiler {
         JsonArray arguments=new JsonArray();arguments.add(receiverAddress(params.get(0),environment));
         for(int i=2;i<params.size();i++)arguments.add(params.get(i));
         JsonObject result=ownedCall(method,arguments,info,environment);
+        markVirtualCall(result,info,params.get(1).getAsString(),expressionType(params.get(0),environment),environment);
         if(source.has("type-args"))result.add("type-args",source.get("type-args"));return result;
+    }
+    private static void markVirtualCall(JsonObject call,ClassInfo receiver,String name,int receiverType,LogicEnvironment environment) {
+        Integer slot=receiver.virtualSlots.get(name);
+        if(slot!=null&&isClassPointer(receiverType)&&!receiver.vtable.get(slot).finalMethod())
+            environment.state().virtualCalls.put(call,slot);
     }
     /**
      * {@code Base::m(args)}: the method {@code m} visible in {@code Base}, which is the
@@ -1761,7 +1805,11 @@ public class Compiler {
     private static CallBinding bindCall(JsonObject source,LogicEnvironment environment) {
         String original=string(source.get("call"),"Function name"),name=resolveCall(original,environment);
         JsonArray args=parameters(source);
-        if(!original.equals(name)){JsonArray receiver=new JsonArray();receiver.add(variable("this"));args.forEach(receiver::add);args=receiver;}
+        if(!original.equals(name)) {
+            JsonArray receiver=new JsonArray();receiver.add(variable("this"));args.forEach(receiver::add);args=receiver;
+            ClassInfo implicit=receiverClass(receiver.get(0),environment);
+            markVirtualCall(source,implicit,original,expressionType(receiver.get(0),environment),environment);
+        }
         int id=environment.getFunctionId(name);Signature signature=environment.root().namedSignatures.get(name);
         if(signature==null)signature=environment.root().builtinSignatures.get(id);
         if(signature==null)throw new IllegalArgumentException("Unknown function signature: "+name);
@@ -1825,6 +1873,17 @@ public class Compiler {
     }
     private static AcsArray contexts(List<Integer> types,LogicEnvironment environment) {
         AcsArray result=new AcsArray();for(int type:types)result.acsa.add(context(type,environment,0));return result;
+    }
+    /** Additional compact-ABD levels below a context record, including its empty lists. */
+    private static int contextHeight(AcsObject context) {
+        if(context.mmp.containsKey("ref"))return 0;
+        int height=1;
+        for(String key:List.of("contexts","placement-contexts")) {
+            AcsElement children=context.mmp.get(key);
+            if(children instanceof AcsArray values)for(AcsElement child:values.acsa)height=Math.max(height,2+contextHeight((AcsObject)child));
+        }
+        AcsElement element=context.mmp.get("element");
+        return element instanceof AcsObject child?Math.max(height,1+contextHeight(child)):height;
     }
     private static AcsObject context(int type,LogicEnvironment environment,int depth) {
         if(depth>MAX_VALUE_NESTING)throw new IllegalArgumentException("Generic operation context nesting exceeds "+MAX_VALUE_NESTING);
@@ -2111,10 +2170,12 @@ public class Compiler {
     private static void prepareLayout(ClassInfo info) {
             // A failed layout may be retried by another class or function; start over each time.
             info.ownFields.clear();info.ownMethods.clear();info.ownOperators.clear();
+            info.virtualMethods.clear();info.overrideMethods.clear();info.finalMethods.clear();
             if(info!=info.declaration) {
                 ClassInfo original=info.declaration;Map<Integer,Integer> substitutions=substitutions(info);
                 info.constructor=original.constructor;info.destructor=original.destructor;info.cleanupDestructor=original.cleanupDestructor;
                 info.synthesizedDestructor=original.synthesizedDestructor;info.ownMethods.putAll(original.ownMethods);info.ownOperators.putAll(original.ownOperators);
+                info.virtualMethods.addAll(original.virtualMethods);info.overrideMethods.addAll(original.overrideMethods);info.finalMethods.addAll(original.finalMethods);
                 if(original.base!=null)info.base=CLASS_LAYOUTS.get().get(substitute(original.base.valueType,substitutions));
                 for(Field field:original.ownFields) info.ownFields.add(new Field(field.owner(),field.name(),substitute(field.type(),substitutions),field.initializer(),field.file(),field.line(),field.column()));
             } else {
@@ -2149,6 +2210,14 @@ public class Compiler {
                     if(!qualified.equals(info.name+"::"+method.getKey()))throw new IllegalArgumentException("Invalid method mapping for "+info.name);
                     info.ownMethods.put(method.getKey(),qualified);
                 }
+                for(String modifier:List.of("virtual","override","final")) {
+                    Set<String> targets=modifier.equals("virtual")?info.virtualMethods:modifier.equals("override")?info.overrideMethods:info.finalMethods;
+                    if(definition.has(modifier+"-methods"))for(JsonElement method:definition.getAsJsonArray(modifier+"-methods")) {
+                        String name=string(method,modifier+" method name");
+                        if(!info.ownMethods.containsKey(name))throw new IllegalArgumentException(modifier+" modifier requires an ordinary method declared in "+info.name);
+                        if(!targets.add(name))throw new IllegalArgumentException("Duplicate "+modifier+" method: "+info.name+"."+name);
+                    }
+                }
                 if(definition.has("operators"))for(var operation:definition.getAsJsonObject("operators").entrySet()) {
                     String name=operation.getKey(),qualified=string(operation.getValue(),"Operator function");
                     if(!OPERATOR_KINDS.contains(name)||!qualified.equals(info.name+"::<op:"+name+">"))
@@ -2162,9 +2231,17 @@ public class Compiler {
     }
     private static void finishLayout(ClassInfo info) {
             info.fields.clear();info.visibleFields.clear();info.fieldOffsets.clear();info.methods.clear();info.operators.clear();
-            if(info.base!=null){info.fields.addAll(info.base.fields);info.visibleFields.putAll(info.base.visibleFields);info.fieldOffsets.putAll(info.base.fieldOffsets);info.methods.putAll(info.base.methods);info.operators.putAll(info.base.operators);}
+            info.vtable.clear();info.virtualSlots.clear();
+            if(info.base!=null){info.fields.addAll(info.base.fields);info.visibleFields.putAll(info.base.visibleFields);info.fieldOffsets.putAll(info.base.fieldOffsets);info.methods.putAll(info.base.methods);info.operators.putAll(info.base.operators);info.vtable.addAll(info.base.vtable);info.virtualSlots.putAll(info.base.virtualSlots);}
             for(Field field:info.ownFields){info.fieldOffsets.put(field.name(),info.fields.size());info.fields.add(field);info.visibleFields.put(field.name(),field);info.methods.remove(field.name());}
             info.ownMethods.forEach((name,method)->{info.methods.put(name,method);info.visibleFields.remove(name);info.fieldOffsets.remove(name);});
+            for(var method:info.ownMethods.entrySet()) {
+                String name=method.getKey();Integer slot=info.virtualSlots.get(name);
+                if(slot!=null)info.vtable.set(slot,new VirtualMethod(name,method.getValue(),info,info.finalMethods.contains(name)));
+                else if(info.virtualMethods.contains(name)||info.overrideMethods.contains(name)) {
+                    info.virtualSlots.put(name,info.vtable.size());info.vtable.add(new VirtualMethod(name,method.getValue(),info,info.finalMethods.contains(name)));
+                }
+            }
             info.operators.putAll(info.ownOperators);
             if(info.fields.isEmpty())throw new IllegalArgumentException("Class "+info.name+" must declare at least one field");
             if(info.fields.size()>MAX_VARIABLE_SLOTS)throw new IllegalArgumentException("Class exceeds object slot limit");
@@ -2289,6 +2366,8 @@ public class Compiler {
         } catch (RuntimeException error) { recover(error, info.source, "class " + info.name, global); }
         Diagnostics diagnostics = global.state().diagnostics;
         diagnostics.checkpoint();
+        validateVirtualMethods(byName,global);
+        diagnostics.checkpoint();
         for (Function function : functions) try {
             boolean member = function.metadata().has("owner-class") || function.metadata().has("function-kind") || function.name().contains("::");
             if (member && !declaredClassFunctions.contains(function.name())) throw new IllegalArgumentException("Unregistered class function: " + function.name());
@@ -2369,6 +2448,35 @@ public class Compiler {
         } catch (RuntimeException error) { recover(error, info.source, "class " + info.name, global); }
         diagnostics.checkpoint();
     }
+    private static void validateVirtualMethods(Map<String,Function> functions,LogicEnvironment global) {
+        for(ClassInfo info:global.classes.values())for(var method:info.ownMethods.entrySet()) {
+            String name=method.getKey(),display=info.name+"."+name;
+            Function function=functions.get(method.getValue());
+            try {
+                boolean marked=info.virtualMethods.contains(name)||info.overrideMethods.contains(name)||info.finalMethods.contains(name);
+                if(marked&&function.typeParameters().size()!=function.classParameters())
+                    throw new IllegalArgumentException("Virtual method "+display+" cannot declare method type parameters");
+                Integer inherited=info.base==null?null:info.base.virtualSlots.get(name);
+                if(inherited==null) {
+                    if(info.overrideMethods.contains(name))throw new IllegalArgumentException("Method "+display+" is declared override but does not override a virtual method");
+                    if(info.finalMethods.contains(name)&&!info.virtualMethods.contains(name))
+                        throw new IllegalArgumentException("Method "+display+" declared final must be virtual or override");
+                    continue;
+                }
+                VirtualMethod base=info.base.vtable.get(inherited);
+                String parent=base.function().replace("::", ".");
+                if(!info.overrideMethods.contains(name))throw new IllegalArgumentException("Method "+display+" overrides virtual method "+parent+" and must be declared override");
+                if(base.finalMethod())throw new IllegalArgumentException("Method "+display+" cannot override final method "+parent);
+                Signature expected=operatorSignature(base.owner(),functions.get(base.function())),actual=operatorSignature(info,function);
+                if(expected.paramTypes().size()!=actual.paramTypes().size()
+                        ||!expected.paramTypes().subList(1,expected.paramTypes().size()).equals(actual.paramTypes().subList(1,actual.paramTypes().size())))
+                    throw new IllegalArgumentException("Override "+display+" must have the same parameter types as "+parent);
+                int wanted=expected.returnType(),returned=actual.returnType();
+                if(wanted!=returned&&!(isPointerClass(wanted)&&isPointerClass(returned)&&assignable(wanted,returned)))
+                    throw new IllegalArgumentException("Override "+display+" has incompatible return type: "+typeName(returned)+"; expected "+typeName(wanted));
+            } catch(RuntimeException error) { recover(error,function==null?info.source:function.metadata(),"class "+info.name,global); }
+        }
+    }
     private static Signature operatorSignature(ClassInfo receiver,Function function) {
         ClassInfo declaration=CLASS_DECLARATIONS.get().get(function.metadata().get("owner-class").getAsString());
         Map<Integer,Integer> substitution=substitutions(ancestor(receiver,declaration));
@@ -2447,6 +2555,9 @@ public class Compiler {
         if (!body.isJsonArray()) throw new IllegalArgumentException("Class function body must be a block");
         ClassInfo info = global.classes.get(string(metadata.get("owner-class"), "Function owner"));
         JsonArray guarded = new JsonArray(); guarded.add(internal(global, "#check-this"));
+        if(kind.equals("constructor")||kind.equals("destructor")) {
+            JsonObject methods=internal(global,"#set-methods");copyPosition(metadata,methods,global);guarded.add(methods);
+        }
         if(kind.equals("constructor")) {
             for(Field field:info.ownFields)if(!isOwnedValue(field.type())) {
                 JsonObject member=node("member",variable("this"),new JsonPrimitive(field.name()));
@@ -2479,31 +2590,55 @@ public class Compiler {
         JsonArray receiver = new JsonArray(); receiver.add(variable("this"));
         if (kind.equals("destructor")) {
             // C++ order: this body, this class's literal-object fields (last first), then the base.
-            JsonArray finalizer = new JsonArray();
-            for (int i = info.ownFields.size() - 1; i >= 0; i--) if (isOwnedValue(info.ownFields.get(i).type()) || isTypeParameter(info.ownFields.get(i).type()))
-                finalizer.add(internal(global, "#drop", node("member", variable("this"), new JsonPrimitive(info.ownFields.get(i).name()))));
+            JsonArray finalizer = fieldDrops(info,global);
             if (info.base != null && info.base.cleanupDestructor != null) finalizer.add(callNode(info.base.cleanupDestructor, receiver));
-            return finalizer.isEmpty() ? guarded : internal(global, "#cleanup", guarded, finalizer, new JsonPrimitive(false));
+            return finalizer.isEmpty() ? guarded : internal(global, "#cleanup", guarded, cleanupSequence(finalizer,0,finalizer.size(),global), new JsonPrimitive(false));
         }
-        if (info.base == null || !kind.equals("constructor")) return guarded;
+        JsonElement phase=guarded;
+        if(kind.equals("constructor")&&info.base==null) {
+            // A failed construction never enters the user's destructor. End only
+            // the fields that completed (uninitialized slots are void), before
+            // the outer guard rolls back the completed base.
+            JsonArray fields=fieldDrops(info,global);
+            if(!fields.isEmpty())phase=internal(global,"#cleanup",guarded,cleanupSequence(fields,0,fields.size(),global),new JsonPrimitive(true));
+        }
+        if (info.base == null || !kind.equals("constructor")) return phase;
         JsonArray arguments = new JsonArray(); arguments.add(variable("this"));
         if (metadata.has("base-args")) metadata.getAsJsonArray("base-args").forEach(arguments::add);
         JsonObject baseCall = callNode(info.base.constructor, arguments);
         copyPosition(metadata, baseCall, global);
         JsonArray construction = new JsonArray(); construction.add(internal(global, "#check-this"));
-        if (info.base.cleanupDestructor == null) { construction.add(baseCall); construction.add(guarded); }
+        JsonArray rollback=fieldDrops(info,global);
+        if(info.base.cleanupDestructor!=null)rollback.add(callNode(info.base.cleanupDestructor,receiver));
+        if (rollback.isEmpty()) { construction.add(baseCall); construction.add(phase); }
         else {
             // Include base-argument temporaries in the protected scope: their own destructors
             // may fail after the child body returns, which must still roll back the base.
             String completed = "#base-constructed";
             JsonObject flag = node("vardef", new JsonPrimitive(completed), new JsonPrimitive(false));
             flag.addProperty("declared-type", "boolean"); construction.add(flag);
-            JsonArray protectedBody = new JsonArray(); protectedBody.add(baseCall);
-            protectedBody.add(node("varset", new JsonPrimitive(completed), new JsonPrimitive(true))); protectedBody.add(guarded);
-            JsonObject cleanup = node("if", variable(completed), callNode(info.base.cleanupDestructor, receiver));
+            JsonArray protectedBody = new JsonArray();
+            JsonObject complete=internal(global,"#base-completed",new JsonPrimitive(completed),baseCall);copyPosition(metadata,complete,global);
+            protectedBody.add(complete);protectedBody.add(phase);
+            JsonObject cleanup = node("if", variable(completed), cleanupSequence(rollback,0,rollback.size(),global));
             construction.add(internal(global, "#cleanup", protectedBody, cleanup, new JsonPrimitive(true)));
         }
         return construction;
+    }
+    private static JsonArray fieldDrops(ClassInfo info,LogicEnvironment global) {
+        JsonArray fields=new JsonArray();
+        for(int i=info.ownFields.size()-1;i>=0;i--) {
+            Field field=info.ownFields.get(i);
+            if(isOwnedValue(field.type())||isTypeParameter(field.type()))
+                fields.add(internal(global,"#drop",node("member",variable("this"),new JsonPrimitive(field.name()))));
+        }
+        return fields;
+    }
+    /** Every cleanup runs, in order, even when an earlier cleanup throws. */
+    private static JsonElement cleanupSequence(JsonArray steps,int begin,int end,LogicEnvironment global) {
+        if(end-begin==1)return steps.get(begin);
+        int middle=(begin+end)>>>1;
+        return internal(global,"#cleanup",cleanupSequence(steps,begin,middle,global),cleanupSequence(steps,middle,end,global),new JsonPrimitive(false));
     }
     /**
      * Conservative control-flow check: can execution fall off the end of this

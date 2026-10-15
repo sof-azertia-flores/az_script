@@ -1116,9 +1116,10 @@ class CompilerTest {
                 + "Point::~Point():0003{print(x);}int Point::get():0004{return x;}"));
         JsonObject json = library.toJson().getAsJsonObject();JsonArray ctor = function(json, 2).getAsJsonArray("script");
         assertEquals(ExecOpcodes.OBJECT_ADDRESS, ctor.get(0).getAsJsonObject().get("c").getAsInt());
-        assertEquals(ExecOpcodes.MOVE, ctor.get(1).getAsJsonObject().get("c").getAsInt());
-        assertEquals(0, ctor.get(1).getAsJsonObject().get("v2").getAsInt());
-        assertEquals(0xabcd0005, ctor.get(2).getAsJsonObject().getAsJsonObject("v2").get("id").getAsInt());
+        assertEquals(ExecOpcodes.SET_METHODS, ctor.get(1).getAsJsonObject().get("c").getAsInt());
+        assertEquals(ExecOpcodes.MOVE, ctor.get(2).getAsJsonObject().get("c").getAsInt());
+        assertEquals(0, ctor.get(2).getAsJsonObject().get("v2").getAsInt());
+        assertEquals(0xabcd0005, ctor.get(3).getAsJsonObject().getAsJsonObject("v2").get("id").getAsInt());
         assertEquals(library.toJson(), ExecCodec.decode(library.toValue()).toJson());
         assertFalse(new String(library.toValue().getData(), java.nio.charset.StandardCharsets.ISO_8859_1).contains("Point"));
         for (String invalid : List.of("#namespace_hint X\nclass P{int x;int get(){return x;}}",
@@ -1130,12 +1131,13 @@ class CompilerTest {
         JsonObject ast = newTree("class C{int x=7;int y=x;C(int x){this.x=x;}}void main(){C c(9);}");
         int id = Integer.parseUnsignedInt(ast.getAsJsonObject("abstract").get("C::<ctor>").getAsString(), 16);
         JsonArray body = function(Compiler.compile(ast).toJson().getAsJsonObject(), id).getAsJsonArray("script");
-        assertEquals(6, body.size());
-        assertEquals(0, body.get(1).getAsJsonObject().get("v2").getAsInt());
+        assertEquals(7, body.size());
+        assertEquals(ExecOpcodes.SET_METHODS, body.get(1).getAsJsonObject().get("c").getAsInt());
         assertEquals(0, body.get(2).getAsJsonObject().get("v2").getAsInt());
-        assertEquals(7, body.get(3).getAsJsonObject().get("v2").getAsInt());
-        assertEquals(0x0abd0006, body.get(4).getAsJsonObject().getAsJsonObject("v2").get("id").getAsInt());
-        assertEquals(1, body.get(5).getAsJsonObject().getAsJsonObject("v2").get("v").getAsInt());
+        assertEquals(0, body.get(3).getAsJsonObject().get("v2").getAsInt());
+        assertEquals(7, body.get(4).getAsJsonObject().get("v2").getAsInt());
+        assertEquals(0x0abd0006, body.get(5).getAsJsonObject().getAsJsonObject("v2").get("id").getAsInt());
+        assertEquals(1, body.get(6).getAsJsonObject().getAsJsonObject("v2").get("v").getAsInt());
         assertThrows(IllegalArgumentException.class, () -> compile("class C{int x=parameter;C(int parameter){}}void main(){}"));
         assertDoesNotThrow(() -> compile("class C{int x=missingPrivate();extern C():abcd0002;}void main(){C c;}"));
         assertThrows(IllegalArgumentException.class, () -> compile("class C{int x;extern C(int n):abcd0002;}void main(){C c;}"));

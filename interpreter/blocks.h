@@ -17,6 +17,7 @@ struct slot_block {
     std::vector<std::shared_ptr<variable>> slots;
     std::optional<int> destructor;
     type_contexts destructor_contexts;
+    std::shared_ptr<const method_table> methods;
     std::weak_ptr<azertian::script> script_owner;
     // Exactly one storage variable owns a live block, unless it is an unbound
     // temporary of a frame or is held by a host. owner_env orders the cleanup

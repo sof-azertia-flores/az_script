@@ -170,6 +170,18 @@ final class AstShape {
         typeParameters(definition, path);
         JsonObject methods = object(definition, "methods", path, true);
         strings(methods, path.key("methods"));
+        for (String modifier : List.of("virtual", "override", "final")) {
+            String key = modifier + "-methods"; JsonArray marked = array(definition, key, path, false);
+            if (marked == null) continue;
+            Set<String> seen = new HashSet<>();
+            for (int i = 0; i < marked.size(); i++) {
+                JsonElement entry = marked.get(i); Pointer at = path.key(key).index(i);
+                if (!entry.isJsonPrimitive() || !entry.getAsJsonPrimitive().isString()) { stringElement(entry, at); continue; }
+                String name = entry.getAsString();
+                if (!seen.add(name)) error(at, "duplicate " + modifier + " method: " + printable(name));
+                if (methods != null && !methods.has(name)) error(at, modifier + " must name an own method: " + printable(name));
+            }
+        }
         strings(object(definition, "operators", path, false), path.key("operators"));
         JsonArray fields = array(definition, "fields", path, true);
         if (fields != null) for (int i = 0; i < fields.size(); i++) {

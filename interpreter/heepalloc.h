@@ -18,6 +18,7 @@ struct object_record {
     bool manual;
     std::weak_ptr<azertian::script> script_owner;
     type_contexts destructor_contexts;
+    std::shared_ptr<const method_table> methods;
 };
 inline constexpr int max_slots=1048576;
 int resize_heap();
@@ -29,6 +30,10 @@ address object_alloc(int size);
 bool is_object_storage(address pointer);
 // Reflection checks liveness and direct ABI tags, never nominal class identity.
 void check_object(address pointer,const std::vector<int>& slot_types);
+// Empty tables clear a binding; construction/destruction phase changes are allowed.
+void set_methods(address pointer,std::shared_ptr<const method_table> methods,const std::shared_ptr<script>& script);
+std::shared_ptr<const method_table> methods_at(address pointer,const std::shared_ptr<script>& script);
+std::size_t method_table_count();
 bool free(address startpos);
 std::shared_ptr<variable> getAt(address pointer);
 // Raw slot access is for snapshots only; getAt checks allocation membership.

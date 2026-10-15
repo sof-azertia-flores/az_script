@@ -232,7 +232,7 @@ def write_manifest(package, args, java_version, native_details, tests):
         'createdUtc': datetime.now(timezone.utc).isoformat(),
         'platform': {'system': platform.system(), 'architecture': platform.machine(),
                      'buildOsVersion': platform.platform(), 'nativeToolchain': native_details},
-        'entryFunction': '0x0fff0000', 'execFormatVersion': 10, 'jniSnapshotVersion': 9,
+        'entryFunction': '0x0fff0000', 'execFormatVersion': 10, 'jniSnapshotVersion': 10,
         'standardLibraries': {
             'AZSCRIPT_MATH': {
                 'executable': 'stdlib/math.exec.abd', 'declarations': 'stdlib/math.include.azs'},

@@ -116,7 +116,7 @@ C++ azertian::address stores uint64 in .value. Variable(address) differs from va
 
 Load only mounts code. Flush links and initializes pending modules before invoke. Destroy runs destruction hooks and cleanup and is repeatable. Explicitly close on normal and exceptional exits. Do not use the old unbounded pointer API for external files. See examples/cpp/main.cpp for bounded reading, errors, and budgets.
 
-Catch the original C++ exception type and call `azertian::describe_error(error)` before `destroy()` or another runtime entry. It returns `what()` plus matching frames, without the CLI prefix or a trailing newline. `last_error_trace()` returns an `error_trace` containing `frames` and `omitted_frames`; `format_error_trace(trace)` formats the frames and `clear_error_trace()` clears them. Collection is thread-local and restarts at each entry, including callback reentry. The trace API changes the public C++ ABI: rebuild hosts and plugins against this package's matching headers and libraries.
+Catch the original C++ exception type and call `azertian::describe_error(error)` before `destroy()` or another runtime entry. It returns `what()` plus matching frames, without the CLI prefix or a trailing newline. `last_error_trace()` returns an `error_trace` containing `frames` and `omitted_frames`; `format_error_trace(trace)` formats the frames and `clear_error_trace()` clears them. Collection is thread-local and restarts at each entry, including callback reentry. Trace APIs and virtual-method storage change the public C++ ABI: rebuild hosts and plugins against this package's matching headers and libraries.
 
 Insert_script records each module's global offset per function, so two -1 globals refer to separate slots. Parameter/local frames and block destructors remain independent. Fixed namespaces must avoid ID collisions; namespace_hint libraries receive runtime namespaces. Successful insertion requires another flush. Query namespace_for_hint("NAME"). See [global offsets](LANGUAGE.en.md#insert-and-module-global-offsets).
 
@@ -196,7 +196,7 @@ Class-pointer arguments and extern results remain trusted address values; member
 
 Java calls loadScript(mainFile), insertScript for each library, flush, then invoke. namespaceForHint("POINT_LIB") supplies the actual namespace; public IDs are `(namespace << 16) | localId`. Identical assumed namespaces in different modules may identify different libraries. Missing libraries/signature errors fail flush atomically and permit retry after dependencies are added. Onload failure requires close/recreation. Insert, flush, and snapshot replacement are forbidden during execution/callbacks.
 
-JNI v9 snapshots require initialized idle scripts, including literals in heap fields, and identical ordered module bytes, actual namespaces, and global layouts. Restore does not rerun onload. Old executables/snapshots are unsupported. See [hint linking](HINT_LINKING.en.md) for syntax, out-of-class implementations, and lifetimes.
+JNI v10 snapshots require initialized idle scripts, including literals in heap fields, and identical ordered module bytes, actual namespaces, and global layouts. Restore does not rerun onload. Old executables/snapshots are unsupported. See [hint linking](HINT_LINKING.en.md) for syntax, out-of-class implementations, and lifetimes. Snapshot v10 preserves virtual bindings and their generic contexts through required `methods:[{id,contexts}]` arrays on every heap-object and literal/view record; buffers use `[]`.
 
 ## Signed external libraries
 

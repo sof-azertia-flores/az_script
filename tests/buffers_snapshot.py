@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Real-JVM v9 buffer snapshot restoration and malformed-state atomicity."""
+"""Real-JVM v10 buffer snapshot restoration and malformed-state atomicity."""
 import argparse
 import os
 from pathlib import Path
@@ -111,17 +111,19 @@ public class BufferSnapshot {
    Address before=(Address)AbdInvoker.invoke(BASE+14);
    check(AbdInvoker.saveStatus(saved),"save buffer state");
    byte[] bytes=Files.readAllBytes(saved.toPath());AcsObject root=new AcsObject(AbdValue.fromAbd(bytes));
-   check(root.getAsInt("snapshot version")==9,"snapshot version");
+   check(root.getAsInt("snapshot version")==10,"snapshot version");
    AcsObject buffer=obj(root.getAsAcsArray("variable global"),0);
    check(buffer.getAsInt("capacity")==5&&buffer.getAsInt("length")==2&&buffer.getAsAcsArray("slots").acsa.size()==2,"only live slab elements stored");
    check(obj(buffer.getAsAcsArray("slots"),0).getAsAcsArray("slots").acsa.size()==2,"class slab width");
    check(obj(root.getAsAcsArray("variable global"),4).getAsAcsArray("slots").acsa.isEmpty(),"empty buffer saves no slots");
+   check(buffer.getAsAcsArray("methods").acsa.isEmpty(),"buffers require empty methods");
+   check(obj(buffer.getAsAcsArray("slots"),0).getAsAcsArray("methods").acsa.isEmpty(),"class views require methods");
    AbdInvoker.invoke(BASE+20,99);
-   for(int mode=0;mode<22;++mode) {
+   for(int mode=0;mode<27;++mode) {
     root=new AcsObject(AbdValue.fromAbd(bytes));buffer=obj(root.getAsAcsArray("variable global"),0);
     AcsObject element=buffer.getAsAcsObject("element");AcsArray slots=buffer.getAsAcsArray("slots");
     switch(mode) {
-     case 0 -> root.put("snapshot version",8);
+     case 0 -> root.put("snapshot version",9);
      case 1 -> buffer.put("capacity",1);
      case 2 -> buffer.put("length",3);
      case 3 -> buffer.put("capacity",Integer.MAX_VALUE);
@@ -143,6 +145,11 @@ public class BufferSnapshot {
      case 19 -> {AcsObject nested=obj(root.getAsAcsArray("variable global"),3);nested.getAsAcsObject("element").put("has element",false);}
      case 20 -> buffer.put("buffer",false);
      case 21 -> buffer.put("capacity",1048576/2);
+     case 22 -> buffer.mmp.remove("methods");
+     case 23 -> buffer.put("methods",17);
+     case 24 -> {AcsArray entries=new AcsArray();AcsObject method=new AcsObject();method.put("id",BASE+10);method.put("contexts",new AcsArray());entries.acsa.add(method);buffer.put("methods",entries);}
+     case 25 -> obj(slots,0).mmp.remove("methods");
+     case 26 -> obj(slots,0).put("methods",17);
     }
     Files.write(bad.toPath(),root.toValue().toAbdFormat());
     try {AbdInvoker.loadStatus(bad);throw new AssertionError("accepted malformed buffer "+mode);}
@@ -157,7 +164,7 @@ public class BufferSnapshot {
    AbdInvoker.invoke(BASE+22);check(invoke(13)==3&&invoke(11)==0,"restored placement context can grow buffer");
    check(AbdInvoker.saveStatus(saved),"save restored buffer");AbdInvoker.loadStatus(saved);
    AbdInvoker.invoke(BASE+21);check(invoke(11)==3&&invoke(13)==0,"restored view destructors run once");
-   System.out.println("Buffer JNI snapshot passed: 22 corrupt states rejected atomically; slab views, nested and empty buffers restored");
+   System.out.println("Buffer JNI snapshot passed: 27 corrupt states rejected atomically; slab views, nested and empty buffers restored");
   } finally {AbdInvoker.close();}
  }
 }''', encoding='utf-8')

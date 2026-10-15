@@ -199,7 +199,7 @@ struct function_reference {
     int* target;
     bool destructor=false;
     int hidden_count=0;
-    bool factory=false,placement=false;
+    bool factory=false,placement=false,method=false;
 };
 struct loaded_module {
     module_manifest_entry manifest;
@@ -902,6 +902,58 @@ public:
         mark_returned(env,std::move(result));return nil();
     }
 };
+struct method_spec {int function_id;std::vector<std::shared_ptr<context_spec>> contexts;};
+bool constant_context(const std::shared_ptr<context_spec>& context) {
+    if(context->ref>=0)return false;
+    for(const auto& child:context->contexts)if(!constant_context(child))return false;
+    for(const auto& child:context->placement_contexts)if(!constant_context(child))return false;
+    return !context->element||constant_context(context->element);
+}
+class set_methods_expression final:public expression {
+    std::shared_ptr<expression> pointer;
+    std::shared_ptr<const method_table> cached;
+public:
+    std::vector<std::shared_ptr<method_spec>> entries;
+    explicit set_methods_expression(std::shared_ptr<expression> pointer):pointer(std::move(pointer)) {}
+    V execute(E env) override {
+        tick(env);auto address_value=run(pointer,env);
+        if(address_value->type!=ADDRESS_VALUE)throw std::runtime_error("Virtual method receiver must be address");
+        bool context_free=true;for(const auto& entry:entries) {
+            tick(env);for(const auto& context:entry->contexts)if(!constant_context(context))context_free=false;
+        }
+        auto methods=cached;
+        if(!methods) {
+            auto bound=std::make_shared<method_table>();bound->reserve(entries.size());
+            for(const auto& entry:entries)bound->push_back({entry->function_id,bind_contexts(entry->contexts,env)});
+            methods=std::move(bound);
+        }
+        heap::set_methods(*static_cast<address*>(address_value->value),methods,owner(env));
+        if(context_free)cached=std::move(methods);
+        return nil();
+    }
+};
+class call_virtual_expression final:public expression {
+    std::size_t slot;
+    int return_type;
+    std::vector<std::shared_ptr<expression>> arguments;
+public:
+    call_virtual_expression(int slot,int return_type,std::vector<std::shared_ptr<expression>> arguments)
+        :slot(static_cast<std::size_t>(slot)),return_type(return_type),arguments(std::move(arguments)) {}
+    V execute(E env) override {
+        tick(env);std::vector<V> args;args.reserve(arguments.size());
+        for(const auto& argument:arguments)args.push_back(blocks::materialize(run(argument,env),env));
+        if(args.empty()||args[0]->type!=ADDRESS_VALUE)throw std::runtime_error("Virtual method receiver must be address");
+        const auto script=owner(env);const auto methods=heap::methods_at(*static_cast<address*>(args[0]->value),script);
+        if(slot>=methods->size())throw std::runtime_error("Virtual method slot is out of range");
+        const auto& method=(*methods)[slot];
+        auto result=invoke_bound_function(script,method.function_id,env,std::move(args),method.contexts);
+        if(!result)throw std::runtime_error("Host function returned a null pointer");
+        blocks::adopt_result(result,env);
+        if(return_type!=ANY_VALUE&&result->type!=return_type)
+            throw std::runtime_error(std::string("Virtual method return type mismatch: expected ")+type_name(return_type)+", got "+type_name(result->type));
+        return result;
+    }
+};
 bool same_context_layout(const std::shared_ptr<const type_context>& a,const std::shared_ptr<const type_context>& b,std::size_t depth=0) {
     if(!a||!b||depth>=128)return false;
     return a->abi==b->abi&&a->kind==b->kind&&a->width==b->width&&
@@ -1261,6 +1313,25 @@ X parse_raw_expression(raw_view view,const raw_function_layout& layout,std::size
             throw std::invalid_argument("Invalid conversion target type: "+std::to_string(target));
         result=std::make_shared<convert_expression>(target,child());break;
     }
+    case 52: {
+        auto node=std::make_shared<set_methods_expression>(child());raw_cursor entries(fields.take());
+        while(!entries.empty()) {
+            if(node->entries.size()>=MAX_VARIABLE_SLOTS)throw std::invalid_argument("Too many virtual method entries");
+            raw_cursor entry(entries.take());auto method=std::make_shared<method_spec>();method->function_id=entry.integer();
+            method->contexts=parse_contexts(entry.take(),layout,logical_depth+2);entry.finish();
+            layout.references->push_back({method->function_id,&method->function_id,false,static_cast<int>(method->contexts.size()),false,false,true});
+            node->entries.push_back(std::move(method));
+        }
+        result=std::move(node);break;
+    }
+    case 53: {
+        const int slot=fields.integer(),type=fields.integer();
+        if(slot<0||static_cast<std::size_t>(slot)>=MAX_VARIABLE_SLOTS)throw std::invalid_argument("Invalid virtual method slot");
+        if(type<INT_VALUE||type>OBJECT_VALUE)throw std::invalid_argument("Invalid virtual method return type");
+        auto args=parse_raw_expressions(fields.take(),layout,logical_depth+2);
+        if(args.empty()||args.size()>MAX_VARIABLE_SLOTS)throw std::invalid_argument("Virtual method call requires a receiver and at most 1048576 arguments");
+        result=std::make_shared<call_virtual_expression>(slot,type,std::move(args));break;
+    }
     case 51: {
         auto value=child();auto context=parse_context(fields.take(),layout,logical_depth+1);
         raw_cursor tags(fields.take());std::vector<int> slot_types;
@@ -1534,6 +1605,18 @@ void validate_type_contexts(const type_contexts& contexts,const std::shared_ptr<
     };
     for(auto& context:contexts)check(check,context,1);
 }
+void validate_method_table(const method_table& methods,const std::shared_ptr<script>& script) {
+    if(!script||script->closed)throw std::invalid_argument("Virtual method table belongs to an unavailable script");
+    if(methods.size()>MAX_VARIABLE_SLOTS)throw std::invalid_argument("Too many virtual method entries");
+    for(const auto& method:methods) {
+        auto found=script->functions.find(method.function_id);
+        auto fn=found==script->functions.end()?nullptr:std::dynamic_pointer_cast<ofunction>(found->second);
+        if(!fn||fn->entry_kind!=0||fn->param_types.empty()||fn->param_types.front()!=ADDRESS_VALUE||
+           fn->hidden_count<0||static_cast<std::size_t>(fn->hidden_count)!=method.contexts.size())
+            throw std::invalid_argument("Invalid virtual method entry: "+function_id_text(method.function_id));
+        validate_type_contexts(method.contexts,script);
+    }
+}
 V invoke_bound_function(const std::shared_ptr<script>& script,int id,const E& env,std::vector<V> args,type_contexts contexts) {
     entry_scope entry;return entry.run([&]() -> V {
     auto target=script->getFunction(id);
@@ -1715,7 +1798,7 @@ void script::flush() {
         for(auto& reference:module.references) {
             const int id=resolve(reference.original_id);
             if(auto defining=function_modules.find(id);defining!=function_modules.end()&&defining->second!=index)dependencies[index].insert(defining->second);
-            if(mapping.contains(namespace_of(reference.original_id))||reference.destructor||reference.factory||reference.placement) {
+            if(mapping.contains(namespace_of(reference.original_id))||reference.destructor||reference.factory||reference.placement||reference.method) {
                 auto target=functions.find(id);
                 if(target==functions.end())throw std::runtime_error("Referenced script function is missing: "+function_id_text(id));
                 if(reference.destructor) {
@@ -1727,6 +1810,11 @@ void script::flush() {
                     auto fn=std::dynamic_pointer_cast<ofunction>(target->second);
                     if(!fn||fn->rett!=VOID_VALUE||fn->param_types!=std::vector<int>{ADDRESS_VALUE}||fn->entry_kind!=1)
                         throw std::runtime_error("Generic placement initializer must be an internal script function void(address)");
+                }
+                if(reference.method) {
+                    auto fn=std::dynamic_pointer_cast<ofunction>(target->second);
+                    if(!fn||fn->entry_kind!=0||fn->param_types.empty()||fn->param_types.front()!=ADDRESS_VALUE)
+                        throw std::runtime_error("Virtual method entry must be an ordinary script function with an address receiver");
                 }
                 if(reference.factory) {
                     auto fn=std::dynamic_pointer_cast<ofunction>(target->second);

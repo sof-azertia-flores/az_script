@@ -19,6 +19,8 @@ std::map<address,const environment*> owners;
 struct registered_object {object_record value;bool destroying=false;};
 std::map<address,registered_object> objects;
 std::set<address> object_allocations;
+struct method_binding {std::shared_ptr<const method_table> methods;std::weak_ptr<script> script_owner;};
+std::map<address,method_binding> method_tables;
 void check_not_destroying(address pointer) {
     auto it=objects.find(pointer);
     if(it!=objects.end()&&it->second.destroying)throw std::runtime_error("Object is being destroyed");
@@ -72,6 +74,7 @@ void validate_object(const object_record& record) {
     auto script=record.script_owner.lock();
     if(!script||script->closed)throw std::invalid_argument("Object belongs to an unavailable script");
     validate_type_contexts(record.destructor_contexts,script);
+    if(record.methods)validate_method_table(*record.methods,script);
     if(!record.destructor_id) {
         if(!record.destructor_contexts.empty())throw std::invalid_argument("Destructor contexts require a destructor");
         return;
@@ -101,6 +104,7 @@ void restore(std::vector<std::shared_ptr<variable>> values,std::vector<heap_allo
     }
     std::map<address,registered_object> restored_objects;
     std::set<address> restored_object_allocations;
+    std::map<address,method_binding> restored_methods;
     for(auto& record:records) {
         validate_object(record);
         if(std::none_of(ranges.begin(),ranges.end(),[&](auto a){return a.startpos==record.startpos;})||
@@ -108,11 +112,13 @@ void restore(std::vector<std::shared_ptr<variable>> values,std::vector<heap_allo
            !restored_objects.emplace(record.startpos,registered_object{record}).second)
             throw std::invalid_argument("Invalid restored object registration");
         restored_object_allocations.insert(record.startpos);
+        if(record.methods&&!record.methods->empty())restored_methods.emplace(record.startpos,method_binding{record.methods,record.script_owner});
+        restored_objects.at(record.startpos).value.methods.reset();
         if(restored_owner&&record.script_owner.lock()!=restored_owner->script.lock())
             throw std::invalid_argument("Restored object belongs to another script");
     }
     slots.swap(values);allocations.swap(ranges);owners.swap(restored_owners);objects.swap(restored_objects);
-    object_allocations.swap(restored_object_allocations);
+    object_allocations.swap(restored_object_allocations);method_tables.swap(restored_methods);
     packed=0;extend_packed();
     if(restored_owner)restored_owner->owned_pointer.swap(owned);
 }
@@ -154,7 +160,7 @@ void clearHeap() {
     std::lock_guard<std::recursive_mutex> lock(runtime_mutex());
     for(const auto& [pointer,object]:objects)if(object.destroying)throw std::runtime_error("Cannot clear heap during object destruction");
     std::vector<std::shared_ptr<variable>> empty{std::make_shared<variable>(nullptr)};
-    slots.swap(empty);allocations.clear();packed=0;owners.clear();objects.clear();object_allocations.clear();
+    slots.swap(empty);allocations.clear();packed=0;owners.clear();objects.clear();object_allocations.clear();method_tables.clear();
 }
 void resize_heap(int size) {
     std::lock_guard<std::recursive_mutex> lock(runtime_mutex());
@@ -229,6 +235,56 @@ void check_object(address pointer,const std::vector<int>& slot_types) {
             throw std::runtime_error("Object check failed: slot "+std::to_string(i)+" has an incompatible type");
     }
 }
+namespace {
+std::shared_ptr<slot_block> method_literal(address pointer,const std::shared_ptr<script>& script) {
+    std::shared_ptr<slot_block> block;
+    try {block=blocks::resolve(pointer);}catch(const std::out_of_range&) {
+        throw std::runtime_error("Virtual call requires a live object start");
+    }
+    constexpr auto offset_mask=(std::uint64_t{1}<<blocks::offset_bits)-1;
+    if((pointer.value&offset_mask)!=0||block->buffer)throw std::runtime_error("Virtual call requires a live object start");
+    if(block->script_owner.lock()!=script)throw std::runtime_error("Object belongs to another script");
+    return block;
+}
+void check_method_heap(address pointer,const std::shared_ptr<script>& script) {
+    if(!is_allocation_start(pointer)||!object_allocations.contains(pointer))
+        throw std::runtime_error("Virtual call requires a live object start");
+    auto object=objects.find(pointer);
+    const auto owning_script=object!=objects.end()?object->second.value.script_owner.lock():
+        (owner_of(pointer)?owner_of(pointer)->script.lock():nullptr);
+    if(owning_script!=script)throw std::runtime_error("Object belongs to another script");
+}
+}
+void set_methods(address pointer,std::shared_ptr<const method_table> methods,const std::shared_ptr<script>& script) {
+    std::lock_guard<std::recursive_mutex> lock(runtime_mutex());
+    if(!script||script->closed)throw std::runtime_error("Object belongs to an unavailable script");
+    if(pointer.value==0)throw std::runtime_error("Virtual call requires a non-null object");
+    if(methods)validate_method_table(*methods,script);
+    if(methods&&methods->empty())methods.reset();
+    if(blocks::is_block_address(pointer)){method_literal(pointer,script)->methods=std::move(methods);return;}
+    check_method_heap(pointer,script);
+    if(methods)method_tables.insert_or_assign(pointer,method_binding{std::move(methods),script});
+    else method_tables.erase(pointer);
+}
+std::shared_ptr<const method_table> methods_at(address pointer,const std::shared_ptr<script>& script) {
+    std::lock_guard<std::recursive_mutex> lock(runtime_mutex());
+    if(!script||script->closed)throw std::runtime_error("Object belongs to an unavailable script");
+    if(pointer.value==0)throw std::runtime_error("Virtual call requires a non-null object");
+    std::shared_ptr<const method_table> methods;
+    if(blocks::is_block_address(pointer))methods=method_literal(pointer,script)->methods;
+    else {
+        check_method_heap(pointer,script);auto found=method_tables.find(pointer);
+        if(found!=method_tables.end()) {
+            if(found->second.script_owner.lock()!=script)throw std::runtime_error("Object belongs to another script");
+            methods=found->second.methods;
+        }
+    }
+    if(!methods||methods->empty())throw std::runtime_error("Object has no virtual method table");
+    return methods;
+}
+std::size_t method_table_count() {
+    std::lock_guard<std::recursive_mutex> lock(runtime_mutex());return method_tables.size();
+}
 int resize_heap() {
     std::lock_guard<std::recursive_mutex> lock(runtime_mutex());
     const auto size=allocations.empty()?1:static_cast<int>(allocations.back().startpos.value)+allocations.back().len;
@@ -242,14 +298,16 @@ bool free(address pointer) {
     // Existing host references may survive, but can no longer be reached by an address.
     for(int i=0;i<it->len;++i) slots[static_cast<std::size_t>(pointer.value)+static_cast<std::size_t>(i)]->setValue(nullptr);
     packed=std::min(packed,static_cast<std::size_t>(it-allocations.begin()));
-    allocations.erase(it);detach_owner(pointer);objects.erase(pointer);object_allocations.erase(pointer);resize_heap();return true;
+    allocations.erase(it);detach_owner(pointer);objects.erase(pointer);object_allocations.erase(pointer);method_tables.erase(pointer);resize_heap();return true;
 }
 std::vector<object_record> object_records() {
     std::lock_guard<std::recursive_mutex> lock(runtime_mutex());
     std::vector<object_record> result;
     for(const auto& [pointer,object]:objects) {
         if(object.destroying)throw std::runtime_error("Cannot snapshot an object during destruction");
-        result.push_back(object.value);
+        auto record=object.value;auto table=method_tables.find(pointer);
+        record.methods=table==method_tables.end()?nullptr:table->second.methods;
+        result.push_back(std::move(record));
     }
     return result;
 }
@@ -372,6 +430,8 @@ void discard_script_objects(const azertian::script* script_owner) noexcept {
             // Load failure is state disposal, not a source-language delete.
             it=objects.erase(it);free(pointer);
         }
+        for(auto it=method_tables.begin();it!=method_tables.end();)
+            if(it->second.script_owner.lock().get()==script_owner)it=method_tables.erase(it);else ++it;
     }catch(...) {}
 }
 }

@@ -164,6 +164,10 @@ def main():
                  '--runner',native/'interpreter/azscript-run','--host',native/'interpreter/numeric-module-host']
     if jni:inheritance += ['--bridge',bridge,'--library',native/'abdjni'/libname]
     run(inheritance)
+    virtuals=[sys.executable, ROOT/'tests/virtual_methods_end_to_end.py', '--classpath', classpath,
+              '--runner', native/'interpreter/azscript-run', '--host', native/'interpreter/numeric-module-host']
+    if jni:virtuals += ['--bridge', bridge, '--library', native/'abdjni'/libname]
+    run(virtuals)
     types=[sys.executable, ROOT/'tests/type_safety_end_to_end.py', '--classpath', classpath,
            '--runner', native/'interpreter/azscript-run']
     if jni:types += ['--bridge', bridge, '--library', native/'abdjni'/libname]

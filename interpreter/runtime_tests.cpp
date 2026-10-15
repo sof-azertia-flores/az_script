@@ -810,6 +810,228 @@ void runtime_trace_tests() {
     check(shutdown->closed&&owned->state==slot_block::status::dead,"shutdown finishes owned values after a pre-destroy failure");
     clear_error_trace();
 }
+void virtual_tests() {
+    auto entry=[](int id,std::initializer_list<R> contexts={}) {return raw({ri(id),raw(contexts)});};
+    auto methods=[](R pointer,std::initializer_list<R> entries) {return rx(52,{std::move(pointer),raw(entries)});};
+    auto dispatch=[](int slot,int type,std::initializer_list<R> arguments) {return rx(53,{ri(slot),ri(type),raw(arguments)});};
+    auto field=[](R pointer){return rcall(0x0abd0006,{rx(9,{std::move(pointer),ri(0)})});};
+    auto bind=[](int destructor){return rx(10,{rvar(0),rb(true),ri(destructor),rb(true),raw({})});};
+    auto debug=[](R function,const std::string& name,int line) {
+        return append_raw(replace_raw(function,8,rb(true)),raw({rs(name),ri(0),ri(line),ri(1),raw({})}));
+    };
+    constexpr int record_id=0x6cc20001;
+    std::vector<int> phases;
+    auto callback=std::make_shared<test_executor>(0x6cc2);
+    callback->functions[record_id]=std::make_shared<test_function>(VOID_VALUE,[&](const std::vector<V>& args) {
+        phases.push_back(integer(args[0]));return std::make_shared<variable>(nullptr);
+    });
+    registered_executor registered(callback);
+    const auto emit=[&](R expression){return rcall(record_id,{std::move(expression)});};
+    const auto current=[&](){return dispatch(0,INT_VALUE,{rvar(0)});};
+    auto module=rmodule({
+        rfn(1000,INT_VALUE,rreturn(rx(12,{field(rvar(0)),rc(n(10))})),0,{ADDRESS_VALUE}),
+        rfn(1001,INT_VALUE,rreturn(rx(12,{field(rvar(0)),rc(n(100))})),0,{ADDRESS_VALUE}),
+        rfn(1002,INT_VALUE,rreturn(rx(12,{field(rvar(0)),rvar(1)})),0,{ADDRESS_VALUE,INT_VALUE}),
+        rfn(1003,STRING_VALUE,rreturn(rc(s("method"))),0,{ADDRESS_VALUE}),
+        gfn(1004,INT_VALUE,rreturn(rx(36,{cref(0)})),1,0,{ADDRESS_VALUE}),
+        gfn(1005,ANY_VALUE,greturn(rx(37,{cref(0)}),cref(0)),1,0,{ADDRESS_VALUE}),
+        rfn(1006,VOID_VALUE,rblock({methods(rvar(0),{entry(1001)}),emit(current()),
+            methods(rvar(0),{entry(1000)}),emit(current())}),0,{ADDRESS_VALUE}),
+        debug(rfn(1007,VOID_VALUE,rblock({methods(rvar(0),{entry(1008)}),
+            rx(31,{rx(12,{rc(n(std::numeric_limits<int>::max())),rc(n(1))}),current(),rb(false)})}),0,{ADDRESS_VALUE}),"virtualDestructor",30),
+        debug(rfn(1008,INT_VALUE,rreturn(rx(15,{rc(n(1)),rc(n(0))})),0,{ADDRESS_VALUE}),"cleanupVirtual",35),
+        rfn(1010,ADDRESS_VALUE,rblock({rdef(0,rcall(0x0abd0014,{rc(n(1))})),rx(6,{field(rvar(0)),rc(n(7))}),
+            methods(rvar(0),{entry(1000)}),emit(current()),methods(rvar(0),{entry(1001)}),emit(current()),bind(1006),rx(8,{rvar(0)})}),1),
+        rfn(1011,ADDRESS_VALUE,rblock({rdef(0,rcall(0x0abd0014,{rc(n(1))})),methods(rvar(0),{entry(1001)}),bind(1007),rx(8,{rvar(0)})}),1),
+        gfn(1012,VOID_VALUE,methods(rvar(0),{entry(1004,{cref(0)})}),1,0,{ADDRESS_VALUE}),
+        rfn(1013,INT_VALUE,rblock({rset(-1,rx(12,{rx(14,{rvar(-1),rc(n(10))}),rvar(1)})),rreturn(rvar(1))}),0,{ADDRESS_VALUE,INT_VALUE}),
+        rfn(1014,ADDRESS_VALUE,rblock({rset(-1,rc(n(1))),rreturn(rvar(0))}),0,{ADDRESS_VALUE}),
+        rfn(1015,OBJECT_VALUE,rreturn(rx(32,{ri(1)}))),
+        rfn(1016,INT_VALUE,rreturn(rc(n(1))),0,{INT_VALUE}),
+        gfn(1017,VOID_VALUE,rblock({}),0,0,{ADDRESS_VALUE},1),
+        rfn(1020,INT_VALUE,rreturn(dispatch(0,INT_VALUE,{rvar(0)})),0,{ADDRESS_VALUE}),
+        rfn(1021,VOID_VALUE,methods(rvar(0),{}),0,{ADDRESS_VALUE}),
+        rfn(1022,OBJECT_VALUE,rreturn(dispatch(0,ANY_VALUE,{rvar(0)})),0,{ADDRESS_VALUE}),
+        rfn(1023,INT_VALUE,rreturn(dispatch(1,INT_VALUE,{rvar(0)})),0,{ADDRESS_VALUE}),
+        rfn(1024,INT_VALUE,rreturn(dispatch(0,INT_VALUE,{rcall(1014,{rvar(0)}),rcall(1013,{rvar(0),rc(n(2))})})),0,{ADDRESS_VALUE}),
+        rfn(1025,INT_VALUE,rreturn(dispatch(0,INT_VALUE,{rc(n(0))}))),
+        rfn(1026,VOID_VALUE,methods(rc(n(0)),{})),
+        rfn(1027,VOID_VALUE,methods(rvar(0),{entry(1000),entry(1001),entry(1002),entry(1003)}),0,{ADDRESS_VALUE}),
+    },1,raw({rsignature(record_id,VOID_VALUE,{INT_VALUE})}));
+    auto program=load_raw(replace_raw(module,10,raw({rs("virtual.azs")})));
+    auto env=program->baseEnv;env->getVariable(-1)->setValue(0);
+    const auto at=[](address value){return std::make_shared<variable>(value);};
+    const auto table=[](std::initializer_list<bound_method> entries){return std::make_shared<const method_table>(entries);};
+    auto base=table({{1000,{}}}),derived=table({{1001,{}}});
+    const auto live=pointer(program->invoke(1010));
+    check(phases==std::vector<int>({17,107})&&heap::method_table_count()==1,"constructor phase changes dispatch before object registration");
+    check(integer(program->invoke(1020,{at(live)}))==107,"virtual calls resolve the current heap table");
+    heap::set_methods(live,base,program);check(integer(program->invoke(1020,{at(live)}))==17,"set_methods replaces the active table");
+    heap::set_methods(live,derived,program);
+    auto records=heap::object_records();
+    check(records.size()==1&&records[0].methods==derived&&heap::method_table_count()==1,"object_records reports table bindings without modifying them");
+    auto literal=blocks::create(1,program);literal->slots[0]->setValue(7);heap::set_methods(blocks::address_of(literal),derived,program);
+    auto literal_copy=blocks::copy(literal);
+    check(literal_copy->methods==derived&&integer(program->invoke(1020,{at(blocks::address_of(literal_copy))}))==107,"literal copies preserve immutable method bindings");
+    auto target=blocks::create(1,program);target->slots[0]->setValue(1);heap::set_methods(blocks::address_of(target),base,program);
+    auto target_storage=std::make_shared<variable>(target);target->owner=target_storage.get();
+    blocks::store(target_storage,std::make_shared<variable>(literal),env);
+    check(target->methods==base&&integer(target->slots[0])==7&&integer(program->invoke(1020,{at(blocks::address_of(target))}))==17,
+          "value assignment retains the target's table while copying fields");
+    rejects_message([&]{program->invoke(1020,{at(address{})});},"Virtual call requires a non-null object","null virtual receivers reject");
+    rejects_message([&]{program->invoke(1023,{at(live)});},"Virtual method slot is out of range","virtual slot bounds are checked");
+    rejects_message([&]{program->invoke(1025);},"Virtual method receiver must be address","virtual receiver ABI is checked");
+    rejects_message([&]{program->invoke(1026);},"Virtual method receiver must be address","set_methods receiver ABI is checked");
+    heap::set_methods(live,table({{1003,{}}}),program);
+    rejects_message([&]{program->invoke(1020,{at(live)});},"Virtual method return type mismatch: expected int, got string","virtual returns require the expected ABI");
+    program->invoke(1021,{at(live)});
+    check(heap::method_table_count()==0&&!heap::object_records()[0].methods,"empty set_methods clears table bindings and snapshot metadata");
+    rejects_message([&]{program->invoke(1020,{at(live)});},"Object has no virtual method table","cleared tables reject dispatch");
+    heap::set_methods(live,table({{1002,{}}}),program);
+    check(integer(program->invoke(1024,{at(live)}))==9&&integer(env->getVariable(-1))==12,
+          "virtual argument evaluation follows ordinary CALL left-to-right materialization");
+    auto string_type=std::make_shared<type_context>();string_type->abi=STRING_VALUE;
+    auto double_type=std::make_shared<type_context>();double_type->abi=DOUBLE_VALUE;
+    invoke_bound_function(program,1012,env,{at(live)},{string_type});
+    check(integer(program->invoke(1020,{at(live)}))==STRING_VALUE,"method tables retain bound hidden contexts after their installing call ends");
+    const auto first_bound_table=heap::methods_at(live,program);
+    invoke_bound_function(program,1012,env,{at(live)},{double_type});
+    check(integer(program->invoke(1020,{at(live)}))==DOUBLE_VALUE&&first_bound_table->at(0).contexts[0]->abi==STRING_VALUE,
+          "reference contexts are rebound instead of cached or mutated across calls");
+    auto class_type=std::make_shared<type_context>();class_type->abi=OBJECT_VALUE;class_type->kind=3;class_type->factory_id=1015;
+    heap::set_methods(live,table({{1005,{class_type}}}),program);
+    auto returned=program->invoke(1022,{at(live)});
+    check(returned->type==OBJECT_VALUE&&blocks::of(returned)->slots.size()==1,"ANY virtual return tags support runtime generic class results");
+    auto foreign=load_raw(rmodule({rfn(1030,VOID_VALUE,rblock({})),rfn(1000,INT_VALUE,rreturn(rc(n(0))),0,{ADDRESS_VALUE})}));
+    rejects_message([&]{heap::set_methods(live,base,foreign);},"Object belongs to another script","a foreign script cannot change heap methods");
+    rejects_message([&]{heap::methods_at(live,foreign);},"Object belongs to another script","a foreign script cannot dispatch heap methods");
+    rejects_message([&]{heap::methods_at(blocks::address_of(literal),foreign);},"Object belongs to another script","a foreign script cannot dispatch literal methods");
+    foreign->destroy();
+    const auto raw_pointer=heap::alloc(1);
+    rejects_message([&]{heap::methods_at(raw_pointer,program);},"Virtual call requires a live object start","raw memory is not a virtual receiver");heap::free(raw_pointer);
+    rejects_message([&]{heap::methods_at(address{live.value+1},program);},"Virtual call requires a live object start","heap interiors cannot dispatch");
+    auto expired=blocks::address_of(blocks::create(1,program));
+    rejects_message([&]{heap::methods_at(expired,program);},"Virtual call requires a live object start","expired literal virtual receivers reject");
+    for(auto malformed:std::vector<method_table>{{{99999,{}}},{{1016,{}}},{{1017,{}}},{{1004,{}}},{{1000,{string_type}}}}) {
+        bool caught=false;try {validate_method_table(malformed,program);}catch(const std::invalid_argument& error) {
+            caught=true;check(typeid(error)==typeid(std::invalid_argument),"snapshot method validation preserves invalid_argument mapping");
+        }
+        check(caught,"invalid method signatures and hidden-context counts reject");
+    }
+    heap::set_methods(live,derived,program);
+    heap::delete_object(live,env);
+    check(phases==std::vector<int>({17,107,107,17})&&heap::method_table_count()==0,
+          "destructor phase transitions dispatch while destroying and then release table bindings");
+    rejects_message([&]{program->invoke(1020,{at(live)});},"Virtual call requires a live object start","deleted heap virtual receivers reject");
+    const auto throwing=pointer(program->invoke(1011));
+    bool first_error=false;try {heap::delete_object(throwing,env);}catch(const std::overflow_error& error) {
+        first_error=true;check(describe_error(error)=="Integer overflow\n  at virtualDestructor (virtual.azs:30:1)",
+            "virtual cleanup preserves the first exception and its trace");
+    }
+    check(first_error&&heap::method_table_count()==0,"throwing virtual cleanup releases heap tables");
+    insert_raw(program,rmodule({gfn(1040,VOID_VALUE,rblock({rx(6,{field(rvar(0)),rc(n(7))}),
+        methods(rvar(0),{entry(1001)}),rx(10,{rvar(0),rb(false),rb(false),raw({})})}),0,0,{ADDRESS_VALUE},1)}));
+    auto element=std::make_shared<type_context>();element->abi=OBJECT_VALUE;element->kind=3;element->placement_id=1040;
+    auto buffer=blocks::create_buffer(element,program);
+    auto operate=[&](int operation,const std::shared_ptr<slot_block>& block,int size) {
+        return blocks::buffer_operation(operation,block,{std::make_shared<variable>(size)},env);
+    };
+    operate(2,buffer,1);operate(6,buffer,1);
+    auto view=blocks::of(buffer->slots[0]);const auto old_view=blocks::address_of(view);
+    check(view->methods&&integer(program->invoke(1020,{at(old_view)}))==107,"placement constructors install tables on buffer class views");
+    auto buffer_copy=blocks::copy(buffer);
+    check(blocks::of(buffer_copy->slots[0])->methods==view->methods&&
+          integer(program->invoke(1020,{at(blocks::address_of(blocks::of(buffer_copy->slots[0])))}))==107,
+          "buffer copies retain each class view's method table");
+    operate(2,buffer,4);auto moved_view=blocks::of(buffer->slots[0]);
+    check(moved_view->methods&&integer(program->invoke(1020,{at(blocks::address_of(moved_view))}))==107,
+          "buffer slab relocation transfers view method tables");
+    rejects_message([&]{heap::methods_at(old_view,program);},"Virtual call requires a live object start","buffer reallocation expires former view receivers");
+    blocks::validate_buffer(buffer);blocks::validate_buffer(buffer_copy);
+    const auto snapshot=heap::object_alloc(1);heap::set_owner(snapshot,env.get());env->owned_pointer.push_back(snapshot);
+    heap::getAt(snapshot)->setValue(7);heap::register_object(snapshot,std::nullopt,true,env);
+    heap::set_methods(snapshot,table({{1004,{string_type}}}),program);
+    std::vector<V> saved_slots;for(int i=0;i<heap::lenHeap();++i)saved_slots.push_back(heap::getSlot(i));
+    std::vector<heap::heap_allocation> saved_ranges;for(int i=0;i<heap::lenAlloc();++i)saved_ranges.push_back(heap::allocAt(i));
+    auto saved_objects=heap::object_records();auto saved_owned=env->owned_pointer;
+    auto malformed_objects=saved_objects;malformed_objects[0].methods=table({{1016,{}}});
+    rejects([&]{heap::restore(saved_slots,saved_ranges,malformed_objects,env,saved_owned);},"invalid restored method signatures reject before heap replacement");
+    check(heap::method_table_count()==1&&integer(program->invoke(1020,{at(snapshot)}))==STRING_VALUE,
+          "failed table restore leaves allocations and previous context bindings intact");
+    heap::restore(saved_slots,saved_ranges,saved_objects,env,saved_owned);
+    check(heap::method_table_count()==1&&integer(program->invoke(1020,{at(snapshot)}))==STRING_VALUE,
+          "registered snapshot records restore method IDs and bound contexts atomically");
+    heap::set_methods(snapshot,base,program);program->max_steps=5;
+    rejects_containing([&]{program->invoke(1027,{at(snapshot)});},"step limit","set_methods charges steps for every entry before binding");
+    program->max_steps=1000000;
+    check(heap::methods_at(snapshot,program)==base,"budget failure leaves the previous table installed");
+    program->invoke(1027,{at(snapshot)});const auto cached_table=heap::methods_at(snapshot,program);
+    program->invoke(1027,{at(snapshot)});
+    check(heap::methods_at(snapshot,program)==cached_table,"context-free set_methods nodes reuse immutable cached tables");
+    program->max_steps=5;
+    rejects_containing([&]{program->invoke(1027,{at(snapshot)});},"step limit","cached constant tables still charge every entry");
+    program->max_steps=1000000;
+    heap::restore(saved_slots,saved_ranges);
+    check(heap::method_table_count()==0&&heap::object_records().empty()&&!heap::is_object_storage(snapshot),
+          "the raw restore overload clears registrations, object tags and method tables");
+    heap::free(snapshot);
+    const auto orphan=heap::object_alloc(1);heap::set_owner(orphan,env.get());env->owned_pointer.push_back(orphan);
+    heap::set_methods(orphan,base,program);
+    check(heap::object_records().empty()&&heap::method_table_count()==1,
+          "object_records stays pure when a construction table has no registration yet");
+    heap::discard_script_objects(program.get());
+    check(heap::method_table_count()==0,"script disposal erases orphan construction method tables");heap::free(orphan);
+    program->destroy();check(heap::method_table_count()==0&&heap::lenAlloc()==0,"virtual tests release every heap method table");
+
+    // Base and derived phases share one script even when their definitions live
+    // in independently relocated hint modules loaded in either order.
+    for(bool base_first:{false,true}) {
+        phases.clear();
+        const auto base_module=rhint("VirtualBase",{
+            rfn(2,INT_VALUE,rreturn(rc(n(100))),0,{ADDRESS_VALUE}),
+            rfn(4,VOID_VALUE,rblock({methods(rvar(0),{entry(static_cast<int>(0xbeef0002u))}),emit(current())}),0,{ADDRESS_VALUE}),
+            rfn(5,VOID_VALUE,rblock({methods(rvar(0),{entry(static_cast<int>(0xbeef0002u))}),emit(current())}),0,{ADDRESS_VALUE}),
+        },0,raw({assume("VirtualBase",0xbeef)}),raw({rsignature(record_id,VOID_VALUE,{INT_VALUE})}));
+        const auto derived_module=rhint("VirtualDerived",{
+            rfn(2,ADDRESS_VALUE,rblock({rdef(0,rcall(0x0abd0014,{rc(n(1))})),
+                rcall(static_cast<int>(0xbeef0004u),{rvar(0)}),methods(rvar(0),{entry(static_cast<int>(0xcafe0003u))}),emit(current()),
+                rx(10,{rvar(0),rb(true),ri(static_cast<int>(0xcafe0006u)),rb(true),raw({})}),rx(8,{rvar(0)})}),1),
+            rfn(3,INT_VALUE,rreturn(rc(n(200))),0,{ADDRESS_VALUE}),
+            rfn(6,VOID_VALUE,rblock({emit(current()),rcall(static_cast<int>(0xbeef0005u),{rvar(0)})}),0,{ADDRESS_VALUE}),
+        },0,raw({assume("VirtualBase",0xbeef),assume("VirtualDerived",0xcafe)}),raw({rsignature(record_id,VOID_VALUE,{INT_VALUE})}));
+        auto cross=load_raw(base_first?base_module:derived_module,false);
+        insert_raw(cross,base_first?derived_module:base_module,false);cross->flush();
+        const int derived_namespace=cross->namespace_for_hint("VirtualDerived");
+        const auto object=pointer(cross->invoke((derived_namespace<<16)|2));
+        check(phases==std::vector<int>({100,200})&&heap::object_records()[0].methods->at(0).function_id==((derived_namespace<<16)|3),
+              "cross-hint construction changes phases and relocates method IDs in either insertion order");
+        heap::delete_object(object,cross->baseEnv);
+        check(phases==std::vector<int>({100,200,200,100})&&heap::method_table_count()==0,
+              "cross-hint destruction permits legitimate base phase transitions");
+        cross->destroy();
+    }
+    const auto valid_set=methods(rc(ptr(0)),{entry(1100)});
+    const auto valid_call=dispatch(0,INT_VALUE,{rc(ptr(0))});
+    for(const auto& expression:{valid_set,valid_call}) {
+        AbdStack fields(expression);
+        for(std::size_t count=1;count<fields.vs.size();++count) {
+            AbdStack truncated;truncated.vs.assign(fields.vs.begin(),fields.vs.begin()+static_cast<std::ptrdiff_t>(count));
+            rejects([&]{load_raw(rmodule({rfn(1100,INT_VALUE,rreturn(rc(n(1))),0,{ADDRESS_VALUE}),rfn(1101,VOID_VALUE,truncated.toAbdValue())}));},
+                    "virtual opcodes reject missing fields");
+        }
+    }
+    for(const auto& malformed:std::vector<R>{append_raw(valid_set,ri(0)),replace_raw(valid_set,2,raw({raw({ri(1100)})})),
+            replace_raw(valid_set,2,raw({append_raw(entry(1100),ri(0))})),append_raw(valid_call,ri(0)),
+            replace_raw(valid_call,1,ri(-1)),replace_raw(valid_call,1,ri(static_cast<int>(MAX_VARIABLE_SLOTS))),
+            replace_raw(valid_call,2,ri(-1)),replace_raw(valid_call,2,ri(9)),replace_raw(valid_call,3,raw({}))})
+        rejects([&]{load_raw(rmodule({rfn(1100,INT_VALUE,rreturn(rc(n(1))),0,{ADDRESS_VALUE}),rfn(1101,VOID_VALUE,malformed)}));},
+                "virtual opcode parser rejects malformed tables, slot, ABI and arity");
+    for(const auto& target:std::vector<R>{rfn(1100,INT_VALUE,rreturn(rc(n(1))),0,{INT_VALUE}),
+            gfn(1100,VOID_VALUE,rblock({}),0,0,{ADDRESS_VALUE},1),gfn(1100,INT_VALUE,rreturn(rc(n(1))),1,0,{ADDRESS_VALUE})})
+        rejects([&]{load_raw(rmodule({target,rfn(1101,VOID_VALUE,valid_set)}));},"flush rejects invalid virtual receiver, internal entry and context count");
+    rejects([&]{load_raw(rmodule({rfn(1101,VOID_VALUE,methods(rc(ptr(0)),{entry(99999)}))}));},"flush rejects missing virtual method entries");
+    check(heap::method_table_count()==0&&heap::lenAlloc()==0,"all virtual errors leave the heap and method registry empty");
+}
 void checked_object_tests() {
     auto checked=[](R value,R context,std::initializer_list<int> types={}) {
         AbdStack tags;for(int type:types)tags.vs.push_back(ri(type));
@@ -1745,6 +1967,7 @@ void boolean_condition_equality_tests() {
     program->destroy();
 }
 int main(){try{
+    virtual_tests();
     checked_object_tests();
     object_storage_tests();
     string_tests();
@@ -2171,7 +2394,7 @@ int main(){try{
         auto twenty=rc(n(20));auto zero=rc(n(0));
         auto compact=load_raw(rmodule({rfn(10,INT_VALUE,rx(7,{rb(true),rx(12,{twenty,rc(n(22))})}))}));
         check(integer(compact->invoke(10))==42,"raw exec directly executes native arithmetic expressions");
-        for(int opcode=0;opcode<=51;++opcode)if(opcode!=29&&opcode!=30)
+        for(int opcode=0;opcode<=53;++opcode)if(opcode!=29&&opcode!=30)
             rejects([&]{load_raw(rmodule({rfn(10,VOID_VALUE,rx(opcode))}));},"exec opcode rejects missing fields");
         auto byte=[](unsigned char value){return std::make_shared<AbdValue>(&value,1);};
         const unsigned char bad_text[]={0xed,0xa0,0x80};

@@ -24,7 +24,7 @@ OP_NAMES = {3: 'v', 4: 'vd', 5: 'vs', 6: 'm', 7: 'r', 8: 'ro', 9: 'oa',
             32: 'new_block', 33: 'block_address', 34: 'mv', 35: 'drop',
             36: 'context_abi', 37: 'context_default', 38: 'return_typed', 39: 'check_type',
             40: 'buffer_new', 41: 'buffer_op', 42: 'value_compare',
-            43: 'bit_and', 44: 'bit_or', 45: 'bit_xor', 46: 'shl', 47: 'shr', 48: 'ushr', 49: 'convert', 50: 'select', 51: 'check_object'}
+            43: 'bit_and', 44: 'bit_or', 45: 'bit_xor', 46: 'shl', 47: 'shr', 48: 'ushr', 49: 'convert', 50: 'select', 51: 'check_object', 52: 'set_methods', 53: 'call_virtual'}
 EXEC_VERSION = 10
 
 
@@ -275,6 +275,11 @@ def encode_compact_expression(value):
         fields = [child('v'), child('then'), child('else')]
     elif opcode == 51:
         fields = [child('v'), encode_context(value['context']), stack(*(integer(kind) for kind in value['slot-types']))]
+    elif opcode == 52:
+        entries = [stack(integer(entry['id']), encode_contexts(entry.get('contexts', []))) for entry in value['entries']]
+        fields = [child('v'), stack(*entries)]
+    elif opcode == 53:
+        fields = [integer(value['slot']), integer(value['type']), stack(*(encode_compact_expression(arg) for arg in value['param']))]
     else:
         assert opcode in (29, 30)
         fields = []
@@ -494,6 +499,19 @@ class WireReader:
             if context.get('kind') == 3:
                 assert len(kinds) == context['width']
             result.update(v=self.expression(fields[0]), context=context, **{'slot-types': kinds})
+        elif opcode == 52:
+            assert len(fields) == 2
+            entries = []
+            for payload in frames(fields[1]):
+                entry = frames(payload)
+                assert len(entry) == 2
+                entries.append({'id': int_value(entry[0]), 'contexts': self.contexts(entry[1])})
+            result.update(v=self.expression(fields[0]), entries=entries)
+        elif opcode == 53:
+            assert len(fields) == 3
+            slot, kind = int_value(fields[0]), int_value(fields[1])
+            assert slot >= 0 and 0 <= kind <= 8
+            result.update(slot=slot, type=kind, param=[self.expression(arg) for arg in frames(fields[2])])
         else:
             assert opcode in (29, 30) and not fields
         return result
@@ -648,7 +666,8 @@ def main():
         reader = WireReader()
         legacy = reader.read(abd.read_bytes())
         assert encode_compact_module(legacy) == abd.read_bytes(), 'independent fixed-record reconstruction'
-        assert reader.opcodes == set(range(36)), ('missing opcodes', set(range(36)) - reader.opcodes)
+        baseline_opcodes = set(range(36)) | {52}  # Nonvirtual constructor/destructor phases still clear their method table.
+        assert reader.opcodes == baseline_opcodes, ('baseline opcodes', baseline_opcodes - reader.opcodes, reader.opcodes - baseline_opcodes)
         assert {item.tag for item in reader.scalars} >= {INT, STRING, FLOAT, DOUBLE, BOOL}
         assert Scalar(FLOAT, struct.pack('<f', 1.25)) in reader.scalars
         assert Scalar(DOUBLE, struct.pack('<d', 2.5)) in reader.scalars
@@ -741,6 +760,16 @@ def main():
         assert 51 in checked_reader.opcodes, checked_reader.opcodes
         assert encode_compact_module(checked_view) == checked.read_bytes(), 'independent checked-reference reconstruction'
         run([args.runner, checked], '7\n')
+
+        virtual_source = '''class Base{int value=7;virtual int read(){return value;}}
+            class Child:Base{override int read(){return Base::read()+100;}}
+            <T extends Base*> int through(T p){return p.read();}
+            int main(){Base* p=new Child();int result=through(p);delete p;return result;}'''
+        virtual_abd, _, _ = compile_source('virtual-coverage', virtual_source)
+        virtual_reader = WireReader();virtual_view = virtual_reader.read(virtual_abd.read_bytes())
+        assert {52, 53} <= virtual_reader.opcodes, virtual_reader.opcodes
+        assert encode_compact_module(virtual_view) == virtual_abd.read_bytes(), 'independent virtual reconstruction'
+        run([args.runner, virtual_abd], '107\n')
 
         minimum = module([function(block(returning(constant(42))))])
         checks = 0
@@ -931,6 +960,51 @@ def main():
         for label, arguments in [('missing', []), ('extra', [constant(1), constant(2)]),
                                  ('wrong-type', [constant(True)]), ('negative', [constant(-1)])]:
             execute_wire('object-allocator-' + label, module([function(returning(wire_call(0x0abd0014, *arguments)), return_type=7)]), invalid=True)
+
+        def set_methods(value, entries):
+            return expression(52, value, stack(*(stack(integer(ident), encode_contexts(contexts)) for ident, contexts in entries)))
+
+        def virtual(slot, kind, *arguments):
+            return expression(53, integer(slot), integer(kind), stack(*arguments))
+
+        method_id = 0x12340071
+        method = function(returning(expression(12, expression(3, integer(1)), constant(100))), method_id, params=[7, 0])
+        attach = set_methods(pointer, [(method_id, [])])
+        save_answer = expression(4, integer(1), integer(0), b'\1', virtual(0, 0, pointer, constant(7)))
+        body = block(allocation, bind_manual, attach, save_answer, expression(11, pointer), returning(expression(3, integer(1))))
+        fields = module([function(body, locals_count=2), method])
+        payload = frame(stack(*fields));assert encode_compact_module(WireReader().read(payload)) == payload
+        execute_wire('virtual-method-dispatch', fields, expected='107\n')
+        literal_method = function(returning(constant(101)), method_id, params=[7])
+        body = block(literal, set_methods(literal_pointer, [(method_id, [])]), returning(virtual(0, 0, literal_pointer)))
+        execute_wire('virtual-literal-dispatch', module([function(body, locals_count=1), literal_method]), expected='101\n')
+        contextual = function(returning(expression(36, encode_context({'ref': 0}))), method_id, params=[7], hidden_count=1)
+        body = block(allocation, bind_manual, set_methods(pointer, [(method_id, [{'abi': 0, 'kind': 0}])]),
+                     expression(4, integer(1), integer(0), b'\1', virtual(0, 0, pointer)), expression(11, pointer), returning(expression(3, integer(1))))
+        execute_wire('virtual-captured-context', module([function(body, locals_count=2), contextual]), expected='0\n')
+        for label, setup, invocation in [
+                ('null', [], virtual(0, 0, constant(Address(0)), constant(1))),
+                ('no-table', [allocation, bind_manual], virtual(0, 0, pointer, constant(1))),
+                ('cleared-table', [allocation, bind_manual, attach, set_methods(pointer, [])], virtual(0, 0, pointer, constant(1))),
+                ('freed', [allocation, bind_manual, attach, expression(11, pointer)], virtual(0, 0, pointer, constant(1))),
+                ('slot-out-of-range', [allocation, bind_manual, attach], virtual(1, 0, pointer, constant(1))),
+                ('return-type', [allocation, bind_manual, attach], virtual(0, 1, pointer, constant(1))),
+                ('missing-this', [], virtual(0, 0)),
+                ('wrong-this', [], virtual(0, 0, constant(7))),
+                ('raw-storage', [raw_allocation], set_methods(pointer, [(method_id, [])]))]:
+            body = block(*setup, invocation)
+            execute_wire('virtual-' + label, module([function(body, return_type=5, locals_count=1), method]), invalid=True)
+        for label, target, captured in [
+                ('missing-target', method_id + 1, []),
+                ('native-target', 0x0abd0001, []),
+                ('hidden-mismatch', method_id, [{'abi': 0, 'kind': 0}])]:
+            body = block(allocation, bind_manual, set_methods(pointer, [(target, captured)]))
+            execute_wire('virtual-binding-' + label, module([function(body, return_type=5, locals_count=1), method]), invalid=True)
+        for label, target in [('non-address-first', function(returning(constant(1)), method_id, params=[0])),
+                              ('missing-first', function(returning(constant(1)), method_id)),
+                              ('internal-target', function(returning(constant(1)), method_id, params=[7], entry_kind=1))]:
+            body = block(allocation, bind_manual, attach)
+            execute_wire('virtual-binding-' + label, module([function(body, return_type=5, locals_count=1), target]), invalid=True)
 
         def checked_reference(value, context, kinds):
             return expression(51, value, encode_context(context), stack(*(integer(kind) for kind in kinds)))
@@ -1123,6 +1197,24 @@ def main():
         for count in (0, 1, 3):
             context = encode_context({'abi': 8, 'kind': 3, 'width': 2})
             bad_expressions[f'check-object-value-slot-count-{count}'] = expression(51, constant(Address(0)), context, stack(*(integer(0) for _ in range(count))))
+        good_entry = stack(integer(0x12340071), encode_contexts([]))
+        for label, fields in [('missing', ()), ('address-only', (constant(Address(0)),)),
+                              ('extra', (constant(Address(0)), stack(good_entry), constant(1))),
+                              ('entry-missing-contexts', (constant(Address(0)), stack(stack(integer(0x12340071))))),
+                              ('entry-extra', (constant(Address(0)), stack(stack(integer(0x12340071), b'', b'')))),
+                              ('id-width', (constant(Address(0)), stack(stack(b'\0', b'')))),
+                              ('bad-context', (constant(Address(0)), stack(stack(integer(0x12340071), stack(stack(integer(9))))))),
+                              ('bad-child', (stack(b'\0'), stack(good_entry)))]:
+            bad_expressions['set-methods-' + label] = expression(52, *fields)
+        for label, fields in [('missing', ()), ('slot-only', (integer(0),)),
+                              ('missing-args', (integer(0), integer(0))),
+                              ('extra', (integer(0), integer(0), b'', b'')),
+                              ('slot-width', (b'\0', integer(0), b'')),
+                              ('negative-slot', (integer(-1), integer(0), b'')),
+                              ('type-width', (integer(0), b'\0', b'')),
+                              ('unknown-type', (integer(0), integer(99), b'')),
+                              ('bad-argument', (integer(0), integer(0), stack(stack(b'\0'))))]:
+            bad_expressions['call-virtual-' + label] = expression(53, *fields)
         for label, body in bad_expressions.items():
             execute_wire(label, module([function(body)]), invalid=True)
         complete = frame(stack(*minimum))
@@ -1212,10 +1304,11 @@ public class CompactSnapshot {
                  work / 'debug.snapshot.abd'],
                 'Compact JNI snapshot passed\n')
             snapshot = typed_decode(MAP, frames(saved.read_bytes())[0])
-            assert snapshot['snapshot version'].value() == 9
+            assert snapshot['snapshot version'].value() == 10
             assert snapshot['module manifest'][0]['bytes'].payload == native.read_bytes()
             assert [item.value() for item in snapshot['variable global']] == [41]
             assert len(snapshot['objects']) == 1
+            assert all(item['methods'] == [] for item in snapshot['objects'])
             # The pointer object's literal-object field is saved as a slot block with its address.
             assert any(isinstance(item, dict) and 'object' in item and len(item['slots']) == 1 for item in snapshot['heap'])
 

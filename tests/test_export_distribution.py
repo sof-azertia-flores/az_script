@@ -56,6 +56,11 @@ class DistributionOutputTests(unittest.TestCase):
     def test_checked_reference_instruction_is_accepted(self):
         self.check_output([{'t': 0, 'c': 51, 'v': {'address': '0'}, 'context': {'abi': 7, 'kind': 2, 'width': 1}, 'slot-types': [0]}])
 
+    def test_virtual_method_binding_and_dispatch_are_accepted(self):
+        self.check_output([{'t': 0, 'c': 52, 'v': {'address': '0'},
+                            'entries': [{'id': 0x12340002, 'contexts': [{'ref': 0}]}]},
+                           {'t': 0, 'c': 53, 'slot': 0, 'type': 0, 'param': [{'address': '0'}]}])
+
     def test_invalid_controls_report_the_actual_value_and_location(self):
         # The first opcode past the registry is unknown.
         for opcode in (None, True, 'return_typed', 38.0, -1, 0, 2, max(verifier.CONTROL_OPCODES) + 1):

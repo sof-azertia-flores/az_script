@@ -2,7 +2,7 @@
 
 [中文](STATUS.md) | English
 
-This branch (`claude/confident-galileo-fic3s1`) carries a planned series of 28 commits. They fix the compiler problems found in a repository review, add new language features, and add runtime line numbers. Work has resumed through C23; the next item is C24.
+This branch (`claude/confident-galileo-fic3s1`) carries a planned series of 28 commits. They fix the compiler problems found in a repository review, add new language features, and add runtime line numbers. Work has resumed through C24; the next item is C25.
 
 - [DESIGN.md](DESIGN.md): the detailed per-commit design, with file:line citations.
 - [COMPLETENESS.md](COMPLETENESS.md): the review of that design.
@@ -55,20 +55,18 @@ This branch (`claude/confident-galileo-fic3s1`) carries a planned series of 28 c
 
 | C22 | 5ce9d75 | Typed class pointers, explicit address erasure and closed object storage across runtime/JNI; Known limitations documented. V0–V3 passed on Linux x86_64. |
 
-| C23 | this commit | Checked reflection results with opcode51: object liveness, known direct slot tags, runtime generic widths and buffer layouts. V0–V3 passed on Linux x86_64. |
+| C23 | e620817 | Checked reflection results with opcode51: object liveness, known direct slot tags, runtime generic widths and buffer layouts. V0–V3 passed on Linux x86_64. |
+
+| C24 | this commit | Virtual methods and phase-bound method tables; opcodes52–53 and JNI snapshot v10. Construction rollback and cleanup preserve the first error. V0–V3 passed on Linux x86_64. |
 
 ## Remaining
 
 Each item gives its validation sets (V0–V3 are defined under "How to resume"). Details for item Cxx are in the section **Cxx** of [DESIGN.md](DESIGN.md).
 
-1. **C24 Virtual methods** (V0–V3).
-    - Keywords `virtual`, `override` and `final`; opcodes 52 `set_methods` and 53 `call_virtual`. Method tables live outside the slots.
-    - **JNI snapshot v10**: update every snapshot-version site listed in COMPLETENESS §2.7.
-    - Update the AGENTS wording.
-2. **C25 Exact ABD measurement and statement-level spilling** (V0, V1, V2). `ExecShape` and `AbdLinearizer`. Differential runs at internal limits 96, 64 and 48.
-3. **C26 Flat operator chains above 128 operands** (V0, V1, V2).
-4. **C27 Flat else-if ladders** (V0, V1, V2). Choose nested or flat lowering from the remaining depth budget; this covers ladders of about 120–128 branches and ladders inside loops.
-5. **C28 Validation record** (V0–V3). Add an entry to VALIDATION.md/.en.md with real results.
+1. **C25 Exact ABD measurement and statement-level spilling** (V0, V1, V2). `ExecShape` and `AbdLinearizer`. Differential runs at internal limits 96, 64 and 48.
+2. **C26 Flat operator chains above 128 operands** (V0, V1, V2).
+3. **C27 Flat else-if ladders** (V0, V1, V2). Choose nested or flat lowering from the remaining depth budget; this covers ladders of about 120–128 branches and ladders inside loops.
+4. **C28 Validation record** (V0–V3). Add an entry to VALIDATION.md/.en.md with real results.
 
 ### Follow-ups found while implementing C01–C13
 

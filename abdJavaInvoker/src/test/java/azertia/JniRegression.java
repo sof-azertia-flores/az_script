@@ -200,7 +200,7 @@ public final class JniRegression {
         File[] malformed = work.listFiles((directory, name) -> name.startsWith("numeric.invalid-") && name.endsWith(".snapshot.abd"));
         if (malformed == null || malformed.length < 8) throw new AssertionError("Missing malformed numeric fixtures");
         List<File> rejected = new ArrayList<>(List.of(malformed));
-        for (int version : new int[]{0, 2, 3, 4, 5, 6}) rejected.add(new File(work, "numeric.named-v" + version + ".snapshot.abd"));
+        for (int version : new int[]{0, 2, 3, 4, 5, 6, 7, 8, 9}) rejected.add(new File(work, "numeric.named-v" + version + ".snapshot.abd"));
         for (File invalid : rejected) {
             fails(IllegalArgumentException.class, () -> AbdInvoker.loadStatus(invalid));
             equal(7, AbdInvoker.invoke(207));
@@ -287,7 +287,7 @@ public final class JniRegression {
         equal(3, construction.size()); // Restore never calls constructors.
         equal(71, Caller.getMemInt(raw));
         equal(72, Caller.getMemInt(raw + 1));
-        // Registered heap objects are re-tagged from existing v9 records.
+        // Registered heap objects are re-tagged from existing v10 records.
         objectRawWrites(automatic);
         objectRawWrites(manual);
         Caller220.ACputMem(raw, 73);
@@ -303,6 +303,55 @@ public final class JniRegression {
         Caller20.memFree(raw);
         AbdInvoker.destroyScript();
         AbdInvoker.unregisterJfunction(0x34560011);
+    }
+    private static void virtualSnapshotValues(Address heap, Address literal, Address buffer) {
+        equal(111, AbdInvoker.invoke(622, heap));
+        equal(24, AbdInvoker.invoke(623, heap));
+        equal(111, AbdInvoker.invoke(629, literal));
+        equal(24, AbdInvoker.invoke(630, literal));
+        equal(111, AbdInvoker.invoke(627, buffer));
+        equal(24, AbdInvoker.invoke(628, buffer));
+    }
+    private static void virtualSnapshots(File work) {
+        loadAndFlush(new File(work, "virtual.snapshot.exec.abd"));
+        Address heap = (Address) AbdInvoker.invoke(620);
+        Address literal = (Address) AbdInvoker.invoke(625);
+        Address buffer = (Address) AbdInvoker.invoke(626);
+        virtualSnapshotValues(heap, literal, buffer);
+        File saved = new File(work, "virtual.saved.snapshot.abd");
+        equal(true, AbdInvoker.saveStatus(saved));
+        AbdInvoker.invoke(621, heap);
+        AbdInvoker.invoke(631, literal);
+        equal(211, AbdInvoker.invoke(622, heap));
+        equal(211, AbdInvoker.invoke(629, literal));
+        Caller20.memFree(buffer.bits());
+        fails(RuntimeException.class, () -> AbdInvoker.invoke(627, buffer));
+        AbdInvoker.loadStatus(saved);
+        virtualSnapshotValues(heap, literal, buffer);
+        File[] invalid = work.listFiles((directory, name) -> name.startsWith("virtual.invalid-") && name.endsWith(".snapshot.abd"));
+        if (invalid == null || invalid.length < 34) throw new AssertionError("Missing malformed virtual method snapshots");
+        for (File corrupt : invalid) {
+            fails(IllegalArgumentException.class, () -> AbdInvoker.loadStatus(corrupt));
+            virtualSnapshotValues(heap, literal, buffer);
+            rejectsObjectRaw(() -> Caller220.ACputMem(heap.bits(), 99));
+        }
+        // Independently encoded method/context records restore all three
+        // object representations, including the class view inside a buffer.
+        AbdInvoker.loadStatus(new File(work, "virtual.valid.snapshot.abd"));
+        virtualSnapshotValues(Address.of(1), Address.of(2), Address.of(3));
+        AbdInvoker.invoke(624, Address.of(1));
+        Caller20.memFree(2);
+        Caller20.memFree(3);
+        AbdInvoker.destroyScript();
+        // The final script close must release the heap method-table registry;
+        // a fresh script and a plain allocation can reuse the old address.
+        loadAndFlush(new File(work, "fixture.exec.abd"));
+        long raw = Caller20.memAlloc(1);
+        Caller220.ACputMem(raw, 91);
+        equal(91, Caller.getMemInt(raw));
+        Caller20.memFree(raw);
+        equal(true, AbdInvoker.saveStatus(new File(work, "virtual.after-close.snapshot.abd")));
+        AbdInvoker.destroyScript();
     }
     private static void runtimeTraces(File work) {
         loadAndFlush(new File(work, "traces.exec.abd"));
@@ -538,6 +587,7 @@ public final class JniRegression {
             numericSnapshots(work);
             runtimeTraces(work);
             objectStorageGuards(work);
+            virtualSnapshots(work);
             checks += JniHintRegression.run(work);
             loadAndFlush(script);
             equal(42, AbdInvoker.invoke(110));

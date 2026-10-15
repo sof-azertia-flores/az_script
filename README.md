@@ -86,7 +86,7 @@ int main() {
 
 支持 `class`、成员变量、构造方法、成员方法和 `~ClassName()` 析构。对象有三种写法：`Point p(3);` 是字面量对象，按值复制（赋值、传参、返回都复制全部 slots，每个副本各自析构），地址随变量到期而失效；`Point * p(3);` 是离块自动析构的指针对象（无参也要写 `()`）；`Point * p = new Point(3);` 是需要 `delete p;` 的手动对象；单写 `Point * q;` 声明空指针，等同 `= null`。参数写成 `Point (*) p` 时，函数同时接受指针和字面量对象，字面量对象按地址借入、不复制。脚本只能通过方法中的 `this` 或 `Point (*)` 参数（函数内类型均为 `Point *`）拿到字面量对象的地址。每个字段占一个 slot，字面量字段内嵌完整对象；方法均编译成带隐式对象地址参数的普通函数。完整语义见 [类、字面量对象与指针](compiler/LANGUAGE.md#类字面量对象与指针)，[类回归示例](compiler/examples/classes-regressions.azs) 成功返回 `0`。
 
-`for (int i=0; i<10; i++)` 在编译层降为块和 `while`；`continue` 清理当前轮局部对象后进入下一轮，在 `for` 中会先执行步进。`class Child : Base` 支持公开单继承：父类字段占前面的 slots，子类字段追加，父类方法直接接收同一个对象地址。方法按静态类型绑定，`Base::method(args)` 可对 `this` 调用被遮蔽的父类方法；构造从父到子，析构从子到父；子类构造失败会清理已完成的父类部分。示例见 [循环](compiler/examples/loops-regressions.azs) 和 [继承](compiler/examples/inheritance-regressions.azs)。
+`for (int i=0; i<10; i++)` 在编译层降为块和 `while`；`continue` 清理当前轮局部对象后进入下一轮，在 `for` 中会先执行步进。`class Child : Base` 支持公开单继承：父类字段占前面的 slots，子类字段追加，父类方法直接接收同一个对象地址。非虚方法按静态类型绑定，`virtual`/`override` 支持指针派发，`final` 禁止进一步覆盖；`Base::method(args)` 始终对 `this` 静态调用父类方法；构造从父到子，析构从子到父；子类构造失败先逆序清理已完成的拥有型字段，再清理已完成的父类部分；清理失败时仍保留原错误。示例见 [循环](compiler/examples/loops-regressions.azs) 和 [继承](compiler/examples/inheritance-regressions.azs)。
 
 已有可读代码树也可以直接编译：
 
@@ -220,7 +220,7 @@ try {
 - 函数按值传参，参数从左到右求值；函数只能访问自己的局部变量和全局变量。块有独立作用域，循环每次创建新的块作用域。`for` 初始化变量的作用域包含整个循环，循环结束后不可见。
 - `return` 穿透当前函数内的循环和条件块；`break` 退出最内层循环/switch，`continue` 结束最近循环的本轮执行，均执行必要的块清理。数值返回必须精确匹配，或从 int 扩宽到 float/double、从 float 扩宽到 double；int 转 float 可能舍入。收窄须显式使用受检查的 `int(x)` 或 `float(x)` 转换，动态返回类型在运行时检查。
 - 编译器按 ABD 的 128 层容器嵌套限制检查函数体：同时检查逻辑表达式和实际 wire 容器深度，函数体从第 4 层开始；调用实参列表、块内语句列表和常量封装各另占一层，超限时报告函数名和行列（大约 120 个串联运算符或 60 层嵌套块）。语法递归和 JSON 容器另有 320 层防护上限，循环代码树会报错。默认每次顶层脚本调用最多执行 1,000,000 步、嵌套 256 层；脚本文件最多 64 MiB，堆最多 1,048,576 个槽（含保留槽 0）。宿主回调本身的执行时间不受指令预算控制。
-- `return`、`if`、`else`、`while`、`for`、`switch`、`case`、`default`、`break`、`continue`、`def`、`var`、`class`、`new`、`this`、`null`、`delete`、`extern`、`public/private/protected/virtual`、`any`、类型名和 `true/false` 是保留字，不能作为类、字段、方法、函数、参数、变量、全局变量或宏的名字；标识符不能含控制字符或格式字符（如 U+200B、U+202E）。源码与 `compile-json` 共用这些命名规则。非 void 函数的正常退出路径都必须 `return`；条件恒真的 while/for 且体内没有属于它的 `break` 时，视为不会正常结束。
+- `return`、`if`、`else`、`while`、`for`、`switch`、`case`、`default`、`break`、`continue`、`def`、`var`、`class`、`new`、`this`、`null`、`delete`、`extern`、`public/private/protected/virtual`、`override`、`final`、`any`、类型名和 `true/false` 是保留字，不能作为类、字段、方法、函数、参数、变量、全局变量或宏的名字；标识符不能含控制字符或格式字符（如 U+200B、U+202E）。源码与 `compile-json` 共用这些命名规则。非 void 函数的正常退出路径都必须 `return`；条件恒真的 while/for 且体内没有属于它的 `break` 时，视为不会正常结束。
 - 数值转字符串（`print` 和 `+` 拼接）使用最短可往返表示：`0.1+0.2` 得到 `0.30000000000000004`，`123456789.0` 得到 `123456789`，`1e20` 得到 `1e+20`，负零保留为 `-0`。
 - `address` 与 int32 不隐式转换，`alloc(int)` 返回 address，内存接口接收 address。支持 `address + int`、`int + address`、`address - int`，以及地址间的无符号相等和大小比较；超出 uint64 范围报错。类指针不参与原始地址算术。堆地址仍是进程内逻辑下标，64 位表示不扩大当前堆上限；越界和已经释放的地址会拒绝，地址复用后无法识别旧引用，仍须避免悬空引用。
 - 原始分配与对象存储分离：脚本原始内存接口及 JNI 原始写入/释放拒绝对象起点、内部地址和字面量/视图地址。类指针须保留明确类型；`address(p)` 只擦除类型，不开放原始字段访问。对象使用带类型成员及 delete。受信任宿主指针、旧别名、重复 delete 和自动对象逃逸见[对象存储与已知限制](compiler/LANGUAGE.md#对象存储与已知限制)。
@@ -236,7 +236,7 @@ ABD 地址标量新增标签 `0xce200b`，payload 恰为 8 字节 uint64 小端�
 
 新增运算指令、else、变量初始化、参数类型及外部函数签名字段需要配套新版解释器，建议源码重新编译。历史编译器若已把表达式拆错，新运行时无法从错误指令树还原原意。
 
-类指针、隐式 `this` 和底层内存指针统一使用 address（运行时类型编号 7），字面量对象以运行时对象值传递（类型编号 8），普通整数仍为 int32。已有 `oa/ob/od/ro` 对象指令保持生命周期语义，新增 `new_block/block_address/mv/drop` 实现字面量对象。exec v10 使用数字变量与数字 opcode，固定结构直接使用裸 `AbdStack`，仅动态常量和扩展元数据保留带类型的容器，并可携带 `-g` 生成的调试记录。exec JSON 是带字段名的检查视图；完整布局见 [Exec v10 格式](docs/EXEC_FORMAT.md)。解释器只接受 exec v10；包括 v9、v8 在内的旧执行文件均须从源码或可读 AST 重新编译，旧源码中的类对象须按新写法迁移：原来的 `C x(...)` 若依赖引用语义应改为 `C * x(...)`，`C y = new C()` 改为 `C * y = new C()`，类类型的引用参数、字段和返回值改为 `C *`。JNI 快照只接受 v9，使用独立地址值保存堆分配、对象登记和自动清理顺序，同时保留全局槽、模块身份和字段中的字面量对象；旧快照不再受支持。
+类指针、隐式 `this` 和底层内存指针统一使用 address（运行时类型编号 7），字面量对象以运行时对象值传递（类型编号 8），普通整数仍为 int32。已有 `oa/ob/od/ro` 对象指令保持生命周期语义，新增 `new_block/block_address/mv/drop` 实现字面量对象。exec v10 使用数字变量与数字 opcode，固定结构直接使用裸 `AbdStack`，仅动态常量和扩展元数据保留带类型的容器，并可携带 `-g` 生成的调试记录。exec JSON 是带字段名的检查视图；完整布局见 [Exec v10 格式](docs/EXEC_FORMAT.md)。解释器只接受 exec v10；包括 v9、v8 在内的旧执行文件均须从源码或可读 AST 重新编译，旧源码中的类对象须按新写法迁移：原来的 `C x(...)` 若依赖引用语义应改为 `C * x(...)`，`C y = new C()` 改为 `C * y = new C()`，类类型的引用参数、字段和返回值改为 `C *`。JNI 快照只接受 v10，使用独立地址值保存堆分配、对象登记和自动清理顺序，同时保留全局槽、模块身份、字段中的字面量对象及必需的方法表和已绑定泛型上下文；旧快照不再受支持。
 
 编译器提供拥有型 `buffer<T>`：元素直接 slots 连续，支持深复制、自动清理及带检查的 reserve/get/set/push/resize。`value_compare<T>` 提供基础值顺序，类的 `+ - * / [] []= ()` 声明降为普通方法调用，详见[语言说明](compiler/LANGUAGE.md)。`List`、`Stack`、`Queue` 仍是链表。`Vector`、`Set`、`Map` 用这些原语做连续存储和默认比较。
 

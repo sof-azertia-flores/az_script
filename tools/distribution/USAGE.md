@@ -118,7 +118,7 @@ C++ 地址类型为 `azertian::address`，其 `.value` 保存无符号 64 位地
 
 `load_script` 只装载；`flush()` 链接依赖并执行尚未初始化模块的加载钩子，成功后才能 invoke。`destroy()` 执行销毁钩子并清理脚本，允许重复调用。宿主应在正常和异常退出时都显式关闭脚本。不要用无长度的旧指针入口读取外部文件。完整文件读取、异常处理及预算设置见 `examples/cpp/main.cpp`。
 
-按原 C++ 异常类型捕获，在 `destroy()` 或再次进入运行时之前调用 `azertian::describe_error(error)`。它返回 `what()` 加匹配的调用帧，不含 CLI 前缀和末尾换行。`last_error_trace()` 返回含 `frames` 和 `omitted_frames` 的 `error_trace`；`format_error_trace(trace)` 格式化调用帧，`clear_error_trace()` 清空记录。记录是线程局部的，每次进入（包括回调重入）都重新开始收集。调用栈 API 改变了公开 C++ ABI，宿主和插件须用本包配套的头文件及库重新构建。
+按原 C++ 异常类型捕获，在 `destroy()` 或再次进入运行时之前调用 `azertian::describe_error(error)`。它返回 `what()` 加匹配的调用帧，不含 CLI 前缀和末尾换行。`last_error_trace()` 返回含 `frames` 和 `omitted_frames` 的 `error_trace`；`format_error_trace(trace)` 格式化调用帧，`clear_error_trace()` 清空记录。记录是线程局部的，每次进入（包括回调重入）都重新开始收集。调用栈 API 和虚方法存储改变了公开 C++ ABI，宿主和插件须用本包配套的头文件及库重新构建。
 
 使用 `script->insert_script(bytes.data(), bytes.size())` 追加数字 exec 模块时，每个函数保存模块自己的全局 offset；即使两个模块都使用 `-1` 作为第一个全局变量，也分别访问各自的槽。参数、局部变量和对象的块级析构保持独立。固定 namespace 的模块须避免 ID 冲突；独立库使用 `#namespace_hint NAME`，由运行时自动分配 namespace。成功 insert 后须再次 flush；通过 `namespace_for_hint("NAME")` 查询实际位置。数字变量格式与类型信息见 [语言文档](LANGUAGE.md#insert-与模块全局偏移)。
 
@@ -198,7 +198,7 @@ AbdInvoker.registerJfunction(0x12340001,
 
 Java 对应流程是 `loadScript(mainFile)`、依次 `insertScript(libraryFile)`、`flush()`，随后 invoke。`namespaceForHint("POINT_LIB")` 返回实际 namespace；公开函数的完整 ID 是 `(namespace << 16) | localId`。相同假定 namespace 在不同模块可以引用不同库。缺库或签名错误使 flush 原子失败，补齐依赖可重试；onload 运行失败则必须关闭重建。执行或回调期间不能 insert、flush 或替换快照。
 
-JNI v9 快照仅保存和恢复初始化完成的空闲脚本（含堆对象字段中的字面量对象）；必须有相同的有序模块字节、实际 namespace 与全局布局。恢复不重新执行 onload。旧执行文件和快照不再支持。语法、类外实现和生命周期细节见 [多文件库与 hint 链接](HINT_LINKING.md)。
+JNI v10 快照仅保存和恢复初始化完成的空闲脚本（含堆对象字段中的字面量对象）；必须有相同的有序模块字节、实际 namespace 与全局布局。恢复不重新执行 onload。旧执行文件和快照不再支持。语法、类外实现和生命周期细节见 [多文件库与 hint 链接](HINT_LINKING.md)。 快照 v10 在每个堆对象及字面量/视图记录中使用必需的 `methods:[{id,contexts}]` 数组保存虚方法绑定和泛型上下文；buffer 使用 `[]`。
 
 ## 已签名的外部动态库
 

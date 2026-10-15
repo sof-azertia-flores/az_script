@@ -350,6 +350,40 @@ type_contexts decodeContexts(const std::shared_ptr<AbdMap>& entry) {
     validate_type_contexts(result, loadedScript);
     return result;
 }
+std::shared_ptr<AbdArray> encodeMethods(const std::shared_ptr<const method_table>& methods) {
+    auto result = std::make_shared<AbdArray>();
+    if (!methods) return result;
+    if (methods->size() > MAX_VARIABLE_SLOTS)
+        throw std::invalid_argument("Snapshot method table exceeds the slot limit");
+    validate_method_table(*methods, loadedScript);
+    for (const auto& method : *methods) {
+        auto entry = std::make_shared<AbdMap>();
+        entry->put("id", std::make_shared<IntAbdValue>(method.function_id));
+        entry->put("contexts", encodeContexts(method.contexts));
+        result->push_back(entry);
+    }
+    return result;
+}
+std::shared_ptr<const method_table> decodeMethods(const std::shared_ptr<AbdMap>& entry) {
+    auto entries = field<AbdArray>(entry, "methods");
+    if (entries->values.size() > MAX_VARIABLE_SLOTS)
+        throw std::invalid_argument("Snapshot method table exceeds the slot limit");
+    if (entries->values.empty()) return nullptr;
+    auto result = std::make_shared<method_table>();
+    result->reserve(entries->values.size());
+    std::size_t nodes = 0;
+    for (const auto& value : entries->values) {
+        auto method = std::dynamic_pointer_cast<AbdMap>(value);
+        if (!method) throw std::invalid_argument("Invalid snapshot method entry");
+        for (const auto& [key, item] : method->values)
+            if (key != "id" && key != "contexts")
+                throw std::invalid_argument("Unexpected snapshot method entry field: " + key);
+        result->push_back({field<IntAbdValue>(method, "id")->data,
+                          decodeContextTree(field<AbdArray>(method, "contexts"), 0, nodes)});
+    }
+    validate_method_table(*result, loadedScript);
+    return result;
+}
 void validateSnapshotDestructor(std::optional<int> destructor, const type_contexts& contexts) {
     validate_type_contexts(contexts, loadedScript);
     if (!destructor) {
@@ -402,6 +436,9 @@ std::shared_ptr<AbdMapValue> encodeValue(const std::shared_ptr<variable>& value,
             if (block->destructor) entry->put("destructor", std::make_shared<IntAbdValue>(*block->destructor));
             validateSnapshotDestructor(block->destructor, block->destructor_contexts);
             entry->put("destructor contexts", encodeContexts(block->destructor_contexts));
+            if (block->buffer && block->methods && !block->methods->empty())
+                throw std::invalid_argument("Snapshot buffer cannot have virtual methods");
+            entry->put("methods", encodeMethods(block->methods));
             if (block->buffer) {
                 blocks::validate_buffer(block);
                 validate_type_contexts({block->buffer->element}, loadedScript);
@@ -476,11 +513,12 @@ struct SnapshotDecoder {
             else if (entry->get("destructor")) throw std::invalid_argument("Unexpected snapshot object destructor");
             auto contexts = decodeContexts(entry);
             validateSnapshotDestructor(destructor, contexts);
+            auto methods = decodeMethods(entry);
             auto items = field<AbdArray>(entry, "slots");
             auto block = blocks::of(target);
             const bool view = block && block->is_view;
             if (entry->get("buffer")) {
-                if (!field<BoolAbdValue>(entry, "buffer")->data || view || destructor || !contexts.empty())
+                if (!field<BoolAbdValue>(entry, "buffer")->data || view || destructor || !contexts.empty() || methods)
                     throw std::invalid_argument("Invalid snapshot buffer record");
                 const int length = field<IntAbdValue>(entry, "length")->data;
                 const int capacity = field<IntAbdValue>(entry, "capacity")->data;
@@ -498,7 +536,7 @@ struct SnapshotDecoder {
                     if (block->slots.size() != items->values.size()) throw std::invalid_argument("Snapshot class view width differs from its element context");
                 } else block = blocks::create(items->values.size(), loadedScript);
             }
-            block->destructor = destructor; block->destructor_contexts = std::move(contexts); block->depth = depth;
+            block->destructor = destructor; block->destructor_contexts = std::move(contexts); block->methods = std::move(methods); block->depth = depth;
             objects.emplace(idOf(saved), block);
             for (std::size_t i = 0; i < items->values.size(); ++i) decodeInto(block->slots[i], items->values[i], depth + 1);
             if (!view) { target->setValue(block); block->owner = target.get(); }
@@ -529,6 +567,11 @@ std::vector<module_manifest_entry> stableManifest() {
 }
 std::shared_ptr<AbdMap> snapshot() {
     const auto modules = stableManifest();
+    const auto registered = heap::object_records();
+    const auto registeredTables = static_cast<std::size_t>(std::count_if(registered.begin(), registered.end(),
+        [](const auto& object) { return static_cast<bool>(object.methods); }));
+    if (registeredTables != heap::method_table_count())
+        throw std::invalid_argument("Cannot snapshot an unregistered object method table");
     std::size_t bufferSlots = 0;
     for (const auto& value : loadedScript->baseEnv->variables) checkSnapshotBufferBudget(value, bufferSlots);
     for (int i = 0; i < heap::lenHeap(); ++i) checkSnapshotBufferBudget(heap::getSlot(i), bufferSlots);
@@ -539,7 +582,7 @@ std::shared_ptr<AbdMap> snapshot() {
         moduleBytes += module.bytes.size();
     }
     auto result = std::make_shared<AbdMap>();
-    result->put("snapshot version", std::make_shared<IntAbdValue>(9));
+    result->put("snapshot version", std::make_shared<IntAbdValue>(10));
     auto manifest = std::make_shared<AbdArray>();
     for (const auto& module : modules) {
         auto entry = std::make_shared<AbdMap>();
@@ -572,7 +615,7 @@ std::shared_ptr<AbdMap> snapshot() {
     }
     result->put("heap allocation", allocations);
     auto objects = std::make_shared<AbdArray>();
-    for (const auto& object : heap::object_records()) {
+    for (const auto& object : registered) {
         if (object.script_owner.lock() != loadedScript) throw std::invalid_argument("Cannot snapshot an object belonging to another script");
         auto entry = std::make_shared<AbdMap>();
         entry->put("begin position", std::make_shared<AddressAbdValue>(object.startpos));
@@ -580,6 +623,7 @@ std::shared_ptr<AbdMap> snapshot() {
         if (object.destructor_id) entry->put("destructor", std::make_shared<IntAbdValue>(*object.destructor_id));
         validateSnapshotDestructor(object.destructor_id, object.destructor_contexts);
         entry->put("destructor contexts", encodeContexts(object.destructor_contexts));
+        entry->put("methods", encodeMethods(object.methods));
         entry->put("manual", std::make_shared<BoolAbdValue>(object.manual));
         objects->push_back(entry);
     }
@@ -596,8 +640,8 @@ int snapshotModuleExecVersion(const ByteArrayValue& code) {
 void restoreSnapshot(const std::vector<unsigned char>& bytes) {
     const auto modules = stableManifest();
     auto result = std::make_shared<AbdMap>(std::make_shared<AbdStack>(AbdValue::fromBytes(bytes.data(), bytes.size())));
-    if (field<IntAbdValue>(result, "snapshot version")->data != 9)
-        throw std::invalid_argument("Unsupported snapshot version; expected v9");
+    if (field<IntAbdValue>(result, "snapshot version")->data != 10)
+        throw std::invalid_argument("Unsupported snapshot version; expected v10");
     auto manifest = field<AbdArray>(result, "module manifest");
     // Exec versions are checked first, so a snapshot of modules from another format names the real cause.
     for (const auto& value : manifest->values) {
@@ -677,9 +721,10 @@ void restoreSnapshot(const std::vector<unsigned char>& bytes) {
         else if (map->get("destructor")) throw std::invalid_argument("Unexpected snapshot destructor id");
         auto contexts = decodeContexts(map);
         validateSnapshotDestructor(destructor, contexts);
+        auto methods = decodeMethods(map);
         objects.push_back({field<AddressAbdValue>(map, "begin position")->data,
                            destructor,
-                           field<BoolAbdValue>(map, "manual")->data, loadedScript, std::move(contexts)});
+                           field<BoolAbdValue>(map, "manual")->data, loadedScript, std::move(contexts), std::move(methods)});
     }
     // The heap validates all ranges, objects, destructor signatures and owners
     // before atomically replacing state. The final globals swap cannot throw.

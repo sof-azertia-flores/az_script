@@ -32,6 +32,9 @@ struct type_context {
     type_contexts placement_contexts;
     std::shared_ptr<const type_context> element;
 };
+struct bound_method {int function_id;type_contexts contexts;};
+using method_table=std::vector<bound_method>;
+void validate_method_table(const method_table& methods,const std::shared_ptr<script>& script);
 struct context_spec;
 // A source position of an exec debug record; file indexes function_debug::files.
 // Line and column are 1-based; a header position of 0:0 is unknown.

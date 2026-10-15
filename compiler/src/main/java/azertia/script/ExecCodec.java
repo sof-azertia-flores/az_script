@@ -103,6 +103,9 @@ public final class ExecCodec {
             CONVERSION=KeySpec.of("t c type v",""),
             SELECT=KeySpec.of("t c v then else",""),
             CHECKED_OBJECT=KeySpec.of("t c v context slot-types",""),
+            SET_METHODS=KeySpec.of("t c v entries",""),
+            METHOD_ENTRY=KeySpec.of("id contexts",""),
+            VIRTUAL_CALL=KeySpec.of("t c slot type param",""),
             BINARY=KeySpec.of("t c v1 v2","");
     private static void keys(AcsObject object,KeySpec keys) {
         for(String name:keys.required())if(!object.mmp.containsKey(name)||object.mmp.get(name)==null)throw invalid("missing field "+name);
@@ -150,6 +153,16 @@ public final class ExecCodec {
     }
     private static void externalId(int id) {
         if(SourceRules.reservedExternalId(id))throw invalid("invalid external function id "+Diagnostic.hexId(id));
+    }
+    private static void methodId(int id) {
+        scriptId(id);if(id==0||id==1)throw invalid("invalid method function id "+Diagnostic.hexId(id));
+    }
+    private static void virtualSlot(int slot) {
+        if(slot<0||slot>=MAX_SLOTS)throw invalid("virtual method slot is outside 0.."+(MAX_SLOTS-1));
+    }
+    private static void virtualArguments(AcsArray arguments) {
+        count(arguments.acsa.size(),"virtual argument count");
+        if(arguments.acsa.isEmpty())throw invalid("virtual call requires a receiver argument");
     }
     private static void slot(int slot,Layout layout,boolean declaration) {
         if(slot<0) {
@@ -206,6 +219,16 @@ public final class ExecCodec {
             rejectVoidContext(spec.mmp.get("element"));fields.add(context(spec.mmp.get("element"),layout,level+1));
         }
         return stack(fields);
+    }
+    private static AbdValue methodEntries(AcsElement value,Layout layout,int level) {
+        depth(level);AcsArray entries=array(value,"entries");count(entries.acsa.size(),"method entry count");
+        List<AbdValue> result=new ArrayList<>();
+        for(AcsElement item:entries.acsa) {
+            depth(level+1);AcsObject entry=object(item,"method entry");keys(entry,METHOD_ENTRY);
+            int id=integer(entry,"id");methodId(id);
+            result.add(stack(n(id),contexts(entry.mmp.get("contexts"),layout,level+2)));
+        }
+        return stack(result);
     }
     private static void rejectVoidContext(AcsElement value) {
         AcsObject spec=object(value,"context");
@@ -479,6 +502,15 @@ public final class ExecCodec {
                 fields.add(context(object.mmp.get("context"),layout,level+1));
                 fields.add(slotTypes(object.mmp.get("slot-types"),object.mmp.get("context")));
             }
+            case ExecOpcodes.SET_METHODS -> {
+                keys(object,SET_METHODS);fields.add(expression(object.mmp.get("v"),layout,level+1));
+                fields.add(methodEntries(object.mmp.get("entries"),layout,level+1));
+            }
+            case ExecOpcodes.CALL_VIRTUAL -> {
+                keys(object,VIRTUAL_CALL);int slot=integer(object,"slot"),type=integer(object,"type");
+                virtualSlot(slot);type(type,false,false);AcsArray arguments=array(object.mmp.get("param"),"param");virtualArguments(arguments);
+                fields.add(n(slot));fields.add(n(type));fields.add(expressions(arguments,layout,level+1));
+            }
             default -> {
                 if(!binaryOpcode(op))throw invalid("invalid control opcode "+op);
                 keys(object,BINARY);
@@ -523,6 +555,14 @@ public final class ExecCodec {
     private static AcsArray decodeContexts(AbdValue value,int level) {
         Record record=new Record(value,level);count(record.fields.size(),"context count");AcsArray result=new AcsArray();
         for(AbdValue item:record.fields)result.acsa.add(decodeContext(item,level+1));
+        return result;
+    }
+    private static AcsArray decodeMethodEntries(AbdValue value,int level) {
+        Record record=new Record(value,level);count(record.fields.size(),"method entry count");AcsArray result=new AcsArray();
+        for(AbdValue item:record.fields) {
+            Record entry=new Record(item,level+1);int id=entry.integer();methodId(id);AcsObject view=new AcsObject();view.put("id",id);
+            view.put("contexts",decodeContexts(entry.next(),level+2));entry.end();result.acsa.add(view);
+        }
         return result;
     }
     private static AcsObject decodeContext(AbdValue value,int level) {
@@ -691,6 +731,14 @@ public final class ExecCodec {
             case ExecOpcodes.CHECK_OBJECT -> {
                 view.put("v",decodeExpression(record.next(),level+1));view.put("context",decodeContext(record.next(),level+1));
                 view.put("slot-types",decodeSlotTypes(record.next(),level+1));
+            }
+            case ExecOpcodes.SET_METHODS -> {
+                view.put("v",decodeExpression(record.next(),level+1));view.put("entries",decodeMethodEntries(record.next(),level+1));
+            }
+            case ExecOpcodes.CALL_VIRTUAL -> {
+                int slot=record.integer(),type=record.integer();virtualSlot(slot);type(type,false,false);
+                view.put("slot",slot);view.put("type",type);AcsArray arguments=decodeExpressions(record.next(),level+1);virtualArguments(arguments);
+                view.put("param",arguments);
             }
             default -> {
                 if(!binaryOpcode(op))throw invalid("invalid control opcode "+op);

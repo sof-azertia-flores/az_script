@@ -1,3 +1,11 @@
+# C24 Virtual Methods and Snapshot v10 (2026-10-15)
+
+[中文](VALIDATION.md) | English
+
+Added virtual/override/final, opcodes52–53, bound method contexts outside user slots, static Base::/value/final calls and dynamic pointer/this/T dispatch. Constructor/destructor phases replace even empty tables. Failed derived construction cleans completed owned fields before its completed base, without calling the failed derived destructor. Balanced finalizers continue after failures while preserving the first exception/trace. JNI snapshot v10 requires validated method arrays and rejects corrupt replacement atomically; exec stays v10. Paired SDK, language, hint and AGENTS contracts were updated.
+
+V0–V3 passed sequentially with JAVA_TOOL_OPTIONS unset:293 Java tests,5944 native checks,3402 JNI assertions,800 calls from four workers and1000-module linking. Virtual suites passed80 ordinary/79 sanitizer checks, including phase/error/ownership/cross-hint/snapshot cases; independent wire suites389 each. No ASan/UBSan reports occurred. Review and targeted validation corrected constructor-index assertions, a Java lambda capture and an invalid foreign-method test fixture before complete runs. Export passed27 relocation/consumer checks, including real JNI and static/shared SDK consumers; all175 manifest file sizes/SHA-256 digests matched. Logs: build/c24/v1.log,build/c24/v2.log,build/c24/v3.log.
+
 # C23 Checked Reflection Results (2026-10-15)
 
 [中文](VALIDATION.md) | English

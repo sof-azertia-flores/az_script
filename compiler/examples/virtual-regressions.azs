@@ -1,0 +1,51 @@
+// Success returns 0. Constructors and destructors use their own class's table.
+int phase = 0;
+
+class Base {
+    int value;
+    Base() { phase = phase * 10 + kind(); }
+    ~Base() { phase = phase * 10 + kind(); }
+    virtual int kind() { return 1; }
+    virtual Base* self() { return this; }
+    virtual final int fixed() { return 7; }
+}
+
+class Child : Base {
+    Child() { phase = phase * 10 + kind(); }
+    ~Child() { phase = phase * 10 + kind(); }
+    override int kind() { return 2; }
+    override Child* self() { return this; }
+    int base_kind() { return Base::kind(); }
+}
+
+<T extends Base*> int inspect(T value) { return value.kind(); }
+
+class Box<T> {
+    T value;
+    virtual T get() { return value; }
+}
+class IntBox : Box<int> {
+    override int get() { return value + 1; }
+}
+
+int main() {
+    Child* child = new Child();
+    Base* base = child;
+    if (phase != 12) { return 1; }
+    if (base.kind() != 2 || child.base_kind() != 1 || base.fixed() != 7) { return 2; }
+    if (base.self() != child || inspect<Child*>(child) != 2) { return 3; }
+    delete child;
+    if (phase != 1221) { return 4; }
+
+    Base value;
+    if (value.kind() != 1) { return 5; }
+    IntBox* derived = new IntBox();
+    Box<int>* pointer = derived;
+    pointer.value = 40;
+    if (pointer.get() != 41) { return 6; }
+    Box<int> literal;
+    literal.value = 9;
+    if (literal.get() != 9) { return 7; }
+    delete derived;
+    return 0;
+}

@@ -164,7 +164,7 @@ void main() {
 }                                   // 依次输出 5、4、3
 ```
 
-`class` 只能在顶层声明。字段必须标注基础类型、类名（字面量对象）、`类名 *`（指针）或 `buffer<T>`，按声明顺序各占一个 slot；没有隐藏对象头。包含继承字段在内仍然零字段的类被拒绝。构造方法与类同名且没有返回类型；不声明构造时合成无参构造，声明带参构造后不会额外合成无参构造。析构为可选的 `~ClassName()`，无参数且不能返回值或直接调用。所有成员公开，支持单继承；不支持多继承、虚函数、动态派发、普通函数重载、静态成员或嵌套类。
+`class` 只能在顶层声明。字段必须标注基础类型、类名（字面量对象）、`类名 *`（指针）或 `buffer<T>`，按声明顺序各占一个 slot；没有隐藏对象头。包含继承字段在内仍然零字段的类被拒绝。构造方法与类同名且没有返回类型；不声明构造时合成无参构造，声明带参构造后不会额外合成无参构造。析构为可选的 `~ClassName()`，无参数且不能返回值或直接调用。所有成员公开，支持单继承和虚方法；不支持多继承、普通函数重载、静态成员或嵌套类。
 
 对象有三种写法：
 
@@ -207,7 +207,7 @@ bump(a);                        // a.x 变为 101：字面量对象按地址借�
 - 按值参数是调用方对象的副本，随调用结束销毁。
 - 返回本函数拥有的局部或参数时直接移交给调用方，不复制，局部也不会先析构；返回字段、全局或借来的对象时先复制一份再交出。
 - 返回当前函数拥有的自动指针对象时，仅将直接返回对象的所有权移交给实际调用代码块；返回调用者的对象或 `this` 不改变原所有权。`return new C();` 的结果仍需手动删除。
-- 构造失败时不运行该对象自身的析构，已经构造完成的字面量字段会被销毁；如果直接父类已经构造成功，则先执行该父类及其祖先的析构，清理错误不覆盖原构造错误。
+- 构造失败时不运行失败类自身的析构正文；先逆序销毁该类已经完成构造的拥有型字段，再清理已完成的父类及其祖先。某个字段清理抛错也不会跳过其他字段或父类，原构造错误及其调用栈优先保留。
 
 `delete expression;` 只接受指针或 `null`，只能销毁由 `new` 创建的对象；通过别名删除同样有效。`delete null;` 无操作，删除自动指针对象、已失效地址或正在析构的对象报运行错误，删除字面量对象在编译时即被拒绝。删除后其他别名不会自动置空。公共堆的地址会被复用且不提供世代识别，程序必须避免使用悬空的堆指针。
 
@@ -278,7 +278,7 @@ void main() {
 
 写作 `class Child : Base` 或 `class Child : public Base`。父类可以在源码后面声明，继承环、未知父类和多个父类会报编译错误。继承环、没有字段的类和以字面量对象包含自身等布局错误由编译器在类声明处报告（如 `main.azs:1:7: error: in class A: Inheritance cycle involving A`），源码编译与 `compile-json` 的报告相同。布局递归保留父类全部 slots 作为前缀，再按声明顺序追加子类自己的字段；继承至少一个字段的子类可以不声明新字段，不增加对象头或隐藏 slots。父类方法接收同一个对象起始地址，因此无需调整地址。
 
-子类可直接使用继承的字段和方法；同名成员由子类遮蔽。成员绑定取决于表达式的静态类类型：子类对象或指针调用子类同名方法，父类指针调用父类方法；父类方法正文中的名称继续按父类解析。当前没有虚函数或运行时方法选择。
+子类可直接使用继承的字段和方法；同名成员可由子类遮蔽。非虚方法按表达式的静态类类型绑定，父类正文中的名称仍按父类解析。声明为虚方法时，指针调用按下节规则派发。
 
 在类函数（方法、构造、析构或字段初始化）中，限定调用 `Base::method(args)` 对 `this` 调用 `Base` 中可见的同名方法；即使当前类用同名方法或字段遮蔽了它，也按静态绑定选择该方法，例如 `int describe() { return Point::describe() * 100 + tag; }`。`Base` 必须是当前类或其父类，书写时不带类型实参，类型实参来自继承链（如 `class IntBox : Box<int>` 中写 `Box::get()`）；泛型方法可显式给出类型实参，如 `Box::echo<string>("e")`。语句也可以以这种调用开头。编译器拒绝以下情况：在类函数之外使用（`A::f() calls are only available inside class functions`）、所写的类既不是当前类也不是其父类（`A is not B or one of its base classes`）、未知方法或字段（`Unknown method: A.h`、`A.x is a field, not a method`）、构造与析构函数、运算符方法、带接收对象的写法（如 `this.A::f()`）、类名带类型实参（`Name a base class without type arguments in A::method(...)`），以及不是类名的名称。
 
@@ -286,9 +286,36 @@ void main() {
 
 构造先执行父类构造，再为本层全部字段设置默认值、按本层声明顺序执行字段初始化表达式，最后执行本层构造正文。不写父类初始化列表时隐式调用 `Base()`；若父类没有无参构造，会在编译时报错。可用 `Child(int n) : Base(n + 1) { ... }` 显式传参，实参使用子类构造参数并从左到右各求值一次。本层字段初始化仍按成员、实现模块全局解析，不被同名构造参数遮蔽。构造函数编号先于父类初始化列表，例如 `Child::Child(int n):0002 : Base(n) { ... }`。
 
-完成对象的析构从最派生类逐级执行到根父类，每层析构正文之后销毁该层的字面量字段；子类未声明析构时仍会调用父类析构，提前 `return` 或析构错误也不会跳过父类。自动回收、字面量对象到期及通过父类指针 `delete` 都使用创建时登记的完整析构链，这项对象清理规则不引入虚方法派发。构造失败只销毁已经成功完成构造的父类部分，不调用失败层级的析构；保留原始错误并释放对象内存。执行预算耗尽时仍保证底层释放，用户析构是否能完整运行受原有预算限制。
+完成对象的析构从最派生类逐级执行到根父类，每层析构正文之后销毁该层的字面量字段；子类未声明析构时仍会调用父类析构，提前 `return` 或析构错误也不会跳过父类。自动回收、字面量对象到期及通过父类指针 `delete` 都使用创建时登记的完整析构链，这条清理链不依赖是否声明虚方法。构造失败先逆序清理失败类已完成构造的拥有型字段，再清理成功构造的父类链，不调用失败类自身的析构正文。字段清理错误不会跳过后续清理，也不替换原错误及其调用栈；对象内存仍会释放。执行预算耗尽时仍保证底层释放，用户析构是否能完整运行受原有预算限制。
 
-跨 hint 库继承采用相同共享声明：父类和子类分别声明 extern 构造、方法、析构，类外实现可以在不同模块中。继承关系和字段顺序保留在可读 AST，执行文件只包含原有地址、字段偏移和普通函数引用；`flush()` 将跨库构造及析构调用一并链接。可运行回归示例见 [`examples/inheritance-regressions.azs`](examples/inheritance-regressions.azs)。
+跨 hint 库继承采用相同共享声明：父类和子类分别声明 extern 构造、方法、析构，类外实现可以在不同模块中。继承关系和字段顺序保留在可读 AST，执行文件包含地址、字段偏移、函数引用和方法绑定，不携带名义类名；`flush()` 一并链接跨库构造、析构及虚方法绑定。可运行回归示例见 [`examples/inheritance-regressions.azs`](examples/inheritance-regressions.azs)。
+
+### 虚方法
+
+```cpp
+class Base {
+    int value;
+    Base(int n) { value = n; }
+    virtual int score() { return value; }
+}
+class Child : Base {
+    Child(int n) : Base(n) {}
+    override int score() { return Base::score() + 100; }
+}
+void main() {
+    Base * p = new Child(7);
+    print(p.score()); // 107
+    delete p;
+}
+```
+
+`virtual` 声明虚方法槽。覆盖继承的虚方法必须写 `override`；也可写 `virtual override`，仍复用原槽。`virtual final` 或 `override final` 禁止进一步覆盖；`final` 不能单独把普通方法变成虚方法，也不能绕过必需的 `override`。参数类型必须完全一致；具体类指针返回类型可以协变为子类指针，泛型返回类型参数则须完全一致。覆盖非虚方法或不存在的方法会被拒绝。
+
+这些修饰符只适用于没有方法类型参数的普通成员方法，不能用于构造、析构、运算符、顶层函数或类外定义。不支持抽象方法，非 extern 声明必须有正文。共享头文件可在普通 `class` 内写 `extern virtual int score():12340002;`，类外实现写普通的 `int Base::score() { ... }`，不重复修饰符。各模块必须使用一致的共享声明及槽顺序，见 [hint 链接](../docs/HINT_LINKING.md)。
+
+通过类指针、`C (*)` 借用、`this` 或具有类指针上界的类型参数调用时，使用当前对象的方法绑定。字面量值接收对象、值上界类型参数、静态已知的 final 槽及 `Base::method(...)` 按静态绑定调用；非虚方法保留原有行为。接收对象和实参从左到右各求值一次。null、失效、其他脚本所属或没有方法表的接收对象会报错；同一个脚本装配的多个模块共享所有权边界。
+
+构造和析构使用当前类的方法表：父类构造中的虚调用选择父类实现，进入子类构造时安装子类表；析构向父类推进时相应切换。方法表位于用户 slots 之外，不改变字段偏移或 buffer 步长。复制（包括 buffer 元素视图）保留方法绑定及已绑定的泛型上下文，逐字段赋值保留目标对象的方法表。这不增加名义类检查，也不消除前述堆生命周期限制。示例见 [虚方法回归](examples/virtual-regressions.azs)。
 
 ## 表达式与流程
 
@@ -527,7 +554,7 @@ extern int host_add(int, int):0xccf0001;
 - 预处理后的文本（含全部 include 和宏展开）最多 16,777,216 个字符，不计最后一行的换行符，所以不含 include 和宏的最大源文件不会超出此上限；
 - 整个程序最多 4,194,304 个词法记号。
 
-源文件开头的 UTF-8 BOM 会被忽略，不影响首行指令。`return`、`if`、`else`、`while`、`for`、`switch`、`case`、`default`、`break`、`continue`、`def`、`var`、`class`、`new`、`this`、`null`、`delete`、`extern`、`public/private/protected/virtual`、`any`、所有类型名以及 `true/false` 是保留字，不能声明为类、字段、方法、类型参数、函数、参数、变量、`#gvar`、`#define` 或 `extern` 的名字，报告为 `'any' is a reserved word and cannot be used as a name`。标识符的字符沿用 Java 标识符规则中基本多文种平面（BMP）的字符（字母、数字、`_`、`$` 等，不能以数字开头），但控制字符和格式字符（如零宽空格 U+200B、双向覆盖 U+202E）不能出现在标识符中，以免两个名字看起来相同，源码中报告为 `Unexpected character: U+202E`；不在文件开头的 U+FEFF 同样如此报告。诊断信息把这类字符打印为转义形式，如 `Invalid field name: x\u202e`。`compile-json` 对手写 AST 中的类、字段、方法、类型参数、函数、参数、局部变量和全局变量名应用同一套规则，例如 `in class P: 'any' is a reserved word and cannot be used as a field name`；以 `#` 开头的局部变量名留给编译器生成的变量。
+源文件开头的 UTF-8 BOM 会被忽略，不影响首行指令。`return`、`if`、`else`、`while`、`for`、`switch`、`case`、`default`、`break`、`continue`、`def`、`var`、`class`、`new`、`this`、`null`、`delete`、`extern`、`public/private/protected/virtual`、`override`、`final`、`any`、所有类型名以及 `true/false` 是保留字，不能声明为类、字段、方法、类型参数、函数、参数、变量、`#gvar`、`#define` 或 `extern` 的名字，报告为 `'any' is a reserved word and cannot be used as a name`。标识符的字符沿用 Java 标识符规则中基本多文种平面（BMP）的字符（字母、数字、`_`、`$` 等，不能以数字开头），但控制字符和格式字符（如零宽空格 U+200B、双向覆盖 U+202E）不能出现在标识符中，以免两个名字看起来相同，源码中报告为 `Unexpected character: U+202E`；不在文件开头的 U+FEFF 同样如此报告。诊断信息把这类字符打印为转义形式，如 `Invalid field name: x\u202e`。`compile-json` 对手写 AST 中的类、字段、方法、类型参数、函数、参数、局部变量和全局变量名应用同一套规则，例如 `in class P: 'any' is a reserved word and cannot be used as a field name`；以 `#` 开头的局部变量名留给编译器生成的变量。
 
 嵌套上限以 ABD 的 128 层容器嵌套为准：函数体从第 4 层开始，每个二元/一元运算、每个调用参数、每条语句和每个块各占一层，所以一个表达式大约可以串联 120 个运算符，或嵌套约 60 层块。超限时编译器报告文件、行列和所在函数，例如 `main.azs:2:8: error: in function main: Expression nesting exceeds the ABD limit of 128 levels; split the expression or statement`。泛型类型及指针的类型表达式嵌套最多 64 层，手写 AST 中的类型字符串也遵守此限制。语法递归和 JSON 容器另有 320 层防护上限，用于保护宿主，超限时报告最内层所在的语句或字段，或 JSON 行列；循环引用的 AST 会提前拒绝。错误后同一进程可以继续编译其他程序。
 
@@ -713,6 +740,8 @@ int functionId(int ns, int position) {
 
 根节点的 `sources` 表对文件的每次实际展开的包含各有一项，例如 `{"name": "inc/lib.azs", "included-from": {"source": 0, "line": 2, "column": 1}}`；第 0 项是主文件，include 总是指向更早的项，被 `#pragma once` 跳过的 include 没有对应项。表达式对象、函数元数据、类、字段和 extern 签名带有原始文件中的 `_line/_column`，以及所在 `sources` 项的下标 `_file`（为 0 时省略）。函数元数据还以 `_end_line/_end_column` 记录结束的右花括号，加括号的赋值带有 `_parenthesized: true`。字面值和块不带位置，诊断使用最近的带位置祖先。这些字段用于诊断，以及在 `-g` 时生成 exec 调试记录，不写入 ABD 指令。compile-json 输入中的 `sources` 可以省略，此时所有位置都属于以输入文件命名的同一文件。位置均为正整数，`_file` 必须是表中的有效下标；该表最多 4097 项，即主文件加 4096 次 include 展开；`sources` 的每项命名一个非空、不超过 4096 个字符且不含控制字符或双向格式字符的文件，include 链最多 64 层。compile-json 在编译前检查这些结构，见[多个错误与退出码](#多个错误与退出码)。
 
+可读类 AST 可含 `virtual-methods`、`override-methods`、`final-methods` 数组，元素为与 `methods` 键对应的普通方法名，如 `"virtual-methods":["score"]`。空数组省略，重复元素和非方法名被拒绝。调用节点无需额外标记，非虚方法程序保留既有 AST 结构。
+
 可读类 AST 保存 `operators` 映射及方法的 `operator-kind`，下标读写和后缀调用使用 `index`、`index-set`、`invoke` 节点，空 buffer 使用 `buffer-new`。compile-json 重新检查类型和降级，保持 ABD 字节一致。
 
 新生成的 exec/ABD 使用 `exec-version: 10`，与源码元数据的 `version` 分开。所有控制指令的 `c` 都为数字；可读 AST 仍保留源码名称、类型和操作名。下表是 exec JSON 检查视图，实际 ABD 的字段顺序及类型见 [Exec v10 二进制格式](../docs/EXEC_FORMAT.md)。
@@ -751,6 +780,8 @@ int functionId(int ns, int position) {
 | 显式转换 `c=49`（convert） | `type` 为目标 0/1/2/3/7，`v` 为源表达式 |
 | 条件选择 `c=50`（select） | `v` 为条件，`then` 为真分支，`else` 为假分支 |
 | 引用检查 `c=51`（check_object） | `v` 为结果表达式、`context`、`slot-types` 直接 ABI 标签；6 表示不检查 |
+| 方法绑定 `c=52`（set_methods） | `v` 接收对象地址、`entries: [{id, contexts}]` |
+| 虚调用 `c=53`（call_virtual） | `slot` 方法槽、`type` 结果 ABI、`param` 接收对象及实参 |
 
 根、函数、签名和表达式记录都使用裸 `AbdStack`；每个字段本身有长度边界，固定记录不保存键名和已知的类型标签。函数列表、参数类型列表、参数表达式和块内语句也都是裸 stack。常量的实际类型不固定，使用单元素 `AbdArray` 保留 int/float/double/bool/string/void/address 标签；扩展元数据仍使用 `AbdMap`。JSON 中的裸常量和块数组在二进制中分别使用 opcode 0 和 1。Java 调用 `Compiler.compile()` 得到的 `ExecProgram` 可继续作为 `AcsObject` 检查，`toValue()` 输出新 wire 格式；从执行文件恢复检查视图使用 `ExecCodec.decode()`，不再直接把根当作 `AcsObject` 解码。
 
@@ -758,7 +789,7 @@ int functionId(int ns, int position) {
 
 函数检查视图包含 `id/return-type/script/param-count/param-types/local-count/hidden-count/entry-kind`，使用 `-g` 时另含 `debug` 记录；根的 `debug-files` 列出调试文件，无 `-g` 时为空。`local-count` 只计局部和临时槽，不包含参数。每次调用创建独立槽数组，递归和宿主重入不共享局部值。块退出仍按原规则清理对象，并清空该块声明的局部槽，循环下次进入时重新初始化。全局槽总数及单次调用的参数加局部槽数量均不能超过 1,048,576；无效编号、跨越所属模块全局范围及未声明/已退出作用域的访问会被拒绝。
 
-未声明类型的脚本参数在元数据中使用内部 `any` 类型；无界类型参数也擦除为 any，但只有泛型隐藏上下文非空时才允许 any 返回和 extern any 参数。`entry-kind` 为 0 表示普通入口，1 表示内部入口；上下文不占变量槽。AST 额外保存 `type-parameters`、上界、参数化类型字符串和显式 `type-args`。`param-types` 和 `return-type` 保留供直接 C++/JNI 调用的类型检查；根的 `extern-signatures` 保存宿主边界签名。解释器仅接受 exec v10 裸 stack 文件，不再读取 v9、v8 等旧版本或旧 Map 文件；源码或可读 AST 应重新编译。不识别的版本、opcode、额外/缺失字段、错误字段宽度或超过 128 层的结构在加载时拒绝。JNI 快照版本与 exec 版本独立，本次为 v9。
+未声明类型的脚本参数在元数据中使用内部 `any` 类型；无界类型参数也擦除为 any，但只有泛型隐藏上下文非空时才允许 any 返回和 extern any 参数。`entry-kind` 为 0 表示普通入口，1 表示内部入口；上下文不占变量槽。AST 额外保存 `type-parameters`、上界、参数化类型字符串和显式 `type-args`。`param-types` 和 `return-type` 保留供直接 C++/JNI 调用的类型检查；根的 `extern-signatures` 保存宿主边界签名。解释器仅接受 exec v10 裸 stack 文件，不再读取 v9、v8 等旧版本或旧 Map 文件；源码或可读 AST 应重新编译。不识别的版本、opcode、额外/缺失字段、错误字段宽度或超过 128 层的结构在加载时拒绝。JNI 快照版本与 exec 版本独立，本次为 v10。
 
 ### insert 与模块全局偏移
 
@@ -768,7 +799,7 @@ int functionId(int ns, int position) {
 
 装载及 insert 只装配，不执行 onload。宿主必须在调用之前显式 `flush()`；成功 insert 会使 `setup=false`，需要再次 flush。链接先完整验证再原子修正调用和析构引用，失败可补库重试；依赖先初始化，循环依赖内按装载顺序。onload 失败后只能关闭重建。关闭按已成功初始化顺序的逆序执行 pre-destroy，再清理全局对象。
 
-类指针在 ABD 中擦除为 address，类型编号为 7；字面量对象的类型编号为 8；int32 仍为 0，动态 any 仍为 6。地址常量使用 `0xce200b` 标签、8 字节无符号小端值，exec JSON 视图为 `{"address":"无符号十进制"}`；例如 null 是 `{"address":"0"}`。只有对象返回指令按实际所有权转移对象，普通 address 或整数返回不转移。JNI v9 快照保存有序模块身份（原始字节、实际 namespace、hint、全局布局）、全局槽、堆（含字段中的字面量对象）和对象清理责任，仅可在已完成初始化且无执行中的状态保存和恢复。恢复先完整校验再原子替换，不重链接或调用旧对象析构；旧 exec 和快照不兼容，须重新编译全部模块；旧源码中用 int 保存的堆地址须改为 address。
+类指针在 ABD 中擦除为 address，类型编号为 7；字面量对象的类型编号为 8；int32 仍为 0，动态 any 仍为 6。地址常量使用 `0xce200b` 标签、8 字节无符号小端值，exec JSON 视图为 `{"address":"无符号十进制"}`；例如 null 是 `{"address":"0"}`。只有对象返回指令按实际所有权转移对象，普通 address 或整数返回不转移。JNI v10 快照保存有序模块身份（原始字节、实际 namespace、hint、全局布局）、全局槽、堆（含字段中的字面量对象）和对象清理责任，仅可在已完成初始化且无执行中的状态保存和恢复。恢复先完整校验再原子替换，不重链接或调用旧对象析构；旧 exec 和快照不兼容，须重新编译全部模块；旧源码中用 int 保存的堆地址须改为 address。
 
 ## 修复验证与打包
 

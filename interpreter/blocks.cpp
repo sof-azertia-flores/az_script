@@ -182,7 +182,7 @@ B copy_block(const B& source,std::size_t depth,const E& env) {
                 auto from=source->slots[i];auto to=result->slots[i];
                 if(source->buffer->element->kind==3) {
                     auto view=create_view(result,i);auto old=handle_of(*from);
-                    view->destructor_contexts=old->destructor_contexts;copy_fields(old,view,depth+1,env);view->destructor=old->destructor;
+                    view->methods=old->methods;view->destructor_contexts=old->destructor_contexts;copy_fields(old,view,depth+1,env);view->destructor=old->destructor;
                 } else if(owns(*from)) {
                     auto child=copy_block(handle_of(*from),depth+1,env);child->owner=to.get();to->setValue(child);
                 } else to->copy_from(from);
@@ -202,7 +202,7 @@ B copy_block(const B& source,std::size_t depth,const E& env) {
         if(!context)if(auto script=source->script_owner.lock())context=script->baseEnv;
         finalize_into(result,context,true,failure);failure.rethrow();
     }
-    result->destructor=source->destructor;
+    result->destructor=source->destructor;result->methods=source->methods;
     return result;
 }
 void assign_block(slot_block& target,const B& source,const E& env) {
@@ -251,13 +251,14 @@ void finalize_into(const B& block,const E& env,bool run_destructor,pending_error
         auto slot=block->slots[i];
         if(slot&&owns(*slot))finalize_into(handle_of(*slot),env,run_destructor,failure);
     }
-    block->state=slot_block::status::dead;block->owner=nullptr;block->owner_env=nullptr;
+    block->state=slot_block::status::dead;block->owner=nullptr;block->owner_env=nullptr;block->methods.reset();
     for(auto& slot:block->slots)if(slot){slot->setValue(nullptr);slot->container=nullptr;}
     auto released=std::move(block->slots);block->slots.clear();
     if(block->buffer){block->buffer->length=0;block->buffer->capacity=0;block->buffer->slab.reset();}
 }
 void abandon_contents(const B& block) noexcept {
     if(!block)return;
+    block->methods.reset();
     for(auto& slot:block->slots)if(slot) {
         if(owns(*slot))abandon(handle_of(*slot));
         slot->setValue(nullptr);slot->container=nullptr;
@@ -289,7 +290,7 @@ void validate_buffer(const std::shared_ptr<slot_block>& block) {
     std::lock_guard<std::recursive_mutex> lock(runtime_mutex());require_buffer(block);
     auto& data=*block->buffer;
     validate_type_contexts({data.element},block->script_owner.lock());
-    if(block->destructor||!block->destructor_contexts.empty()||block->is_view||block->active_operations||
+    if(block->destructor||!block->destructor_contexts.empty()||block->methods||block->is_view||block->active_operations||
        data.length>data.capacity||data.capacity>MAX_VARIABLE_SLOTS/static_cast<std::size_t>(data.element->width)||
        block->slots.size()!=data.capacity)throw std::invalid_argument("Invalid buffer state");
     for(std::size_t i=0;i<data.length;++i) {
@@ -324,12 +325,12 @@ void initialize_element(const B& buffer,std::size_t index,const V& value,const E
             if(source->temp_frame&&!source->owner) {
                 // Intrinsic arguments were materialized exactly once. Relocate
                 // their payload into the slab without a second value copy.
-                view->destructor=source->destructor;view->destructor_contexts.swap(source->destructor_contexts);
+                view->destructor=source->destructor;view->destructor_contexts.swap(source->destructor_contexts);view->methods=std::move(source->methods);
                 for(std::size_t i=0;i<source->slots.size();++i)move_storage(source->slots[i],view->slots[i]);
                 release_temporary(*source);source->state=slot_block::status::dead;source->slots.clear();
                 set_depth(*view,view->depth);
             } else {
-                view->destructor_contexts=source->destructor_contexts;
+                view->methods=source->methods;view->destructor_contexts=source->destructor_contexts;
                 copy_fields(source,view,view->depth,env);view->destructor=source->destructor;
             }
         } catch(...) {
@@ -378,7 +379,7 @@ void reserve_buffer(const B& buffer,std::size_t capacity) {
     for(std::size_t i=0;i<data.length;++i) {
         if(data.element->kind==3) {
             auto old=of(buffer->slots[i]);auto next=of(candidate->slots[i]);
-            next->destructor=old->destructor;next->destructor_contexts.swap(old->destructor_contexts);
+            next->destructor=old->destructor;next->destructor_contexts.swap(old->destructor_contexts);next->methods.swap(old->methods);
             for(std::size_t j=0;j<width;++j)move_storage(old->slots[j],next->slots[j]);
             old->state=slot_block::status::dead;old->owner=nullptr;old->slots.clear();
         } else move_storage(buffer->slots[i],candidate->slots[i]);

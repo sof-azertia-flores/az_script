@@ -1,3 +1,11 @@
+# C24 虚方法与快照 v10（2026-10-15）
+
+中文 | [English](VALIDATION.en.md)
+
+新增 virtual/override/final、opcode52–53 和用户 slots 之外的绑定方法上下文；Base::、类值和 final 调用静态绑定，指针、this、T 动态派发。构造/析构阶段即使方法表为空也会替换。派生类构造失败时先清理已完成的自有字段，再清理已完成的基类，不调用失败派生类的用户析构函数。平衡 finalizer 在异常后继续清理，并保留首个异常及调用栈。JNI 快照 v10 要求经过校验的方法数组，损坏快照被原子拒绝；exec 保持 v10。已同步中英文 SDK、语言、hint 和 AGENTS 契约。
+
+清除 JAVA_TOOL_OPTIONS 后顺序通过 V0–V3：293项 Java 测试、5944项原生检查、3402项 JNI 断言、四线程800次调用及1000模块链接。虚方法套件普通/ Sanitizer分别80/79项，覆盖阶段、错误、所有权、跨 hint 和快照；独立线格式各389项，无 ASan/UBSan 报告。审查和针对性验证修正了构造指令索引断言、一处 Java lambda 捕获及无效的外部方法夹具，然后完整重跑。发行包通过27项迁移/消费者验收，包含真实 JNI 和静态/动态 SDK 消费者，175个清单文件大小和 SHA-256 全部吻合。日志：build/c24/v1.log、build/c24/v2.log、build/c24/v3.log。
+
 # C23 反射结果检查（2026-10-15）
 
 中文 | [English](VALIDATION.en.md)

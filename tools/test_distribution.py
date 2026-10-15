@@ -18,7 +18,7 @@ EXECUTABLE_SUFFIX = ".exe" if WINDOWS else ""
 EXEC_VERSION = 10
 # Constants, blocks and calls use other JSON representations (wire opcodes 0–2).
 # The unit suite checks this set against the compiler's opcode registry.
-CONTROL_OPCODES = frozenset(range(3, 52))
+CONTROL_OPCODES = frozenset(range(3, 54))
 
 
 def _require(condition: bool, message: str) -> None:
@@ -145,7 +145,7 @@ def verify(package: Path, java: Optional[Path] = None) -> Dict[str, object]:
                 package / "stdlib/containers.exec.json",
                 package / "examples/hello.azs", package / "examples/classes.azs",
                 package / "examples/loops-regressions.azs", package / "examples/inheritance-regressions.azs",
-                package / "examples/address-regressions.azs", package / "examples/operators-regressions.azs",
+                package / "examples/address-regressions.azs", package / "examples/operators-regressions.azs", package / "examples/virtual-regressions.azs",
                 package / "include/azscript/detail/abdC/address.h",
                 package / "include/azscript/extern_library.hpp",
                 package / "include/azscript/detail/interpreter/library.h",
@@ -356,7 +356,7 @@ def verify(package: Path, java: Optional[Path] = None) -> Dict[str, object]:
                  f"Class example or destructor order failed: {result.stdout!r}")
         passed("literal objects, pointer objects and destructor execution")
 
-        for name, expected in (("loops-regressions", "9"), ("inheritance-regressions", "0"), ("address-regressions", "0"), ("operators-regressions", "0")):
+        for name, expected in (("loops-regressions", "9"), ("inheritance-regressions", "0"), ("address-regressions", "0"), ("operators-regressions", "0"), ("virtual-regressions", "0")):
             output = cwd / "language output" / (name + ".exec.abd")
             _run([compiler, package / "examples" / (name + ".azs"), "-o", output], cwd, compiler_environment)
             ast = output.with_name(name + ".ast.json")
@@ -470,6 +470,9 @@ def verify(package: Path, java: Optional[Path] = None) -> Dict[str, object]:
         modern_source.write_text('''#namespace 1234
 #gvar drops
 class Item { int value = 7; ~Item() { drops = drops + 1; } }
+class VirtualBase { int field = 7; virtual int read() { return field; } }
+class VirtualChild : VirtualBase { override int read() { return VirtualBase::read() + 100; } }
+<T extends VirtualBase*> int virtual_read(T value) { return value.read(); }
 class Box<T> { T value; T get() { return value; } }
 class Indexed<T> {
     buffer<T> data;
@@ -553,6 +556,9 @@ int main() {
     Item* checked = reflect_invoke_function<Item*>(305397872);
     if (checked.value != 7) return -46;
     delete checked;
+    VirtualBase* virtual_item = new VirtualChild();
+    if (virtual_read(virtual_item) != 107) return -47;
+    delete virtual_item;
     return invoke<int>(305397826, values[0]) + value_compare<string>("b", "a");
 }
 ''', encoding="utf-8")
@@ -587,6 +593,7 @@ int main() {
         _require(0x0abd0014 in set(builtin_calls(modern_view["f"])),
                  "Heap object construction must use the tagged internal object allocator")
         _require(51 in modern_opcodes, "Class reflection must emit checked references")
+        _require({52, 53} <= modern_opcodes, "Virtual construction and dispatch must remain in the packaged feature probe")
         modern_roundtrip = modern_abd.with_name("features.roundtrip.abd")
         _run([compiler, "compile-json", modern_ast, "-o", modern_roundtrip], cwd, compiler_environment)
         _require(modern_abd.read_bytes() == modern_roundtrip.read_bytes(),

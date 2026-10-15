@@ -25,7 +25,7 @@ public final class Compile {
                 System.out.println("Distribution shortcut: compile.sh <source.azs> [options]");
                 System.out.println("Source compilation also writes .ast.json and .exec.json by default.");
                 System.out.println("Explicit --ast and --exec-json override those output paths.");
-                System.out.println("compile-json validates switch sections, literal labels and optional default markers from --ast output.");
+                System.out.println("compile-json validates class method modifiers and switch sections from --ast output.");
                 System.out.println("Includes search the package's stdlib/ directory after every -I directory,");
                 System.out.println("so a client anywhere can #include \"math.include.azs\".\n");
             }

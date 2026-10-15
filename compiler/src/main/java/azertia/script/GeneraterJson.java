@@ -1148,6 +1148,26 @@ public class GeneraterJson {
         private int recursionDepth;
         private int loopDepth;
         private int switchDepth;
+        private static final Set<String> METHOD_MODIFIERS = Set.of("virtual", "override", "final");
+        private record DeclarationPrefix(boolean external, JsonArray generic, Map<String,Token> modifiers) {}
+        /** Extern, method modifiers and a method's own type parameters are all prefixes. */
+        private DeclarationPrefix declarationPrefix(boolean member) {
+            boolean external = false, genericSeen = false; JsonArray generic = new JsonArray();
+            Map<String,Token> modifiers = new LinkedHashMap<>();
+            while (true) {
+                if (at("extern")) {
+                    Token at = advance(); if (external) throw error("Duplicate extern modifier", at); external = true;
+                } else if (METHOD_MODIFIERS.contains(current().text())) {
+                    Token at = advance();
+                    if (!member) throw error("'" + at.text() + "' is only supported on methods inside a class declaration", at);
+                    if (modifiers.putIfAbsent(at.text(), at) != null) throw error("Duplicate " + at.text() + " modifier", at);
+                } else if (at("<")) {
+                    if (genericSeen) throw error("Duplicate method type-parameter list");
+                    generic = readTypeParameters(); genericSeen = true;
+                } else break;
+            }
+            return new DeclarationPrefix(external, generic, modifiers);
+        }
         private int nextFunctionPosition = 1;
         private final Set<String> classNames = new LinkedHashSet<>();
         /** The first definition of every class in {@code script.classes}, by name. */
@@ -1432,8 +1452,8 @@ public class GeneraterJson {
                     if (match("class")) { classDeclaration(); continue; }
                     String owner = qualifiedOwnerAhead();
                     if (owner != null) typeParameters.addAll(classTypeParameters.getOrDefault(owner, List.of()));
-                    boolean external = match("extern"); JsonArray generic = readTypeParameters();
-                    if (!external) external = match("extern");
+                    DeclarationPrefix prefix = declarationPrefix(false);
+                    boolean external = prefix.external(); JsonArray generic = prefix.generic();
                     Token typeStart = current();
                     String first = typeApplication(sourceType(name().text(), true));
                     if (match("::")) {
@@ -1742,6 +1762,8 @@ public class GeneraterJson {
                 if (at(",")) throw error("Multiple inheritance is not supported");
             }
             JsonArray fields = new JsonArray(); JsonObject methods = new JsonObject(), operators = new JsonObject();
+            Map<String,JsonArray> modifiedMethods = new LinkedHashMap<>();
+            for (String modifier : List.of("virtual", "override", "final")) modifiedMethods.put(modifier, new JsonArray());
             definition.add("fields", fields); definition.add("methods", methods); script.classes.add(definition);
             declaredClasses.put(className, definition);
             Set<String> members = new HashSet<>(); boolean constructor = false, destructor = false;
@@ -1752,23 +1774,31 @@ public class GeneraterJson {
                 int memberStart = index;
                 Set<String> classScope = typeParameters; typeParameters = new LinkedHashSet<>(classScope);
                 try {
-                boolean external = match("extern"); JsonArray methodGeneric = readTypeParameters();
-                if (!external) external = match("extern");
+                DeclarationPrefix prefix = declarationPrefix(true);
+                boolean external = prefix.external(); JsonArray methodGeneric = prefix.generic();
+                Token modifier = prefix.modifiers().isEmpty() ? null : prefix.modifiers().values().iterator().next();
+                if (modifier != null && !methodGeneric.isEmpty())
+                    throw error("Methods with virtual modifiers cannot declare their own type parameters", modifier);
                 if (match("~")) {
+                    if (modifier != null) throw error("Virtual modifiers are only supported on ordinary member methods", modifier);
                     if (destructor) throw error("Duplicate destructor for " + className);
                     expect(className);parseFunction(className,"destructor","void","<dtor>",external,true,methodGeneric);
                     definition.addProperty("destructor",className+"::<dtor>");destructor=true;
                 } else if (at(className) && tokens.get(index + 1).text().equals("(")) {
+                    if (modifier != null) throw error("Virtual modifiers are only supported on ordinary member methods", modifier);
                     if (constructor) throw error("Constructor overloading is not supported for " + className);
                     advance();parseFunction(className,"constructor","void","<ctor>",external,true,methodGeneric);
                     definition.addProperty("constructor",className+"::<ctor>");constructor=true;
                 } else {
                     Token start=current();String type=readType(true);String member=methodName();
                     if (!members.add(member)) throw error("Duplicate class member: " + className + "." + member);
-                    if (member.startsWith("<op:") || at("(") && !fieldConstruction()) {
-                        parseFunction(className,"method",type,member,external,true,methodGeneric);
+                    if (modifier != null && (member.startsWith("<op:") || !at("(")))
+                        throw error("Virtual modifiers are only supported on ordinary member methods", modifier);
+                    if (modifier != null || member.startsWith("<op:") || at("(") && !fieldConstruction()) {
+                        parseFunction(className,"method",type,member,external,true,methodGeneric,modifier != null);
                         if (member.startsWith("<op:")) operators.addProperty(operatorKind(member), className+"::"+member);
                         else methods.addProperty(member,className+"::"+member);
+                        for (String name : prefix.modifiers().keySet()) modifiedMethods.get(name).add(member);
                     } else {
                         if (external) throw error("Fields cannot be extern");
                         if (!methodGeneric.isEmpty()) throw error("Fields cannot declare type parameters");
@@ -1792,6 +1822,7 @@ public class GeneraterJson {
             }
             expect("}");match(";");
             if (!operators.isEmpty()) definition.add("operators", operators);
+            for (var entry : modifiedMethods.entrySet()) if (!entry.getValue().isEmpty()) definition.add(entry.getKey() + "-methods", entry.getValue());
             if(!constructor) {
                 AzFunction function=new AzFunction();function.ownerClass=className;function.functionKind="constructor";
                 function.name=className+"::<ctor>";function.returnType="void";function.params.add("this");function.paramTypes.add(selfType(className)+"*");
@@ -1823,6 +1854,9 @@ public class GeneraterJson {
             return "<op:" + kind + ">";
         }
         private void parseFunction(String owner,String kind,String type,String member,boolean external,boolean inClass,JsonArray generic) {
+            parseFunction(owner,kind,type,member,external,inClass,generic,false);
+        }
+        private void parseFunction(String owner,String kind,String type,String member,boolean external,boolean inClass,JsonArray generic,boolean modifiedMember) {
             String qualified=owner==null?member:owner+"::"+member;
             if(Compiler.isBuiltinName(qualified)||owner==null&&classNames.contains(qualified))throw error("Reserved function name: "+qualified);
             AzFunction function=new AzFunction();function.name=qualified;function.ownerClass=owner;function.functionKind=kind;function.returnType=type;
@@ -1901,6 +1935,7 @@ public class GeneraterJson {
                     duplicateExterns.add(new DuplicateExtern(qualified,previous,signature));
                 }
             } else {
+                if (modifiedMember && (at(";") || at("="))) throw error("abstract methods are not supported");
                 if(inClass&&!script.namespaceHint.isEmpty())throw error("Hinted library class functions must use extern declarations and out-of-class definitions");
                 function.explicitPosition=suffix;int enclosingLoop=loopDepth,enclosingSwitch=switchDepth;loopDepth=0;switchDepth=0;
                 JsonElement body;try{body=block();}finally{loopDepth=enclosingLoop;switchDepth=enclosingSwitch;}function.body=()->body;
