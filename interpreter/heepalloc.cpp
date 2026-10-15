@@ -202,6 +202,33 @@ bool is_object_storage(address pointer) {
     auto it=containing(pointer);
     return it!=allocations.end()&&object_allocations.contains(it->startpos);
 }
+void check_object(address pointer,const std::vector<int>& slot_types) {
+    std::lock_guard<std::recursive_mutex> lock(runtime_mutex());
+    if(pointer.value==0)return;
+    std::shared_ptr<slot_block> literal;
+    std::size_t width=0;
+    if(blocks::is_block_address(pointer)) {
+        try {literal=blocks::resolve(pointer);}catch(const std::out_of_range&) {
+            throw std::runtime_error("Object check failed: literal object has expired");
+        }
+        constexpr auto offset_mask=(std::uint64_t{1}<<blocks::offset_bits)-1;
+        if((pointer.value&offset_mask)!=0||literal->state!=slot_block::status::live||literal->buffer)
+            throw std::runtime_error("Object check failed: address is not a live class object start");
+        width=literal->slots.size();
+    } else {
+        const auto object=objects.find(pointer);const auto range=containing(pointer);
+        if(object==objects.end()||range==allocations.end()||range->startpos!=pointer)
+            throw std::runtime_error("Object check failed: address is not a live registered object start");
+        if(object->second.destroying)throw std::runtime_error("Object check failed: object is being destroyed");
+        width=static_cast<std::size_t>(range->len);
+    }
+    if(width<slot_types.size())throw std::runtime_error("Object check failed: object has too few slots");
+    for(std::size_t i=0;i<slot_types.size();++i) {
+        const auto& member=literal?literal->slots[i]:slots[static_cast<std::size_t>(pointer.value)+i];
+        if(slot_types[i]!=ANY_VALUE&&(!member||member->type!=slot_types[i]))
+            throw std::runtime_error("Object check failed: slot "+std::to_string(i)+" has an incompatible type");
+    }
+}
 int resize_heap() {
     std::lock_guard<std::recursive_mutex> lock(runtime_mutex());
     const auto size=allocations.empty()?1:static_cast<int>(allocations.back().startpos.value)+allocations.back().len;

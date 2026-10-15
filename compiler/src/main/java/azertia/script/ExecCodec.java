@@ -102,6 +102,7 @@ public final class ExecCodec {
             VALUE_COMPARE=KeySpec.of("t c context v1 v2",""),
             CONVERSION=KeySpec.of("t c type v",""),
             SELECT=KeySpec.of("t c v then else",""),
+            CHECKED_OBJECT=KeySpec.of("t c v context slot-types",""),
             BINARY=KeySpec.of("t c v1 v2","");
     private static void keys(AcsObject object,KeySpec keys) {
         for(String name:keys.required())if(!object.mmp.containsKey(name)||object.mmp.get(name)==null)throw invalid("missing field "+name);
@@ -129,6 +130,20 @@ public final class ExecCodec {
     }
     private static void conversionType(int type) {
         if(type<0||type>3&&type!=7)throw invalid("invalid conversion target type "+type);
+    }
+    private static void slotType(int type) {
+        if(type<0||type>8||type==5)throw invalid("invalid object slot type "+type);
+    }
+    private static AbdValue slotTypes(AcsElement value,AcsElement context) {
+        AcsArray types=array(value,"slot-types");count(types.acsa.size(),"object slot type count");
+        AcsObject spec=object(context,"context");
+        if(!spec.mmp.containsKey("ref")&&integer(spec,"kind")==3&&types.acsa.size()!=optionalInteger(spec,"width",1))
+            throw invalid("object slot type count must match value context width");
+        List<AbdValue> encoded=new ArrayList<>();
+        for(AcsElement item:types.acsa) {
+            int type=integer(item,"object slot type");slotType(type);encoded.add(n(type));
+        }
+        return stack(encoded);
     }
     private static void scriptId(int id) {
         if(SourceRules.runtimeId(id))throw invalid("invalid script function id "+Diagnostic.hexId(id));
@@ -459,6 +474,11 @@ public final class ExecCodec {
                 keys(object,SELECT);fields.add(expression(object.mmp.get("v"),layout,level+1));
                 fields.add(expression(object.mmp.get("then"),layout,level+1));fields.add(expression(object.mmp.get("else"),layout,level+1));
             }
+            case ExecOpcodes.CHECK_OBJECT -> {
+                keys(object,CHECKED_OBJECT);fields.add(expression(object.mmp.get("v"),layout,level+1));
+                fields.add(context(object.mmp.get("context"),layout,level+1));
+                fields.add(slotTypes(object.mmp.get("slot-types"),object.mmp.get("context")));
+            }
             default -> {
                 if(!binaryOpcode(op))throw invalid("invalid control opcode "+op);
                 keys(object,BINARY);
@@ -491,6 +511,13 @@ public final class ExecCodec {
     private static AcsArray decodeTypes(AbdValue value,int level) {
         Record record=new Record(value,level);count(record.fields.size(),"parameter type count");AcsArray result=new AcsArray();
         while(record.position<record.fields.size())result.acsa.add(new AcsIntegerElement(record.integer()));
+        return result;
+    }
+    private static AcsArray decodeSlotTypes(AbdValue value,int level) {
+        Record record=new Record(value,level);count(record.fields.size(),"object slot type count");AcsArray result=new AcsArray();
+        while(record.position<record.fields.size()) {
+            int type=record.integer();slotType(type);result.acsa.add(new AcsIntegerElement(type));
+        }
         return result;
     }
     private static AcsArray decodeContexts(AbdValue value,int level) {
@@ -660,6 +687,10 @@ public final class ExecCodec {
             case ExecOpcodes.SELECT -> {
                 view.put("v",decodeExpression(record.next(),level+1));view.put("then",decodeExpression(record.next(),level+1));
                 view.put("else",decodeExpression(record.next(),level+1));
+            }
+            case ExecOpcodes.CHECK_OBJECT -> {
+                view.put("v",decodeExpression(record.next(),level+1));view.put("context",decodeContext(record.next(),level+1));
+                view.put("slot-types",decodeSlotTypes(record.next(),level+1));
             }
             default -> {
                 if(!binaryOpcode(op))throw invalid("invalid control opcode "+op);

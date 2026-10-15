@@ -6,7 +6,7 @@
 
 本目录使用 Git 统一管理各模块，默认分支为 `main`。跟踪范围、分支与提交流程、发行标签和远程备份说明见 [版本管理文档](docs/VERSION_CONTROL.md)。
 
-泛型类、函数和方法共享编译后的正文，支持类型推断、单个 extends 上界和参数化继承；类型检查保留在编译器，隐藏操作上下文处理默认值及对象清理。`reflect_invoke_function<R>` 可按实际函数 ID 调用普通入口，两个 hint 查询内置可获取挂载状态和 namespace。泛型入口通过固定类型的普通包装函数供反射或宿主调用，详见 [语言说明](compiler/LANGUAGE.md) 和 [跨模块示例](docs/HINT_LINKING.md)。
+泛型类、函数和方法共享编译后的正文，支持类型推断、单个 extends 上界和参数化继承；类型检查保留在编译器，隐藏操作上下文处理默认值及对象清理。`reflect_invoke_function<R>` 可按实际函数 ID 调用普通入口，并检查对象结果的存活状态/形状，但不证明名义类身份；两个 hint 查询内置可获取挂载状态和 namespace。泛型入口通过固定类型的普通包装函数供反射或宿主调用，详见 [语言说明](compiler/LANGUAGE.md) 和 [跨模块示例](docs/HINT_LINKING.md)。
 
 ## 构建与运行
 

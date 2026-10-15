@@ -81,6 +81,7 @@ stack 的成员数量由其 frame 边界确定；固定记录必须恰好包含�
 | 48 | ushr | `left:E, right:E` |
 | 49 | convert | `type:int, value:E` |
 | 50 | select | `condition:E, then:E, else:E` |
+| 51 | check_object | `value:E, context:Context, slot_types:Stack<int>` |
 
 `if`/`wi`/`select` 的条件，以及 `and`/`or`/`not` 中实际求值的每个操作数，必须为 BOOLEAN_VALUE（4）。数值零/非零与 void 不再表示真假；类型错误时抛出 `Condition must be boolean, got <type>`。`and`/`or` 仍从左到右短路，被跳过的右操作数在运行时不求值也不检查。源码编译还会拒绝静态已知的非布尔操作数，包括降级后的 `for` 条件。
 
@@ -166,6 +167,16 @@ JNI 快照 v9 递归保存对象已绑定的析构上下文，包括 ABI、kind�
 `select` 对条件求值一次并要求 boolean，然后只对选中的分支求值一次并返回其值。非布尔条件会报错，例如实际标签为 int 时报告 `Condition must be boolean, got int`。求值使用当前作用域，不采用 opcode 27 `if` 的分支作用域，也不新增清理边界。选中的拥有临时值和自动指针对象继续遵守原有语句/块生命周期。
 
 源码编译器检查两个分支是否具有兼容的非 void 共同类型，并以 opcode 49 `convert` 包装较窄的数值分支。指针兼容性和指针上界类型参数与 null 的配对在编译期检查；`select` 本身不转换选中值，也不恢复已擦除的类类型。exec 保持 v10，根记录和函数记录不变；消费方须支持 opcode 50。
+
+## 引用检查（opcode 51）
+
+记录严格为 `[51, value:E, context:Context, slot_types:Stack<int>]`；检查 JSON 为 `{"t":0,"c":51,"v":value,"context":context,"slot-types":[tags...]}`。`slot_types` 是直接字段的 ABI 标签，6 表示不检查。值只求值一次，通过检查后原样返回。源码编译只对 `reflect_invoke_function<R>` 的类指针、类值、buffer 或类型参数结果生成此指令，不用于构造或派发检查。
+
+指针接受 null，或尚未进入销毁的活动登记对象起点，或活动的非 buffer 字面量/视图。直接槽数量至少与给定向量一样多，并检查对应前缀中非 6 的标签。具体类值要求活动的非 buffer 对象存储，宽度精确匹配声明，并具有完整匹配的直接槽标签向量。原始分配、已到期值、内部指针、正在销毁的对象及不匹配的宽度/标签以 `Object check failed: ...` 报错。
+
+buffer 元素上下文按 ABI、类别、宽度及递归嵌套的元素上下文匹配，受深度限制；不比较工厂/原地构造 ID 或名义类身份。`R=T` 生成引用上下文和空 slot-types 向量：绑定后运行时检查具体类别和存活状态。绑定的类值须匹配 kind 3 上下文宽度；绑定的指针只检查 null/对象起点/存活状态，因为 kind 2 宽度仍是 address ABI 宽度 1，不包含目标对象布局。未知 T 没有可检查的直接字段标签。指针字段指向的对象始终不做递归验证。因此存储形状匹配不证明类身份或完整内存安全。
+
+上下文沿用既有引用/固定编码，并参与深度及隐藏上下文检查。exec 保持 v10，根及函数字段不变，消费方须支持 opcode 51。
 
 ## 返回值检查
 

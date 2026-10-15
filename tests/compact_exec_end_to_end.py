@@ -24,7 +24,7 @@ OP_NAMES = {3: 'v', 4: 'vd', 5: 'vs', 6: 'm', 7: 'r', 8: 'ro', 9: 'oa',
             32: 'new_block', 33: 'block_address', 34: 'mv', 35: 'drop',
             36: 'context_abi', 37: 'context_default', 38: 'return_typed', 39: 'check_type',
             40: 'buffer_new', 41: 'buffer_op', 42: 'value_compare',
-            43: 'bit_and', 44: 'bit_or', 45: 'bit_xor', 46: 'shl', 47: 'shr', 48: 'ushr', 49: 'convert', 50: 'select'}
+            43: 'bit_and', 44: 'bit_or', 45: 'bit_xor', 46: 'shl', 47: 'shr', 48: 'ushr', 49: 'convert', 50: 'select', 51: 'check_object'}
 EXEC_VERSION = 10
 
 
@@ -273,6 +273,8 @@ def encode_compact_expression(value):
         fields = [integer(value['type']), child('v')]
     elif opcode == 50:
         fields = [child('v'), child('then'), child('else')]
+    elif opcode == 51:
+        fields = [child('v'), encode_context(value['context']), stack(*(integer(kind) for kind in value['slot-types']))]
     else:
         assert opcode in (29, 30)
         fields = []
@@ -484,6 +486,14 @@ class WireReader:
         elif opcode == 50:
             assert len(fields) == 3
             result.update(v=self.expression(fields[0]), then=self.expression(fields[1]), **{'else': self.expression(fields[2])})
+        elif opcode == 51:
+            assert len(fields) == 3
+            kinds = [int_value(kind) for kind in frames(fields[2])]
+            assert all(0 <= kind <= 8 and kind != 5 for kind in kinds)
+            context = self.context(fields[1])
+            if context.get('kind') == 3:
+                assert len(kinds) == context['width']
+            result.update(v=self.expression(fields[0]), context=context, **{'slot-types': kinds})
         else:
             assert opcode in (29, 30) and not fields
         return result
@@ -723,6 +733,15 @@ def main():
         assert encode_compact_module(switch_view) == switched.read_bytes(), 'independent lowered-switch reconstruction'
         run([args.runner, switched], '42\n')
 
+        checked_source = '''#namespace 1234
+            class Item{int value=7;}Item* produce():0070{return new Item();}
+            int main(){Item* item=reflect_invoke_function<Item*>(305397872);int result=item.value;delete item;return result;}'''
+        checked, _, _ = compile_source('checked-reflection-coverage', checked_source)
+        checked_reader = WireReader();checked_view = checked_reader.read(checked.read_bytes())
+        assert 51 in checked_reader.opcodes, checked_reader.opcodes
+        assert encode_compact_module(checked_view) == checked.read_bytes(), 'independent checked-reference reconstruction'
+        run([args.runner, checked], '7\n')
+
         minimum = module([function(block(returning(constant(42))))])
         checks = 0
 
@@ -913,6 +932,46 @@ def main():
                                  ('wrong-type', [constant(True)]), ('negative', [constant(-1)])]:
             execute_wire('object-allocator-' + label, module([function(returning(wire_call(0x0abd0014, *arguments)), return_type=7)]), invalid=True)
 
+        def checked_reference(value, context, kinds):
+            return expression(51, value, encode_context(context), stack(*(integer(kind) for kind in kinds)))
+
+        pointer_context = {'abi': 7, 'kind': 2, 'width': 1}
+        null_check = checked_reference(constant(Address(0)), pointer_context, [0, 1])
+        execute_wire('check-object-null-pointer', module([function(returning(null_check), return_type=7)]), expected='0\n')
+        tagged_setup = [allocation, expression(6, field(0), constant(7)), expression(6, field(1), constant('field')), bind_manual]
+        good_check = checked_reference(pointer, pointer_context, [0, 1])
+        preserve = expression(4, integer(1), integer(4), b'\1', expression(19, good_check, pointer))
+        body = block(*tagged_setup, preserve, expression(11, pointer), returning(expression(3, integer(1))))
+        fields = module([function(body, return_type=4, locals_count=2)])
+        payload = frame(stack(*fields));assert encode_compact_module(WireReader().read(payload)) == payload
+        execute_wire('check-object-registered-pointer', fields, expected='true\n')
+        for label, setup, context, kinds in [
+                ('raw', [raw_allocation], pointer_context, [0, 1]),
+                ('unregistered', tagged_setup[:-1], pointer_context, [0, 1]),
+                ('wrong-tag', tagged_setup, pointer_context, [1, 0]),
+                ('too-small', tagged_setup, pointer_context, [0, 1, 0]),
+                ('freed', tagged_setup + [expression(11, pointer)], pointer_context, [0, 1])]:
+            body = block(*setup, returning(checked_reference(pointer, context, kinds)))
+            execute_wire('check-object-' + label, module([function(body, return_type=7, locals_count=1)]),
+                         invalid=True, error='Object check failed:')
+        value_context = {'abi': 8, 'kind': 3, 'width': 1}
+        live_value = expression(4, integer(0), integer(8), b'\1', expression(32, integer(1)))
+        live_member = wire_call(0x0abd0006, expression(9, expression(33, pointer), integer(0)))
+        body = block(live_value, expression(6, live_member, constant(17)),
+                     checked_reference(pointer, value_context, [0]), returning(live_member))
+        execute_wire('check-object-literal-value', module([function(body, locals_count=1)]), expected='17\n')
+        for label, context, kinds in [('value-width', {'abi': 8, 'kind': 3, 'width': 2}, [0, 0]),
+                                      ('value-tag', value_context, [1])]:
+            body = block(live_value, expression(6, live_member, constant(17)), checked_reference(pointer, context, kinds))
+            execute_wire('check-object-' + label, module([function(body, return_type=5, locals_count=1)]), invalid=True, error='Object check failed:')
+        buffer_context = {'abi': 8, 'kind': 4, 'width': 1, 'element': {'abi': 0, 'kind': 0}}
+        new_buffer = expression(40, encode_context({'abi': 0, 'kind': 0}))
+        good_buffer = checked_reference(new_buffer, buffer_context, [])
+        execute_wire('check-object-buffer', module([function(block(good_buffer, returning()), return_type=5)]), expected='')
+        wrong_buffer = {**buffer_context, 'element': {'abi': 1, 'kind': 0}}
+        execute_wire('check-object-buffer-context', module([function(block(checked_reference(new_buffer, wrong_buffer, [])), return_type=5)]),
+                     invalid=True, error='Object check failed:')
+
         mutations = [('root-missing', minimum[:-1]), ('root-extra', minimum + [b''])]
         for index, value, label in [(0, b'AZSCRIPX', 'magic'), (1, integer(5), 'version'), (1, integer(6), 'address-only-version'), (1, integer(7), 'literal-only-version'), (1, integer(8), 'v8-version'), (1, integer(9), 'previous-version'),
                 (1, b'\4', 'version-width'), (2, b'\2', 'source-version-width'),
@@ -1051,6 +1110,19 @@ def main():
                               ('then-child', (constant(False), stack(b'\0'), constant(2))),
                               ('else-child', (constant(True), constant(1), stack(b'\0')))]:
             bad_expressions['select-' + label] = expression(50, *fields)
+        valid_check_context = encode_context({'abi': 7, 'kind': 2, 'width': 1})
+        for label, fields in [('missing', ()), ('value-only', (constant(Address(0)),)),
+                              ('missing-slots', (constant(Address(0)), valid_check_context)),
+                              ('extra', (constant(Address(0)), valid_check_context, stack(integer(0)), constant(1))),
+                              ('slot-width', (constant(Address(0)), valid_check_context, stack(b'\0'))),
+                              ('slot-negative', (constant(Address(0)), valid_check_context, stack(integer(-1)))),
+                              ('slot-unknown', (constant(Address(0)), valid_check_context, stack(integer(99)))),
+                              ('slot-void', (constant(Address(0)), valid_check_context, stack(integer(5)))),
+                              ('malformed-value', (stack(b'\0'), valid_check_context, stack(integer(0))))]:
+            bad_expressions['check-object-' + label] = expression(51, *fields)
+        for count in (0, 1, 3):
+            context = encode_context({'abi': 8, 'kind': 3, 'width': 2})
+            bad_expressions[f'check-object-value-slot-count-{count}'] = expression(51, constant(Address(0)), context, stack(*(integer(0) for _ in range(count))))
         for label, body in bad_expressions.items():
             execute_wire(label, module([function(body)]), invalid=True)
         complete = frame(stack(*minimum))

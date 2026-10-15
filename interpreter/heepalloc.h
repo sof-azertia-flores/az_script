@@ -27,6 +27,8 @@ address alloc(int size);
 address object_alloc(int size);
 // Includes tagged range interiors and literal/view addresses.
 bool is_object_storage(address pointer);
+// Reflection checks liveness and direct ABI tags, never nominal class identity.
+void check_object(address pointer,const std::vector<int>& slot_types);
 bool free(address startpos);
 std::shared_ptr<variable> getAt(address pointer);
 // Raw slot access is for snapshots only; getAt checks allocation membership.

@@ -81,6 +81,7 @@ Each expression is also a raw stack, beginning with an int32 opcode. `E` denotes
 | 48 | ushr | `left:E, right:E` |
 | 49 | convert | `type:int, value:E` |
 | 50 | select | `condition:E, then:E, else:E` |
+| 51 | check_object | `value:E, context:Context, slot_types:Stack<int>` |
 
 `if`/`wi`/`select` conditions and every evaluated operand of `and`/`or`/`not` must have BOOLEAN_VALUE (4). Numeric zero/nonzero and void are not truth values; a wrong tag throws `Condition must be boolean, got <type>`. `and`/`or` remain left-to-right and short-circuit, so a skipped right operand is not evaluated or checked at runtime. Source compilation also rejects statically known non-boolean operands, including the lowered `for` condition.
 
@@ -166,6 +167,16 @@ The record is exactly `[50, condition:E, then:E, else:E]`. All three child expre
 `select` evaluates the condition once and requires a boolean, then evaluates only the selected arm once and returns its value. A non-boolean condition fails with `Condition must be boolean, got int` when its tag is int. Evaluation uses the current scope rather than the branch scopes of opcode 27 `if`; selection adds no cleanup boundary. Selected owned temporaries and automatic pointer objects retain their ordinary statement/block lifetimes.
 
 The source compiler checks both arms for a compatible non-void common type and inserts opcode 49 `convert` around narrower numeric arms. Pointer compatibility and pointer-bound type parameters with null are compile-time checks; `select` itself does not convert the selected value or recover erased class types. Exec stays v10, with unchanged root/function records; consumers must support opcode 50.
+
+## Checked references (opcode 51)
+
+The exact record is `[51, value:E, context:Context, slot_types:Stack<int>]`; inspection JSON is `{"t":0,"c":51,"v":value,"context":context,"slot-types":[tags...]}`. `slot_types` contains direct-field ABI tags, with 6 meaning unchecked. The value is evaluated once and returned unchanged after validation. Source compilation emits this only around `reflect_invoke_function<R>` results for class pointers, class values, buffers, or type parameters; it is not a construction or dispatch check.
+
+A pointer accepts null or the start of a live registered, non-destroying object or a live non-buffer literal/view. It requires at least as many direct slots as the supplied vector and checks that prefix's non-6 tags. A concrete class value requires live non-buffer object storage of exactly the declared width and a full matching direct-slot vector. Raw allocations, expired values, interior pointers, destroying objects, and mismatched widths/tags fail with `Object check failed: ...`.
+
+For a buffer, element contexts must match by ABI, kind, width, and recursively nested element context under the depth bound. Factory/placement IDs and nominal class identity are not compared. `R=T` emits a reference context with an empty slot-types vector: after binding, runtime checks the concrete kind and liveness. A bound class value must match its kind-3 context width; a bound pointer only checks null/object-start/liveness, because kind-2 width remains the address ABI width 1 and contains no pointee layout. Unknown T has no direct-field tags to check. Pointer-field targets are never recursively validated. Matching storage shape therefore does not establish class identity or complete memory safety.
+
+The context uses the existing reference/fixed encoding and participates in its depth and hidden-context checks. Exec stays v10; no root or function fields change, and consumers must support opcode 51.
 
 ## Return-value checks
 

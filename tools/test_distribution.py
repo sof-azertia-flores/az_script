@@ -18,7 +18,7 @@ EXECUTABLE_SUFFIX = ".exe" if WINDOWS else ""
 EXEC_VERSION = 10
 # Constants, blocks and calls use other JSON representations (wire opcodes 0–2).
 # The unit suite checks this set against the compiler's opcode registry.
-CONTROL_OPCODES = frozenset(range(3, 51))
+CONTROL_OPCODES = frozenset(range(3, 52))
 
 
 def _require(condition: bool, message: str) -> None:
@@ -484,6 +484,7 @@ class Number {
 }
 <T> T invoke(int id, T value) { return reflect_invoke_function<T>(id, value); }
 int increment(int value):0042 { return value + 1; }
+Item* checked_item():0070 { return new Item(); }
 int main() {
     drops = 0;
     {
@@ -549,6 +550,9 @@ int main() {
     Item* closed = new Item(); closed.value = 9;
     if (closed.value != 9 || address(closed) != address(closed)) return -45;
     delete closed;
+    Item* checked = reflect_invoke_function<Item*>(305397872);
+    if (checked.value != 7) return -46;
+    delete checked;
     return invoke<int>(305397826, values[0]) + value_compare<string>("b", "a");
 }
 ''', encoding="utf-8")
@@ -582,6 +586,7 @@ int main() {
                  "String probe must exercise all nine Unicode string builtins")
         _require(0x0abd0014 in set(builtin_calls(modern_view["f"])),
                  "Heap object construction must use the tagged internal object allocator")
+        _require(51 in modern_opcodes, "Class reflection must emit checked references")
         modern_roundtrip = modern_abd.with_name("features.roundtrip.abd")
         _run([compiler, "compile-json", modern_ast, "-o", modern_roundtrip], cwd, compiler_environment)
         _require(modern_abd.read_bytes() == modern_roundtrip.read_bytes(),

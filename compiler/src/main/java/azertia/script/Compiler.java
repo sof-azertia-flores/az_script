@@ -1801,7 +1801,20 @@ public class Compiler {
         if(type==AsTypes.ANY_VALUE||isFlexibleClass(type))throw new IllegalArgumentException("Invalid reflection return type");return type;
     }
     private static AcsElement compileReflection(JsonObject source,LogicEnvironment environment) {
-        int returns=reflectionType(source,environment);JsonArray params=parameters(source);arity("reflect_invoke_function",params,1,Integer.MAX_VALUE);
+        int returns=reflectionType(source,environment);
+        if (!isClass(returns) && !isBuffer(returns) && !isTypeParameter(returns)) return compileReflectionCall(source,returns,environment);
+        AcsObject checked=new AcsObject();checked.put("t",0);checked.put("c",ExecOpcodes.CHECK_OBJECT);
+        checked.put("v",withDepth(1,()->compileReflectionCall(source,returns,environment)));
+        checked.put("context",context(returns,environment,0));
+        AcsArray slots=new AcsArray();
+        if(isClass(returns)) {
+            ClassInfo info=CLASS_LAYOUTS.get().get(returns);ensureLayout(info);
+            for(Field field:info.fields)slots.acsa.add(new AcsIntegerElement(isTypeParameter(field.type())?AsTypes.ANY_VALUE:abiType(field.type())));
+        }
+        checked.put("slot-types",slots);return checked;
+    }
+    private static AcsElement compileReflectionCall(JsonObject source,int returns,LogicEnvironment environment) {
+        JsonArray params=parameters(source);arity("reflect_invoke_function",params,1,Integer.MAX_VALUE);
         requireKnownExact("Reflection function ID",AsTypes.INT_VALUE,expressionType(params.get(0),environment));
         AcsObject result=new AcsObject();result.put("t",1);result.put("id",0x0abd0008);
         AcsArray args=new AcsArray();

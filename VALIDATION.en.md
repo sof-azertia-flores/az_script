@@ -1,3 +1,11 @@
+# C23 Checked Reflection Results (2026-10-15)
+
+[中文](VALIDATION.md) | English
+
+Opcode51 checks class pointer/value, buffer and type-parameter reflection results. Concrete pointers require null or a live registered/literal object start and matching known prefix tags. Class values require exact runtime width; buffers compare structural element contexts. Unknown generic pointers check liveness only. Nominal identity and pointer-field targets remain unchecked, as documented. Exec remains v10 and snapshots v9.
+
+V0–V3 passed sequentially with JAVA_TOOL_OPTIONS unset:275 Java tests and5837 native checks in both builds;90 ordinary/81 sanitizer generic/reflection cases;354 independent wire cases and119 address cases in each build. Existing JNI/module/lifetime suites passed without ASan/UBSan reports. Independent review found no production blocker. A shadowing local in a new native fixture and a missing parenthesis in a new Java fixture were corrected before complete validation. Export passed26 relocation/consumer checks; all174 manifest file sizes/SHA-256 digests matched. Logs: build/c23/v1.log,build/c23/v2.log,build/c23/v3.log.
+
 # C22 Typed Pointers and Object Storage (2026-10-15)
 
 [中文](VALIDATION.md) | English

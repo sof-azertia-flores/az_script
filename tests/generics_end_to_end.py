@@ -149,6 +149,45 @@ def main():
             Point make():0042{{Point p(8);return p;}}
             <T> T invoke(int id){{return reflect_invoke_function<T>(id);}}
             void main(){{Point p=invoke<Point>({REFLECT_TARGET});print(p.x);}}''', '8\n~8\n')
+        # Reflection may erase source class names, but must retain live storage and ABI tags.
+        checked_prefix = '#namespace 1234\nclass Expected{int x;string text;}\n'
+        checked_failures = {
+            'raw': 'address target():0042{address p=alloc(2);mem_send_up(p);return p;}',
+            'unregistered': 'address target():0042{return address(alloc(2));}',
+            'wrong-tag': 'class Wrong{string x;int text;}Wrong* target():0042{Wrong* p();return p;}',
+            'too-small': 'class Small{int x;}Small* target():0042{Small* p();return p;}',
+            'freed': 'address target():0042{Expected* p=new Expected();address raw=address(p);delete p;return raw;}',
+        }
+        for label, factory in checked_failures.items():
+            name = 'reflection-object-check-' + label
+            artifact = execute(name, checked_prefix + factory + f'void main(){{Expected* p=reflect_invoke_function<Expected*>({REFLECT_TARGET});}}',
+                               error='Object check failed:')
+            if artifact and args.host and not args.compile_only:
+                result = command([args.host, artifact[0], 'flush', 'reject-call', MAIN, '0', 'heap-empty'])
+                assert result.returncode == 0 and result.stdout == 'rejected\nempty\n' and not result.stderr, (name, result.stdout, result.stderr)
+                checks += 1
+        execute('reflection-object-check-null', checked_prefix + f'address target():0042{{return null;}}'
+                f'void main(){{Expected* p=reflect_invoke_function<Expected*>({REFLECT_TARGET});print(p==null);}}', 'true\n')
+        execute('reflection-layout-not-nominal', '#namespace 1234\nclass Left{int x=17;}class Right{int x;}\n'
+                f'Left* target():0042{{Left* p();return p;}}void main(){{Right* p=reflect_invoke_function<Right*>({REFLECT_TARGET});print(p.x);}}', '17\n')
+        execute('reflection-live-literal-pointer', '#namespace 1234\nclass Item{int x=19;Item* self(){return this;}}\n'
+                f'address target(address p):0042{{return p;}}void main(){{Item value;Item* p=reflect_invoke_function<Item*>({REFLECT_TARGET},address(value.self()));print(p.x);}}', '19\n')
+        execute('reflection-value-wrong-tag', '#namespace 1234\nclass Left{string x;}class Right{int x;}\n'
+                f'Left target():0042{{Left value;return value;}}void main(){{Right value=reflect_invoke_function<Right>({REFLECT_TARGET});}}', error='Object check failed:')
+        execute('reflection-buffer-element-check', '#namespace 1234\n'
+                f'buffer<string> target():0042{{buffer<string> value;return value;}}void main(){{buffer<int> value=reflect_invoke_function<buffer<int>>({REFLECT_TARGET});}}', error='Object check failed:')
+        execute('reflection-generic-wide-value', '#namespace 1234\nclass Pair{int first=17;string second="wide";}\n'
+                f'Pair target():0042{{Pair value;return value;}}<T> T invoke(){{return reflect_invoke_function<T>({REFLECT_TARGET});}}'
+                'void main(){Pair value=invoke<Pair>();print(value.first);print(value.second);}', '17\nwide\n')
+        execute('reflection-generic-primitive-abi', '#namespace 1234\n'
+                f'int target():0042{{return 17;}}<T> T invoke(){{return reflect_invoke_function<T>({REFLECT_TARGET});}}'
+                'void main(){print(invoke<int>());}', '17\n')
+        execute('reflection-generic-address-abi', '#namespace 1234\n'
+                f'address target():0042{{return null;}}<T> T invoke(){{return reflect_invoke_function<T>({REFLECT_TARGET});}}'
+                'void main(){print(invoke<address>()==null);}', 'true\n')
+        execute('reflection-generic-pointer-liveness', checked_prefix + checked_failures['freed'] +
+                f'<T> T invoke(){{return reflect_invoke_function<T>({REFLECT_TARGET});}}void main(){{Expected* p=invoke<Expected*>();}}', error='Object check failed:')
+
         execute('reflection-left-to-right', f'''#namespace 1234
             #gvar order
             int target(){{order=order*10+1;return {REFLECT_TARGET};}}

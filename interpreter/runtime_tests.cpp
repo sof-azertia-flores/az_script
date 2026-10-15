@@ -810,6 +810,116 @@ void runtime_trace_tests() {
     check(shutdown->closed&&owned->state==slot_block::status::dead,"shutdown finishes owned values after a pre-destroy failure");
     clear_error_trace();
 }
+void checked_object_tests() {
+    auto checked=[](R value,R context,std::initializer_list<int> types={}) {
+        AbdStack tags;for(int type:types)tags.vs.push_back(ri(type));
+        return rx(51,{std::move(value),std::move(context),tags.toAbdValue()});
+    };
+    const auto cp=cfixed(ADDRESS_VALUE,2),ci=cfixed(INT_VALUE,0);
+    const auto cv=replace_raw(cfixed(OBJECT_VALUE,3),3,ri(2));
+    constexpr int callback_id=0x6cc10001;
+    auto callback=std::make_shared<test_executor>(0x6cc1);bool checked_destroying=false;
+    callback->functions[callback_id]=std::make_shared<test_function>(VOID_VALUE,[&](const std::vector<V>& args) {
+        rejects_message([&]{heap::check_object(pointer(args[0]),{});},"Object check failed: object is being destroyed",
+                        "checked reflection rejects an object during its destructor");
+        checked_destroying=true;return std::make_shared<variable>(nullptr);
+    });
+    registered_executor registered(callback);
+    auto pointer_function=append_raw(replace_raw(rfn(900,ADDRESS_VALUE,rreturn(checked(rvar(0),cp,{INT_VALUE,STRING_VALUE})),0,{ANY_VALUE}),8,rb(true)),
+        raw({rs("checkedPointer"),ri(0),ri(10),ri(1),raw({ri(1),ri(0),ri(12),ri(7)})}));
+    auto module=rmodule({pointer_function,
+        rfn(901,OBJECT_VALUE,rreturn(checked(rvar(0),cv,{INT_VALUE,STRING_VALUE})),0,{ANY_VALUE}),
+        rfn(902,OBJECT_VALUE,rreturn(checked(rvar(0),buffer_context(ci))),0,{ANY_VALUE}),
+        gfn(903,ANY_VALUE,greturn(checked(rvar(0),cref(0)),cref(0)),1,0,{ANY_VALUE}),
+        rfn(904,ADDRESS_VALUE,rreturn(checked(rvar(0),cp,{ANY_VALUE,STRING_VALUE})),0,{ANY_VALUE}),
+        rfn(905,VOID_VALUE,rcall(callback_id,{rvar(0)}),0,{ADDRESS_VALUE}),
+        gfn(906,VOID_VALUE,rblock({}),0,0,{ADDRESS_VALUE},1),
+        rfn(907,ADDRESS_VALUE,rblock({rdef(0,rcall(0x0abd0014,{rc(n(2))})),rreturn(checked(rvar(0),cp))}),1),
+    },0,raw({rsignature(callback_id,VOID_VALUE,{ADDRESS_VALUE})}));
+    auto program=load_raw(replace_raw(module,10,raw({rs("checks.azs")})));
+    auto env=program->baseEnv;
+    const auto at=[](address value){return std::make_shared<variable>(value);};
+    const auto object=[&](int width,std::optional<int> destructor={}) {
+        const address pointer=heap::object_alloc(width);heap::set_owner(pointer,env.get());env->owned_pointer.push_back(pointer);
+        heap::register_object(pointer,destructor,true,env);return pointer;
+    };
+    const auto fails=[&](int id,V value,const std::string& message) {
+        bool caught=false;try {program->invoke(id,{std::move(value)});}catch(const std::runtime_error& error) {
+            caught=true;check(typeid(error)==typeid(std::runtime_error)&&error.what()==message,"checked reflection raises the stable runtime error");
+        }
+        check(caught,"malformed reflected values fail before use");
+    };
+    check(pointer(program->invoke(900,{at(address{})}))==address{},"checked pointer results admit null");
+    const auto live=object(3);heap::getAt(live)->setValue(7);heap::getAt(address{live.value+1})->setValue(std::string("field"));
+    check(pointer(program->invoke(900,{at(live)}))==live,"checked pointers admit a registered wider object with compatible prefix");
+    heap::getAt(live)->setValue(true);
+    check(pointer(program->invoke(904,{at(live)}))==live,"unchecked ABI6 fields do not impose a tag");
+    fails(900,at(live),"Object check failed: slot 0 has an incompatible type");heap::getAt(live)->setValue(7);
+    const auto raw_pointer=heap::alloc(3);
+    fails(900,at(raw_pointer),"Object check failed: address is not a live registered object start");heap::free(raw_pointer);
+    const auto incomplete=heap::object_alloc(2);
+    fails(900,at(incomplete),"Object check failed: address is not a live registered object start");heap::free(incomplete);
+    const auto small=object(1);heap::getAt(small)->setValue(7);
+    fails(900,at(small),"Object check failed: object has too few slots");
+    fails(900,at(address{live.value+1}),"Object check failed: address is not a live registered object start");
+    fails(900,std::make_shared<variable>(7),"Object check failed: value has an incompatible type");
+    auto literal=blocks::create(3,program);literal->slots[0]->setValue(7);literal->slots[1]->setValue(std::string("field"));
+    const auto literal_pointer=blocks::address_of(literal);
+    check(pointer(program->invoke(900,{at(literal_pointer)}))==literal_pointer,"checked pointers admit live literal object starts");
+    fails(900,at(address{literal_pointer.value+1}),"Object check failed: address is not a live class object start");
+    literal->state=slot_block::status::destroying;
+    fails(900,at(literal_pointer),"Object check failed: address is not a live class object start");literal->state=slot_block::status::live;
+    const auto expired=blocks::address_of(blocks::create(2,program));
+    fails(900,at(expired),"Object check failed: literal object has expired");
+    auto value=blocks::create(2,program);value->slots[0]->setValue(7);value->slots[1]->setValue(std::string("field"));
+    auto value_result=program->invoke(901,{std::make_shared<variable>(value)});
+    check(blocks::of(value_result)->slots.size()==2&&integer(blocks::of(value_result)->slots[0])==7,"checked class values retain compatible slots and ownership");
+    fails(901,std::make_shared<variable>(literal),"Object check failed: class value width mismatch");
+    value->slots[1]->setValue(false);fails(901,std::make_shared<variable>(value),"Object check failed: slot 1 has an incompatible type");value->slots[1]->setValue(std::string("field"));
+    auto int_type=std::make_shared<type_context>();int_type->abi=INT_VALUE;
+    auto string_type=std::make_shared<type_context>();string_type->abi=STRING_VALUE;
+    auto buffer=blocks::create_buffer(int_type,program);
+    check(static_cast<bool>(blocks::of(program->invoke(902,{std::make_shared<variable>(buffer)}))->buffer),"checked buffers accept equal element layouts");
+    fails(902,std::make_shared<variable>(blocks::create_buffer(string_type,program)),"Object check failed: buffer element context mismatch");
+    fails(902,std::make_shared<variable>(value),"Object check failed: buffer element context mismatch");
+    fails(900,at(blocks::address_of(buffer)),"Object check failed: address is not a live class object start");
+    auto class_type=std::make_shared<type_context>();class_type->abi=OBJECT_VALUE;class_type->kind=3;class_type->width=2;
+    const auto generic=[&](V input,const std::shared_ptr<const type_context>& type) {
+        return invoke_bound_function(program,903,env,{std::move(input)},{type});
+    };
+    check(blocks::of(generic(std::make_shared<variable>(value),class_type))->slots.size()==2,
+          "unknown generic class values use runtime context width even with an empty tag list");
+    rejects_message([&]{generic(std::make_shared<variable>(literal),class_type);},"Object check failed: class value width mismatch","generic class values reject incompatible runtime widths");
+    check(integer(generic(std::make_shared<variable>(19),int_type))==19,"generic primitive checks retain exact ABI identity");
+    rejects_message([&]{generic(std::make_shared<variable>(false),int_type);},"Object check failed: value has an incompatible type","generic primitive ABI mismatch is checked");
+    auto pointer_type=std::make_shared<type_context>();pointer_type->abi=ADDRESS_VALUE;pointer_type->kind=2;
+    check(pointer(generic(at(small),pointer_type))==small,"unknown generic pointers check liveness without an unknown static layout");
+    rejects_containing([&]{generic(at(address{live.value+1}),pointer_type);},"Object check failed:","generic pointer liveness rejects interior addresses");
+    auto different_class_type=std::make_shared<type_context>(*class_type);different_class_type->placement_id=906;
+    auto buffer_type=std::make_shared<type_context>();buffer_type->abi=OBJECT_VALUE;buffer_type->kind=4;buffer_type->element=class_type;
+    auto same_layout=blocks::create_buffer(different_class_type,program);
+    check(static_cast<bool>(blocks::of(generic(std::make_shared<variable>(same_layout),buffer_type))->buffer),
+          "buffer checks compare layout and intentionally ignore placement identity");
+    const auto destroying=object(2,905);heap::getAt(destroying)->setValue(7);heap::getAt(address{destroying.value+1})->setValue(std::string("field"));
+    heap::delete_object(destroying,env);check(checked_destroying,"registered destroying objects cannot pass reflection checks");
+    heap::delete_object(live,env);fails(900,at(live),"Object check failed: address is not a live registered object start");
+    bool located=false;try {program->invoke(900,{std::make_shared<variable>(1)});}catch(const std::runtime_error& error) {
+        located=true;check(describe_error(error)=="Object check failed: value has an incompatible type\n  at checkedPointer (checks.azs:12:7)","check_object errors use their own source position");
+    }
+    check(located,"checked pointer source error propagates");
+    rejects_containing([&]{program->invoke(907);},"Object check failed:","reflection rejects objects before construction completes");
+    program->destroy();check(heap::lenAlloc()==0,"rejected reflected results preserve cleanup and leave the heap empty");
+    const auto valid=checked(rc(ptr(0)),cp,{INT_VALUE});
+    AbdStack fields(valid);
+    for(std::size_t count=1;count<fields.vs.size();++count) {
+        AbdStack truncated;truncated.vs.assign(fields.vs.begin(),fields.vs.begin()+static_cast<std::ptrdiff_t>(count));
+        rejects([&]{load_raw(rmodule({rfn(950,VOID_VALUE,truncated.toAbdValue())}));},"check_object rejects missing fields");
+    }
+    for(auto malformed:{append_raw(valid,ri(0)),replace_raw(valid,3,raw({ri(-1)})),replace_raw(valid,3,raw({ri(5)})),replace_raw(valid,3,raw({ri(9)})),
+                        replace_raw(valid,3,raw({rb(true)})),replace_raw(valid,2,cref(0)),
+                        checked(rx(32,{ri(2)}),cv),checked(rx(32,{ri(2)}),cv,{INT_VALUE})})
+        rejects([&]{load_raw(rmodule({rfn(950,VOID_VALUE,malformed)}));},"check_object rejects malformed tags, contexts and extra fields");
+}
 void object_storage_tests() {
     auto field=[](R base,int offset=0){return rcall(0x0abd0006,{rx(9,{std::move(base),ri(offset)})});};
     auto program=load_raw(rmodule({
@@ -1635,6 +1745,7 @@ void boolean_condition_equality_tests() {
     program->destroy();
 }
 int main(){try{
+    checked_object_tests();
     object_storage_tests();
     string_tests();
     select_tests();
@@ -2060,7 +2171,7 @@ int main(){try{
         auto twenty=rc(n(20));auto zero=rc(n(0));
         auto compact=load_raw(rmodule({rfn(10,INT_VALUE,rx(7,{rb(true),rx(12,{twenty,rc(n(22))})}))}));
         check(integer(compact->invoke(10))==42,"raw exec directly executes native arithmetic expressions");
-        for(int opcode=0;opcode<=50;++opcode)if(opcode!=29&&opcode!=30)
+        for(int opcode=0;opcode<=51;++opcode)if(opcode!=29&&opcode!=30)
             rejects([&]{load_raw(rmodule({rfn(10,VOID_VALUE,rx(opcode))}));},"exec opcode rejects missing fields");
         auto byte=[](unsigned char value){return std::make_shared<AbdValue>(&value,1);};
         const unsigned char bad_text[]={0xed,0xa0,0x80};

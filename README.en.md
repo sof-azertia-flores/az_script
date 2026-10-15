@@ -6,7 +6,7 @@ This edition rebuilds the compiler's lexer, recursive-descent parser, symbol res
 
 Git manages all modules together, with main as the default branch. See [version control](docs/VERSION_CONTROL.en.md) for tracked files, branches, commits, release tags, and remote backups.
 
-Generic classes, functions, and methods share compiled bodies, with type inference, a single extends bound, and parameterized inheritance. Compile-time checking and hidden operation contexts preserve defaults and object cleanup. `reflect_invoke_function<R>` calls ordinary entries by actual function ID; hint queries expose mount status and namespace. Expose generics to reflection or hosts through ordinary wrappers with fixed type arguments. See the [language guide](compiler/LANGUAGE.en.md) and [cross-module examples](docs/HINT_LINKING.en.md).
+Generic classes, functions, and methods share compiled bodies, with type inference, a single extends bound, and parameterized inheritance. Compile-time checking and hidden operation contexts preserve defaults and object cleanup. `reflect_invoke_function<R>` calls ordinary entries by actual function ID and checks object-result liveness/shape without proving nominal class identity; hint queries expose mount status and namespace. Expose generics to reflection or hosts through ordinary wrappers with fixed type arguments. See the [language guide](compiler/LANGUAGE.en.md) and [cross-module examples](docs/HINT_LINKING.en.md).
 
 ## Build and run
 

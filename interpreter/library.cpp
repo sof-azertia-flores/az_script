@@ -902,6 +902,40 @@ public:
         mark_returned(env,std::move(result));return nil();
     }
 };
+bool same_context_layout(const std::shared_ptr<const type_context>& a,const std::shared_ptr<const type_context>& b,std::size_t depth=0) {
+    if(!a||!b||depth>=128)return false;
+    return a->abi==b->abi&&a->kind==b->kind&&a->width==b->width&&
+        (a->kind!=4||same_context_layout(a->element,b->element,depth+1));
+}
+class check_object_expression final:public expression {
+    std::shared_ptr<expression> value;
+    std::shared_ptr<context_spec> context;
+    std::vector<int> slot_types;
+public:
+    check_object_expression(std::shared_ptr<expression> value,std::shared_ptr<context_spec> context,std::vector<int> slot_types)
+        :value(std::move(value)),context(std::move(context)),slot_types(std::move(slot_types)) {}
+    V execute(E env) override {
+        tick(env);auto result=run(value,env);auto bound=bind_context(context,env);
+        if(!result||result->type!=bound->abi)throw std::runtime_error("Object check failed: value has an incompatible type");
+        if(bound->kind==2)heap::check_object(*static_cast<address*>(result->value),slot_types);
+        else if(bound->kind==3||bound->kind==4) {
+            auto block=blocks::of(result);
+            if(!block||block->state!=slot_block::status::live)throw std::runtime_error("Object check failed: value object has expired");
+            if(bound->kind==4) {
+                if(!block->buffer||!same_context_layout(bound->element,block->buffer->element))
+                    throw std::runtime_error("Object check failed: buffer element context mismatch");
+            } else {
+                if(block->buffer||block->slots.size()!=static_cast<std::size_t>(bound->width)||
+                   (!slot_types.empty()&&block->slots.size()!=slot_types.size()))
+                    throw std::runtime_error("Object check failed: class value width mismatch");
+                for(std::size_t i=0;i<slot_types.size();++i)
+                    if(slot_types[i]!=ANY_VALUE&&(!block->slots[i]||block->slots[i]->type!=slot_types[i]))
+                        throw std::runtime_error("Object check failed: slot "+std::to_string(i)+" has an incompatible type");
+            }
+        }
+        return result;
+    }
+};
 class buffer_new_expression final:public expression {
     std::shared_ptr<context_spec> context;
 public:
@@ -1226,6 +1260,19 @@ X parse_raw_expression(raw_view view,const raw_function_layout& layout,std::size
         if(target!=INT_VALUE&&target!=STRING_VALUE&&target!=FLOAT_VALUE&&target!=DOUBLE_VALUE&&target!=ADDRESS_VALUE)
             throw std::invalid_argument("Invalid conversion target type: "+std::to_string(target));
         result=std::make_shared<convert_expression>(target,child());break;
+    }
+    case 51: {
+        auto value=child();auto context=parse_context(fields.take(),layout,logical_depth+1);
+        raw_cursor tags(fields.take());std::vector<int> slot_types;
+        while(!tags.empty()) {
+            const int tag=tags.integer();
+            if(tag<INT_VALUE||tag>OBJECT_VALUE||tag==VOID_VALUE||slot_types.size()>=MAX_VARIABLE_SLOTS)
+                throw std::invalid_argument("Invalid object-check slot type");
+            slot_types.push_back(tag);
+        }
+        if(context->ref<0&&context->kind==3&&slot_types.size()!=static_cast<std::size_t>(context->width))
+            throw std::invalid_argument("Object-check class slot count must match context width");
+        result=std::make_shared<check_object_expression>(std::move(value),std::move(context),std::move(slot_types));break;
     }
     case 50: {
         auto condition=child();auto when_true=child();auto when_false=child();
