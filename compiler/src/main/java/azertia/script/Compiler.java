@@ -409,6 +409,7 @@ public class Compiler {
             case "multiply", "divide" -> params.size() == 2
                     ? arithmeticType(expressionType(params.get(0), environment), expressionType(params.get(1), environment))
                     : AsTypes.ANY_VALUE;
+            case "bit_and", "bit_or", "bit_xor", "shl", "shr", "ushr" -> AsTypes.INT_VALUE;
             case "mod" -> params.size() == 2
                     && expressionType(params.get(0), environment) == AsTypes.INT_VALUE
                     && expressionType(params.get(1), environment) == AsTypes.INT_VALUE
@@ -539,6 +540,25 @@ public class Compiler {
         int type = expressionType(value, environment);
         if (type != AsTypes.ANY_VALUE && type != AsTypes.INT_VALUE)
             throw new IllegalArgumentException(context + " must be int, got " + typeName(type));
+    }
+    private static void requireBitwiseIntegerOrUnknown(String context, JsonElement value, LogicEnvironment environment) {
+        int type = expressionType(value, environment);
+        if (type != AsTypes.ANY_VALUE && type != AsTypes.INT_VALUE)
+            throw new IllegalArgumentException(context + " must be int, got " + typeName(type)
+                    + (type == AsTypes.BOOLEAN_VALUE ? "; parenthesize comparisons, e.g. (a & b) == 0" : ""));
+    }
+    /** A signed integer literal, including the explicit unary node in a hand-written AST. */
+    private static BigDecimal shiftCountLiteral(JsonElement value) {
+        boolean negate = false;
+        if (value.isJsonObject()) {
+            JsonObject node = value.getAsJsonObject();
+            if (!isControl(node) || !(node.get("call").getAsString().equals("pos") || node.get("call").getAsString().equals("neg"))) return null;
+            JsonArray params = parameters(node);
+            if (params.size() != 1) return null;
+            negate = node.get("call").getAsString().equals("neg"); value = params.get(0);
+        }
+        if (!value.isJsonPrimitive() || !value.getAsJsonPrimitive().isNumber() || !integerLiteral(value.getAsString())) return null;
+        BigDecimal count = value.getAsBigDecimal(); return negate ? count.negate() : count;
     }
     private static void requireConditionOrUnknown(String context, JsonElement value,
                                                   LogicEnvironment environment) {
@@ -1090,6 +1110,19 @@ public class Compiler {
                 result.put("v", compileExpression(params.get(0), environment));
                 result.put("val", compileExpression(params.get(1), environment));
                 result.put("on-error", params.get(2).getAsBoolean());
+            }
+            case "bit_and", "bit_or", "bit_xor", "shl", "shr", "ushr" -> {
+                arity(call, params, 2, 2);
+                requireBitwiseIntegerOrUnknown(call + " left operand", params.get(0), environment);
+                requireBitwiseIntegerOrUnknown(call + " right operand", params.get(1), environment);
+                if (call.equals("shl") || call.equals("shr") || call.equals("ushr")) {
+                    BigDecimal count = shiftCountLiteral(params.get(1));
+                    if (count != null && (count.signum() < 0 || count.compareTo(BigDecimal.valueOf(31)) > 0))
+                        throw new IllegalArgumentException("Shift count must be between 0 and 31, got " + count.toPlainString());
+                }
+                result.put("c", ExecOpcodes.code(call));
+                result.put("v1", compileExpression(params.get(0), environment));
+                result.put("v2", compileExpression(params.get(1), environment));
             }
             case "add", "minus", "multiply", "divide", "mod", "greater", "lower", "cmp", "ne", "ge", "le", "and", "or" -> {
                 arity(call, params, 2, 2);

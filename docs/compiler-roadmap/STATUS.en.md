@@ -2,7 +2,7 @@
 
 [中文](STATUS.md) | English
 
-This branch (`claude/confident-galileo-fic3s1`) carries a planned series of 28 commits. They fix the compiler problems found in a repository review, add new language features, and add runtime line numbers. Work has resumed through C15; the next item is C16.
+This branch (`claude/confident-galileo-fic3s1`) carries a planned series of 28 commits. They fix the compiler problems found in a repository review, add new language features, and add runtime line numbers. Work has resumed through C16; the next item is C17.
 
 - [DESIGN.md](DESIGN.md): the detailed per-commit design, with file:line citations.
 - [COMPLETENESS.md](COMPLETENESS.md): the review of that design.
@@ -39,13 +39,14 @@ This branch (`claude/confident-galileo-fic3s1`) carries a planned series of 28 c
 | C12 | cc4b022 | Qualified base calls `Base::m(args)`. |
 | C13 | 5af1331 | **Exec v10**, the only format bump: optional per-function debug records with `-g`, and root `debug_files`. |
 | C14 | 0b50e08 | Script/native stack traces; trace-preserving cleanup; UTF-8 JNI messages with original exception types and callback identity. V0–V3 passed on Linux x86_64. |
-| C15 | this commit | Boolean-only conditions and compatible equality, enforced in compiler and runtime. V0–V3 passed on Linux x86_64. |
+| C15 | 80cd387 | Boolean-only conditions and compatible equality, enforced in compiler and runtime. V0–V3 passed on Linux x86_64. |
+
+| C16 | this commit | Int32 bitwise and shift operators, adjacent preprocessed-token shifts and checked counts. V0–V3 passed on Linux x86_64. |
 
 ## Remaining
 
 Each item gives its validation sets (V0–V3 are defined under "How to resume"). Details for item Cxx are in the section **Cxx** of [DESIGN.md](DESIGN.md).
 
-1. **C16 Bitwise and shift operators** (V0–V3). Opcodes 43–48. Shifts are recognized from adjacent `<`/`>` tokens, measured on preprocessed text offsets. The opcode ranges in compact_exec, test_distribution and test_export must grow.
 2. **C17 Explicit conversions** (V0–V3). `int()`, `float()`, `double()`, `string()` and `address()`; opcode 49 `convert`. Float parsing must be locale-independent. `int`↔`address` is rejected.
 3. **C18 Checked return conversion, widening only** (V0, V1, V2, V3). Rewrite the narrowing sites in `compiler/stdlib/math.azs` (`math_trunc` uses `int()`).
 4. **C19 Ternary `?:`** (V0–V3). Opcode 50 `select`. Fix the colon-glue lexing at `GeneraterJson` (see DESIGN R8). `ifExpression` cannot be reused because it scopes each arm.

@@ -808,6 +808,118 @@ void runtime_trace_tests() {
     check(shutdown->closed&&owned->state==slot_block::status::dead,"shutdown finishes owned values after a pre-destroy failure");
     clear_error_trace();
 }
+void bitwise_tests() {
+    AbdStack functions;
+    functions.vs.push_back(rfn(90,INT_VALUE,rblock({
+        rset(-1,rx(12,{rx(14,{rvar(-1),rc(n(10))}),rvar(0)})),rreturn(rvar(0))}),0,{INT_VALUE}));
+    for(int opcode=43;opcode<=48;++opcode) {
+        functions.vs.push_back(rfn(opcode,INT_VALUE,rreturn(rx(opcode,{rvar(0),rvar(1)})),0,{ANY_VALUE,ANY_VALUE}));
+        functions.vs.push_back(rfn(opcode+100,INT_VALUE,rblock({rset(-1,rc(n(0))),
+            rreturn(rx(opcode,{rcall(90,{rc(n(2))}),rcall(90,{rc(n(1))})}))})));
+        functions.vs.push_back(rfn(opcode+200,INT_VALUE,
+            rreturn(rx(opcode,{rvar(0),rset(0,rc(n(opcode<46?3:1)))})),0,{ANY_VALUE}));
+    }
+    auto debug=[](R function,const char* name,std::initializer_list<int> positions) {
+        AbdStack locations;for(int field:positions)locations.vs.push_back(ri(field));
+        return append_raw(replace_raw(function,8,rb(true)),
+            raw({rs(name),ri(0),ri(9),ri(1),locations.toAbdValue()}));
+    };
+    functions.vs.push_back(debug(rfn(98,INT_VALUE,rreturn(rx(46,{rc(n(1)),rc(n(32))}))),
+        "shiftCount",{1,0,9,5}));
+    functions.vs.push_back(debug(rfn(99,INT_VALUE,rreturn(rx(46,{rc(n(1)),rx(15,{rc(n(1)),rc(n(0))})}))),
+        "shiftOperand",{1,0,9,5,3,0,9,21}));
+    auto module=replace_raw(replace_raw(rmodule({},1),7,functions.toAbdValue()),10,raw({rs("bitwise.azs")}));
+    auto program=load_raw(module);
+    auto evaluate=[&](int opcode,int left,int right) {
+        return integer(program->invoke(opcode,{std::make_shared<variable>(left),std::make_shared<variable>(right)}));
+    };
+    auto runtime_failure=[&](int opcode,std::vector<V> args,const std::string& message) {
+        bool caught=false;
+        try {program->invoke(opcode,std::move(args));}
+        catch(const std::runtime_error& error) {
+            caught=true;
+            check(typeid(error)==typeid(std::runtime_error)&&error.what()==message,
+                  "bitwise failures preserve runtime_error and its exact diagnostic");
+        }
+        check(caught,"invalid bitwise operations must not return a value");
+    };
+    constexpr int minimum=std::numeric_limits<int>::min(),maximum=std::numeric_limits<int>::max();
+    struct bit_case {int left,right,and_value,or_value,xor_value;};
+    for(const auto& item:std::initializer_list<bit_case>{
+        {0,0,0,0,0},{0,-1,0,-1,-1},{-1,-1,-1,-1,0},{5,3,1,7,6},
+        {-2,1,0,-1,-1},{-2,2,2,-2,-4},{minimum,maximum,0,-1,-1},
+        {-1,minimum,minimum,-1,maximum},{minimum,1,0,minimum+1,minimum+1},
+        {maximum,1,1,maximum,maximum-1},{1431655765,-1431655766,0,-1,-1},
+    }) {
+        const int expected[]{item.and_value,item.or_value,item.xor_value};
+        for(int opcode=43;opcode<=45;++opcode) {
+            check(evaluate(opcode,item.left,item.right)==expected[opcode-43],"bitwise operators preserve all signed bit patterns");
+            check(evaluate(opcode,item.right,item.left)==expected[opcode-43],"bitwise operators accept either operand order");
+        }
+    }
+    auto signed_pattern=[](std::uint32_t value) {
+        const auto widened=static_cast<std::int64_t>(value);
+        return static_cast<int>(value<=0x7fffffffu?widened:widened-0x100000000ll);
+    };
+    for(int value:{minimum,minimum+1,-1431655766,-2,-1,0,1,2,1431655765,maximum}) {
+        check(evaluate(45,value,-1)==static_cast<int>(-static_cast<std::int64_t>(value)-1),
+              "xor with minus one implements unary complement without signed overflow");
+        for(int count=0;count<=31;++count) {
+            // Mathematical references use multiplication/division, rather than
+            // relying on host signed-shift behavior or repeating sign filling.
+            const auto divisor=std::int64_t{1}<<count;
+            const auto product=static_cast<std::int64_t>(value)*divisor;
+            auto quotient=static_cast<std::int64_t>(value)/divisor;
+            if(value<0&&static_cast<std::int64_t>(value)%divisor)--quotient;
+            const auto unsigned_quotient=static_cast<std::uint64_t>(static_cast<std::uint32_t>(value))/static_cast<std::uint64_t>(divisor);
+            check(evaluate(46,value,count)==signed_pattern(static_cast<std::uint32_t>(product)),"left shift truncates to the low 32 bits");
+            check(evaluate(47,value,count)==static_cast<int>(quotient),"arithmetic right shift rounds negative values toward minus infinity");
+            check(evaluate(48,value,count)==signed_pattern(static_cast<std::uint32_t>(unsigned_quotient)),"unsigned right shift fills with zeroes");
+        }
+    }
+    const int ordered[]{0,3,3,4,1,1},snapshotted[]{1,7,6,10,2,2};
+    for(int opcode=43;opcode<=48;++opcode) {
+        check(integer(program->invoke(opcode+100))==ordered[opcode-43]&&integer(program->baseEnv->getVariable(-1))==21,
+              "bitwise operands execute once from left to right");
+        check(integer(program->invoke(opcode+200,{std::make_shared<variable>(5)}))==snapshotted[opcode-43],
+              "bitwise left values are snapshotted before the right operand mutates their storage");
+    }
+    static constexpr const char* names[]{"bit_and","bit_or","bit_xor","shl","shr","ushr"};
+    struct invalid_value {const char* type;V value;};
+    const std::vector<invalid_value> invalid{
+        {"boolean",std::make_shared<variable>(false)},{"boolean",std::make_shared<variable>(true)},
+        {"float",std::make_shared<variable>(1.0f)},{"double",std::make_shared<variable>(1.0)},
+        {"string",std::make_shared<variable>("1")},{"void",std::make_shared<variable>(nullptr)},
+        {"address",std::make_shared<variable>(address{})},{"object",std::make_shared<variable>(blocks::create(1,program))},
+    };
+    auto integer_value=std::make_shared<variable>(1);
+    for(int opcode=43;opcode<=48;++opcode) {
+        for(const auto& item:invalid)for(bool reverse:{false,true}) {
+            const std::string types=reverse?std::string("int and ")+item.type:std::string(item.type)+" and int";
+            runtime_failure(opcode,reverse?std::vector<V>{integer_value,item.value}:std::vector<V>{item.value,integer_value},
+                std::string(names[opcode-43])+" operands must be int, got "+types);
+        }
+        runtime_failure(opcode,{invalid[0].value,invalid[4].value},
+            std::string(names[opcode-43])+" operands must be int, got boolean and string");
+        if(opcode>=46)for(int value:{minimum,-1,0,maximum})for(int count:{minimum,-1,32,33,maximum})
+            runtime_failure(opcode,{std::make_shared<variable>(value),std::make_shared<variable>(count)},
+                "Shift count must be between 0 and 31, got "+std::to_string(count));
+        for(auto malformed:{rx(opcode,{rc(n(1))}),rx(opcode,{rc(n(1)),rc(n(2)),rc(n(3))})})
+            rejects([&]{load_raw(rmodule({rfn(10,INT_VALUE,malformed)}));},"bitwise opcodes require exactly two operands");
+    }
+    for(const auto& item:std::initializer_list<std::pair<int,std::string>>{
+        {98,"Shift count must be between 0 and 31, got 32\n  at shiftCount (bitwise.azs:9:5)"},
+        {99,"Division by zero\n  at shiftOperand (bitwise.azs:9:21)"},
+    }) {
+        bool caught=false;
+        try {program->invoke(item.first);}
+        catch(const std::runtime_error& error) {
+            caught=true;check(describe_error(error)==item.second,"bitwise nodes and operands retain their debug source positions");
+        }
+        check(caught,"debug-position probes must throw");
+    }
+    program->destroy();
+}
 void boolean_condition_equality_tests() {
     // These hand-authored functions use any parameters so their checks cannot
     // be supplied by the compiler or by a declared parameter's ABI validation.
@@ -910,6 +1022,7 @@ void boolean_condition_equality_tests() {
     program->destroy();
 }
 int main(){try{
+    bitwise_tests();
     boolean_condition_equality_tests();
     runtime_trace_tests();
     buffer_tests();
@@ -1329,7 +1442,7 @@ int main(){try{
         auto twenty=rc(n(20));auto zero=rc(n(0));
         auto compact=load_raw(rmodule({rfn(10,INT_VALUE,rx(7,{rb(true),rx(12,{twenty,rc(n(22))})}))}));
         check(integer(compact->invoke(10))==42,"raw exec directly executes native arithmetic expressions");
-        for(int opcode=0;opcode<=42;++opcode)if(opcode!=29&&opcode!=30)
+        for(int opcode=0;opcode<=48;++opcode)if(opcode!=29&&opcode!=30)
             rejects([&]{load_raw(rmodule({rfn(10,VOID_VALUE,rx(opcode))}));},"exec opcode rejects missing fields");
         auto byte=[](unsigned char value){return std::make_shared<AbdValue>(&value,1);};
         const unsigned char bad_text[]={0xed,0xa0,0x80};

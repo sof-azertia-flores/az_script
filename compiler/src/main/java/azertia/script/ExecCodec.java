@@ -327,6 +327,10 @@ public final class ExecCodec {
         if(value instanceof AcsByteArray bytes&&Arrays.equals(bytes.getBytes(),new byte[]{(byte)0xff}))return;
         throw invalid("constant must be a supported finite scalar or void sentinel");
     }
+    private static boolean binaryOpcode(int op) {
+        return op==ExecOpcodes.MOVE||op>=ExecOpcodes.ADD&&op<=ExecOpcodes.OR
+                ||op>=ExecOpcodes.BIT_AND&&op<=ExecOpcodes.SHIFT_UNSIGNED;
+    }
     private static AbdValue expression(AcsElement value,Layout layout,int level) {
         Numbering numbering=layout.numbering();int node=numbering.next++;
         if(numbering.positions==null)return expressionBody(value,layout,level);
@@ -443,7 +447,7 @@ public final class ExecCodec {
                 fields.add(expression(object.mmp.get("v1"),layout,level+1));fields.add(expression(object.mmp.get("v2"),layout,level+1));
             }
             default -> {
-                if(op!=ExecOpcodes.MOVE&&(op<ExecOpcodes.ADD||op>ExecOpcodes.OR))throw invalid("invalid control opcode "+op);
+                if(!binaryOpcode(op))throw invalid("invalid control opcode "+op);
                 keys(object,BINARY);
                 if(op==ExecOpcodes.MOVE)storageTarget(object(object.mmp.get("v1"),"assignment target"),"assignment target");
                 fields.add(expression(object.mmp.get("v1"),layout,level+1));fields.add(expression(object.mmp.get("v2"),layout,level+1));
@@ -636,7 +640,10 @@ public final class ExecCodec {
                 view.put("context",decodeContext(record.next(),level+1));view.put("v1",decodeExpression(record.next(),level+1));
                 view.put("v2",decodeExpression(record.next(),level+1));
             }
-            default -> {view.put("v1",decodeExpression(record.next(),level+1));view.put("v2",decodeExpression(record.next(),level+1));}
+            default -> {
+                if(!binaryOpcode(op))throw invalid("invalid control opcode "+op);
+                view.put("v1",decodeExpression(record.next(),level+1));view.put("v2",decodeExpression(record.next(),level+1));
+            }
         }
         record.end();return view;
     }

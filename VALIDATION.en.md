@@ -1,3 +1,11 @@
+# C16 Bitwise and Shift Operators (2026-10-15)
+
+[中文](VALIDATION.md) | English
+
+Added int32 `& | ^ ~ << >> >>>` and local compound assignments, opcodes 43–48. Expression parsing joins adjacent angle tokens by their preprocessed offsets while preserving generic closers. Runtime bit patterns and arithmetic/logical right shifts use unsigned operations; counts are checked in 0–31. Exec stays v10 and JNI snapshots v9.
+
+V0–V3 passed sequentially with `JAVA_TOOL_OPTIONS` unset. Both complete builds passed 232 Java tests and 4515 native checks; the language-operator suite passed 104 ordinary cases including real JNI and 102 sanitizer cases. Existing cross-language, lifetime, hint and JNI suites passed, with no ASan/UBSan reports. An initial Java test expected `?` in a parser diagnostic; its expectation was corrected to the exact source location and message before the complete rerun. Independent code review found no blocker. The release export passed 25 relocation/consumer checks and all 173 manifest file sizes and SHA-256 digests matched. Logs: `build/c16/v1.log`, `build/c16/v2.log`, `build/c16/v3.log`.
+
 # C15 Boolean Conditions and Compatible Equality (2026-10-15)
 
 [中文](VALIDATION.md) | English

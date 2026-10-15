@@ -919,8 +919,10 @@ public class GeneraterJson {
     /**
      * A lexical token at its original position: source unit (index into the AST
      * {@code sources} table), line and column, plus the macro it was expanded from or -1.
+     * start/end are offsets in the preprocessed text, independent of mapped macro columns.
      */
-    private record Token(String text, JsonElement literal, int unit, int line, int column, boolean identifier, int macro) {}
+    private record Token(String text, JsonElement literal, int unit, int line, int column, boolean identifier, int macro,
+                         int start, int end) {}
     /**
      * Splits preprocessed text into tokens at their original positions. A lexical
      * error is reported and skipped: an unexpected character, the rest of a broken
@@ -939,9 +941,9 @@ public class GeneraterJson {
             return c;
         }
         /** A token at preprocessed line l and column c. */
-        private Token token(String text, JsonElement literal, int l, int c, boolean identifier) {
+        private Token token(String text, JsonElement literal, int l, int c, boolean identifier, int start) {
             SourceMap.Origin origin = map.resolve(l, c);
-            return new Token(text, literal, origin.unit(), origin.line(), origin.column(), identifier, origin.macro());
+            return new Token(text, literal, origin.unit(), origin.line(), origin.column(), identifier, origin.macro(), start, offset);
         }
         /** Reports an error at preprocessed line l and column c; returns when lexing may continue. */
         private void fail(String message, int l, int c) {
@@ -953,7 +955,7 @@ public class GeneraterJson {
             SourceMap.Origin origin = map.resolve(l, c);
             diagnostics.report(new CompileException(map.error(origin.unit(), origin.line(), origin.column(), origin.macro(), null, message)).stopping());
         }
-        private static final Set<String> TWO_CHARACTER_OPERATORS = Set.of("==", "!=", "<=", ">=", "&&", "||", "+=", "-=", "*=", "/=", "%=", "++", "--", "::");
+        private static final Set<String> TWO_CHARACTER_OPERATORS = Set.of("==", "!=", "<=", ">=", "&&", "||", "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=", "++", "--", "::");
         List<Token> scan() {
             List<Token> tokens = new ArrayList<>();
             while (offset < source.length()) {
@@ -979,7 +981,7 @@ public class GeneraterJson {
                     // Keep IDs such as 000a intact and defer their validation to the parser.
                     take();
                     while (peek(0) != '\0' && SourceRules.identifierPart(peek(0))) take();
-                    tokens.add(token(source.substring(start, offset), null, l, col, SourceRules.identifierStart(c)));
+                    tokens.add(token(source.substring(start, offset), null, l, col, SourceRules.identifierStart(c), start));
                 } else if (Character.isDigit(c) || (c == '.' && Character.isDigit(peek(1)))) {
                     Token number = number(l, col, start);
                     if (number != null) tokens.add(number);
@@ -987,15 +989,15 @@ public class GeneraterJson {
                     take(); while (SourceRules.identifierPart(peek(0)) && peek(0) != '\0') take();
                     String text = source.substring(start, offset);
                     JsonElement literal = text.equals("true") || text.equals("false") ? new JsonPrimitive(Boolean.parseBoolean(text)) : null;
-                    tokens.add(token(text, literal, l, col, true));
+                    tokens.add(token(text, literal, l, col, true, start));
                 } else {
                     String two = "" + c + peek(1);
                     if (TWO_CHARACTER_OPERATORS.contains(two)) {
-                        take(); take(); tokens.add(token(two, null, l, col, false));
+                        take(); take(); tokens.add(token(two, null, l, col, false, start));
                     } else if (c == ':') {
-                        take(); tokens.add(token(":", null, l, col, false));
-                    } else if ("{}[](),;+-*/%=<>!.~".indexOf(c) >= 0) {
-                        take(); tokens.add(token(String.valueOf(c), null, l, col, false));
+                        take(); tokens.add(token(":", null, l, col, false, start));
+                    } else if ("{}[](),;+-*/%=<>!.~&|^?".indexOf(c) >= 0) {
+                        take(); tokens.add(token(String.valueOf(c), null, l, col, false, start));
                     } else {
                         // Skip a whole code point, so a supplementary character is one error.
                         int codePoint = source.codePointAt(offset);
@@ -1006,7 +1008,7 @@ public class GeneraterJson {
             }
             // Preprocessed text ends with a newline per line; place <eof> at the end of the last line.
             boolean newline = !source.isEmpty() && source.charAt(source.length() - 1) == '\n';
-            tokens.add(token("<eof>", null, newline ? lastLine : line, newline ? lastColumn : column, false)); return tokens;
+            tokens.add(token("<eof>", null, newline ? lastLine : line, newline ? lastColumn : column, false, offset)); return tokens;
         }
         /** A string literal token, or null after reporting a malformed one. */
         private Token string(int l, int col, int start) {
@@ -1019,7 +1021,7 @@ public class GeneraterJson {
                         fail("Unpaired surrogate in string literal; write a supplementary character as a \\uD8xx\\uDCxx pair", l, col);
                         return null;
                     }
-                    return token(source.substring(start, offset), new JsonPrimitive(value.toString()), l, col, false);
+                    return token(source.substring(start, offset), new JsonPrimitive(value.toString()), l, col, false, start);
                 }
                 if (c == '\n' || c == '\r') { fail("Newline in string literal", l, col); return null; }
                 if (c != '\\') { value.append(c); continue; }
@@ -1080,9 +1082,9 @@ public class GeneraterJson {
                 if (!Float.isFinite(value) || (value == 0 && decimal.signum() != 0)) {
                     fail("Floating literal is outside float range", l, col); return null;
                 }
-                Token at = token(source.substring(start, offset), null, l, col, false);
+                Token at = token(source.substring(start, offset), null, l, col, false, start);
                 JsonObject object = operation("ctrl", "float", at, new JsonPrimitive(value));
-                return new Token(at.text(), object, at.unit(), at.line(), at.column(), false, at.macro());
+                return new Token(at.text(), object, at.unit(), at.line(), at.column(), false, at.macro(), at.start(), at.end());
             }
             JsonPrimitive literal;
             if (text.indexOf('.') >= 0 || text.indexOf('e') >= 0 || text.indexOf('E') >= 0) {
@@ -1093,7 +1095,7 @@ public class GeneraterJson {
                 // Keep lexical floating kind even for 5., 5e0 and zero; BigDecimal normalizes these away.
                 literal = new JsonPrimitive(value);
             } else literal = new JsonPrimitive(decimal);
-            return token(text, literal, l, col, false);
+            return token(text, literal, l, col, false, start);
         }
         /**
          * A character for a message: printable ASCII as itself, anything else as U+XXXX,
@@ -1379,14 +1381,14 @@ public class GeneraterJson {
         private Token located(JsonObject node, Token fallback) {
             int line = node == null ? -1 : SourceMap.integer(node.get("_line"));
             if (line <= 0) return fallback;
-            return new Token("", null, map.unitOf(node), line, Math.max(0, SourceMap.integer(node.get("_column"))), false, -1);
+            return new Token("", null, map.unitOf(node), line, Math.max(0, SourceMap.integer(node.get("_column"))), false, -1, -1, -1);
         }
         private Token directive(int[] location, Token fallback) {
-            return location == null ? fallback : new Token("#", null, location[0], location[1], location[2], false, -1);
+            return location == null ? fallback : new Token("#", null, location[0], location[1], location[2], false, -1, -1, -1);
         }
         private Token functionLocation(AzFunction function) {
             Token token = functionTokens.get(function);
-            return token != null ? token : new Token(function.name, null, function.file, function.line, function.column, true, -1);
+            return token != null ? token : new Token(function.name, null, function.file, function.line, function.column, true, -1, -1, -1);
         }
         private final Map<String,AzFunction> definitions = new LinkedHashMap<>();
         private record DuplicateExtern(String name, ExternSignature first, ExternSignature second) {}
@@ -2026,12 +2028,13 @@ public class GeneraterJson {
             enterRecursion();
             try { return assignmentBody(); } finally { recursionDepth--; }
         }
-        private static final Set<String> ASSIGNMENT_OPERATORS = Set.of("=", "+=", "-=", "*=", "/=", "%="),
+        private static final Set<String> ASSIGNMENT_OPERATORS = Set.of("=", "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=", "<<=", ">>=", ">>>="),
                 ASSIGNMENT_CALLS = Set.of("varset", "member-set", "index-set", "mov");
         private JsonElement assignmentBody() {
             JsonElement left = binary(0);
-            if (ASSIGNMENT_OPERATORS.contains(current().text())) {
-                Token operator = advance();
+            String assignmentOperator = operatorText();
+            if (ASSIGNMENT_OPERATORS.contains(assignmentOperator)) {
+                Token operator = advanceOperator(assignmentOperator);
                 JsonObject target = left.isJsonObject() ? left.getAsJsonObject() : null;
                 boolean variable = target != null && target.get("t").getAsString().equals("ctrl")
                         && target.get("call").getAsString().equals("var");
@@ -2052,7 +2055,7 @@ public class GeneraterJson {
                         target.getAsJsonArray("param").get(0), target.getAsJsonArray("param").get(1), value);
                 if (member) return operation("ctrl", "member-set", operator, left, value);
                 if (memory) return operation("ctrl", "mov", operator, left, value);
-                if (!operator.text().equals("=")) value = operation("ctrl", binaryName(operator.text().substring(0, 1)), operator, left, value);
+                if (!operator.text().equals("=")) value = operation("ctrl", binaryName(operator.text().substring(0, operator.text().length() - 1)), operator, left, value);
                 JsonObject assignment = operation("ctrl", "varset", operator, target.getAsJsonArray("param").get(0), value);
                 if (!operator.text().equals("=")) assignment.addProperty("compound", true);
                 return assignment;
@@ -2062,13 +2065,35 @@ public class GeneraterJson {
         private static boolean isMemoryGet(String call) {
             return call.equals("mem_get");
         }
-        private static final List<Set<String>> PRECEDENCE = List.of(Set.of("||"), Set.of("&&"), Set.of("==", "!="),
-                Set.of("<", ">", "<=", ">="), Set.of("+", "-"), Set.of("*", "/", "%"));
+        private static final List<Set<String>> PRECEDENCE = List.of(Set.of("||"), Set.of("&&"), Set.of("|"), Set.of("^"), Set.of("&"),
+                Set.of("==", "!="), Set.of("<", ">", "<=", ">="), Set.of("<<", ">>", ">>>"), Set.of("+", "-"), Set.of("*", "/", "%"));
+        /** Angle tokens stay separate for generic types; only expression parsing joins adjacent ones. */
+        private String operatorText() {
+            Token first = current(); String angle = first.text();
+            if ((!angle.equals("<") && !angle.equals(">")) || index + 1 >= tokens.size()) return angle;
+            Token second = tokens.get(index + 1);
+            if (first.end() != second.start() || !(second.text().equals(angle) || second.text().equals(angle + "="))) return angle;
+            String text = angle + second.text();
+            if (angle.equals(">") && second.text().equals(">") && index + 2 < tokens.size()) {
+                Token third = tokens.get(index + 2);
+                if (second.end() == third.start() && (third.text().equals(">") || third.text().equals(">="))) text += third.text();
+            }
+            return text;
+        }
+        /** Consumes either one lexical token or a shift assembled by operatorText(). */
+        private Token advanceOperator(String text) {
+            Token first = advance(), last = first;
+            for (int width = first.text().length(); width < text.length(); width += last.text().length()) last = advance();
+            return first == last ? first : new Token(text, null, first.unit(), first.line(), first.column(), false,
+                    first.macro(), first.start(), last.end());
+        }
         private JsonElement binary(int level) {
             if (level == PRECEDENCE.size()) return unary();
             JsonElement left = binary(level + 1);
-            while (PRECEDENCE.get(level).contains(current().text())) {
-                Token operator = advance(); left = operation("ctrl", binaryName(operator.text()), operator, left, binary(level + 1));
+            String text = operatorText();
+            while (PRECEDENCE.get(level).contains(text)) {
+                Token operator = advanceOperator(text); left = operation("ctrl", binaryName(operator.text()), operator, left, binary(level + 1));
+                text = operatorText();
             }
             return left;
         }
@@ -2077,6 +2102,8 @@ public class GeneraterJson {
                 case "+" -> "add"; case "-" -> "minus"; case "*" -> "multiply"; case "/" -> "divide";
                 case "%" -> "mod"; case "==" -> "cmp"; case "!=" -> "ne"; case ">" -> "greater";
                 case "<" -> "lower"; case ">=" -> "ge"; case "<=" -> "le"; case "&&" -> "and"; case "||" -> "or";
+                case "&" -> "bit_and"; case "|" -> "bit_or"; case "^" -> "bit_xor";
+                case "<<" -> "shl"; case ">>" -> "shr"; case ">>>" -> "ushr";
                 default -> throw new IllegalArgumentException("Unknown binary operator: " + text);
             };
         }
@@ -2085,9 +2112,10 @@ public class GeneraterJson {
             try { return unaryBody(); } finally { recursionDepth--; }
         }
         private JsonElement unaryBody() {
-            if (at("+") || at("-") || at("!")) {
+            if (at("+") || at("-") || at("!") || at("~")) {
                 Token operator = advance(); JsonElement value = unary();
                 if (operator.text().equals("+")) return operation("ctrl", "pos", operator, value);
+                if (operator.text().equals("~")) return operation("ctrl", "bit_xor", operator, value, new JsonPrimitive(-1));
                 if (operator.text().equals("-") && value.isJsonPrimitive() && value.getAsJsonPrimitive().isNumber()) {
                     if (value.getAsNumber() instanceof Double) return new JsonPrimitive(-value.getAsDouble());
                     return new JsonPrimitive(value.getAsBigDecimal().negate());
@@ -2133,9 +2161,10 @@ public class GeneraterJson {
             for (int cursor = index; cursor < tokens.size(); cursor++) {
                 String token = tokens.get(cursor).text();
                 if (token.equals("<")) depth++;
-                else if (token.equals(">") && --depth == 0)
-                    return cursor + 1 < tokens.size() && tokens.get(cursor + 1).text().equals("(");
-                else if (token.equals(";") || token.equals("{") || token.equals("}") || token.equals("<eof>")) return false;
+                else if (token.equals(">")) {
+                    if (--depth == 0) return cursor + 1 < tokens.size() && tokens.get(cursor + 1).text().equals("(");
+                }
+                else if (!knownType(token) && !token.equals(",") && !token.equals("*")) return false;
             }
             return false;
         }

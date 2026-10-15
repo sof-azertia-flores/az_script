@@ -18,7 +18,7 @@ EXECUTABLE_SUFFIX = ".exe" if WINDOWS else ""
 EXEC_VERSION = 10
 # Constants, blocks and calls use other JSON representations (wire opcodes 0–2).
 # The unit suite checks this set against the compiler's opcode registry.
-CONTROL_OPCODES = frozenset(range(3, 43))
+CONTROL_OPCODES = frozenset(range(3, 49))
 
 
 def _require(condition: bool, message: str) -> None:
@@ -465,7 +465,7 @@ def verify(package: Path, java: Optional[Path] = None) -> Dict[str, object]:
 
         # Exercise every post-literal-object opcode through the exported tools.
         # Merely bumping the root version misses stale opcode ranges and SDKs.
-        modern_source = source_directory / "generic buffer operators.azs"
+        modern_source = source_directory / "generic buffer bitwise operators.azs"
         modern_source.write_text('''#namespace 1234
 #gvar drops
 class Item { int value = 7; ~Item() { drops = drops + 1; } }
@@ -498,6 +498,13 @@ int main() {
     buffer<buffer<int>> nested; nested.reserve(1); nested.push(copy);
     if (nested.get(0).get(0) != 9) return -5;
     Number a(1); Number b(2); if ((a + b).value != 3) return -6;
+    int bits = 10; int mask = 12; int shift = 1; int negative = -8;
+    if ((bits & mask) != 8 || (bits | mask) != 14 || (bits ^ mask) != 6) return -7;
+    if (~bits != -11 || (negative >> shift) != -4 || (negative >>> shift) != 2147483644) return -8;
+    if ((bits << shift) != 20 || (1 << 31) != (-2147483647 - 1)) return -9;
+    bits &= mask; bits |= 2; bits ^= 4;
+    bits <<= 2; bits >>= 1; bits >>>= 1;
+    if (bits != 14) return -10;
     return invoke<int>(305397826, values[0]) + value_compare<string>("b", "a");
 }
 ''', encoding="utf-8")
@@ -507,16 +514,19 @@ int main() {
         _run([compiler, modern_source, "-o", modern_abd], cwd, compiler_environment)
         _outputs(modern_abd, modern_ast, modern_json)
         modern_view = json.loads(modern_json.read_text(encoding="utf-8"))
-        _require(set(range(36, 43)) <= _control_opcodes(modern_view["f"], str(modern_json)),
+        modern_opcodes = _control_opcodes(modern_view["f"], str(modern_json))
+        _require(set(range(36, 43)) <= modern_opcodes,
                  f"Generic/buffer probe must exercise operation contexts and all exec v{EXEC_VERSION} buffer instructions")
+        _require(set(range(43, 49)) <= modern_opcodes,
+                 f"Bitwise/shift probe must exercise all exec v{EXEC_VERSION} bitwise and shift instructions")
         modern_roundtrip = modern_abd.with_name("features.roundtrip.abd")
         _run([compiler, "compile-json", modern_ast, "-o", modern_roundtrip], cwd, compiler_environment)
         _require(modern_abd.read_bytes() == modern_roundtrip.read_bytes(),
-                 "Generic/buffer/operator AST roundtrip changed executable bytes")
+                 "Generic/buffer/bitwise/operator AST roundtrip changed executable bytes")
         result = _run([runner, modern_abd], cwd, environment)
         _require(result.stdout.splitlines() == ["42"],
-                 f"Generic/buffer/operator probe failed: {result.stdout!r}")
-        passed("generic contexts, owning buffers, class operators and reflection through relocated tools")
+                 f"Generic/buffer/bitwise/operator probe failed: {result.stdout!r}")
+        passed("generic contexts, owning buffers, class operators, reflection, bitwise and shifts through relocated tools")
 
         standalone = work / "standalone runner"
         standalone_bin = standalone / "bin"
@@ -560,7 +570,7 @@ int main() {
         _require("Host received: 42" in result.stdout, "Static C++ consumer returned an unexpected value")
         result = _run([_host_executable(static_build), modern_abd], cwd, environment)
         _require(result.stdout.splitlines() == ["Host received: 42"],
-                 "Static C++ consumer could not execute generic/buffer instructions")
+                 "Static C++ consumer could not execute generic/buffer/bitwise instructions")
         passed("relocated CMake package and static C++ consumer")
 
         shared_source = work / "shared consumer source"
@@ -577,7 +587,7 @@ int main() {
         _require("Host received: 42" in result.stdout, "Shared C++ consumer returned an unexpected value")
         result = _run([_host_executable(shared_build), modern_abd], cwd, environment)
         _require(result.stdout.splitlines() == ["Host received: 42"],
-                 "Shared C++ consumer could not execute generic/buffer instructions")
+                 "Shared C++ consumer could not execute generic/buffer/bitwise instructions")
         passed("relocated CMake package and shared C++ consumer")
 
         result = _run([java_executable, "-Xcheck:jni", "--class-path", package / "java/abdJavaInvoker.jar",
@@ -590,10 +600,10 @@ int main() {
         result = _run([java_executable, "-Xcheck:jni", "--class-path", package / "java/abdJavaInvoker.jar",
                        package / "examples/java/RunScript.java", package, modern_abd], cwd, environment)
         _require(result.stdout.splitlines() == ["Host received: 42"],
-                 "Java JNI consumer could not execute generic/buffer instructions")
+                 "Java JNI consumer could not execute generic/buffer/bitwise instructions")
         _require("WARNING in native method" not in result.stdout + result.stderr,
-                 "JVM reported a JNI contract warning for generic/buffer execution")
-        passed("real JNI execution of generic contexts, buffers and class operators")
+                 "JVM reported a JNI contract warning for generic/buffer/bitwise execution")
+        passed("real JNI execution of generic contexts, buffers, class operators, bitwise and shifts")
 
         native_name = "abdJ.dll" if WINDOWS else ("libabdJ.dylib" if sys.platform == "darwin" else "libabdJ.so")
         native_library = package / ("bin" if WINDOWS else "lib") / native_name

@@ -38,6 +38,11 @@ class DistributionOutputTests(unittest.TestCase):
         script = [{'t': 0, 'c': opcode, 'context': context} for opcode in range(36, 43)]
         self.check_output([{'t': 1, 'id': 0x12340002, 'param': [script], 'contexts': [context]}])
 
+    def test_bitwise_and_shift_instructions_are_accepted(self):
+        for opcode in range(43, 49):
+            with self.subTest(opcode=opcode):
+                self.check_output([{'t': 0, 'c': opcode}])
+
     def test_invalid_controls_report_the_actual_value_and_location(self):
         # The first opcode past the registry is unknown.
         for opcode in (None, True, 'return_typed', 38.0, -1, 0, 2, max(verifier.CONTROL_OPCODES) + 1):

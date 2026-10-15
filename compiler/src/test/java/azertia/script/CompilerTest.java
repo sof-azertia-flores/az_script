@@ -887,7 +887,7 @@ class CompilerTest {
         AcsObject decoded = ExecCodec.decode(payload);
         assertEquals(compiled.toJson(), decoded.toJson());
         assertArrayEquals(payload.toAbdFormat(), decoded.toValue().toAbdFormat());
-        for(int opcode = 0; opcode <= ExecOpcodes.VALUE_COMPARE; opcode++)
+        for(int opcode = 0; opcode <= ExecOpcodes.SHIFT_UNSIGNED; opcode++)
             assertEquals(opcode, ExecOpcodes.code(ExecOpcodes.name(opcode)));
         // -g appends a debug record to each function and fills the debug file table; instructions stay the same.
         var debugRoot = Compiler.compile(newTree("int main(){return 1+2;}"), true).toValue().getAsAss().values;

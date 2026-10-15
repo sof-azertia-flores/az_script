@@ -444,6 +444,44 @@ V binary(const std::string& op,const V& a,const V& b) {
     if(!std::isfinite(f)) throw std::overflow_error("Float overflow");
     return std::make_shared<variable>(f);
 }
+V bitwise(int opcode,const V& left,const V& right) {
+    static constexpr const char* names[]{"bit_and","bit_or","bit_xor","shl","shr","ushr"};
+    if(left->type!=INT_VALUE||right->type!=INT_VALUE)
+        throw std::runtime_error(std::string(names[opcode-43])+" operands must be int, got "+
+            type_name(left->type)+" and "+type_name(right->type));
+    const auto a=static_cast<std::uint32_t>(*static_cast<int*>(left->value));
+    const auto b=static_cast<std::uint32_t>(*static_cast<int*>(right->value));
+    std::uint32_t result;
+    if(opcode==43)result=a&b;
+    else if(opcode==44)result=a|b;
+    else if(opcode==45)result=a^b;
+    else {
+        const int count=*static_cast<int*>(right->value);
+        if(count<0||count>31)
+            throw std::runtime_error("Shift count must be between 0 and 31, got "+std::to_string(count));
+        const auto shift=static_cast<unsigned>(count);
+        if(opcode==46)result=a<<shift;
+        else {
+            result=a>>shift;
+            // Use unsigned shifts for every bit pattern. The explicit sign
+            // extension also avoids shifting by 32 when the count is zero.
+            if(opcode==47&&shift&&(a&0x80000000u))result|=std::uint32_t{0xffffffffu}<<(32-shift);
+        }
+    }
+    return std::make_shared<variable>(std::bit_cast<int>(result));
+}
+class bitwise_expression final:public expression {
+    int opcode;
+    std::shared_ptr<expression> left,right;
+public:
+    bitwise_expression(int opcode,std::shared_ptr<expression> left,std::shared_ptr<expression> right)
+        :opcode(opcode),left(std::move(left)),right(std::move(right)) {}
+    V execute(E env) override {
+        tick(env);
+        auto a=run(left,env)->deepCopy();auto b=run(right,env);
+        return bitwise(opcode,a,b);
+    }
+};
 class extra_expression final:public expression {
     std::string op;
     std::shared_ptr<expression> a,b;
@@ -993,6 +1031,10 @@ X parse_raw_expression(raw_view view,const raw_function_layout& layout,std::size
     case 42: {
         auto context=parse_context(fields.take(),layout,logical_depth+1);auto left=child();auto right=child();
         result=std::make_shared<value_compare_expression>(std::move(context),std::move(left),std::move(right));break;
+    }
+    case 43:case 44:case 45:case 46:case 47:case 48: {
+        auto left=child();auto right=child();
+        result=std::make_shared<bitwise_expression>(opcode,std::move(left),std::move(right));break;
     }
     case 7:case 8: {
         auto node=std::make_shared<returnExpression>();node->object_return=opcode==8;

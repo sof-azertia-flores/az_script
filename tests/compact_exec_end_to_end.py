@@ -23,7 +23,8 @@ OP_NAMES = {3: 'v', 4: 'vd', 5: 'vs', 6: 'm', 7: 'r', 8: 'ro', 9: 'oa',
             27: 'if', 28: 'wi', 29: 'brk', 30: 'cont', 31: 'cleanup',
             32: 'new_block', 33: 'block_address', 34: 'mv', 35: 'drop',
             36: 'context_abi', 37: 'context_default', 38: 'return_typed', 39: 'check_type',
-            40: 'buffer_new', 41: 'buffer_op', 42: 'value_compare'}
+            40: 'buffer_new', 41: 'buffer_op', 42: 'value_compare',
+            43: 'bit_and', 44: 'bit_or', 45: 'bit_xor', 46: 'shl', 47: 'shr', 48: 'ushr'}
 EXEC_VERSION = 10
 
 
@@ -231,7 +232,7 @@ def encode_compact_expression(value):
             fields.append(child('val'))
     elif opcode == 5:
         fields = [integer(value['v']), child('val')]
-    elif opcode == 6 or 12 <= opcode <= 24:
+    elif opcode == 6 or 12 <= opcode <= 24 or 43 <= opcode <= 48:
         fields = [child('v1'), child('v2')]
     elif opcode == 7:
         fields = [bytes(['r' in value])] + ([child('r')] if 'r' in value else [])
@@ -408,7 +409,7 @@ class WireReader:
         elif opcode == 5:
             assert len(fields) == 2
             result.update(v=int_value(fields[0]), val=self.expression(fields[1]))
-        elif opcode == 6 or 12 <= opcode <= 24:
+        elif opcode == 6 or 12 <= opcode <= 24 or 43 <= opcode <= 48:
             assert len(fields) == 2
             result.update(v1=self.expression(fields[0]), v2=self.expression(fields[1]))
         elif opcode == 7:
@@ -666,10 +667,22 @@ def main():
         if args.host:
             run([args.host, abd, 'flush', 'span', MAIN], '0:1\n')
 
+        # New operators have an independent compiler/wire roundtrip in addition
+        # to the unchanged baseline opcode corpus above.
+        bitwise_source = '''int main(){int a=12;int b=10;
+            print(1 << 31);print(-a >> 1);print(-a >>> 1);
+            return (a & b) + (a | b) + (a ^ b) + (~a);}'''
+        bitwise, _, _ = compile_source('bitwise-coverage', bitwise_source)
+        bitwise_reader = WireReader()
+        bitwise_view = bitwise_reader.read(bitwise.read_bytes())
+        assert set(range(43, 49)) <= bitwise_reader.opcodes, bitwise_reader.opcodes
+        assert encode_compact_module(bitwise_view) == bitwise.read_bytes(), 'independent bitwise reconstruction'
+        run([args.runner, bitwise], '-2147483648\n-6\n2147483642\n15\n')
+
         minimum = module([function(block(returning(constant(42))))])
         checks = 0
 
-        def execute_wire(name, root_fields=None, data=None, expected=None, invalid=False):
+        def execute_wire(name, root_fields=None, data=None, expected=None, invalid=False, error=None):
             nonlocal checks
             path = work / (name + '.abd')
             path.write_bytes(data if data is not None else frame(stack(*(root_fields or minimum))))
@@ -677,6 +690,8 @@ def main():
             if invalid:
                 assert result.returncode == 1 and result.stderr.startswith('AzScript error:'), (name, result.returncode, result.stdout, result.stderr)
                 assert not any(text in result.stderr for text in ('AddressSanitizer', 'UndefinedBehaviorSanitizer', 'runtime error:')), (name, result.stderr)
+                if error is not None:
+                    assert error in result.stderr, (name, error, result.stderr)
             else:
                 assert result.returncode == 0 and result.stdout == expected and not result.stderr, (name, result.stdout, result.stderr)
             checks += 1
@@ -689,6 +704,30 @@ def main():
                 ('void', b'\xff', 5, '')]:
             execute_wire('independent-' + name, module([function(block(returning(constant(value))), return_type=kind)]), expected=expected)
         execute_wire('independent-void-return', module([function(block(returning()), return_type=5)]), expected='')
+
+        bitwise_cases = [(43, 12, 10, 8), (43, -1, -2147483648, -2147483648),
+                         (44, 12, 10, 14), (44, -2147483648, 1, -2147483647),
+                         (45, 12, 10, 6), (45, -1, -2147483648, 2147483647),
+                         (46, 1, 31, -2147483648), (46, 2147483647, 1, -2),
+                         (47, -8, 2, -2), (47, -1, 31, -1),
+                         (48, -8, 2, 1073741822), (48, -1, 31, 1), (48, -1, 0, -1)]
+        for index, (opcode, left, right, expected) in enumerate(bitwise_cases):
+            body = returning(expression(opcode, constant(left), constant(right)))
+            fields = module([function(body)])
+            payload = frame(stack(*fields))
+            parsed = WireReader().read(payload)
+            assert encode_compact_module(parsed) == payload, ('bitwise independent roundtrip', opcode)
+            execute_wire('independent-bitwise-' + str(index), fields, expected=str(expected) + '\n')
+        for opcode in range(43, 49):
+            for side, operands in [('left', (True, 1)), ('right', (1, 'text'))]:
+                body = returning(expression(opcode, *(constant(value) for value in operands)))
+                execute_wire(f'bitwise-type-{opcode}-{side}', module([function(body)]),
+                             invalid=True, error='operands must be int')
+        for opcode in range(46, 49):
+            for count in (-2147483648, -1, 32, 2147483647):
+                body = returning(expression(opcode, constant(-1), constant(count)))
+                execute_wire(f'shift-count-{opcode}-{count}', module([function(body)]), invalid=True,
+                             error=f'Shift count must be between 0 and 31, got {count}')
 
         mutations = [('root-missing', minimum[:-1]), ('root-extra', minimum + [b''])]
         for index, value, label in [(0, b'AZSCRIPX', 'magic'), (1, integer(5), 'version'), (1, integer(6), 'address-only-version'), (1, integer(7), 'literal-only-version'), (1, integer(8), 'v8-version'), (1, integer(9), 'previous-version'),
@@ -809,6 +848,11 @@ def main():
             'while-extra': expression(28, constant(False), block(), block()),
             'break-extra': expression(29, constant(1)),
         }
+        for opcode in range(43, 49):
+            for label, operands in [('empty', ()), ('missing', (constant(1),)),
+                                    ('extra', (constant(1), constant(2), constant(3))),
+                                    ('malformed-child', (stack(b'\0'), constant(1)))]:
+                bad_expressions[f'bitwise-{opcode}-{label}'] = expression(opcode, *operands)
         for label, body in bad_expressions.items():
             execute_wire(label, module([function(body)]), invalid=True)
         complete = frame(stack(*minimum))

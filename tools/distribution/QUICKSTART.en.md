@@ -28,7 +28,7 @@ Without `-g`, a frame reads `  at function 0x0fff0002`. Native callbacks use `  
 
 ## Variables, functions, and control flow
 
-Basic types are int, float, double, boolean (also bool), string, and address; functions may also return void. Int is signed 32-bit; address is an independent unsigned 64-bit slot address with null as its empty value. They do not implicitly convert. Decimals default to double; 1.5f is float. Integer overflow and division by zero are errors. Explicit primitive locals require initialization; var and def declare dynamic variables.
+Basic types are int, float, double, boolean (also bool), string, and address; functions may also return void. Int is signed 32-bit; address is an independent unsigned 64-bit slot address with null as its empty value. They do not implicitly convert. Decimals default to double; 1.5f is float. Arithmetic integer overflow and division by zero are errors. Explicit primitive locals require initialization; var and def declare dynamic variables.
 
 ```c
 int factorial(int n) {
@@ -53,7 +53,7 @@ Functions support forward calls and recursion. Primitive parameter types may be 
 
 `for (int i = 0; i < 5; i++) { ... }` scopes i to the loop. Initializer, condition, and step are optional; an omitted condition is true. Continue cleans the current iteration's objects, then runs a for step and checks its condition; while continue directly rechecks the condition. Break and return skip the step. ++/-- work only on simple numeric/address variables as standalone statements or for steps, never results or arguments.
 
-Operators include + - * / %, == != < <= > >=, && || !, assignment, and variable += -= *= /= %=. Multiplication/division precede addition/subtraction; comparison precedes logic. &&/|| short-circuit. Strings use single/double quotes and escapes including `\n`, `\t`, `\\`, `\"`, `\'`, and `\uXXXX`. Comments use // or /* ... */.
+Operators include arithmetic `+ - * / %`, comparison `== != < <= > >=`, boolean `&& || !`, int-only bitwise `& | ^ ~`, shifts `<< >> >>>`, and assignment. Simple variables support `+= -= *= /= %= &= |= ^= <<= >>= >>>=`. From higher to lower precedence: unary, multiply/divide/remainder, add/subtract, shifts, ordering, equality, `&`, `^`, `|`, `&&`, `||`, assignment. Only `&&`/`||` short-circuit. Shifts use 32-bit patterns: left shift wraps, `>>` sign-extends, `>>>` zero-fills; counts outside 0…31 fail instead of wrapping. Write `(flags & mask) != 0` for a bit test. Shift characters must touch (`a > > b` is invalid); nested generic closers such as `buffer<buffer<int>>` still work. See [bitwise operators](LANGUAGE.en.md#bitwise-and-shift-operators). Strings use single/double quotes and escapes including `\n`, `\t`, `\\`, `\"`, `\'`, and `\uXXXX`. Comments use // or /* ... */.
 
 ## Classes, objects, and destruction
 

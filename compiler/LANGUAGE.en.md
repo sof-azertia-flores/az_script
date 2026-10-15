@@ -259,14 +259,18 @@ Precedence from lowest to highest:
 
 | Operators | Associativity |
 | --- | --- |
-| `= += -= *= /= %=` | Right |
+| `= += -= *= /= %= &= \|= ^= <<= >>= >>>=` | Right |
 | `\|\|` | Left, short-circuit |
 | `&&` | Left, short-circuit |
+| `\|` | Left |
+| `^` | Left |
+| `&` | Left |
 | `== !=` | Left |
 | `< <= > >=` | Left |
+| `<< >> >>>` | Left |
 | `+ -` | Left |
 | `* / %` | Left |
-| Unary `+ - !` | Right |
+| Unary `+ - ! ~` | Right |
 | Parentheses, literals, variables, calls | Highest |
 
 Thus `20-3-2` is 15, `100/5/2` is 10, and `2+3*(4+1)` is 17. `a=b=3` assigns from the right. Short-circuited right operands of &&/|| are not evaluated.
@@ -315,7 +319,17 @@ print(total); // 9
 
 Every normal exit of a nonvoid function must return. Both if branches must return. While/for counts as nonterminating only with literal true conditions (or an omitted for condition) and no break belonging to that loop; otherwise compilation reports `non-void function can reach the end of its body without returning a value`. Statements end in semicolons, optional immediately before block end; function-definition trailing semicolons are optional. Array subscripts, object-literal expression syntax, closures, and exception handling are unsupported and rejected.
 
-Integers are signed 32-bit; out-of-range literals fail compilation. Decimal/scientific literals default to double; f/F produces float, e.g. 1.5f, 5f, 2e3f. Both reject overflow and underflow to zero. Numeric print/string concatenation uses shortest round-trippable text: `0.1+0.2` → `0.30000000000000004`, `123456789.0` → `123456789`, `1e20` → `1e+20`; float uses its own precision (0.1f → 0.1), and negative zero prints -0. Runtime-only zero divisors compile but int/float/double division, including positive/negative floating zero, throws `Division by zero`, never Infinity/NaN. Integer overflow also fails at runtime.
+Integers are signed 32-bit; out-of-range literals fail compilation. Decimal/scientific literals default to double; f/F produces float, e.g. 1.5f, 5f, 2e3f. Both reject overflow and underflow to zero. Numeric print/string concatenation uses shortest round-trippable text: `0.1+0.2` → `0.30000000000000004`, `123456789.0` → `123456789`, `1e20` → `1e+20`; float uses its own precision (0.1f → 0.1), and negative zero prints -0. Runtime-only zero divisors compile but int/float/double division, including positive/negative floating zero, throws `Division by zero`, never Infinity/NaN. Arithmetic integer overflow also fails at runtime; bitwise shifts use the bit-pattern rules below.
+
+### Bitwise and shift operators
+
+`&`, `|`, `^`, and unary `~` are bitwise AND, OR, XOR, and complement. `<<` shifts left, `>>` shifts right with sign extension, and `>>>` shifts right with zero fill. Operands, including shift counts, must be int; known float, double, boolean, string, and address operands fail compilation, and dynamic operands must actually be int at runtime. These operators evaluate their operands once, left to right, without short-circuiting.
+
+Operations use 32-bit bit patterns and return signed int32. Left shift discards high bits and fills low bits with zero; this wrap does not raise arithmetic overflow. For example, `1 << 31` is -2147483648, `-8 >> 1` is -4, `-1 >>> 1` is 2147483647, and `~0` is -1. Every shift count must be 0…31, inclusive: invalid literal counts fail compilation, and invalid dynamic counts throw `Shift count must be between 0 and 31, got 32` (for count 32). Counts are never masked modulo 32.
+
+Shift operators bind less tightly than addition/subtraction and more tightly than comparisons. Equality binds more tightly than bitwise `&`, then `^`, then `|`; all three bind more tightly than `&&` and `||`. Parenthesize a bit test as `(flags & mask) == 0`; `flags & mask == 0` attempts to apply `&` to a boolean and is rejected with a hint to parenthesize the comparison.
+
+Shift characters must be adjacent in the preprocessed text: `a >> b` is a shift, but `a > > b` is not and is rejected. Generic type closers remain separate in type syntax, so `buffer<buffer<int>>` and generic calls followed by shifts remain valid. Simple variables also support `&=`, `|=`, `^=`, `<<=`, `>>=`, and `>>>=`; members, subscripts, and `mem_get` are not compound-assignment targets. Unary `~x` lowers to `bit_xor(x, -1)` and introduces no separate unary opcode.
 
 ## Strings, comments, and preprocessing
 
@@ -571,6 +585,7 @@ Generated exec/ABD uses `exec-version: 10`, independent of source version. All c
 | Empty buffer c=40 (buffer_new) | context: element operations |
 | Buffer operation c=41 (buffer_op) | op, v, args; operations 0–6 are length/capacity/reserve/get/set/push/resize |
 | Default comparison c=42 (value_compare) | context, v1, v2 |
+| Bitwise/shift c=43…48 | v1, v2: bit_and/bit_or/bit_xor/shl/shr/ushr; int operands/results |
 
 Root, functions, signatures, expressions, function/type/argument/statement lists use raw AbdStack. Fields retain length boundaries without names or known-type tags. Dynamic constants use single-element AbdArray preserving int/float/double/bool/string/void/address; extension metadata uses AbdMap. JSON constants and block arrays use binary opcodes 0 and 1. `Compiler.compile()` returns ExecProgram, still inspectable as AcsObject; toValue emits the wire format. Use ExecCodec.decode to recover the inspection view, not direct root AcsObject decoding.
 

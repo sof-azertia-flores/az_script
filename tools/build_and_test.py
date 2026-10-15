@@ -172,6 +172,10 @@ def main():
             '--runner', native/'interpreter/azscript-run']
     if jni:traces += ['--bridge', bridge, '--library', native/'abdjni'/libname]
     run(traces)
+    language_ops=[sys.executable, ROOT/'tests/language_ops_end_to_end.py', '--classpath', classpath,
+                  '--runner', native/'interpreter/azscript-run']
+    if jni:language_ops += ['--bridge', bridge, '--library', native/'abdjni'/libname]
+    run(language_ops)
     run([sys.executable, ROOT/'tests/address_end_to_end.py', '--classpath', classpath,
          '--runner', native/'interpreter/azscript-run', '--host', native/'interpreter/numeric-module-host'])
     run([sys.executable, ROOT/'tests/numeric_slots_end_to_end.py', '--classpath', classpath,

@@ -73,6 +73,12 @@ Each expression is also a raw stack, beginning with an int32 opcode. `E` denotes
 | 40 | buffer_new | `element:Context` |
 | 41 | buffer_op | `operation:int, receiver:E, arguments:Es` |
 | 42 | value_compare | `context:Context, left:E, right:E` |
+| 43 | bit_and | `left:E, right:E` |
+| 44 | bit_or | `left:E, right:E` |
+| 45 | bit_xor | `left:E, right:E` |
+| 46 | shl | `left:E, right:E` |
+| 47 | shr | `left:E, right:E` |
+| 48 | ushr | `left:E, right:E` |
 
 `if`/`wi` conditions and every evaluated operand of `and`/`or`/`not` must have BOOLEAN_VALUE (4). Numeric zero/nonzero and void are not truth values; a wrong tag throws `Condition must be boolean, got <type>`. `and`/`or` remain left-to-right and short-circuit, so a skipped right operand is not evaluated or checked at runtime. Source compilation also rejects statically known non-boolean operands, including the lowered `for` condition.
 
@@ -126,6 +132,12 @@ Each buffer owns a contiguous capacity × stride slab. Class elements are separa
 `value_compare` uses inspection fields `context`, `v1`, `v2`, produces exactly -1/0/1, and supports scalar non-void, address, and pointer contexts. It rejects class/buffer contexts and nonfinite floating values, compares strings as unsigned UTF-8 bytes, and treats signed zero equally. Both operands evaluate once left to right. Operators declared on classes lower to ordinary CALL nodes, with no operator-specific executable metadata.
 
 Snapshot v9 adds width, placement bindings, and recursive element contexts. Buffer object records additionally contain `buffer:true`, `element`, `length`, `capacity`; `slots` encodes only live logical elements. A class element uses its object-view ID and destructor/context/field record, so slab fields are encoded once, without serializing spare capacity. Restoration prechecks the capacity budget, validates length/capacity/stride, tags, unique IDs, nesting, and all function bindings while building temporary slabs and views with fresh IDs, and remaps saved addresses. Only fully validated temporary state replaces the old state. Busy/transitional states cannot be saved. Across all buffers, a single snapshot's cumulative capacity × stride may not exceed 1,048,576 slots: saving or restoring beyond this persistence budget fails before allocating slabs. The runtime's per-block capacity bound and the 64 MiB file limit also apply. State replacement never destroys the old state through user code.
+
+## Bitwise and shifts (opcodes 43–48)
+
+Each instruction is exactly `[opcode:int, left:E, right:E]`: 43 `bit_and`, 44 `bit_or`, 45 `bit_xor`, 46 `shl`, 47 `shr`, and 48 `ushr`. The inspection JSON uses `v1` and `v2` for the operands. Both evaluate once, left to right, and must be INT_VALUE (0), including shift counts; no numeric or boolean conversion applies. The result is also int32.
+
+Operations use uint32 bit patterns, then interpret the result as signed int32. `shl` discards high bits and fills with zero, `shr` sign-extends, and `ushr` fills with zero. Counts must be 0…31, inclusive, without masking; an invalid count throws `std::runtime_error` (JNI `IllegalStateException`), for example `Shift count must be between 0 and 31, got 32`. Shift wrap does not trigger arithmetic overflow. Source `~x` lowers to `bit_xor(x, -1)`; compound assignments lower to ordinary variable assignment of the corresponding binary operation. These opcodes extend exec v10 without changing its version or root/function layout; consumers must support opcodes through 48.
 
 ## Type numbers and constants
 
