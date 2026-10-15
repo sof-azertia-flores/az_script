@@ -246,6 +246,104 @@ class TypeSafetyTest {
         assertTrue(mixed.getMessage().endsWith("Initializer for r has unknown type; expected double"), mixed::getMessage);
     }
 
+    @Test void conditionsRequireBooleanAcrossStatementsAndFunctionalForms() throws Exception {
+        record Case(String source, String message) {}
+        for (Case item : List.of(
+                new Case("void main(){if(1){}}", "if condition must be boolean, got int"),
+                new Case("void main(){while(1.0){}}", "while condition must be boolean, got double"),
+                new Case("void main(){for(;1;){}}", "for condition must be boolean, got int"),
+                new Case("void main(){if(1,{});}", "if condition must be boolean, got int"),
+                new Case("void main(){while(1,{break;});}", "while condition must be boolean, got int"),
+                new Case("boolean main(){return !1;}", "not operand must be boolean, got int"),
+                new Case("boolean main(){return 1&&true;}", "and left operand must be boolean, got int"),
+                new Case("boolean main(){return true&&2.0;}", "and right operand must be boolean, got double"),
+                new Case("boolean main(){return 1||false;}", "or left operand must be boolean, got int"),
+                new Case("boolean main(){return false||2.0;}", "or right operand must be boolean, got double"),
+                new Case("void main(){if(null){}}", "if condition must be boolean, got null"),
+                new Case("void main(){address p=null;if(p){}}", "if condition must be boolean, got address"),
+                new Case("class P{int x;}void main(){P* p=null;if(p){}}", "if condition must be boolean, got P *"))) {
+            String message = failure(item.source()).getMessage();
+            assertTrue(message.endsWith(item.message()), message);
+            // Reading the same AST back from JSON must enforce the same rule.
+            JsonObject parsed = tree(item.source());
+            CompileException fromJson = assertThrows(CompileException.class,
+                    () -> bytes(JsonParser.parseString(parsed.toString()).getAsJsonObject()));
+            assertEquals(message, fromJson.getMessage(), item.source());
+        }
+        for (String source : List.of(
+                "void main(){if(true){}while(false){}for(int i=0;i<2;i++){}}",
+                "boolean main(){return !false&&(true||false);}",
+                "void main(){if(true,{},{});while(false,{});}",
+                // Bare parameters and def/var stay dynamic: the runtime checks the actual tag.
+                "boolean check(value){return !value&&(value||true);}void main(){}",
+                "void main(){def(x,1);if(x){}while(x){break;}for(;x;){break;}}")) {
+            JsonObject parsed = tree(source);
+            assertArrayEquals(bytes(parsed), bytes(JsonParser.parseString(parsed.toString()).getAsJsonObject()), source);
+        }
+        // The loop initializer's declaration is visible when the lowered condition is checked.
+        assertTrue(failure("void main(){for(int i=0;i;){}}").getMessage().endsWith("for condition must be boolean, got int"));
+    }
+
+    @Test void equalityRequiresCompatiblePrimitiveTypesForBothOperators() throws Exception {
+        List<String> types = List.of("int", "float", "double", "boolean", "string", "address");
+        for (String operator : List.of("==", "!=")) for (String left : types) for (String right : types) {
+            String source = "boolean compare(" + left + " a," + right + " b){return a" + operator + "b;}void main(){}";
+            boolean numericPair = types.indexOf(left) < 3 && types.indexOf(right) < 3;
+            if (left.equals(right) || numericPair) {
+                JsonObject parsed = tree(source);
+                assertArrayEquals(bytes(parsed), bytes(JsonParser.parseString(parsed.toString()).getAsJsonObject()), source);
+            } else {
+                String expected = left.equals("address") || right.equals("address")
+                        ? "Address equality requires an address or null"
+                        : "Equality requires compatible operand types, got " + left + " and " + right;
+                String message = failure(source).getMessage();
+                assertTrue(message.endsWith(expected), message);
+            }
+        }
+        for (String source : List.of("boolean main(){return \"abc\"==5;}", "boolean main(){return true!=1;}"))
+            assertTrue(failure(source).getMessage().contains("Equality requires compatible operand types"));
+        assertDoesNotThrow(() -> bytes(tree("boolean compare(value){return value==1&&value!=\"x\"&&value==true;}void main(){}")));
+    }
+
+    @Test void equalityKeepsNominalReferenceChecksAndDoesNotEraseThemThroughAny() throws Exception {
+        String classes = "class A{int x;}class B:A{int y;}class C{int x;}";
+        assertDoesNotThrow(() -> bytes(tree(classes + "boolean compare(A* a,B* b,address p,value){"
+                + "return a==b&&b!=a&&a==null&&null!=b&&p==null&&null==p&&null==null&&value==null;}void main(){}")));
+        for (String expression : List.of("a==c", "c!=a", "a==value", "value!=a")) {
+            String source = classes + "boolean compare(A* a,C* c,value){return " + expression + ";}void main(){}";
+            String message = failure(source).getMessage();
+            assertTrue(message.endsWith("Object equality requires compatible class references or null"), message);
+        }
+        for (String expression : List.of("a==a", "a!=value", "value==a")) {
+            String source = classes + "boolean compare(value){A a;return " + expression + ";}void main(){}";
+            String message = failure(source).getMessage();
+            assertTrue(message.endsWith("Literal objects cannot be compared; compare their fields or pointers"), message);
+        }
+        String bufferMessage = failure("boolean compare(value){buffer<int> b;return b==value;}void main(){}").getMessage();
+        assertTrue(bufferMessage.endsWith("Literal objects cannot be compared; compare their fields or pointers"), bufferMessage);
+    }
+
+    @Test void compileJsonCannotBypassConditionOrEqualityRules() throws Exception {
+        JsonObject condition = tree("void check(boolean flag){if(flag){}}void main(){}");
+        String conditionMessage = rejected(condition, copy -> function(copy, "check").getAsJsonObject("metadata")
+                .getAsJsonArray("param-types").set(0, new JsonPrimitive("int"))).getMessage();
+        assertTrue(conditionMessage.endsWith("if condition must be boolean, got int"), conditionMessage);
+        JsonObject loop = tree("void main(){for(int i=0;i<2;i++){}}");
+        String loopMessage = rejected(loop, copy -> function(copy, "main").getAsJsonArray("script").get(0)
+                .getAsJsonObject().getAsJsonArray("param").set(1, new JsonPrimitive(1))).getMessage();
+        assertTrue(loopMessage.endsWith("for condition must be boolean, got int"), loopMessage);
+        JsonObject equality = tree("boolean compare(boolean a,boolean b){return a==b;}void main(){}");
+        String equalityMessage = rejected(equality, copy -> {
+            JsonArray params = function(copy, "compare").getAsJsonObject("metadata").getAsJsonArray("param-types");
+            params.set(0, new JsonPrimitive("string")); params.set(1, new JsonPrimitive("int"));
+        }).getMessage();
+        assertTrue(equalityMessage.endsWith("Equality requires compatible operand types, got string and int"), equalityMessage);
+        // Bare AST parameters retain ANY and must remain eligible for runtime checks.
+        JsonObject dynamic = condition.deepCopy();
+        function(dynamic, "check").getAsJsonObject("metadata").getAsJsonArray("param-types").set(0, new JsonPrimitive("any"));
+        assertDoesNotThrow(() -> bytes(dynamic));
+    }
+
     @Test void hexadecimalIdsAndReservedNamespacesMatchBetweenSourceAndAst() throws Exception {
         // Source accepts a 0x prefix and leading zeros; the AST always holds the canonical spelling.
         JsonObject tree = tree("#namespace 0x0005151\nint f():00000000abcd {return 1;}\nextern int g():00000000abcd;\nextern int h():0X00051510002;\n"

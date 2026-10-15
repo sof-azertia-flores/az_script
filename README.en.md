@@ -202,6 +202,7 @@ Non-library main is 0x0fff0000; ordinary definitions may fix low IDs with :0003,
 
 ## Defined semantics and limits
 
+- Conditions and `!`/`&&`/`||` require booleans, including for dynamic values at runtime. Equality permits mixed numeric types, same-type booleans/strings, addresses/null, and compatible class pointers; incompatible pairs fail rather than comparing unequal. See [equality rules](compiler/LANGUAGE.en.md#expressions-and-control-flow).
 - Integers are signed 32-bit; division truncates toward zero and overflow/zero division fail. Numeric promotion is double > float > int; booleans are not implicit numbers.
 - Decimals default to double; 1.5f, 5f, and 2e3f are float.
 - Fully typed extern declarations require explicit types; old #extern is removed. Actual arguments/results match exactly without int/float/double conversions. Namespace accepts 1–4 hex digits and rejects the reserved 0000 and 0abd; libraries use namespace_hint/assume_hint.

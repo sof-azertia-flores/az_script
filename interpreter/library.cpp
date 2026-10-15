@@ -365,9 +365,7 @@ double number(const V& v) {
 bool truth(const V& v) {
     if(!v) throw std::runtime_error("Null host value");
     if(v->type==BOOLEAN_VALUE) return *static_cast<bool*>(v->value);
-    if(numeric(v)) return number(v)!=0;
-    if(v->type==VOID_VALUE) return false;
-    throw std::runtime_error("Condition must be boolean or numeric");
+    throw std::runtime_error("Condition must be boolean, got "+std::string(type_name(v->type)));
 }
 V checked_int(std::int64_t n) {
     if(n<std::numeric_limits<int>::min()||n>std::numeric_limits<int>::max())
@@ -408,7 +406,10 @@ V binary(const std::string& op,const V& a,const V& b) {
     if(op=="eq"||op=="ne") {
         bool eq=false;
         if(numeric(a)&&numeric(b)) eq=number(a)==number(b);
-        else if(a->type==b->type) {
+        else if(a->type!=b->type)
+            throw std::runtime_error("Equality requires compatible operand types, got "+
+                std::string(type_name(a->type))+" and "+type_name(b->type));
+        else {
             if(a->type==VOID_VALUE) eq=true;
             else if(a->type==STRING_VALUE) eq=*static_cast<std::string*>(a->value)==*static_cast<std::string*>(b->value);
             else if(a->type==BOOLEAN_VALUE) eq=*static_cast<bool*>(a->value)==*static_cast<bool*>(b->value);

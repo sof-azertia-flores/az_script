@@ -271,6 +271,21 @@ Precedence from lowest to highest:
 
 Thus `20-3-2` is 15, `100/5/2` is 10, and `2+3*(4+1)` is 17. `a=b=3` assigns from the right. Short-circuited right operands of &&/|| are not evaluated.
 
+Conditions in `if`, `while`, and `for`, including functional syntax, and operands of `!`, `&&`, and `||` must be boolean. There is no numeric, string, address, or void truthiness: use `n != 0` or `p != null` explicitly. Known non-boolean operands fail compilation, e.g. `if condition must be boolean, got int`. Dynamic `var`, `def`, or untyped parameter values are checked when evaluated and fail with `Condition must be boolean, got int` when their actual type is int. Short-circuiting still skips the right operand when the left boolean determines the result.
+
+Equality `==` / `!=` accepts these operand pairs and returns boolean:
+
+| Operand pair | Comparison |
+| --- | --- |
+| Any mixture of `int`, `float`, and `double` | Numeric equality, including mixed numeric types. |
+| `boolean` and `boolean`; `string` and `string` | Same-type value equality. |
+| `address` and `address` or `null` | Equality of unsigned address values; null is address zero. |
+| Class pointers of the same or an inheritance-related class; a class pointer and `null` | Pointer identity; unrelated class pointers and raw-address/class-pointer pairs are rejected. |
+| `null` and `null` | Equal. |
+| Dynamic `any` with another dynamic value or a non-class scalar | Deferred to runtime; actual values must form a compatible pair above. |
+
+Other known pairs fail compilation, e.g. `Equality requires compatible operand types, got string and int`. Dynamic incompatible pairs fail at runtime instead of returning false/true. Booleans are not numbers, and integer zero is not null. Class values and buffers have no generic equality; compare their fields or elements explicitly. Unbounded type parameters do not gain an equality operation. Statically void operands cannot be compared. At runtime, two void values are equal (`eq` true, `ne` false); this also applies to dynamic variables that have not received a value.
+
 ```text
 // Original functional control syntax
 while (i < 10, { i += 1; });
@@ -298,7 +313,7 @@ print(total); // 9
 
 `i++`, `++i`, `i--`, `--i` are standalone statements or for steps on simple numeric/address variables only. They cannot appear in returns, arguments, or other expressions, so prefix/postfix result differences do not apply. Members and mem_get targets do not support them. Integer overflow, address bounds, and dynamic values that are neither numbers nor addresses fail at runtime.
 
-Every normal exit of a nonvoid function must return. Both if branches must return. While/for counts as nonterminating only with literal true/nonzero numeric conditions (or omitted for condition) and no break belonging to that loop; otherwise compilation reports `non-void function can reach the end of its body without returning a value`. Statements end in semicolons, optional immediately before block end; function-definition trailing semicolons are optional. Array subscripts, object-literal expression syntax, closures, and exception handling are unsupported and rejected.
+Every normal exit of a nonvoid function must return. Both if branches must return. While/for counts as nonterminating only with literal true conditions (or an omitted for condition) and no break belonging to that loop; otherwise compilation reports `non-void function can reach the end of its body without returning a value`. Statements end in semicolons, optional immediately before block end; function-definition trailing semicolons are optional. Array subscripts, object-literal expression syntax, closures, and exception handling are unsupported and rejected.
 
 Integers are signed 32-bit; out-of-range literals fail compilation. Decimal/scientific literals default to double; f/F produces float, e.g. 1.5f, 5f, 2e3f. Both reject overflow and underflow to zero. Numeric print/string concatenation uses shortest round-trippable text: `0.1+0.2` → `0.30000000000000004`, `123456789.0` → `123456789`, `1e20` → `1e+20`; float uses its own precision (0.1f → 0.1), and negative zero prints -0. Runtime-only zero divisors compile but int/float/double division, including positive/negative floating zero, throws `Division by zero`, never Infinity/NaN. Integer overflow also fails at runtime.
 

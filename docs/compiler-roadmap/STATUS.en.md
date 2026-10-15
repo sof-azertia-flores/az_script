@@ -2,7 +2,7 @@
 
 [中文](STATUS.md) | English
 
-This branch (`claude/confident-galileo-fic3s1`) carries a planned series of 28 commits. They fix the compiler problems found in a repository review, add new language features, and add runtime line numbers. Work has resumed through C14; the next item is C15.
+This branch (`claude/confident-galileo-fic3s1`) carries a planned series of 28 commits. They fix the compiler problems found in a repository review, add new language features, and add runtime line numbers. Work has resumed through C15; the next item is C16.
 
 - [DESIGN.md](DESIGN.md): the detailed per-commit design, with file:line citations.
 - [COMPLETENESS.md](COMPLETENESS.md): the review of that design.
@@ -38,33 +38,33 @@ This branch (`claude/confident-galileo-fic3s1`) carries a planned series of 28 c
 | C11 | 86471cc | Typed globals `T g;` / `T g = e;`, initialized in the onload. |
 | C12 | cc4b022 | Qualified base calls `Base::m(args)`. |
 | C13 | 5af1331 | **Exec v10**, the only format bump: optional per-function debug records with `-g`, and root `debug_files`. |
-| C14 | this commit | Script/native stack traces; trace-preserving cleanup; UTF-8 JNI messages with original exception types and callback identity. V0–V3 passed on Linux x86_64. |
+| C14 | 0b50e08 | Script/native stack traces; trace-preserving cleanup; UTF-8 JNI messages with original exception types and callback identity. V0–V3 passed on Linux x86_64. |
+| C15 | this commit | Boolean-only conditions and compatible equality, enforced in compiler and runtime. V0–V3 passed on Linux x86_64. |
 
 ## Remaining
 
 Each item gives its validation sets (V0–V3 are defined under "How to resume"). Details for item Cxx are in the section **Cxx** of [DESIGN.md](DESIGN.md).
 
-1. **C15 Boolean conditions and compatible equality** (V0–V3). Enforced statically and at runtime (`truth()` in library.cpp; `eq`/`ne`).
-2. **C16 Bitwise and shift operators** (V0–V3). Opcodes 43–48. Shifts are recognized from adjacent `<`/`>` tokens, measured on preprocessed text offsets. The opcode ranges in compact_exec, test_distribution and test_export must grow.
-3. **C17 Explicit conversions** (V0–V3). `int()`, `float()`, `double()`, `string()` and `address()`; opcode 49 `convert`. Float parsing must be locale-independent. `int`↔`address` is rejected.
-4. **C18 Checked return conversion, widening only** (V0, V1, V2, V3). Rewrite the narrowing sites in `compiler/stdlib/math.azs` (`math_trunc` uses `int()`).
-5. **C19 Ternary `?:`** (V0–V3). Opcode 50 `select`. Fix the colon-glue lexing at `GeneraterJson` (see DESIGN R8). `ifExpression` cannot be reused because it scopes each arm.
-6. **C20 switch** (V0, V1, V3). Lowered flat through a `SyntheticLoop` descriptor, no new opcode. No fall-through.
-7. **C21 String functions** (V0–V3). Dense built-ins 0x0abd000b–13 with code-point semantics. Supports `s.length()` and `s[i]`.
-8. **C22 Typed class pointers and closed object storage** (V0–V3).
+1. **C16 Bitwise and shift operators** (V0–V3). Opcodes 43–48. Shifts are recognized from adjacent `<`/`>` tokens, measured on preprocessed text offsets. The opcode ranges in compact_exec, test_distribution and test_export must grow.
+2. **C17 Explicit conversions** (V0–V3). `int()`, `float()`, `double()`, `string()` and `address()`; opcode 49 `convert`. Float parsing must be locale-independent. `int`↔`address` is rejected.
+3. **C18 Checked return conversion, widening only** (V0, V1, V2, V3). Rewrite the narrowing sites in `compiler/stdlib/math.azs` (`math_trunc` uses `int()`).
+4. **C19 Ternary `?:`** (V0–V3). Opcode 50 `select`. Fix the colon-glue lexing at `GeneraterJson` (see DESIGN R8). `ifExpression` cannot be reused because it scopes each arm.
+5. **C20 switch** (V0, V1, V3). Lowered flat through a `SyntheticLoop` descriptor, no new opcode. No fall-through.
+6. **C21 String functions** (V0–V3). Dense built-ins 0x0abd000b–13 with code-point semantics. Supports `s.length()` and `s[i]`.
+7. **C22 Typed class pointers and closed object storage** (V0–V3).
    - `object_alloc` 0x0abd0014; the heap tags object ranges.
    - `mem_get`/`mem_free`/`make_free`/`mem_send_up` and JNI raw put/free reject object storage.
    - `oa` requires object storage.
    - Add the Known limitations docs.
-9. **C23 `check_object`** (V0–V3). Opcode 51, applied to `reflect_invoke_function<R>` results.
-10. **C24 Virtual methods** (V0–V3).
+8. **C23 `check_object`** (V0–V3). Opcode 51, applied to `reflect_invoke_function<R>` results.
+9. **C24 Virtual methods** (V0–V3).
     - Keywords `virtual`, `override` and `final`; opcodes 52 `set_methods` and 53 `call_virtual`. Method tables live outside the slots.
     - **JNI snapshot v10**: update every snapshot-version site listed in COMPLETENESS §2.7.
     - Update the AGENTS wording.
-11. **C25 Exact ABD measurement and statement-level spilling** (V0, V1, V2). `ExecShape` and `AbdLinearizer`. Differential runs at internal limits 96, 64 and 48.
-12. **C26 Flat operator chains above 128 operands** (V0, V1, V2).
-13. **C27 Flat else-if ladders** (V0, V1, V2). Choose nested or flat lowering from the remaining depth budget; this covers ladders of about 120–128 branches and ladders inside loops.
-14. **C28 Validation record** (V0–V3). Add an entry to VALIDATION.md/.en.md with real results.
+10. **C25 Exact ABD measurement and statement-level spilling** (V0, V1, V2). `ExecShape` and `AbdLinearizer`. Differential runs at internal limits 96, 64 and 48.
+11. **C26 Flat operator chains above 128 operands** (V0, V1, V2).
+12. **C27 Flat else-if ladders** (V0, V1, V2). Choose nested or flat lowering from the remaining depth budget; this covers ladders of about 120–128 branches and ladders inside loops.
+13. **C28 Validation record** (V0–V3). Add an entry to VALIDATION.md/.en.md with real results.
 
 ### Follow-ups found while implementing C01–C13
 

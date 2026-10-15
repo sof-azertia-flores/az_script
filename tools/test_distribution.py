@@ -281,6 +281,24 @@ def verify(package: Path, java: Optional[Path] = None) -> Dict[str, object]:
                  f"Packaged runtime lost stripped error frames: {failure.stderr!r}")
         passed("packaged debug and stripped runtime traces preserve exact error reports")
 
+        strict_source = source_directory / "strict conditions.azs"
+        strict_source.write_text("void main(){if(1)print(99);}\n", encoding="utf-8")
+        failure = _run([compiler, strict_source], cwd, compiler_environment, succeeds=False)
+        _require(failure.returncode == 1 and "if condition must be boolean, got int" in failure.stderr,
+                 f"Packaged compiler accepted a numeric condition: {failure.stderr!r}")
+        strict_abd = cwd / "strict runtime/program.abd"
+        for text, message in [
+                ("void main(){def(value,1);if(value)print(99);}\n", "Condition must be boolean, got int"),
+                ('boolean main(){def(value,"1");return value==1;}\n',
+                 "Equality requires compatible operand types, got string and int")]:
+            strict_source.write_text(text, encoding="utf-8")
+            _run([compiler, strict_source, "-o", strict_abd], cwd, compiler_environment)
+            failure = _run([runner, strict_abd], cwd, environment, succeeds=False)
+            _require(failure.returncode == 1 and not failure.stdout and failure.stderr == (
+                         f"AzScript error: {message}\n  at function 0x0fff0000\n"),
+                     f"Packaged runtime lost strict condition/equality checks: {failure.stderr!r}")
+        passed("boolean-only conditions and compatible equality in compiler and runtime")
+
         broken_source = source_directory / "invalid source.azs"
         broken_source.write_text("int main() { return missing_name; }\n", encoding="utf-8")
         broken = _run([compiler, broken_source], cwd, compiler_environment, succeeds=False)

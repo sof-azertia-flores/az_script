@@ -1,3 +1,11 @@
+# C15 布尔条件与相容相等比较（2026-10-15）
+
+中文 | [English](VALIDATION.en.md)
+
+条件和逻辑运算数现在必须为 boolean：已知类型在编译时检查，动态值在运行时检查。相等运算允许混合数值、相同基础类型及既有的兼容地址/类指针配对，不相容的动态标签会报错。运行时 void/void 仍相等，也覆盖未赋值的动态变量；静态 void 表达式仍被拒绝。未改变 opcode、exec 或快照版本。
+
+取消 `JAVA_TOOL_OPTIONS` 后顺序完成 V1 和 V2，均通过 225 项 Java 测试、2067 项原生检查，以及既有 JNI、跨语言和端到端套件。普通类型套件通过 35 项，补入的动态 void 用例另行通过，sanitizer 类型套件包含完整 36 项；未发现 ASan/UBSan 报告。V3 `python3 tools/export_distribution.py build/dist-check --offline --force` 通过 25 项搬迁及消费者检查，包括发行工具拒绝数字条件和不相容相等比较；173 个清单文件的大小及 SHA-256 均一致。V0 空白与改动文件审查通过。日志：`build/c15/v1.log`、`build/c15/void-targeted.log`、`build/c15/v2.log`、`build/c15/v3.log`。
+
 # C14 脚本运行时调用栈（2026-10-15）
 
 中文 | [English](VALIDATION.en.md)

@@ -74,6 +74,10 @@ stack 的成员数量由其 frame 边界确定；固定记录必须恰好包含�
 | 41 | buffer_op | `operation:int, receiver:E, arguments:Es` |
 | 42 | value_compare | `context:Context, left:E, right:E` |
 
+`if`/`wi` 的条件，以及 `and`/`or`/`not` 中实际求值的每个操作数，必须为 BOOLEAN_VALUE（4）。数值零/非零与 void 不再表示真假；类型错误时抛出 `Condition must be boolean, got <type>`。`and`/`or` 仍从左到右短路，被跳过的右操作数在运行时不求值也不检查。源码编译还会拒绝静态已知的非布尔操作数，包括降级后的 `for` 条件。
+
+`eq`/`ne` 对混合 int/float/double 做数值比较，对两个 boolean 或两个 string 做值比较，对两个 address 比较 uint64 值。null 和类指针擦除为 address；源码编译另外要求类指针类型兼容。其他混合类型会抛错，不再直接产生不等/相等；address 与非 address 的配对仍走地址专用错误。OBJECT_VALUE（类值和 buffer）没有通用相等运算。运行时的两个 void 值（包括尚未赋值的动态变量）比较时，`eq` 为 true，`ne` 为 false；编译器拒绝静态类型为 void 的操作数。这些检查只收紧 exec v10 的执行语义，不改变二进制布局或 opcode 编号。
+
 `cont` 结束当前最内层循环的本轮执行，各层块先完成对象清理，再由循环消费跳转标记。`for` 在编译期降为块与 `wi`，没有独立 opcode：初始化只执行一次，首次跳过步进，后续轮次先步进再判断条件，循环正文具有独立作用域。因此 `continue` 会执行步进，`break` 和 `return` 不执行步进。
 
 `cleanup` 是编译器内部清理指令，检查视图 JSON 的字段为 `v`（正文）、`val`（清理）、`on-error`。先执行正文及其作用域清理；`on_error=true` 时只在失败后执行 finalizer，false 时无论正常结束、跳转或错误都执行。finalizer 不替换正文已有的返回值或跳转；已有错误优先保留，否则传播清理错误。继承构造用它回滚已完成的父类部分，析构用它保证父类随后执行。两个子节点都是普通表达式，类名、继承关系及布局不进入 exec 指令。清理仍受调用和指令预算约束，底层内存释放保持原有兜底保证。不认识新 opcode 的解释器会明确拒绝相应程序。

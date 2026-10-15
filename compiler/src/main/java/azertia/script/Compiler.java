@@ -108,6 +108,8 @@ public class Compiler {
          * are reported only at positioned nodes of the compiled AST, never at these.
          */
         final Set<JsonObject> synthesized = Collections.newSetFromMap(new IdentityHashMap<>());
+        /** Source-level labels for checks performed by lowered nodes, such as a for condition. */
+        final IdentityHashMap<JsonObject,String> diagnosticLabels = new IdentityHashMap<>();
         /** The memo of the running outermost type query (see expressionType), reused by the next query. */
         final TypeQuery typeQuery = new TypeQuery();
         /**
@@ -492,7 +494,7 @@ public class Compiler {
         return info.base;
     }
     private static boolean conditionType(int type) {
-        return type == AsTypes.BOOLEAN_VALUE || numeric(type);
+        return type == AsTypes.BOOLEAN_VALUE || type == AsTypes.ANY_VALUE;
     }
     private static String typeName(int type) {
         return switch (type) {
@@ -541,9 +543,25 @@ public class Compiler {
     private static void requireConditionOrUnknown(String context, JsonElement value,
                                                   LogicEnvironment environment) {
         int type = expressionType(value, environment);
-        if (type != AsTypes.ANY_VALUE && !conditionType(type))
+        if (!conditionType(type))
             throw new IllegalArgumentException(
-                    context + " must be boolean or numeric, got " + typeName(type));
+                    context + " must be boolean, got " + typeName(type));
+    }
+    /** Equality preserves nominal references; only dynamic non-class operands defer to the runtime. */
+    private static void requireComparable(JsonElement first, JsonElement second, LogicEnvironment environment) {
+        int left = expressionType(first, environment), right = expressionType(second, environment);
+        if (isOwnedValue(left) || isOwnedValue(right))
+            throw new IllegalArgumentException("Literal objects cannot be compared; compare their fields or pointers");
+        if (isClass(left) || isClass(right) || left == NULL_TYPE || right == NULL_TYPE) {
+            if (left == NULL_TYPE && right == AsTypes.ANY_VALUE || right == NULL_TYPE && left == AsTypes.ANY_VALUE
+                    || assignable(left, right) || assignable(right, left)) return;
+            throw new IllegalArgumentException("Object equality requires compatible class references or null");
+        }
+        if ((left == AsTypes.ADDRESS_VALUE || right == AsTypes.ADDRESS_VALUE)
+                && left != AsTypes.ANY_VALUE && right != AsTypes.ANY_VALUE && left != right)
+            throw new IllegalArgumentException("Address equality requires an address or null");
+        if (left == AsTypes.ANY_VALUE || right == AsTypes.ANY_VALUE || left == right || numeric(left) && numeric(right)) return;
+        throw new IllegalArgumentException("Equality requires compatible operand types, got " + typeName(left) + " and " + typeName(right));
     }
     private static void requireAddableOrUnknown(JsonElement first, JsonElement second,
                                                 LogicEnvironment environment) {
@@ -1111,19 +1129,7 @@ public class Compiler {
                         requireConditionOrUnknown(call + " left operand", params.get(0), environment);
                         requireConditionOrUnknown(call + " right operand", params.get(1), environment);
                     }
-                    default -> {
-                        int left = expressionType(params.get(0), environment), right = expressionType(params.get(1), environment);
-                        if (isOwnedValue(left) || isOwnedValue(right))
-                            throw new IllegalArgumentException("Literal objects cannot be compared; compare their fields or pointers");
-                        if ((isClass(left) || isClass(right) || left == NULL_TYPE || right == NULL_TYPE)
-                                && !(left == NULL_TYPE && right == AsTypes.ANY_VALUE || right == NULL_TYPE && left == AsTypes.ANY_VALUE)
-                                && !assignable(left, right) && !assignable(right, left))
-                            throw new IllegalArgumentException("Object equality requires compatible class references or null");
-                        if ((left == AsTypes.ADDRESS_VALUE || right == AsTypes.ADDRESS_VALUE)
-                                && left != AsTypes.ANY_VALUE && right != AsTypes.ANY_VALUE
-                                && !assignable(left, right) && !assignable(right, left))
-                            throw new IllegalArgumentException("Address equality requires an address or null");
-                    }
+                    default -> requireComparable(params.get(0), params.get(1), environment);
                 }
                 result.put("c", ExecOpcodes.code(switch (call) { case "greater" -> "gt"; case "lower" -> "lt"; case "cmp" -> "eq"; default -> call; }));
                 result.put("v1", compileExpression(params.get(0), environment));
@@ -1131,9 +1137,10 @@ public class Compiler {
             }
             case "neg", "pos", "not" -> {
                 arity(call, params, 1, 1);
-                rejectVoidValue(call + " operand", params.get(0), environment);
+                String label = environment.state().diagnosticLabels.getOrDefault(source, call + " operand");
+                rejectVoidValue(label, params.get(0), environment);
                 if (call.equals("neg") || call.equals("pos")) requireNumericOrUnknown(call + " operand", params.get(0), environment);
-                else requireConditionOrUnknown("not operand", params.get(0), environment);
+                else requireConditionOrUnknown(label, params.get(0), environment);
                 if (call.equals("pos")) {
                     // A dynamic value still needs the same numeric check as a known operand.
                     // Multiplication by int one preserves numeric type, signed zero and evaluation count.
@@ -1187,6 +1194,7 @@ public class Compiler {
                 JsonElement condition = params.get(1).isJsonObject() && params.get(1).getAsJsonObject().has("_line") ? params.get(1) : source;
                 JsonObject negated = node("not", params.get(1)), exit = node("if", negated, node("break"));
                 copyPosition(condition, negated, environment); copyPosition(condition, exit, environment);
+                environment.state().diagnosticLabels.put(negated, "for condition");
                 JsonArray iteration = array(
                         node("if", variable(first), node("varset", new JsonPrimitive(first), new JsonPrimitive(false)), params.get(2)),
                         exit, array(params.get(3)));

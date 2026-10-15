@@ -491,7 +491,7 @@ class CompilerTest {
                 "return \"a\"-1;", "return -\"a\";", "return 1.0%1;"})
             assertThrows(IllegalArgumentException.class,
                     () -> compile("int main(){" + body + "}"), body);
-        assertDoesNotThrow(() -> compile("boolean main(){if(1){return true;}return false;}"));
+        assertThrows(IllegalArgumentException.class, () -> compile("boolean main(){if(1){return true;}return false;}"));
     }
     @Test void breakIsLimitedToLoopsAndMacroExpansionIsBounded() throws Exception {
         JsonArray body = main("int main(){var i=0;while(i<5){i+=1;if(i==2){break;}i+=10;}return i;}")
@@ -652,7 +652,7 @@ class CompilerTest {
                 "int f(x){while(true){return 1;}} int main(){return f(1);}",
                 "int f(x){if(x,{return 1;},{return 2;});} int main(){return f(1);}",
                 "int f(x){while(true){if(x){return 1;}}} int main(){return f(1);}",
-                "int f(x){while(1){while(x){break;}return 3;}} int main(){return f(1);}",
+                "int f(x){while(true){while(x){break;}return 3;}} int main(){return f(1);}",
                 "void g(){} int main(){return 1;}"})
             assertDoesNotThrow(() -> compile(source), source);
     }

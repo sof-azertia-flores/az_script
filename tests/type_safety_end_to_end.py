@@ -73,6 +73,43 @@ def main():
             run_case(name, artifact, output, error)
             return artifact
 
+        # Conditions reject dynamic non-booleans at the point of use; equality
+        # permits numeric promotion but rejects incompatible scalar tags.
+        execute('boolean-conditions', 'boolean main(){return true && !false || false;}', 'true\n')
+        execute('numeric-equality', 'void main(){print(1==1.0);print(1.0f==1.0);print(2!=2.0f);}', 'true\ntrue\nfalse\n')
+        execute('dynamic-void-equality', 'void main(){def(a);def(b);print(a==b);print(a!=b);}', 'true\nfalse\n')
+        execute('scalar-equality', 'void main(){print("x"=="x");print(true!=false);print(null==null);}', 'true\ntrue\ntrue\n')
+        for name, body in [
+                ('if', 'if(value)print(99);'),
+                ('while', 'while(value)print(99);'),
+                ('for', 'for(;value;)print(99);'),
+                ('not', 'print(!value);'),
+                ('and-left', 'print(value && true);'),
+                ('and-right', 'print(true && value);'),
+                ('or-left', 'print(value || false);'),
+                ('or-right', 'print(false || value);')]:
+            execute('dynamic-boolean-' + name, 'void main(){def(value,1);' + body + '}',
+                    error='Condition must be boolean, got int')
+        for name, value, other in [('string-int', '"1"', '1'), ('bool-int', 'true', '1'),
+                                    ('string-bool', '"true"', 'true')]:
+            for operator in ('==', '!='):
+                execute('dynamic-equality-' + name + ('-eq' if operator == '==' else '-ne'),
+                        'boolean main(){def(value,' + value + ');return value' + operator + other + ';}',
+                        error='Equality requires compatible operand types')
+        execute('boolean-short-circuit', 'void main(){def(value,1);print(false && value);print(true || value);}',
+                'false\ntrue\n')
+        if selected('static-boolean-errors'):
+            for name, source in [('if', 'void main(){if(1)print(99);}'),
+                                 ('while', 'void main(){while(0)print(99);}'),
+                                 ('for', 'void main(){for(;1;)print(99);}'),
+                                 ('not', 'boolean main(){return !1;}'),
+                                 ('and', 'boolean main(){return true && 1;}'),
+                                 ('or', 'boolean main(){return 1 || false;}')]:
+                compile_case('static-boolean-' + name, source, 'must be boolean')
+            for name, source in [('string-int', 'boolean main(){return "1"==1;}'),
+                                 ('bool-int', 'boolean main(){return true!=1;}')]:
+                compile_case('static-equality-' + name, source, 'Equality requires compatible operand types')
+
         # Every typed global gets its default first, so an initializer can read a later global
         # (c reads d's 0); the initializers then run in order, before the onload body.
         order = execute('typed-global-order', '''int trace(string label, int value){print(label);return value;}
@@ -196,7 +233,7 @@ public class TypedGlobalsBridge {
             checks += 1
 
     assert checks > 0, 'No cases selected'
-    print(f'Type safety checks passed: {checks} (typed globals, AST roundtrip, hint libraries and snapshots).')
+    print(f'Type safety checks passed: {checks} (boolean conditions, equality, typed globals, AST roundtrip, hint libraries and snapshots).')
 
 
 if __name__ == '__main__':

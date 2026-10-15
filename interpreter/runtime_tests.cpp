@@ -18,6 +18,7 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <typeinfo>
 #include <utility>
 #include <vector>
 namespace {
@@ -73,6 +74,7 @@ void rejects_containing(std::function<void()> f,const std::string& expected,cons
 }
 MV ptr(std::uint64_t v){return std::make_shared<AddressAbdValue>(address{v});}
 MV n(int v){return std::make_shared<IntAbdValue>(v);}
+MV boolean(bool v){return std::make_shared<BoolAbdValue>(v);}
 MV s(std::string v){return std::make_shared<StringAbdValue>(v);}
 A block(std::initializer_list<MV> nodes){auto a=std::make_shared<AbdArray>();for(auto x:nodes)a->push_back(x);return a;}
 A type_list(std::initializer_list<int> types){auto a=std::make_shared<AbdArray>();for(int type:types)a->push_back(n(type));return a;}
@@ -806,7 +808,109 @@ void runtime_trace_tests() {
     check(shutdown->closed&&owned->state==slot_block::status::dead,"shutdown finishes owned values after a pre-destroy failure");
     clear_error_trace();
 }
+void boolean_condition_equality_tests() {
+    // These hand-authored functions use any parameters so their checks cannot
+    // be supplied by the compiler or by a declared parameter's ABI validation.
+    auto program=load_raw(rmodule({
+        rfn(10,INT_VALUE,rblock({rx(27,{rvar(0),rreturn(rc(n(1))),rb(false)}),rreturn(rc(n(0)))}),0,{ANY_VALUE}),
+        rfn(11,INT_VALUE,rblock({rx(28,{rvar(0),rreturn(rc(n(1)))}),rreturn(rc(n(0)))}),0,{ANY_VALUE}),
+        rfn(12,BOOLEAN_VALUE,rreturn(rx(25,{rvar(0)})),0,{ANY_VALUE}),
+        rfn(13,BOOLEAN_VALUE,rreturn(rx(23,{rvar(0),rc(boolean(true))})),0,{ANY_VALUE}),
+        rfn(14,BOOLEAN_VALUE,rreturn(rx(24,{rvar(0),rc(boolean(false))})),0,{ANY_VALUE}),
+        rfn(15,BOOLEAN_VALUE,rreturn(rx(23,{rc(boolean(true)),rvar(0)})),0,{ANY_VALUE}),
+        rfn(16,BOOLEAN_VALUE,rreturn(rx(24,{rc(boolean(false)),rvar(0)})),0,{ANY_VALUE}),
+        rfn(17,BOOLEAN_VALUE,rreturn(rx(23,{rc(boolean(false)),rx(15,{rc(n(1)),rc(n(0))})}))),
+        rfn(18,BOOLEAN_VALUE,rreturn(rx(24,{rc(boolean(true)),rx(15,{rc(n(1)),rc(n(0))})}))),
+        rfn(19,BOOLEAN_VALUE,rreturn(rx(19,{rvar(0),rvar(1)})),0,{ANY_VALUE,ANY_VALUE}),
+        rfn(20,BOOLEAN_VALUE,rreturn(rx(20,{rvar(0),rvar(1)})),0,{ANY_VALUE,ANY_VALUE}),
+    }));
+    auto truth_result=[&](int id,std::vector<V> args) {
+        auto result=program->invoke(id,std::move(args));
+        check(result->type==BOOLEAN_VALUE,"boolean operations return boolean values");
+        return *static_cast<bool*>(result->value);
+    };
+    auto runtime_failure=[&](int id,std::vector<V> args,const std::string& message) {
+        bool caught=false;
+        try {program->invoke(id,std::move(args));}
+        catch(const std::runtime_error& error) {
+            caught=true;
+            check(typeid(error)==typeid(std::runtime_error)&&error.what()==message,
+                  "dynamic type violations retain their runtime_error type and exact diagnostic");
+        }
+        check(caught,"a dynamic type violation must fail before producing a value");
+    };
+    for(bool value:{false,true}) {
+        auto input=std::make_shared<variable>(value);
+        check(integer(program->invoke(10,{input}))==(value?1:0),"if accepts both boolean values");
+        check(integer(program->invoke(11,{input}))==(value?1:0),"while accepts both boolean values");
+        check(truth_result(12,{input})==!value,"logical not accepts boolean values");
+        for(int id:{13,14,15,16})
+            check(truth_result(id,{input})==value,"both evaluated logical operands accept boolean values");
+    }
+    check(!truth_result(17,{})&&truth_result(18,{}),"boolean short-circuiting leaves a failing right operand unevaluated");
+
+    struct value_case {const char* type;V value;};
+    const std::vector<value_case> non_boolean{
+        {"int",std::make_shared<variable>(0)},{"int",std::make_shared<variable>(1)},
+        {"float",std::make_shared<variable>(0.0f)},{"float",std::make_shared<variable>(1.5f)},
+        {"double",std::make_shared<variable>(0.0)},{"double",std::make_shared<variable>(1.5)},
+        {"string",std::make_shared<variable>("")},{"string",std::make_shared<variable>("x")},
+        {"void",std::make_shared<variable>(nullptr)},
+        {"address",std::make_shared<variable>(address{})},{"address",std::make_shared<variable>(address{1})},
+        {"object",std::make_shared<variable>(blocks::create(1,program))},
+    };
+    for(const auto& item:non_boolean)for(int id:{10,11,12,13,14,15,16})
+        runtime_failure(id,{item.value},"Condition must be boolean, got "+std::string(item.type));
+
+    auto equality=[&](const V& left,const V& right,bool equal) {
+        check(truth_result(19,{left,right})==equal,"compatible dynamic values compare for equality");
+        check(truth_result(20,{left,right})==!equal,"inequality is the complement of compatible equality");
+    };
+    struct numeric_case {V value;int number;};
+    const std::vector<numeric_case> numbers{
+        {std::make_shared<variable>(2),2},{std::make_shared<variable>(2.0f),2},{std::make_shared<variable>(2.0),2},
+        {std::make_shared<variable>(3),3},{std::make_shared<variable>(3.0f),3},{std::make_shared<variable>(3.0),3},
+    };
+    for(const auto& left:numbers)for(const auto& right:numbers)equality(left.value,right.value,left.number==right.number);
+    for(bool left:{false,true})for(bool right:{false,true})
+        equality(std::make_shared<variable>(left),std::make_shared<variable>(right),left==right);
+    for(const std::string left:{"","same","\xe4\xb8\xad"})for(const std::string right:{"","same","\xe4\xb8\xad"})
+        equality(std::make_shared<variable>(left),std::make_shared<variable>(right),left==right);
+    equality(std::make_shared<variable>(nullptr),std::make_shared<variable>(nullptr),true);
+    for(std::uint64_t left:{std::uint64_t{0},std::uint64_t{1},std::numeric_limits<std::uint64_t>::max()})
+        for(std::uint64_t right:{std::uint64_t{0},std::uint64_t{1},std::numeric_limits<std::uint64_t>::max()})
+            equality(std::make_shared<variable>(address{left}),std::make_shared<variable>(address{right}),left==right);
+
+    const std::vector<value_case> scalar_types{
+        {"int",std::make_shared<variable>(1)},{"float",std::make_shared<variable>(1.0f)},
+        {"double",std::make_shared<variable>(1.0)},{"string",std::make_shared<variable>("1")},
+        {"boolean",std::make_shared<variable>(true)},{"void",std::make_shared<variable>(nullptr)},
+    };
+    for(std::size_t i=0;i<scalar_types.size();++i)for(std::size_t j=i+1;j<scalar_types.size();++j) {
+        if(i<3&&j<3)continue; // Mixed numeric types are compatible; every other unequal tag is not.
+        for(bool reverse:{false,true}) {
+            const auto& left=scalar_types[reverse?j:i];const auto& right=scalar_types[reverse?i:j];
+            for(int id:{19,20})runtime_failure(id,{left.value,right.value},
+                "Equality requires compatible operand types, got "+std::string(left.type)+" and "+right.type);
+        }
+    }
+    auto address_value=std::make_shared<variable>(address{}),object_value=non_boolean.back().value;
+    for(const auto& scalar:scalar_types)for(bool reverse:{false,true})for(int id:{19,20}) {
+        runtime_failure(id,reverse?std::vector<V>{scalar.value,address_value}:std::vector<V>{address_value,scalar.value},
+                        "Unsupported address operands for "+std::string(id==19?"eq":"ne"));
+        runtime_failure(id,reverse?std::vector<V>{scalar.value,object_value}:std::vector<V>{object_value,scalar.value},
+                        "Unsupported object value operands for "+std::string(id==19?"eq":"ne"));
+    }
+    for(int id:{19,20}) {
+        const std::string message="Unsupported object value operands for "+std::string(id==19?"eq":"ne");
+        runtime_failure(id,{object_value,object_value},message);
+        runtime_failure(id,{object_value,address_value},message);
+        runtime_failure(id,{address_value,object_value},message);
+    }
+    program->destroy();
+}
 int main(){try{
+    boolean_condition_equality_tests();
     runtime_trace_tests();
     buffer_tests();
     hint_name_tests();
@@ -1371,7 +1475,7 @@ int main(){try{
             slot_fn(113,INT_VALUE,block({ret(var(0)),def(0,n(9))}),1),
             slot_fn(114,VOID_VALUE,block({def(0,n(1)),block({def(0,n(2))})}),1),
             slot_fn(115,INT_VALUE,block({block({def(0,n(1))}),block({def(0,n(2))}),ret(n(3))}),1),
-            slot_fn(116,INT_VALUE,block({loop(n(1),block({def(0,n(1)),brk()})),ret(var(0))}),1),
+            slot_fn(116,INT_VALUE,block({loop(boolean(true),block({def(0,n(1)),brk()})),ret(var(0))}),1),
             slot_fn(117,INT_VALUE,block({def(0,n(8)),ret(var(0))}),1),
             slot_fn(120,INT_VALUE,block({ret(binary("add",var(-1),call(200)))}))
         },2));
@@ -1455,8 +1559,8 @@ int main(){try{
             factory(20,30,false),factory(21,30,true),factory(22,31,false),factory(23,33,true),factory(28,34,true),factory(29,35,true),factory(36,37,true),
             fn(24,ADDRESS_VALUE,block({def("p",call(0x0abd0003,{n(1)})),binary("m",field(var("p")),n(9)),binary("divide",n(1),n(0)),object_bind(var("p"),30,false),object_return(var("p"))})),
             fn(25,VOID_VALUE,block({set("log",n(0)),call(24)})),
-            fn(26,VOID_VALUE,block({set("log",n(0)),loop(n(1),block({def("a",call(20,{n(6)})),brk()}))})),
-            fn(27,VOID_VALUE,block({set("log",n(0)),def("a",call(20,{n(7)})),loop(n(1),block({}))})),
+            fn(26,VOID_VALUE,block({set("log",n(0)),loop(boolean(true),block({def("a",call(20,{n(6)})),brk()}))})),
+            fn(27,VOID_VALUE,block({set("log",n(0)),def("a",call(20,{n(7)})),loop(boolean(true),block({}))})),
             typed_fn(30,VOID_VALUE,block({append()}),{ADDRESS_VALUE}),
             typed_fn(31,VOID_VALUE,block({append(),binary("divide",n(1),n(0))}),{ADDRESS_VALUE}),
             typed_fn(33,VOID_VALUE,block({object_delete(var("__func_param0"))}),{ADDRESS_VALUE}),
@@ -1514,8 +1618,8 @@ int main(){try{
         objects->destroy();check(integer(log)==443&&heap::lenAlloc()==0,"base owned returned objects destruct before script unload");
         objects->destroy();
 
-        auto limited=program({fn(10,VOID_VALUE,block({def("p",call(0x0abd0003,{n(1)})),object_bind(var("p"),11,false),loop(n(1),block({}))})),
-            typed_fn(11,VOID_VALUE,block({loop(n(1),block({}))}),{ADDRESS_VALUE})});
+        auto limited=program({fn(10,VOID_VALUE,block({def("p",call(0x0abd0003,{n(1)})),object_bind(var("p"),11,false),loop(boolean(true),block({}))})),
+            typed_fn(11,VOID_VALUE,block({loop(boolean(true),block({}))}),{ADDRESS_VALUE})});
         limited->max_steps=40;
         rejects_containing([&]{limited->invoke(10);},"step limit","cleanup never resets an exhausted execution budget");
         check(heap::lenAlloc()==0,"budget failure still releases object storage");limited->destroy();
@@ -1531,7 +1635,7 @@ int main(){try{
         shutdown->destroy();
 
         auto shutdown_budget=program({fn(10,ADDRESS_VALUE,block({def("p",call(0x0abd0003,{n(1)})),object_bind(var("p"),11,false),object_return(var("p"))})),
-            typed_fn(11,VOID_VALUE,block({loop(n(1),block({}))}),{ADDRESS_VALUE})});
+            typed_fn(11,VOID_VALUE,block({loop(boolean(true),block({}))}),{ADDRESS_VALUE})});
         shutdown_budget->invoke(10);shutdown_budget->max_steps=40;
         rejects_containing([&]{shutdown_budget->destroy();},"step limit","base destructor respects shutdown execution budget");
         check(heap::lenAlloc()==0&&shutdown_budget->closed,"shutdown budget exhaustion releases all storage");
@@ -1559,7 +1663,7 @@ int main(){try{
     check(integer(p->invoke(10))==23,"arithmetic");
     rejects([&]{p->invoke(11);},"unknown function throws");check(!p->functions.count(11),"lookup must not insert");
     rejects([&]{p->invoke(10,{std::make_shared<variable>(1)});},"argument count");
-    auto returned=program({fn(10,INT_VALUE,block({loop(n(1),block({ret(n(7))})),ret(n(99))}))});
+    auto returned=program({fn(10,INT_VALUE,block({loop(boolean(true),block({ret(n(7))})),ret(n(99))}))});
     check(integer(returned->invoke(10))==7,"return escapes while");
     auto scope=program({fn(10,INT_VALUE,block({def("x",n(2)),block({def("x",n(9))}),ret(var("x"))}))});
     check(integer(scope->invoke(10))==2,"block shadows without replacing outer variable");
@@ -1672,11 +1776,11 @@ int main(){try{
     rejects_message([&]{zeroDivision->invoke(42);},"Division by zero","float negative zero division error");
     rejects_message([&]{zeroDivision->invoke(43);},"Division by zero","double positive zero division error");
     rejects_message([&]{zeroDivision->invoke(44);},"Division by zero","double negative zero division error");
-    auto bad=program({fn(10,INT_VALUE,block({ret(binary("divide",n(1),n(0)))})),fn(11,INT_VALUE,block({ret(binary("add",n(std::numeric_limits<int>::max()),n(1)))})),fn(12,INT_VALUE,block({ret(s("wrong"))})),fn(13,VOID_VALUE,block({loop(n(1),block({}))})),fn(14,INT_VALUE,block({ret(call(14))}))});
+    auto bad=program({fn(10,INT_VALUE,block({ret(binary("divide",n(1),n(0)))})),fn(11,INT_VALUE,block({ret(binary("add",n(std::numeric_limits<int>::max()),n(1)))})),fn(12,INT_VALUE,block({ret(s("wrong"))})),fn(13,VOID_VALUE,block({loop(boolean(true),block({}))})),fn(14,INT_VALUE,block({ret(call(14))}))});
     rejects([&]{bad->invoke(10);},"division zero");rejects([&]{bad->invoke(11);},"integer overflow");rejects([&]{bad->invoke(12);},"return type mismatch");
     bad->max_steps=100;rejects([&]{bad->invoke(13);},"execution budget");
     bad->max_call_depth=8;rejects([&]{bad->invoke(14);},"recursion budget");check(bad->active_calls==0,"call depth unwound after failure");
-    auto lazy=program({fn(10,BOOLEAN_VALUE,block({ret(binary("and",n(0),binary("divide",n(1),n(0))))})),fn(11,BOOLEAN_VALUE,block({ret(binary("or",n(1),binary("divide",n(1),n(0))))}))});
+    auto lazy=program({fn(10,BOOLEAN_VALUE,block({ret(binary("and",boolean(false),binary("divide",n(1),n(0))))})),fn(11,BOOLEAN_VALUE,block({ret(binary("or",boolean(true),binary("divide",n(1),n(0))))}))});
     check(!*static_cast<bool*>(lazy->invoke(10)->value),"and short circuits");check(*static_cast<bool*>(lazy->invoke(11)->value),"or short circuits");
     heap::clearHeap();check(heap::alloc(0)==address{},"zero allocation");rejects([]{heap::alloc(-1);},"negative allocation");
     auto a=heap::alloc(2),b=heap::alloc(2);check(a==address{1}&&b==address{3},"zero address reserved");

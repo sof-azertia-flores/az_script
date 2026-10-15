@@ -1,3 +1,11 @@
+# C15 Boolean Conditions and Compatible Equality (2026-10-15)
+
+[中文](VALIDATION.md) | English
+
+Conditions and logical operands now require boolean, checked statically when known and at runtime for dynamic values. Equality permits mixed numeric values, identical primitive types and the existing compatible address/class-pointer cases; incompatible dynamic tags throw. Runtime void/void equality remains true, including uninitialized dynamic variables; statically void expressions remain rejected. No opcode, exec or snapshot version changed.
+
+With `JAVA_TOOL_OPTIONS` unset, V1 and V2 completed sequentially with 225 Java tests and 2067 native checks, plus all existing JNI and cross-language/end-to-end suites. The ordinary type suite passed 35 cases; the added dynamic-void case also passed separately, and all 36 cases ran under sanitizer. No ASan/UBSan reports occurred. V3 `python3 tools/export_distribution.py build/dist-check --offline --force` passed 25 relocation/consumer checks, including packaged rejection of numeric conditions and incompatible equality. All 173 manifest file sizes and SHA-256 digests matched. V0 whitespace and changed-file review passed. Logs: `build/c15/v1.log`, `build/c15/void-targeted.log`, `build/c15/v2.log`, `build/c15/v3.log`.
+
 # C14 Script Runtime Traces (2026-10-15)
 
 [中文](VALIDATION.md) | English
