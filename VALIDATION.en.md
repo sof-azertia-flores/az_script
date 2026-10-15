@@ -1,3 +1,63 @@
+# C28 Final Compiler Roadmap Validation (2026-10-15)
+
+[中文](VALIDATION.md) | English
+
+C01–C28 are complete on `claude/confident-galileo-fic3s1`. Final implementation: `7fc5a12`. C28 changes documentation only. Its V1/V2 evidence is the complete, sequential C27 runs against the same final source; those passing suites were not repeated after documentation edits. V3, all measurements and JFR below were executed afterward from that clean commit. Exec and JNI snapshots remain v10.
+
+V0 checked whitespace, added files, documentation links and the coverage inventory. V1/V2 each passed 330 Java tests, 5944 native checks, 355 depth/differential checks and 405 independent wire cases. V1 also passed 3402 real-JVM JNI assertions, 800 calls from four workers and 1000-module linking; V2 excludes JNI and produced no ASan/UBSan reports. Fresh V3 passed 30 relocated distribution/consumer checks, including both 10k chains, static/shared C++ consumers, bundled-Java execution and real JNI. All 175 manifest file sizes and SHA-256 digests matched.
+
+Actual commands, run sequentially after sourcing `/workspace/azscript-toolchain/activate.sh`:
+
+```sh
+env -u JAVA_TOOL_OPTIONS python3 tools/build_and_test.py --offline
+env -u JAVA_TOOL_OPTIONS python3 tools/build_and_test.py --offline --sanitize
+env -u JAVA_TOOL_OPTIONS -u JDK_JAVA_OPTIONS -u _JAVA_OPTIONS python3 tools/export_distribution.py build/c28-distribution --offline
+```
+
+V1/V2 logs and reports: `build/c27/v1.log`, `v2.log`, `limits-v1.json`, `limits-v2.json` (`validation.exit=0`). V3: `build/c28-evidence/v3.log`; export: `build/c28-distribution`. Both differential reports contain 254 passed records, 73 explicitly infeasible records, 24 compiled dependencies and 16 non-standalone units. Of the infeasible records, 35 carry the exact ladder-scope rejection category. Individual reasons remain in the reports; these are expected rejection checks, not unreported test failures. Non-standalone libraries are exercised by linked clients. Forced 96/64/48 budgets actually increased local-slot/definition counts in 17/24/24 cases, while preserving eligible output/error/destructor behavior.
+
+Measurements used Linux x86_64, Temurin 21.0.12.1+1, a 4-CPU quota, 32 GiB memory limit and `-Xmx1g`. Each input ran in three fresh JVMs with all inherited Java option variables removed. Every time column below is an independent median. Process wall includes JVM startup, metric traversal and ABD writes; pipeline covers parsing/AST, compilation, encoding and counter reads. RSS is the maximum observed per-process GNU time peak among the three runs, including JVM native memory. Separately recorded heap-pool peaks are not simultaneous peak heap or RSS.
+
+| Input | Parse+AST s | Compile s | Encode s | Pipeline s | Process wall s | Max RSS MiB | ABD bytes |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Locals 2k | 0.232 | 0.297 | 0.035 | 0.575 | 0.704 | 143.21 | 362247 |
+| Locals 8k | 0.420 | 0.848 | 0.083 | 1.361 | 1.556 | 339.69 | 1448247 |
+| Locals 32k | 0.804 | 2.237 | 0.252 | 3.245 | 3.511 | 801.62 | 5792247 |
+| Statements 20k | 0.525 | 1.131 | 0.162 | 1.777 | 2.022 | 519.46 | 2560247 |
+| Functions 20k | 1.565 | 4.072 | 0.417 | 6.051 | 6.327 | 1089.61 | 13919764 |
+| String chain 10k | 0.166 | 0.634 | 0.039 | 0.850 | 0.998 | 178.83 | 320293 |
+| Else-if ladder 10k | 0.404 | 1.122 | 0.147 | 1.639 | 1.832 | 519.66 | 1580518 |
+
+The five deterministic counters, their total, local-slot totals, selected opcode counts and ABD bytes/SHA-256 were identical across all three samples per input. A 4× locals increase produced work ratios 3.99962 and 3.99990; observed process-time ratios were 2.20895 and 2.25624. These timings describe this machine and are not portable performance thresholds. Existing deterministic scaling regressions remain the growth guard.
+
+| Input | scope_probes | type_evaluations | compiled_nodes | id_probes | table_probes | total_work |
+| --- | --- | --- | --- | --- | --- | --- |
+| Locals 2k | 36004 | 50003 | 16005 | 0 | 1 | 102013 |
+| Locals 8k | 144004 | 200003 | 64005 | 0 | 1 | 408013 |
+| Locals 32k | 576004 | 800003 | 256005 | 0 | 1 | 1632013 |
+| Statements 20k | 260004 | 580003 | 120005 | 0 | 1 | 960013 |
+| Functions 20k | 3679869 | 2039931 | 619981 | 20000 | 100001 | 6459782 |
+| String chain 10k | 515464 | 920924 | 20007 | 0 | 1 | 1456396 |
+| Else-if ladder 10k | 200014 | 90014 | 80016 | 1 | 5 | 370050 |
+
+| Input | Function records | Local slots | define/move/drop | Native stdout |
+| --- | --- | --- | --- | --- |
+| Locals 2k | 1 | 2001 | 2001/0/0 | 995 |
+| Locals 8k | 1 | 8001 | 8001/0/0 | 997 |
+| Locals 32k | 1 | 32001 | 32001/0/0 | 994 |
+| Statements 20k | 1 | 1 | 1/0/0 | 997 |
+| Functions 20k | 20001 | 19999 | 19999/0/0 | compile only |
+| String chain 10k | 1 | 2 | 2/0/0 | 10000 |
+| Else-if ladder 10k | 2 | 1 | 1/0/0 | 9999 |
+
+`define/move/drop` counts only those opcode kinds; local slots include source and generated locals. They do not count all instructions or identify every generated temporary. All six executable inputs returned the exact native stdout above with empty stderr. The generator for 20,000 functions creates 20001 function records including main; it was compiled only because invoking its recursive chain exceeds the runtime call-depth budget.
+
+The separate 20,000-function JFR run succeeded and was excluded from medians. It contained 224 ExecutionSample events. First project frames included `AstShape.drainNodes` 28, `Compiler.compileProgram` 13, `AstShape.field` 12, `Compiler.scopeDependencies` 12 and `GeneraterJson$Lexer.scan` 11. These are sample counts, not durations or CPU percentages; the profile also includes harness traversal. No before/after hotspot improvement is inferred.
+
+Evidence: `build/c28-evidence/metrics/metrics.json` (sample commands, counters, sizes, hashes, RSS and stdout), `functions-20000.jfr`, `functions-hotspots.json`, plus `build/c28-evidence/metrics.log` and `validation.exit=0`. Generators reuse `tools/bench_compiler.py`; the external measurement runner/probe are under `/workspace/azscript-toolchain/c28-validation` (probe SHA-256 `ee6448488e28304bae6945c00ffcd220030c0d01bb266304cee59922bd76fef2`).
+
+The final [probe inventory](docs/compiler-roadmap/PROBE_COVERAGE.en.md) maps every concretely described, available in-scope roadmap probe to regression source. Original scratchpad/handback inputs were absent, so undisclosed originals cannot be certified. Heap generation/use-after-delete/double-delete/automatic escape and declined ID tooling remain outside this round. Windows/macOS and the follow-ups listed in [STATUS](docs/compiler-roadmap/STATUS.en.md) remain unvalidated or unresolved as stated there.
+
 # C27 Flat Else-if Ladders (2026-10-15)
 
 [中文](VALIDATION.md) | English

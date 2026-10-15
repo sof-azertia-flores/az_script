@@ -2,11 +2,11 @@
 
 中文 | [English](STATUS.en.md)
 
-本分支计划 28 个提交，修复审查发现的编译器问题，增加语言特性和运行时行号。现已恢复工作并完成 C27；下一项是 C28。完整进度表、剩余提交说明、用户决定和恢复步骤以英文版 [STATUS.en.md](STATUS.en.md) 为准；逐提交设计见 [DESIGN.md](DESIGN.md)，设计审查见 [COMPLETENESS.md](COMPLETENESS.md)。
+本分支计划 28 个提交，修复审查发现的编译器问题，增加语言特性和运行时行号。C01–C28 已全部完成，具体实测和后续事项见下文。完整进度表、用户决定和验证步骤以英文版 [STATUS.en.md](STATUS.en.md) 为准；逐提交设计见 [DESIGN.md](DESIGN.md)，设计审查见 [COMPLETENESS.md](COMPLETENESS.md)。
 
 ## 已完成
 
-C01–C13 已提交并推送，C14–C27 已在本次续做中完成：
+C01–C13 已提交并推送，C14–C28 已在本次续做中完成：
 - 带源码映射的诊断，支持多错误报告与警告；
 - 十六进制运行时 ID；
 - include 根目录与 `#pragma once`；
@@ -44,9 +44,11 @@ C01–C13 已提交并推送，C14–C27 已在本次续做中完成：
 
 - C27 按剩余深度展开 else-if 链，保留首条件作用域并检查间接作用域影响；V0–V2 全部通过。
 
-## 剩余
+- C28 最终完整验证证据、30项全新发行验收、175个清单文件校验、七组规模实测及探针覆盖清单。
 
-- C28 验证记录。
+## 后续事项
+
+本轮 C01–C28 已完成。实际结果见 [VALIDATION.md](../../VALIDATION.md)，探针映射见 [PROBE_COVERAGE.md](PROBE_COVERAGE.md)；其他已知限制及后续事项见英文 STATUS。
 
 ## 用户决定
 

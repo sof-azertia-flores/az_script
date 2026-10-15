@@ -2,7 +2,7 @@
 
 [中文](STATUS.md) | English
 
-This branch (`claude/confident-galileo-fic3s1`) carries a planned series of 28 commits. They fix the compiler problems found in a repository review, add new language features, and add runtime line numbers. Work has resumed through C27; the next item is C28.
+This branch (`claude/confident-galileo-fic3s1`) carries a planned series of 28 commits. They fix the compiler problems found in a repository review, add new language features, and add runtime line numbers. All C01–C28 items are complete. C14–C28 were completed in this continuation; the follow-ups below remain outside the completed plan.
 
 - [DESIGN.md](DESIGN.md): the detailed per-commit design, with file:line citations.
 - [COMPLETENESS.md](COMPLETENESS.md): the review of that design.
@@ -40,43 +40,30 @@ This branch (`claude/confident-galileo-fic3s1`) carries a planned series of 28 c
 | C13 | 5af1331 | **Exec v10**, the only format bump: optional per-function debug records with `-g`, and root `debug_files`. |
 | C14 | 0b50e08 | Script/native stack traces; trace-preserving cleanup; UTF-8 JNI messages with original exception types and callback identity. V0–V3 passed on Linux x86_64. |
 | C15 | 80cd387 | Boolean-only conditions and compatible equality, enforced in compiler and runtime. V0–V3 passed on Linux x86_64. |
-
 | C16 | 704a0a8 | Int32 bitwise and shift operators, adjacent preprocessed-token shifts and checked counts. V0–V3 passed on Linux x86_64. |
-
 | C17 | 262302f | Checked scalar conversions with strict locale-independent decimal parsing; opcode 49. V0–V3 passed on Linux x86_64. |
-
 | C18 | 1deec3d | Exact or widening-only returns; explicit narrowing in the math library. V0–V3 passed on Linux x86_64. |
-
 | C19 | 72ac02e | Lazy ternary expressions in the current scope, numeric promotion and colon-ID/literal lexing; opcode50. V0–V3 passed on Linux x86_64. |
-
 | C20 | 28c31ed | Flat switch lowering, grouped literal labels, no fall-through and enclosing-loop continue. V0,V1,V3 passed on Linux x86_64. |
-
 | C21 | 8069303 | Unicode string functions, immutable code-point indexing and method sugar. V0–V3 passed on Linux x86_64. |
-
 | C22 | 5ce9d75 | Typed class pointers, explicit address erasure and closed object storage across runtime/JNI; Known limitations documented. V0–V3 passed on Linux x86_64. |
-
 | C23 | e620817 | Checked reflection results with opcode51: object liveness, known direct slot tags, runtime generic widths and buffer layouts. V0–V3 passed on Linux x86_64. |
-
 | C24 | df6a1c3 | Virtual methods and phase-bound method tables; opcodes52–53 and JNI snapshot v10. Construction rollback and cleanup preserve the first error. V0–V3 passed on Linux x86_64. |
-
 | C25 | 9d5103f | Exact physical ABD depth, eager statement spilling and conservative lifetime/scope checks; forced96/64/48 differentials. V0–V2 passed on Linux x86_64. |
-
 | C26 | e686960 | Flat chains above 128 operands, ordered segmented folds and safe string/boolean balancing; iterative precedence parsing. V0–V2 passed on Linux x86_64. |
+| C27 | 7fc5a12 | Budget-sensitive flat else-if ladders, preserved first-predicate scope and conservative transitive scope proofs. V0–V2 passed on Linux x86_64. |
+| C28 | this commit | Final V1/V2 evidence, fresh V3 (30 checks/175 verified files), seven measured scaling inputs and documented probe coverage. |
 
-| C27 | this commit | Budget-sensitive flat else-if ladders, preserved first-predicate scope and conservative transitive scope proofs. V0–V2 passed on Linux x86_64. |
+## Completed plan
 
-## Remaining
-
-Each item gives its validation sets (V0–V3 are defined under "How to resume"). Details for item Cxx are in the section **Cxx** of [DESIGN.md](DESIGN.md).
-
-1. **C28 Validation record** (V0–V3). Add an entry to VALIDATION.md/.en.md with real results.
+No C01–C28 items remain. See the actual [validation record](../../VALIDATION.en.md) and [probe inventory](PROBE_COVERAGE.en.md). V0–V3 are defined below.
 
 ### Follow-ups found while implementing C01–C13
 
 - `compile-json` reads its JSON input with `Files.readString`, with no regular-file or size check (`Main.readTree`). A FIFO hangs and `/dev/zero` runs out of memory.
 - A stray `}` that closes a function early causes cascading errors, capped at 20.
 - Typed globals are checked at compile time only, because exec v10 records no global types.
-- Compiling 20,000 functions still needs about 512–640 MiB of heap.
+- Compiling 20,000 functions remains memory-heavy; the C28 validation record reports measured process RSS with a 1 GiB heap limit.
 - Only Linux x86_64 was exercised. The Windows and macOS path, launcher and float-parsing code is untested.
 - Hint-assumption conflicts use `Map.containsValue`, which is a quadratic scan.
 - Operator methods cannot be called through `Base::op`.

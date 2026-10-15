@@ -1,3 +1,63 @@
+# C28 编译器路线图最终验证（2026-10-15）
+
+中文 | [English](VALIDATION.en.md)
+
+`claude/confident-galileo-fic3s1` 的 C01–C28 已完成，最终实现为 `7fc5a12`。C28 仅修改文档，V1/V2 证据引用 C27 对同一最终源码顺序完成的完整运行，文档修改后未重复这些已通过的套件。以下 V3、全部实测及 JFR 随后在该干净提交上实际执行。exec 与 JNI 快照均保持 v10。
+
+V0 检查空白、新文件、文档链接及回归覆盖清单。V1/V2 各通过330项 Java 测试、5944项原生检查、355项深度差分及405项独立线格式检查。V1另通过3402项真实JVM JNI断言、四线程800次调用及1000模块链接；V2不含JNI，无ASan/UBSan报告。全新V3通过30项搬迁发行/消费者验收，包含两种万项链、静态/动态C++消费者、内置Java执行及真实JNI；175个清单文件大小及SHA-256逐一吻合。
+
+激活 `/workspace/azscript-toolchain/activate.sh` 后实际顺序执行：
+
+```sh
+env -u JAVA_TOOL_OPTIONS python3 tools/build_and_test.py --offline
+env -u JAVA_TOOL_OPTIONS python3 tools/build_and_test.py --offline --sanitize
+env -u JAVA_TOOL_OPTIONS -u JDK_JAVA_OPTIONS -u _JAVA_OPTIONS python3 tools/export_distribution.py build/c28-distribution --offline
+```
+
+V1/V2日志与报告：`build/c27/v1.log`、`v2.log`、`limits-v1.json`、`limits-v2.json`（`validation.exit=0`）；V3日志为 `build/c28-evidence/v3.log`，发行包位于 `build/c28-distribution`。两份差分报告均含254条通过、73条明确不可行、24条已编译依赖及16条非独立单元记录；不可行记录中35条带精确的链作用域拒绝分类。逐条原因保存在报告中，这些属于预期拒绝检查；非独立库通过链接客户端执行。96/64/48预算分别在17/24/24个案例中实际增加局部槽/定义指令，并保持适用案例的输出、异常和析构行为。
+
+实测环境为Linux x86_64、Temurin21.0.12.1+1、4 CPU配额、32GiB内存上限及 `-Xmx1g`。每个输入运行三次独立JVM，并移除所有继承的Java选项变量。下表各耗时列分别取中位数。进程总耗时包含JVM启动、指标遍历和ABD写入；流水线包含解析/AST、编译、编码和计数器读取。RSS为三次GNU time进程峰值中的最大值，包含JVM原生内存；另行记录的堆池峰值并非同时发生，不能当作峰值堆或RSS。
+
+| 输入 | 解析+AST秒 | 编译秒 | 编码秒 | 流水线秒 | 进程总秒 | 最大RSS MiB | ABD字节 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 局部变量2千 | 0.232 | 0.297 | 0.035 | 0.575 | 0.704 | 143.21 | 362247 |
+| 局部变量8千 | 0.420 | 0.848 | 0.083 | 1.361 | 1.556 | 339.69 | 1448247 |
+| 局部变量3.2万 | 0.804 | 2.237 | 0.252 | 3.245 | 3.511 | 801.62 | 5792247 |
+| 语句2万 | 0.525 | 1.131 | 0.162 | 1.777 | 2.022 | 519.46 | 2560247 |
+| 函数2万 | 1.565 | 4.072 | 0.417 | 6.051 | 6.327 | 1089.61 | 13919764 |
+| 字符串链1万 | 0.166 | 0.634 | 0.039 | 0.850 | 0.998 | 178.83 | 320293 |
+| else-if链1万 | 0.404 | 1.122 | 0.147 | 1.639 | 1.832 | 519.66 | 1580518 |
+
+每个输入的三次运行中，五种确定性工作计数、总计、局部槽总数、指定opcode计数及ABD字节/SHA-256均一致。局部变量每增加4倍，工作量比为3.99962和3.99990，观测进程耗时比为2.20895和2.25624；这些耗时只描述本机，不作为跨机器性能阈值。已有确定性规模回归继续约束增长。
+
+| 输入 | scope_probes | type_evaluations | compiled_nodes | id_probes | table_probes | total_work |
+| --- | --- | --- | --- | --- | --- | --- |
+| 局部变量2千 | 36004 | 50003 | 16005 | 0 | 1 | 102013 |
+| 局部变量8千 | 144004 | 200003 | 64005 | 0 | 1 | 408013 |
+| 局部变量3.2万 | 576004 | 800003 | 256005 | 0 | 1 | 1632013 |
+| 语句2万 | 260004 | 580003 | 120005 | 0 | 1 | 960013 |
+| 函数2万 | 3679869 | 2039931 | 619981 | 20000 | 100001 | 6459782 |
+| 字符串链1万 | 515464 | 920924 | 20007 | 0 | 1 | 1456396 |
+| else-if链1万 | 200014 | 90014 | 80016 | 1 | 5 | 370050 |
+
+| 输入 | 函数记录 | 局部槽 | define/move/drop | 原生输出 |
+| --- | --- | --- | --- | --- |
+| 局部变量2千 | 1 | 2001 | 2001/0/0 | 995 |
+| 局部变量8千 | 1 | 8001 | 8001/0/0 | 997 |
+| 局部变量3.2万 | 1 | 32001 | 32001/0/0 | 994 |
+| 语句2万 | 1 | 1 | 1/0/0 | 997 |
+| 函数2万 | 20001 | 19999 | 19999/0/0 | 仅编译 |
+| 字符串链1万 | 1 | 2 | 2/0/0 | 10000 |
+| else-if链1万 | 2 | 1 | 1/0/0 | 9999 |
+
+`define/move/drop`仅统计这三种opcode，局部槽同时包括源码变量和生成变量；它们不是总指令数，也不能识别全部生成临时量。六组可执行输入的原生stdout均精确匹配上表且stderr为空。2万函数生成器连同main共有20001条函数记录，仅验证编译，因为运行其递归调用链会超过运行时深度预算。
+
+单独的2万函数JFR运行成功，未计入耗时中位数，共含224条ExecutionSample事件。每条采样栈首次出现的项目帧包括 `AstShape.drainNodes`28次、`Compiler.compileProgram`13次、`AstShape.field`12次、`Compiler.scopeDependencies`12次及 `GeneraterJson$Lexer.scan`11次。这些是采样次数，并非耗时或CPU占比；采样也包含测量程序遍历，未据此推断前后热点改进。
+
+证据：`build/c28-evidence/metrics/metrics.json`（逐次命令、计数、大小、摘要、RSS及输出）、`functions-20000.jfr`、`functions-hotspots.json`，以及 `build/c28-evidence/metrics.log` 和 `validation.exit=0`。输入复用 `tools/bench_compiler.py` 生成器；外部测量程序位于 `/workspace/azscript-toolchain/c28-validation`，Java探针SHA-256为 `ee6448488e28304bae6945c00ffcd220030c0d01bb266304cee59922bd76fef2`。
+
+最终[探针清单](docs/compiler-roadmap/PROBE_COVERAGE.md)将可取得、具体且属于本轮范围的路线图探针映射到回归源码。原scratchpad/交接输入缺失，无法认证未披露的原始输入。堆分配代次、删除后使用、重复删除、自动对象逃逸及已拒绝的ID工具仍不在本轮范围内；Windows/macOS及[STATUS](docs/compiler-roadmap/STATUS.en.md)所列后续事项仍按其说明保持未验证或未解决。
+
 # C27 扁平 else-if 链（2026-10-15）
 
 中文 | [English](VALIDATION.en.md)
