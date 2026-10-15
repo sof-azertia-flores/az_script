@@ -977,13 +977,19 @@ public class GeneraterJson {
                     if (string != null) tokens.add(string);
                 } else if (!tokens.isEmpty() && tokens.get(tokens.size() - 1).text().equals(":")
                         && SourceRules.identifierPart(c)) {
-                    // A colon introduces either a hexadecimal ID or a class/base name.
-                    // Keep IDs such as 000a intact and defer their validation to the parser.
-                    take();
-                    while (peek(0) != '\0' && SourceRules.identifierPart(peek(0))) take();
-                    tokens.add(token(source.substring(start, offset), null, l, col, SourceRules.identifierStart(c), start));
+                    // IDs keep their raw spelling, even when it resembles a number
+                    // such as 1e5 or overflows as 1e999. In expression position a
+                    // successful numeric scan may extend through a dot or exponent sign.
+                    Token numeric = Character.isDigit(c) ? numberToken(l, col, start, false) : null;
+                    if (numeric != null) tokens.add(numeric);
+                    else {
+                        take(); while (peek(0) != '\0' && SourceRules.identifierPart(peek(0))) take();
+                        String text = source.substring(start, offset);
+                        JsonElement literal = text.equals("true") || text.equals("false") ? new JsonPrimitive(Boolean.parseBoolean(text)) : null;
+                        tokens.add(token(text, literal, l, col, SourceRules.identifierStart(c), start));
+                    }
                 } else if (Character.isDigit(c) || (c == '.' && Character.isDigit(peek(1)))) {
-                    Token number = number(l, col, start);
+                    Token number = numberToken(l, col, start, true);
                     if (number != null) tokens.add(number);
                 } else if (SourceRules.identifierStart(c)) {
                     take(); while (SourceRules.identifierPart(peek(0)) && peek(0) != '\0') take();
@@ -1061,26 +1067,35 @@ public class GeneraterJson {
                 if (c == '\\' && offset < source.length() && peek(0) != '\n' && peek(0) != '\r') take();
             }
         }
-        /** A numeric literal token, or null after reporting and skipping a malformed one. */
-        private Token number(int l, int col, int start) {
+        /** A failed non-strict probe changes neither cursor state nor diagnostics. */
+        private Token numberToken(int l, int col, int start, boolean strict) {
+            int savedOffset = offset, savedLine = line, savedColumn = column, savedLastLine = lastLine, savedLastColumn = lastColumn;
+            try { return numberLiteral(l, col, start); }
+            catch (IllegalArgumentException error) {
+                if (strict) { fail(error.getMessage(), l, col); skipIdentifierPart(); return null; }
+                offset = savedOffset; line = savedLine; column = savedColumn; lastLine = savedLastLine; lastColumn = savedLastColumn;
+                return null;
+            }
+        }
+        private Token numberLiteral(int l, int col, int start) {
             while (Character.isDigit(peek(0))) take();
             if (peek(0) == '.') { take(); while (Character.isDigit(peek(0))) take(); }
             if (peek(0) == 'e' || peek(0) == 'E') {
                 take(); if (peek(0) == '+' || peek(0) == '-') take();
-                if (!Character.isDigit(peek(0))) { fail("Invalid numeric exponent", l, col); skipIdentifierPart(); return null; }
+                if (!Character.isDigit(peek(0))) throw new IllegalArgumentException("Invalid numeric exponent");
                 while (Character.isDigit(peek(0))) take();
             }
             boolean floatSuffix = peek(0) == 'f' || peek(0) == 'F';
             if (floatSuffix) take();
-            if (SourceRules.identifierPart(peek(0)) && peek(0) != '\0') { fail("Invalid numeric suffix", l, col); skipIdentifierPart(); return null; }
+            if (SourceRules.identifierPart(peek(0)) && peek(0) != '\0') throw new IllegalArgumentException("Invalid numeric suffix");
             String text = source.substring(start, offset - (floatSuffix ? 1 : 0));
             BigDecimal decimal;
             try { decimal = new BigDecimal(text); }
-            catch (NumberFormatException e) { fail("Numeric literal is out of range", l, col); return null; }
+            catch (NumberFormatException e) { throw new IllegalArgumentException("Numeric literal is out of range"); }
             if (floatSuffix) {
                 float value = decimal.floatValue();
                 if (!Float.isFinite(value) || (value == 0 && decimal.signum() != 0)) {
-                    fail("Floating literal is outside float range", l, col); return null;
+                    throw new IllegalArgumentException("Floating literal is outside float range");
                 }
                 Token at = token(source.substring(start, offset), null, l, col, false, start);
                 JsonObject object = operation("ctrl", "float", at, new JsonPrimitive(value));
@@ -1090,7 +1105,7 @@ public class GeneraterJson {
             if (text.indexOf('.') >= 0 || text.indexOf('e') >= 0 || text.indexOf('E') >= 0) {
                 double value = decimal.doubleValue();
                 if (!Double.isFinite(value) || (value == 0 && decimal.signum() != 0)) {
-                    fail("Floating literal is outside double range", l, col); return null;
+                    throw new IllegalArgumentException("Floating literal is outside double range");
                 }
                 // Keep lexical floating kind even for 5., 5e0 and zero; BigDecimal normalizes these away.
                 literal = new JsonPrimitive(value);
@@ -1117,6 +1132,7 @@ public class GeneraterJson {
     }
     private static final class Parser {
         private final List<Token> tokens;
+        private final String preprocessed;
         private final AzScript script;
         private final SourceMap map;
         private final Diagnostics diagnostics;
@@ -1138,7 +1154,7 @@ public class GeneraterJson {
         private final Map<String,List<String>> classTypeParameters = new LinkedHashMap<>();
         private Set<String> typeParameters = new LinkedHashSet<>();
         Parser(String source, SourceMap map, AzScript script, Diagnostics diagnostics) {
-            this.map = map; this.diagnostics = diagnostics; this.script = script;
+            this.map = map; this.diagnostics = diagnostics; this.script = script; this.preprocessed = source;
             this.tokens = new Lexer(source, map, diagnostics).scan();
             diagnostics.checkpoint(); // lexing
             for (JsonElement item : script.classes) {
@@ -2032,7 +2048,7 @@ public class GeneraterJson {
         private static final Set<String> ASSIGNMENT_OPERATORS = Set.of("=", "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=", "<<=", ">>=", ">>>="),
                 ASSIGNMENT_CALLS = Set.of("varset", "member-set", "index-set", "mov");
         private JsonElement assignmentBody() {
-            JsonElement left = binary(0);
+            JsonElement left = conditional();
             String assignmentOperator = operatorText();
             if (ASSIGNMENT_OPERATORS.contains(assignmentOperator)) {
                 Token operator = advanceOperator(assignmentOperator);
@@ -2062,6 +2078,13 @@ public class GeneraterJson {
                 return assignment;
             }
             return left;
+        }
+        /** The surrounding assignment guard bounds right-associative conditional nesting. */
+        private JsonElement conditional() {
+            JsonElement condition = binary(0);
+            if (!at("?")) return condition;
+            Token question = advance(); JsonElement yes = assignment(); expect(":"); JsonElement no = assignment();
+            return operation("ctrl", "select", question, condition, yes, no);
         }
         private static boolean isMemoryGet(String call) {
             return call.equals("mem_get");
@@ -2211,6 +2234,15 @@ public class GeneraterJson {
                 expect(")"); return operation("ctrl", "object-new", token, args.toArray(JsonElement[]::new));
             }
             if (token.literal() != null) { advance(); return token.literal(); }
+            if (!token.text().isEmpty() && Character.isDigit(token.text().charAt(0))) {
+                // Colon-glued IDs were only probed while lexing. An ID-like digit
+                // run used as an expression still gets the ordinary numeric error.
+                try {
+                    Lexer numeric = new Lexer(preprocessed, SourceMap.single("<expression>"), Diagnostics.failFast());
+                    numeric.offset = token.start();
+                    Token parsed = numeric.numberToken(1, 1, token.start(), true); advance(); return parsed.literal();
+                } catch (CompileException error) { throw error(error.errors().get(0).message(), token); }
+            }
             if (at("(") && cStyleCastAhead()) throw error("C-style casts are not supported; write int(x)", token);
             if (match("(")) {
                 JsonElement value = expression(); expect(")");

@@ -810,6 +810,125 @@ void runtime_trace_tests() {
     check(shutdown->closed&&owned->state==slot_block::status::dead,"shutdown finishes owned values after a pre-destroy failure");
     clear_error_trace();
 }
+void select_tests() {
+    auto select=[](R condition,R when_true,R when_false){return rx(50,{std::move(condition),std::move(when_true),std::move(when_false)});};
+    auto divide=[](){return rx(15,{rc(n(1)),rc(n(0))});};
+    auto overflow=[](){return rx(12,{rc(n(std::numeric_limits<int>::max())),rc(n(1))});};
+    auto literal_address=[](R value){return rx(33,{std::move(value)});};
+    auto field=[](R value){return rcall(0x0abd0006,{std::move(value)});};
+    auto bind=[](R value,int destructor){return rx(10,{std::move(value),rb(true),ri(destructor),rb(false),raw({})});};
+    auto lifetime_body=[](std::initializer_list<R> body) {
+        AbdStack statements;statements.vs={rset(-2,rc(n(0))),rset(-3,rc(n(0)))};
+        statements.vs.insert(statements.vs.end(),body.begin(),body.end());return rx(1,{statements.toAbdValue()});
+    };
+    auto append_destructor=[&](){return rset(-2,rx(12,{rx(14,{rvar(-2),rc(n(10))}),field(rvar(0))}));};
+    auto factory=[&](int id,int destructor,bool pointer) {
+        R allocation=pointer?rcall(0x0abd0003,{rc(n(1))}):rx(32,{ri(1)});
+        R address=pointer?rvar(1):literal_address(rvar(1));
+        R returned=pointer?rx(8,{rvar(1)}):rreturn(rvar(1));
+        return rfn(id,pointer?ADDRESS_VALUE:OBJECT_VALUE,rblock({
+            rset(-3,rx(12,{rvar(-3),rc(n(1))})),rdef(1,allocation),rx(6,{field(address),rvar(0)}),bind(address,destructor),returned,
+        }),1,{INT_VALUE});
+    };
+    auto chosen_object=[&](int id){return select(rvar(0),rcall(id,{rc(n(7))}),rcall(id,{rc(n(9))}));};
+    auto debug=[](R function,const char* name,int line,std::initializer_list<int> positions={}) {
+        AbdStack locations;for(int field:positions)locations.vs.push_back(ri(field));
+        return append_raw(replace_raw(function,8,rb(true)),raw({rs(name),ri(0),ri(line),ri(1),locations.toAbdValue()}));
+    };
+    auto module=rmodule({
+        rfn(0,VOID_VALUE,rblock({rset(-1,rc(n(0))),rset(-2,rc(n(0))),rset(-3,rc(n(0)))})),
+        rfn(600,INT_VALUE,rreturn(select(rvar(0),rc(n(7)),divide())),0,{ANY_VALUE}),
+        rfn(601,INT_VALUE,rreturn(select(rvar(0),divide(),rc(n(9)))),0,{ANY_VALUE}),
+        rfn(602,INT_VALUE,rblock({rset(-1,rc(n(0))),rreturn(select(rcall(620,{rvar(0)}),
+            rcall(621,{rc(n(2))}),rcall(621,{rc(n(3))})))}),0,{BOOLEAN_VALUE}),
+        rfn(603,INT_VALUE,rblock({select(rvar(0),rdef(1,rc(n(7))),rdef(1,rc(n(9)))),rreturn(rvar(1))}),1,{BOOLEAN_VALUE}),
+        rfn(606,OBJECT_VALUE,lifetime_body({rreturn(chosen_object(630))}),0,{ANY_VALUE}),
+        rfn(610,INT_VALUE,lifetime_body({rdef(1,rx(12,{field(literal_address(chosen_object(630))),rvar(-2)})),
+            rreturn(rvar(1))}),1,{BOOLEAN_VALUE}),
+        rfn(611,INT_VALUE,lifetime_body({rdef(1,chosen_object(630)),rreturn(rx(12,{
+            field(literal_address(rvar(1))),rx(14,{rvar(-2),rc(n(100))})}))}),1,{BOOLEAN_VALUE}),
+        rfn(612,INT_VALUE,lifetime_body({rdef(1,chosen_object(640)),rreturn(rx(12,{
+            field(rvar(1)),rx(14,{rvar(-2),rc(n(100))})}))}),1,{BOOLEAN_VALUE}),
+        rfn(613,INT_VALUE,lifetime_body({rdef(0,rx(12,{select(rx(19,{
+            field(literal_address(rcall(630,{rc(n(1))}))),rc(n(1))}),rc(n(7)),rc(n(9))),rvar(-2)})),
+            rreturn(rvar(0))}),1),
+        debug(rfn(615,VOID_VALUE,lifetime_body({rx(12,{field(literal_address(chosen_object(660))),overflow()})}),0,{BOOLEAN_VALUE}),
+            "selectedCleanup",30),
+        rfn(620,BOOLEAN_VALUE,rblock({rset(-1,rx(12,{rx(14,{rvar(-1),rc(n(10))}),rc(n(1))})),rreturn(rvar(0))}),0,{BOOLEAN_VALUE}),
+        rfn(621,INT_VALUE,rblock({rset(-1,rx(12,{rx(14,{rvar(-1),rc(n(10))}),rvar(0)})),rreturn(rvar(0))}),0,{INT_VALUE}),
+        factory(630,631,false),rfn(631,VOID_VALUE,rblock({append_destructor()}),0,{ADDRESS_VALUE}),factory(640,631,true),
+        debug(rfn(650,INT_VALUE,rreturn(select(rvar(0),divide(),rc(n(9)))),0,{ANY_VALUE}),
+            "chosenThen",9,{1,0,9,5,2,0,9,7,3,0,9,11}),
+        debug(rfn(651,INT_VALUE,rreturn(select(rvar(0),rc(n(7)),divide())),0,{ANY_VALUE}),
+            "chosenElse",10,{1,0,10,5,2,0,10,7,4,0,10,25}),
+        factory(660,661,false),debug(rfn(661,VOID_VALUE,rblock({append_destructor(),divide()}),0,{ADDRESS_VALUE}),"cleanupDestructor",40),
+    },3);
+    auto program=load_raw(replace_raw(module,10,raw({rs("select.azs")})));
+    auto input=[](bool value){return std::make_shared<variable>(value);};
+    auto runtime_failure=[&](int id,V condition,const std::string& message) {
+        bool caught=false;
+        try {program->invoke(id,{std::move(condition)});}
+        catch(const std::runtime_error& error) {
+            caught=true;check(typeid(error)==typeid(std::runtime_error)&&error.what()==message,
+                "select preserves the chosen failure type and message");
+        }
+        check(caught,"a selected error or invalid condition must throw");
+    };
+    check(integer(program->invoke(600,{input(true)}))==7&&integer(program->invoke(601,{input(false)}))==9,
+          "either unchosen select arm may throw without being evaluated");
+    runtime_failure(600,input(false),"Division by zero");runtime_failure(601,input(true),"Division by zero");
+    for(bool chosen:{false,true}) {
+        const int value=chosen?7:9;
+        check(integer(program->invoke(602,{input(chosen)}))==(chosen?2:3)&&
+              integer(program->baseEnv->getVariable(-1))==(chosen?12:13),"select evaluates its condition once before exactly one arm");
+        check(integer(program->invoke(603,{input(chosen)}))==value,"selected declarations remain in the enclosing environment");
+        for(int id:{610,611,612}) {
+            const auto allocations=heap::lenAlloc();
+            check(integer(program->invoke(id,{input(chosen)}))==value,"chosen objects survive use in their enclosing statement or block");
+            check(integer(program->baseEnv->getVariable(-2))==value&&integer(program->baseEnv->getVariable(-3))==1,
+                  "only the chosen factory allocates and its value is destroyed once at the enclosing lifetime end");
+            check(heap::lenAlloc()==allocations,"select automatic-pointer ownership leaves no heap allocation behind");
+        }
+        bool caught=false;
+        try {program->invoke(615,{input(chosen)});}
+        catch(const std::overflow_error& error) {
+            caught=true;check(std::string(error.what())=="Integer overflow"&&
+                describe_error(error)=="Integer overflow\n  at selectedCleanup (select.azs:30:1)",
+                "an enclosing error retains its type and trace over a chosen temporary destructor failure");
+        }
+        check(caught&&integer(program->baseEnv->getVariable(-2))==value&&integer(program->baseEnv->getVariable(-3))==1,
+              "selected cleanup finishes once while preserving the first error");
+    }
+    check(integer(program->invoke(613))==7&&integer(program->baseEnv->getVariable(-2))==1&&
+          integer(program->baseEnv->getVariable(-3))==1,"condition temporaries survive until the enclosing expression statement ends");
+    struct invalid_condition {const char* type;V value;};
+    for(const auto& condition:std::vector<invalid_condition>{
+        {"int",std::make_shared<variable>(0)},{"int",std::make_shared<variable>(1)},
+        {"float",std::make_shared<variable>(0.0f)},{"double",std::make_shared<variable>(1.0)},
+        {"string",std::make_shared<variable>("x")},{"void",std::make_shared<variable>(nullptr)},
+        {"address",std::make_shared<variable>(address{})},{"object",std::make_shared<variable>(blocks::create(1,program))},
+    }) {
+        runtime_failure(606,condition.value,"Condition must be boolean, got "+std::string(condition.type));
+        check(integer(program->baseEnv->getVariable(-2))==0&&integer(program->baseEnv->getVariable(-3))==0,
+              "invalid select conditions do not execute or allocate either arm");
+    }
+    for(const auto& item:std::initializer_list<std::pair<int,std::pair<V,std::string>>>{
+        {650,{input(true),"Division by zero\n  at chosenThen (select.azs:9:11)"}},
+        {651,{input(false),"Division by zero\n  at chosenElse (select.azs:10:25)"}},
+        {650,{std::make_shared<variable>(1),"Condition must be boolean, got int\n  at chosenThen (select.azs:9:7)"}},
+    }) {
+        bool caught=false;
+        try {program->invoke(item.first,{item.second.first});}
+        catch(const std::runtime_error& error) {
+            caught=true;check(describe_error(error)==item.second.second,"select reports the chosen arm or condition source position");
+        }
+        check(caught,"select debug probes must throw");
+    }
+    for(auto malformed:{rx(50,{rc(boolean(true))}),rx(50,{rc(boolean(true)),rc(n(1))}),
+        rx(50,{rc(boolean(true)),rc(n(1)),rc(n(2)),rc(n(3))})})
+        rejects([&]{load_raw(rmodule({rfn(10,INT_VALUE,malformed)}));},"select records require a condition and exactly two arms");
+    program->destroy();
+}
 void checked_return_tests() {
     AbdStack functions;
     for(int target:{INT_VALUE,STRING_VALUE,FLOAT_VALUE,DOUBLE_VALUE,BOOLEAN_VALUE,VOID_VALUE,ADDRESS_VALUE,OBJECT_VALUE})
@@ -1301,6 +1420,7 @@ void boolean_condition_equality_tests() {
     program->destroy();
 }
 int main(){try{
+    select_tests();
     checked_return_tests();
     conversion_tests();
     bitwise_tests();
@@ -1723,7 +1843,7 @@ int main(){try{
         auto twenty=rc(n(20));auto zero=rc(n(0));
         auto compact=load_raw(rmodule({rfn(10,INT_VALUE,rx(7,{rb(true),rx(12,{twenty,rc(n(22))})}))}));
         check(integer(compact->invoke(10))==42,"raw exec directly executes native arithmetic expressions");
-        for(int opcode=0;opcode<=49;++opcode)if(opcode!=29&&opcode!=30)
+        for(int opcode=0;opcode<=50;++opcode)if(opcode!=29&&opcode!=30)
             rejects([&]{load_raw(rmodule({rfn(10,VOID_VALUE,rx(opcode))}));},"exec opcode rejects missing fields");
         auto byte=[](unsigned char value){return std::make_shared<AbdValue>(&value,1);};
         const unsigned char bad_text[]={0xed,0xa0,0x80};

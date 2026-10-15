@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Bitwise, shift and conversion source/AST/ABD parity, errors and real JNI."""
+"""Operators, conversions and ternary source/AST/ABD parity, lifetimes and real JNI."""
 import argparse
 import json
 import os
@@ -250,6 +250,142 @@ def main():
                 error='Cannot convert string "' + '1' * 63 + '\\ud83d\\ude00..." to int')
         checks += 2
 
+        selected, _ = execute('select-precedence', '''void main(){
+            print(false ? 1 : true ? 2 : 3);print(true ? false ? 4 : 5 : 6);
+            print(false || true ? 8 : 9);print((1 & 1)==1 ? 4 : 5);
+            int value=0;value=false ? 10 : 20;print(value);
+            print(false ? (value=3) : (value=4));print(value);print((false ? 1 : 2)+3);
+            print((false?1:1e5) == 100000.0);print(false?true:false);
+        }''', '2\n5\n8\n4\n20\n4\n4\n5\ntrue\nfalse\n')
+        assert 50 in set(controls(selected[1])), 'The conditional corpus must emit select'
+        select_ast = json.loads((work / 'select-precedence.ast.json').read_text(encoding='utf-8'))
+
+        def source_selections(value):
+            if isinstance(value, dict):
+                if value.get('t') == 'ctrl' and value.get('call') == 'select':
+                    yield value
+                for child in value.values():
+                    yield from source_selections(child)
+            elif isinstance(value, list):
+                for child in value:
+                    yield from source_selections(child)
+
+        assert all(len(node['param']) == 3 for node in source_selections(select_ast)), select_ast
+        checks += 2
+        execute('select-lazy-order', '''int trace;
+            boolean condition(){trace=trace*10+1;return true;}
+            int arm(int n){trace=trace*10+n;return n;}
+            void main(){
+                print(condition()?arm(2):arm(3));print(trace);
+                trace=0;print(false?arm(4):arm(5));print(trace);
+                print(true?7:1/0);print(false?1/0:9);
+            }''', '2\n12\n5\n5\n7\n9\n')
+        execute('select-current-scope', '''void main(){
+            int depth=getDepth();print((true?getDepth():getDepth())==depth);
+            {int nested=getDepth();print((false?getDepth():getDepth())==nested);}
+        }''', 'true\ntrue\n')
+        promoted, _ = execute('select-numeric-promotion', '''void main(){
+            float f=true?16777217:1.25f;double d=true?7:2.5;double e=true?1.25f:2.5;
+            print(f==16777216.0f);print(d==7.0);print(e==1.25);
+            print((false?7:1.25f)==1.25f);print((false?7:2.5)==2.5);print((false?1.25f:2.5)==2.5);
+        }''', 'true\ntrue\ntrue\ntrue\ntrue\ntrue\n')
+
+        def selection_nodes(value):
+            if isinstance(value, dict):
+                if value.get('t') == 0 and value.get('c') == 50:
+                    yield value
+                for child in value.values():
+                    yield from selection_nodes(child)
+            elif isinstance(value, list):
+                for child in value:
+                    yield from selection_nodes(child)
+
+        promotion_nodes = list(selection_nodes(promoted[1]))
+        assert promotion_nodes and all({'v', 'then', 'else'} <= node.keys() for node in promotion_nodes)
+        arm_conversion_types = {arm['type'] for node in promotion_nodes for arm in (node['then'], node['else'])
+                                if isinstance(arm, dict) and arm.get('t') == 0 and arm.get('c') == 49}
+        assert arm_conversion_types == {2, 3}, arm_conversion_types
+        checks += 1
+        execute('select-promoted-dynamic-value', 'void main(){def(value,true?7:1.25f);print(value&1);}',
+                error='bit_and operands must be int, got float and int')
+        execute('select-pointer-common-type', '''class Base{int x;}class Child:Base{int y;}
+            Base* choose(boolean flag,Child* child,Base* base){return flag?child:base;}
+            <T extends Base*> T maybe(boolean flag,T value){return flag?value:null;}
+            <T extends Base*> T reverse(boolean flag,T value){return flag?null:value;}
+            void main(){Base* base=new Base();Child* child=new Child();base.x=4;child.x=9;child.y=10;
+                print(choose(true,child,base).x);print(choose(false,child,base).x);
+                print(maybe<Child*>(true,child).y);print(maybe<Child*>(false,child)==null);
+                print(reverse<Child*>(false,child).y);print(reverse<Child*>(true,child)==null);
+                (true?child:child).x=11;print(child.x);delete child;delete base;
+            }''', '9\n4\n10\ntrue\n10\ntrue\n11\n')
+        tag = '''class Tag{int n;Tag(int value){n=value;print("+"+n);}~Tag(){print("-"+n);}}
+            Tag value(int n){Tag result(n);return result;}
+            Tag* automatic(int n){Tag* result(n);return result;}
+        '''
+        execute('select-owned-literal', tag + '''void main(){
+            Tag chosen=true?value(1):value(2);print(chosen.n);print("end");
+        }''', '+1\n1\nend\n-1\n')
+        execute('select-statement-temporary', tag + '''void main(){
+            print((false?value(3):value(4)).n);print("next");
+        }''', '+4\n4\n-4\nnext\n')
+        execute('select-automatic-pointer', tag + '''void main(){
+            Tag* chosen=true?automatic(5):automatic(6);print(chosen.n);print("end");
+        }''', '+5\n5\nend\n-5\n')
+        execute('select-unselected-destructor', '''class Tag{int n;Tag(int value){n=value;}
+            ~Tag(){print("drop "+n);if(n==2){int bad=1/0;}}}
+            Tag value(int n){Tag result(n);return result;}
+            void main(){print((true?value(1):value(2)).n);print("next");}
+        ''', '1\ndrop 1\nnext\n')
+        execute('select-destructor-error', '''class Tag{int n;Tag(int value){n=value;}
+            ~Tag(){print("drop "+n);int bad=1/0;}}
+            Tag value(int n){Tag result(n);return result;}
+            void main(){print((true?value(3):value(4)).n);print("unreachable");}
+        ''', '3\ndrop 3\n', error='Division by zero')
+        _, first_error = execute('select-first-error-cleanup', '''class Tag{int n;Tag(int value){n=value;}
+            ~Tag(){print("drop "+n);int bad=2147483647+1;}}
+            Tag value(int n){Tag result(n);return result;}
+            int fail(Tag owned){return 1/0;}
+            void main(){print(fail(true?value(7):value(8)));}
+        ''', 'drop 7\n', error='Division by zero', debug=True)
+        assert 'Tag::~Tag' not in first_error.stderr and 'Integer overflow' not in first_error.stderr, first_error.stderr
+        checks += 1
+        colon, _ = execute('select-colon-ids', '''#namespace 1234
+            extern int colonFull():12340001;int colonFull(){return 3;}
+            int colonLocal():0002{return 2;}
+            int colonExponent():1e5{return 4;}
+            int colonLetter():000a{return 5;}
+            extern int colonMath():4d410008;
+            extern int colonHuge():1e999;
+            void main(){print(colonLocal()+colonFull()+colonExponent()+colonLetter());
+                print((false?1:1e5)==100000.0);print((false?1:1.5)==1.5);print((false?1:0010)==10);}
+        ''', '14\ntrue\ntrue\ntrue\n')
+        colon_ast = json.loads((work / 'select-colon-ids.ast.json').read_text(encoding='utf-8'))
+        for name, ident in [('colonLocal', 0x12340002), ('colonFull', 0x12340001),
+                            ('colonExponent', 0x123401e5), ('colonLetter', 0x1234000a),
+                            ('colonMath', 0x4d410008), ('colonHuge', 0x0001e999)]:
+            assert int(colon_ast['abstract'][name], 16) == ident, (name, colon_ast['abstract'][name])
+        checks += 1
+        execute('select-base-initializer-colon', '''class Base{int x;Base(int n){x=n;}}
+            class Child:Base{int y;Child():0003 : Base(1){y=2;}}
+            class Bare:Base{int y;Bare(): Base(2){y=3;}}
+            void main(){Child value;Bare other;print(value.x+value.y);print(other.x+other.y);}
+        ''', '3\n5\n')
+        macro_select = '#define CHOOSE ?\nint main(){def(value,1);return value CHOOSE 2:3;}\n'
+        macro_column = macro_select.splitlines()[1].index('CHOOSE') + 1
+        execute('select-macro-position', macro_select,
+                error=f'Condition must be boolean, got int\n  at main (select-macro-position.azs:2:{macro_column})', debug=True)
+        for label, source, expected in [
+                ('condition', 'int main(){return 1?2:3;}', 'must be boolean'),
+                ('incompatible', 'void main(){print(true?1:"text");}', 'incompatible types'),
+                ('void', 'void empty(){}void main(){true?empty():empty();}', 'cannot use void'),
+                ('missing-colon', 'int main(){return true?1;}', ''),
+                ('missing-arm', 'int main(){return true?1:;}', ''),
+                ('pointer-narrow', 'class Base{int x;}class Child:Base{int y;}void main(){Base* b=new Base();Child* c=new Child();Child* bad=true?c:b;}', ''),
+                ('readonly-arm', 'class P{int x;}class List{P item;P operator[](int index){return item;}}void main(){List values;P local;(true?values[0]:local).x=1;}', '')]:
+            compile_case('select-invalid-' + label, source, error=expected)
+        execute('select-dynamic-condition', 'void main(){def(flag,1);print(flag?2:3);}',
+                error='Condition must be boolean, got int')
+
         if args.library:
             assert args.bridge, '--library requires --bridge'
             binary, _ = compile_case('jni', '''#namespace 5151
@@ -355,8 +491,54 @@ public class ConversionHost {
                           '-cp', os.pathsep.join((str(work), str(args.bridge))), 'ConversionHost', conversion_binary, expected_escaped])
             assert result.returncode == 0 and not result.stdout and not result.stderr, (result.stdout, result.stderr)
             checks += 1
+            selection_binary, _ = compile_case('select-jni', '''#namespace 5151
+                float selectedFloat(boolean flag):0050{return flag?16777217:1.25f;}
+                double selectedDoubleInt(boolean flag):0051{return flag?7:2.5;}
+                double selectedDoubleFloat(boolean flag):0052{return flag?1.25f:2.5;}
+                int lazy(boolean flag):0053{return flag?7:1/0;}
+                int dynamicCondition():0054{def(flag,1);return flag?2:3;}
+                int promotedOperand(boolean flag):0055{def(value,flag?1:2.5f);return value&1;}
+                int currentScope():0056{int depth=getDepth();return true?getDepth()-depth:1000;}
+            ''')
+            selection_java = work / 'SelectionHost.java'
+            selection_java.write_text(r'''import azertia.AbdInvoker;
+import java.io.File;
+public class SelectionHost {
+ static void expect(int local,Object expected,Object... arguments){
+  Object actual=AbdInvoker.invoke(0x51510000|local,arguments);
+  if(actual==null||actual.getClass()!=expected.getClass()||!expected.equals(actual))throw new AssertionError(local+": "+actual);
+ }
+ static void reject(int local,String message,Object... arguments){
+  try{AbdInvoker.invoke(0x51510000|local,arguments);throw new AssertionError("selection accepted");}
+  catch(IllegalStateException error){
+   String expected=message+"\n  at function "+String.format("0x%08x",0x51510000|local);
+   if(error.getClass()!=IllegalStateException.class||!expected.equals(error.getMessage()))throw new AssertionError(error.getMessage());
+  }
+ }
+ public static void main(String[] args){
+  try{
+   AbdInvoker.loadScript(new File(args[0]));AbdInvoker.flush();
+   expect(0x50,Float.valueOf(16777216.0f),true);expect(0x50,Float.valueOf(1.25f),false);
+   expect(0x51,Double.valueOf(7.0),true);expect(0x51,Double.valueOf(2.5),false);
+   expect(0x52,Double.valueOf(1.25),true);expect(0x52,Double.valueOf(2.5),false);
+   expect(0x53,Integer.valueOf(7),true);
+   reject(0x53,"Division by zero",false);
+   reject(0x54,"Condition must be boolean, got int");
+   reject(0x55,"bit_and operands must be int, got float and int",true);
+   reject(0x55,"bit_and operands must be int, got float and int",false);
+   expect(0x56,Integer.valueOf(0));
+  }finally{AbdInvoker.close();}
+ }
+}
+''', encoding='utf-8')
+            compiled = run(['javac', '--release', '17', '-encoding', 'UTF-8', '-cp', args.bridge, '-d', work, selection_java])
+            assert compiled.returncode == 0 and not compiled.stderr, (compiled.stdout, compiled.stderr)
+            result = run(['java', '-Xcheck:jni', '-Dazertia.native.library=' + str(args.library.resolve()),
+                          '-cp', os.pathsep.join((str(work), str(args.bridge))), 'SelectionHost', selection_binary])
+            assert result.returncode == 0 and not result.stdout and not result.stderr, (result.stdout, result.stderr)
+            checks += 1
 
-    print(f'Language operators end-to-end checks passed: {checks} (source/AST/ABD identity, bitwise, shifts, conversions, order and errors).')
+    print(f'Language operators end-to-end checks passed: {checks} (source/AST/ABD identity, bitwise, shifts, conversions, selection, lifetimes and errors).')
 
 
 if __name__ == '__main__':

@@ -24,7 +24,7 @@ OP_NAMES = {3: 'v', 4: 'vd', 5: 'vs', 6: 'm', 7: 'r', 8: 'ro', 9: 'oa',
             32: 'new_block', 33: 'block_address', 34: 'mv', 35: 'drop',
             36: 'context_abi', 37: 'context_default', 38: 'return_typed', 39: 'check_type',
             40: 'buffer_new', 41: 'buffer_op', 42: 'value_compare',
-            43: 'bit_and', 44: 'bit_or', 45: 'bit_xor', 46: 'shl', 47: 'shr', 48: 'ushr', 49: 'convert'}
+            43: 'bit_and', 44: 'bit_or', 45: 'bit_xor', 46: 'shl', 47: 'shr', 48: 'ushr', 49: 'convert', 50: 'select'}
 EXEC_VERSION = 10
 
 
@@ -271,6 +271,8 @@ def encode_compact_expression(value):
     elif opcode == 49:
         assert value['type'] in (0, 1, 2, 3, 7)
         fields = [integer(value['type']), child('v')]
+    elif opcode == 50:
+        fields = [child('v'), child('then'), child('else')]
     else:
         assert opcode in (29, 30)
         fields = []
@@ -479,6 +481,9 @@ class WireReader:
             kind = int_value(fields[0])
             assert kind in (0, 1, 2, 3, 7)
             result.update(type=kind, v=self.expression(fields[1]))
+        elif opcode == 50:
+            assert len(fields) == 3
+            result.update(v=self.expression(fields[0]), then=self.expression(fields[1]), **{'else': self.expression(fields[2])})
         else:
             assert opcode in (29, 30) and not fields
         return result
@@ -697,6 +702,15 @@ def main():
         assert encode_compact_module(conversion_view) == converted.read_bytes(), 'independent conversion reconstruction'
         run([args.runner, converted], 'true\ntrue\n1.25\n2.5\n42\n')
 
+        selection_source = '''int main(){boolean flag=true;
+            return flag ? (false ? 1 : 42) : 1/0;}'''
+        selected, _, _ = compile_source('select-coverage', selection_source)
+        selection_reader = WireReader()
+        selection_view = selection_reader.read(selected.read_bytes())
+        assert 50 in selection_reader.opcodes, selection_reader.opcodes
+        assert encode_compact_module(selection_view) == selected.read_bytes(), 'independent select reconstruction'
+        run([args.runner, selected], '42\n')
+
         minimum = module([function(block(returning(constant(42))))])
         checks = 0
 
@@ -792,6 +806,25 @@ def main():
                 body = returning(expression(49, integer(target), constant(value)))
                 execute_wire(f'conversion-lexical-{target}-{index}', module([function(body, return_type=target)]),
                              invalid=True, error='Cannot convert string')
+
+        dead_error = expression(15, constant(1), constant(0))
+        for name, condition, yes, no, expected in [
+                ('true', constant(True), constant(42), dead_error, '42\n'),
+                ('false', constant(False), dead_error, constant(43), '43\n'),
+                ('right-associated', constant(False), constant(1),
+                 expression(50, constant(True), constant(2), constant(3)), '2\n')]:
+            fields = module([function(returning(expression(50, condition, yes, no)))])
+            payload = frame(stack(*fields))
+            parsed = WireReader().read(payload)
+            assert encode_compact_module(parsed) == payload, ('select independent roundtrip', name)
+            execute_wire('independent-select-' + name, fields, expected=expected)
+        depth_call = expression(2, integer(0x0abd0001), stack(), stack())
+        same_scope = expression(19, expression(50, constant(True), depth_call, depth_call), depth_call)
+        execute_wire('independent-select-current-scope', module([function(returning(same_scope), return_type=4)]), expected='true\n')
+        for index, condition in enumerate([0, 1, Scalar(DOUBLE, struct.pack('<d', 1.0)), 'yes', Address(1), b'\xff']):
+            body = returning(expression(50, constant(condition), constant(2), constant(3)))
+            execute_wire('select-condition-' + str(index), module([function(body)]), invalid=True,
+                         error='Condition must be boolean')
 
         mutations = [('root-missing', minimum[:-1]), ('root-extra', minimum + [b''])]
         for index, value, label in [(0, b'AZSCRIPX', 'magic'), (1, integer(5), 'version'), (1, integer(6), 'address-only-version'), (1, integer(7), 'literal-only-version'), (1, integer(8), 'v8-version'), (1, integer(9), 'previous-version'),
@@ -924,6 +957,13 @@ def main():
             bad_expressions['conversion-' + label] = expression(49, *fields)
         for target in (-1, 4, 5, 6, 8, 2147483647):
             bad_expressions[f'conversion-target-{target}'] = expression(49, integer(target), constant(1))
+        for label, fields in [('missing', ()), ('condition-only', (constant(True),)),
+                              ('missing-else', (constant(True), constant(1))),
+                              ('extra', (constant(True), constant(1), constant(2), constant(3))),
+                              ('condition-child', (stack(b'\0'), constant(1), constant(2))),
+                              ('then-child', (constant(False), stack(b'\0'), constant(2))),
+                              ('else-child', (constant(True), constant(1), stack(b'\0')))]:
+            bad_expressions['select-' + label] = expression(50, *fields)
         for label, body in bad_expressions.items():
             execute_wire(label, module([function(body)]), invalid=True)
         complete = frame(stack(*minimum))

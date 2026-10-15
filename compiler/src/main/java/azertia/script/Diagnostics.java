@@ -32,7 +32,7 @@ public final class Diagnostics {
     public record Warning(String name, boolean enabledByDefault, String description) {}
     /** Every warning the compiler reports. */
     public static final List<Warning> WARNINGS = List.of(
-            new Warning("assign-in-condition", true, "an assignment used directly as an if, while or for condition"),
+            new Warning("assign-in-condition", true, "an assignment used directly as an if, while, for or conditional-expression condition"),
             new Warning("unreachable-code", true, "a statement after return, break, continue or another statement that never completes"),
             new Warning("unused-variable", false, "a local variable that is declared but never used"));
     private static final Map<String,Warning> WARNINGS_BY_NAME = warningsByName();

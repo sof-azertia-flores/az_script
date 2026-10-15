@@ -48,6 +48,11 @@ class DistributionOutputTests(unittest.TestCase):
             with self.subTest(target=target):
                 self.check_output([{'t': 0, 'c': 49, 'type': target, 'v': value}])
 
+    def test_conditional_instruction_is_accepted_with_condition_and_arms(self):
+        condition = {'t': 0, 'c': 19, 'v1': 1, 'v2': 1}
+        promoted = {'t': 0, 'c': 49, 'type': 3, 'v': 7}
+        self.check_output([{'t': 0, 'c': 50, 'v': condition, 'then': promoted, 'else': 1.5}])
+
     def test_invalid_controls_report_the_actual_value_and_location(self):
         # The first opcode past the registry is unknown.
         for opcode in (None, True, 'return_typed', 38.0, -1, 0, 2, max(verifier.CONTROL_OPCODES) + 1):

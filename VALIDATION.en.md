@@ -1,3 +1,11 @@
+# C19 Conditional Expressions (2026-10-15)
+
+[中文](VALIDATION.md) | English
+
+Added right-associative boolean `?:` with lazy arms evaluated in the enclosing scope, numeric promotion through convert, strict compatible arm types and recursive writable-receiver checks. Opcode50 select preserves statement/owning lifetimes. Colon lexing retains hexadecimal ID spelling while expression literals receive strict normal scanning. Exec stays v10 and JNI snapshots v9.
+
+V0–V3 passed sequentially with JAVA_TOOL_OPTIONS unset: 247 Java tests,5079 native checks,272 ordinary and266 sanitizer operator/selection cases, and290 independent wire cases. Existing JNI, lifetime, trace, math and module suites passed without ASan/UBSan reports. Review found no production blocker. New test fixtures were corrected to use decimal0010 and supported class operator[]/buffer.get syntax before complete reruns. The release export passed25 relocation/consumer checks; all173 manifest sizes and SHA-256 digests matched. Logs: build/c19/v1.log,build/c19/v2.log,build/c19/v3.log.
+
 # C18 Widening-Only Numeric Returns (2026-10-15)
 
 [中文](VALIDATION.md) | English

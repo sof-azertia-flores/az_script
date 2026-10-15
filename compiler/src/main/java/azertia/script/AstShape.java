@@ -196,7 +196,7 @@ final class AstShape {
             } else {
                 JsonObject node = value.getAsJsonObject();
                 positions(node, path);
-                string(node, "t", path, true);
+                String kind = string(node, "t", path, true);
                 String call = string(node, "call", path, true);
                 string(node, "declared-type", path, false);
                 stringArray(node, "type-args", path, false);
@@ -205,7 +205,7 @@ final class AstShape {
                 JsonArray params = array(node, "param", path, false);
                 // A missing param list is an empty one.
                 Pointer paramPath = path.key("param");
-                if (call != null && (params != null || !node.has("param"))) operands(call, params != null ? params : new JsonArray(), paramPath);
+                if (call != null && (params != null || !node.has("param"))) operands(kind, call, params != null ? params : new JsonArray(), paramPath);
                 // A name operand is a string, never an expression node.
                 Set<Integer> names = call == null ? Set.of() : NAME_OPERANDS.getOrDefault(call, Set.of());
                 if (params != null) for (int i = 0; i < params.size(); i++) {
@@ -226,8 +226,11 @@ final class AstShape {
      * receiver may be any expression, e.g. the literal in {@code "abc".x}, which the
      * compiler rejects by type; only the field target of a member assignment is an object.
      */
-    private void operands(String call, JsonArray params, Pointer path) {
+    private void operands(String kind, String call, JsonArray params, Pointer path) {
         switch (call) {
+            case "select" -> {
+                if ("ctrl".equals(kind) && params.size() != 3) error(path, "select needs exactly three operands");
+            }
             case "member-set" -> {
                 if (params.size() > 0 && !params.get(0).isJsonObject()) error(path.index(0), "expected an object, got " + describe(params.get(0)));
             }

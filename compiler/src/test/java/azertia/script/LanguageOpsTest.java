@@ -79,10 +79,6 @@ class LanguageOpsTest {
         roundTrip("<T> T identity(T value){return value;}int main(){return identity<int>(8)<<1;}");
         for (String expression : List.of("8 > > 1", "8 >/* gap */>1", "8 >\n>1", "8 < < 1"))
             assertThrows(CompileException.class, () -> tree("int main(){return " + expression + ";}"), expression);
-        // '?' is a reserved token for a later feature, so it reaches a parser diagnostic.
-        String unsupported = failure("int main(){return true ? 1 : 2;}").getMessage();
-        assertTrue(unsupported.contains("<source>:1:24: error: Expected ';' after statement"), unsupported);
-        assertFalse(unsupported.contains("Unexpected character"), unsupported);
     }
 
     @Test void shiftsUsePreprocessedOffsetsRatherThanMappedMacroColumns() throws Exception {
@@ -126,6 +122,119 @@ class LanguageOpsTest {
         shift.getAsJsonArray("param").remove(1);
         message = assertThrows(CompileException.class, () -> Compiler.compile(ast)).getMessage();
         assertTrue(message.contains("shr expects 2 arguments, got 1"), message);
+    }
+
+    @Test void conditionalPrecedenceAssociativityAndAssignmentArmsArePreserved() throws Exception {
+        JsonObject logical = returned("true || false ? 1 : 2");
+        assertEquals("select", logical.get("call").getAsString());
+        assertEquals("or", operand(logical, 0).get("call").getAsString());
+        assertEquals("select", operand(returned("true?1:false?2:3"), 2).get("call").getAsString());
+        assertEquals("select", operand(returned("true?false?1:2:3"), 1).get("call").getAsString());
+        roundTrip("int main(){int x=0;int y=0;return true?x=1:y=2;}");
+        roundTrip("int main(){int x=0;boolean c=true;x=c?1:2;return x;}");
+        roundTrip("int select(int value){return value;}int main(){return true?select(1):select(2);}");
+        String deep = "int main(){return " + "true?1:".repeat(700) + "1;}";
+        String error = failure(deep).getMessage();
+        assertTrue(error.contains("nesting"), error);
+    }
+
+    @Test void colonIdsKeepRawHexWhileConditionalArmsReadFullLiterals() throws Exception {
+        for (String suffix : List.of("0002", "0010", "1e5", "000a")) {
+            String source = "int value():" + suffix + "{return 7;}int main(){return value();}";
+            JsonObject ast = tree(source);
+            int id = Integer.parseUnsignedInt(ast.getAsJsonObject("abstract").get("value").getAsString(), 16);
+            assertEquals(Integer.parseInt(suffix, 16), id & 0xffff, suffix);
+            roundTrip(source);
+        }
+        for (String suffix : List.of("12340001", "4d410008", "1e999")) {
+            String source = "extern int value():" + suffix + ";int main(){return value();}";
+            JsonObject ast = tree(source);
+            assertEquals(Integer.parseUnsignedInt(suffix, 16),
+                    Integer.parseUnsignedInt(ast.getAsJsonObject("abstract").get("value").getAsString(), 16));
+            roundTrip(source);
+        }
+        assertEquals(10, returned("true?1:0010").getAsJsonArray("param").get(2).getAsInt());
+        assertEquals(100000.0, returned("true?1:1e5").getAsJsonArray("param").get(2).getAsDouble());
+        for (String source : List.of("double main(){return true?1:1.5;}",
+                "double main(){return false?1:2e+3;}", "float main(){return false?1:2f;}",
+                "boolean main(){return false?false:true;}",
+                "class Base{int x;Base(int n){x=n;}}class Child:Base{Child():Base(1){}}int main(){Child value;return value.x;}"))
+            roundTrip(source);
+        for (String literal : List.of("1e999", "1e-999")) {
+            String error = failure("double main(){return true?1:" + literal + ";}").getMessage();
+            assertTrue(error.contains("Floating literal is outside double range"), error);
+        }
+        String suffix = failure("int main(){return true?1:000a;}").getMessage();
+        assertTrue(suffix.contains("Invalid numeric suffix"), suffix);
+        String afterId = failure("extern int value():1e999;\nint main(){return missing;}").getMessage();
+        assertTrue(afterId.startsWith("<source>:2:"), afterId);
+    }
+
+    @Test void conditionalArmsPromoteNumericsAndKeepNominalTypes() throws Exception {
+        JsonObject selected = execReturn("double main(){return true?1:2.0;}");
+        assertEquals(ExecOpcodes.SELECT, selected.get("c").getAsInt());
+        assertEquals(ExecOpcodes.CONVERT, selected.getAsJsonObject("then").get("c").getAsInt());
+        assertEquals(3, selected.getAsJsonObject("then").get("type").getAsInt());
+        assertEquals(2.0, selected.get("else").getAsDouble());
+        selected = execReturn("float main(){return true?1.0f:2;}");
+        assertEquals(ExecOpcodes.CONVERT, selected.getAsJsonObject("else").get("c").getAsInt());
+        assertEquals(2, selected.getAsJsonObject("else").get("type").getAsInt());
+        String classes = "class A{int x;}class B:A{int y;}";
+        for (String source : List.of(classes + "A* pick(boolean c,A* a,B* b){return c?a:b;}void main(){}",
+                classes + "A* pick(boolean c,A* a){return c?a:null;}void main(){}",
+                classes + "<T extends A*> T pick(boolean c,T a){return c?a:null;}void main(){}",
+                classes + "<T extends A*> T pick(boolean c,T a){return c?null:a;}void main(){}",
+                "class P{int x;}P main(boolean c){P a;P b;return c?a:b;}",
+                "buffer<int> main(boolean c){buffer<int> a;buffer<int> b;return c?a:b;}",
+                "address main(boolean c,address a){return c?null:a;}",
+                "int main(c){return c?1:2;}")) roundTrip(source);
+        String incompatible = failure("int main(){return true?1:\"x\";}").getMessage();
+        assertTrue(incompatible.contains("Conditional expression arms have incompatible types: int and string"), incompatible);
+        String condition = failure("int main(){return 1?2:3;}").getMessage();
+        assertTrue(condition.contains("conditional condition must be boolean, got int"), condition);
+        String absent = failure("void sink(){}int main(){return true?1:sink();}").getMessage();
+        assertTrue(absent.contains("Conditional expression arms cannot use void values"), absent);
+    }
+
+    @Test void conditionalReceiverCannotMakeAnIndexGetterWritable() throws Exception {
+        for (String receiver : List.of("c?values[0]:value", "c?value:values[0]", "c?value:(c?values[0]:value)")) {
+            for (String source : List.of(
+                    "class P{int x;}class Values{P item;P operator[](int i){return item;}}"
+                            + "void main(){Values values;P value;boolean c=true;(" + receiver + ").x=1;}",
+                    "class P{int x;}void main(){buffer<P> values;P value;boolean c=true;("
+                            + receiver.replace("values[0]", "values.get(0)") + ").x=1;}")) {
+                String error = failure(source).getMessage();
+                assertTrue(error.contains("Cannot modify a value returned by an index getter"), error);
+            }
+        }
+        roundTrip("class P{int x;}void main(){P a;P b;boolean c=true;(c?a:b).x=1;}");
+    }
+
+    @Test void conditionalChecksAstShapeAndAssignmentConditionWarnings() throws Exception {
+        JsonObject ast = tree("int main(){boolean c=true;return (c=false)?1:2;}");
+        JsonObject selected = main(ast).getAsJsonArray("script").get(1).getAsJsonObject().getAsJsonArray("param").get(0).getAsJsonObject();
+        Diagnostics quiet = new Diagnostics(); Compiler.compile(ast, quiet); assertTrue(quiet.warnings().isEmpty());
+        operand(selected, 0).remove("_parenthesized");
+        Diagnostics warns = new Diagnostics(); Compiler.compile(ast, warns);
+        assertEquals(1, warns.warnings().size()); assertEquals("assign-in-condition", warns.warnings().get(0).code());
+        selected.getAsJsonArray("param").remove(2);
+        String error = assertThrows(CompileException.class, () -> Compiler.compile(ast)).getMessage();
+        assertTrue(error.contains("select needs exactly three operands"), error);
+    }
+
+    @Test void conditionalWireRequiresAllThreeExpressionFields() throws Exception {
+        AcsObject program = Compiler.compile(tree("int main(){return true?1:2;}")); AbdValue wire = program.toValue();
+        var returned = body(wire).getAsAss().values.get(1).getAsAss().values.get(0).getAsAss();
+        var selected = returned.values.get(2).getAsAss(); assertEquals(4, selected.values.size());
+        assertEquals(ExecOpcodes.SELECT, AbdBasicType.abd2int(selected.values.get(0)));
+        AbdValue shortRecord = raw(selected.values.subList(0, 3));
+        assertThrows(IllegalArgumentException.class, () -> ExecCodec.decode(replaceBody(wire, shortRecord)));
+        selected.values.add(selected.values.get(3)); AbdValue longRecord = selected.toAbd();
+        assertThrows(IllegalArgumentException.class, () -> ExecCodec.decode(replaceBody(wire, longRecord)));
+        AcsObject selectedView = ((AcsObject) ((AcsObject) program.getAsAcsArray("f").acsa.get(0))
+                .getAsAcsArray("script").acsa.get(0)).getAsAcsObject("r");
+        selectedView.mmp.remove("else"); assertThrows(IllegalArgumentException.class, program::toValue);
+        roundTrip("double main(boolean c){return c?1:2.0;}");
     }
 
     private static int targetCode(String target) {

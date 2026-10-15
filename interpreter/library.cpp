@@ -589,6 +589,22 @@ V convert_value(const V& value,int target) {
     }
     conversion_error(value,target);
 }
+class select_expression final:public expression {
+    std::shared_ptr<expression> condition,when_true,when_false;
+public:
+    select_expression(std::shared_ptr<expression> condition,std::shared_ptr<expression> when_true,std::shared_ptr<expression> when_false)
+        :condition(std::move(condition)),when_true(std::move(when_true)),when_false(std::move(when_false)) {}
+    V execute(E env) override {
+        tick(env);bool selected;
+        {
+            at_location location(env,condition->location);
+            selected=truth(run(condition,env));
+        }
+        // Arms share the enclosing scope and statement's temporary lifetime.
+        // The consuming expression retains the usual copy/materialization rule.
+        return run(selected?when_true:when_false,env);
+    }
+};
 class convert_expression final:public expression {
     int target;
     std::shared_ptr<expression> value;
@@ -1191,6 +1207,10 @@ X parse_raw_expression(raw_view view,const raw_function_layout& layout,std::size
         if(target!=INT_VALUE&&target!=STRING_VALUE&&target!=FLOAT_VALUE&&target!=DOUBLE_VALUE&&target!=ADDRESS_VALUE)
             throw std::invalid_argument("Invalid conversion target type: "+std::to_string(target));
         result=std::make_shared<convert_expression>(target,child());break;
+    }
+    case 50: {
+        auto condition=child();auto when_true=child();auto when_false=child();
+        result=std::make_shared<select_expression>(std::move(condition),std::move(when_true),std::move(when_false));break;
     }
     case 7:case 8: {
         auto node=std::make_shared<returnExpression>();node->object_return=opcode==8;

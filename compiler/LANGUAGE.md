@@ -280,6 +280,7 @@ void main() {
 | 运算符 | 结合性 |
 | --- | --- |
 | `= += -= *= /= %= &= \|= ^= <<= >>= >>>=` | 右结合 |
+| `?:` | 右结合，只计算选中的分支 |
 | `\|\|` | 左结合，短路 |
 | `&&` | 左结合，短路 |
 | `\|` | 左结合 |
@@ -295,7 +296,7 @@ void main() {
 
 例如 `20-3-2` 得到 `15`，`100/5/2` 得到 `10`，`2+3*(4+1)` 得到 `17`。赋值 `a=b=3` 从右边执行；`&&` 和 `||` 不计算被短路的右侧表达式。
 
-`if`、`while`、`for` 的条件（包括函数式写法），以及 `!`、`&&`、`||` 的操作数必须是 boolean。数字、字符串、address 和 void 都不自动转为真假，应显式写 `n != 0` 或 `p != null`。已知的非布尔操作数在编译时拒绝，例如 `if condition must be boolean, got int`。动态 `var`、`def` 或无类型参数在实际求值时检查，真实类型为 int 时报告 `Condition must be boolean, got int`。短路规则不变：左侧布尔值已决定结果时，不计算右侧。
+`if`、`while`、`for` 的条件（包括函数式写法）、`?:` 的条件，以及 `!`、`&&`、`||` 的操作数必须是 boolean。数字、字符串、address 和 void 都不自动转为真假，应显式写 `n != 0` 或 `p != null`。已知的非布尔操作数在编译时拒绝，例如 `if condition must be boolean, got int`。动态 `var`、`def` 或无类型参数在实际求值时检查，真实类型为 int 时报告 `Condition must be boolean, got int`。短路规则不变：左侧布尔值已决定结果时，不计算右侧。
 
 相等运算 `==` / `!=` 接受以下操作数配对，结果为 boolean：
 
@@ -350,6 +351,32 @@ print(total); // 9
 移位优先级低于加减、高于比较。相等比较优先于按位 `&`，随后依次是 `^`、`|`；三者均优先于 `&&`、`||`。位测试应加括号写成 `(flags & mask) == 0`；`flags & mask == 0` 会尝试对 boolean 做 `&`，因此被拒绝并提示为比较添加括号。
 
 移位符号必须在预处理后的文本中相邻：`a >> b` 是移位，`a > > b` 不是，会被拒绝。类型语法中的泛型结束符仍单独解释，因此 `buffer<buffer<int>>` 及泛型调用后接移位仍然有效。简单变量还支持 `&=`、`|=`、`^=`、`<<=`、`>>=`、`>>>=`；成员、下标和 `mem_get` 不是复合赋值目标。一元 `~x` 降为 `bit_xor(x, -1)`，没有单独的一元 opcode。
+
+### 条件表达式
+
+`条件 ? 真值 : 假值` 对 boolean 条件求值一次，再只对选中的分支求值一次。跳过的分支没有副作用，但两个分支都要通过类型检查。`?:` 的优先级高于赋值、低于 `||`，并且右结合：`a ? b : c ? d : e` 等同于 `a ? b : (c ? d : e)`。
+
+```c
+boolean ready = true;
+double value = ready ? 1 : 2.5; // double 1
+int divisor = 0;
+int safe = ready ? 7 : 10 / divisor; // 7，未选中的除法不运行
+```
+
+两个分支必须有共同类型：
+
+| 分支类型 | 结果类型 |
+| --- | --- |
+| 数值类型 | 按 double、float、int 取最宽类型；选中的较窄分支转换到该类型。 |
+| 相同的非 void 类型 | 保持该类型，包括同类的类值或相同 buffer 类型。 |
+| 父类和子类指针 | 父类指针类型。 |
+| 指针或 address 与 `null` | 对应的指针或 address 类型；具有指针上界的类型参数 `T` 与 `null` 配对时保持 `T`。 |
+
+数值提升遵循显式转换的舍入规则，因此 int 转 float 可能舍入。void 分支、无关类指针、不同类值类型，以及 string/int 等不兼容标量配对均被拒绝。即使类有继承关系，类值也不会隐式切片为父类值。两个动态 `any` 分支保持 `any`；`any` 与其他已知类型的配对被拒绝，必要时应显式转换动态操作数。
+
+选中的分支在当前外围作用域中执行；条件选择不会像函数式 `if` 一样为分支建立新作用域。拥有的字面量临时值按原规则存活到语句边界，自动指针对象保持外围块的生命周期，原有所有权与清理规则继续适用。写入检查递归检查两个分支：如果 `items[0]` 是 getter 返回的类值副本，`(ready ? items[0] : local).field = 1` 会被拒绝，即使该分支运行时不会选中。应先读到明确类型的局部变量，修改后再写回。
+
+`:` 两侧可不加空格：`ready?1:2`、`ready?true:false` 和 `ready?1:1e5` 均有效；表达式中的字面量仍遵守正常数值检查。这不改变 `:0002`、`:1e5` 等十六进制函数编号后缀、构造函数的父类初始化列表或 `Base::method()` 限定调用。
 
 ### 显式转换
 
@@ -563,7 +590,7 @@ class Number {
 
 算术只查找左侧类值的入口；下标和调用也接受类指针。遵守现有继承及静态成员查找，无右侧反向查找、隐式转换或普通函数重载。getter 恰好一个键参数，键类型不限；setter 可省略，否则须与 getter 使用相同键类型、第二个参数与 getter 返回类型相同且返回 void。`x[key] = value` 依次求值接收者、键、右值，各一次；下标复合赋值不支持。
 
-getter 返回类值或 buffer 时得到副本，不能通过该副本继续写入，例如 `matrix[i][j] = x`、`items[i].field = x` 或 `items.get(i).field = x`。应先读到明确类型的局部变量，修改后通过 setter/set 写回；getter 返回指针时继续按正常指针规则访问。无界 T 仍不开放任意算术或调用，只有已知参数化类或上界提供对应入口时才能解析。
+getter 返回类值或 buffer 时得到副本，不能通过该副本继续写入，例如 `matrix[i][j] = x`、`items[i].field = x` 或 `items.get(i).field = x`。条件接收对象的两个分支也都要通过这一检查。应先读到明确类型的局部变量，修改后通过 setter/set 写回；getter 返回指针时继续按正常指针规则访问。无界 T 仍不开放任意算术或调用，只有已知参数化类或上界提供对应入口时才能解析。
 
 ## 按函数 ID 反射与 hint 查询
 
@@ -595,6 +622,8 @@ int functionId(int ns, int position) {
 ## AST 与 ABD 契约
 
 可读 AST 保持 `metadata/ext/abstract/global-variable/body` 结构，并为带签名的宿主函数增加 `extern-signatures`。`global-variable` 先以字符串列出 `#gvar` 名称，再以带位置的 `{"name", "type", "initializer"?}` 对象列出每个带类型全局；`compile-json` 按与源码相同的规则检查并初始化它们。类程序额外保存类定义、字段顺序和成员表达式等编译信息；`compile-json` 会重新执行类型检查与降级。限定的父类调用写作 `{"t":"ctrl","call":"base-call","param":["Base","method",args...]}`，可附带 `type-args`。AST 还保存模块 hint、assume、外部声明、定义名称与实际定义编号；调用绑定与定义位置分开，支持完全相同的 ABD 往返。`abstract` 是 extern 优先的源码名称绑定：有 extern 时保存声明 ID，否则保存定义 ID；hint 库的本地定义仍使用 0000 占位，实际调用的 self-assume 地址在降级时生成。函数定义的独立位置由 `body` 的 namespace 和 `metadata.position/name` 保存；每个签名另保存 `return-type` 与 `param-types`。表达式对象有 `t: "ctrl" | "call"`、`call`、`param`，块是数组。
+
+条件表达式写作 `{"t":"ctrl","call":"select","param":[condition,thenValue,elseValue]}`，恰好包含三个表达式参数。`compile-json` 重新检查布尔条件和分支共同类型，在降为 opcode 50 前插入所需的数值转换。
 
 根节点的 `sources` 表对文件的每次实际展开的包含各有一项，例如 `{"name": "inc/lib.azs", "included-from": {"source": 0, "line": 2, "column": 1}}`；第 0 项是主文件，include 总是指向更早的项，被 `#pragma once` 跳过的 include 没有对应项。表达式对象、函数元数据、类、字段和 extern 签名带有原始文件中的 `_line/_column`，以及所在 `sources` 项的下标 `_file`（为 0 时省略）。函数元数据还以 `_end_line/_end_column` 记录结束的右花括号，加括号的赋值带有 `_parenthesized: true`。字面值和块不带位置，诊断使用最近的带位置祖先。这些字段用于诊断，以及在 `-g` 时生成 exec 调试记录，不写入 ABD 指令。compile-json 输入中的 `sources` 可以省略，此时所有位置都属于以输入文件命名的同一文件。位置均为正整数，`_file` 必须是表中的有效下标；该表最多 4097 项，即主文件加 4096 次 include 展开；`sources` 的每项命名一个非空、不超过 4096 个字符且不含控制字符或双向格式字符的文件，include 链最多 64 层。compile-json 在编译前检查这些结构，见[多个错误与退出码](#多个错误与退出码)。
 
@@ -634,6 +663,7 @@ int functionId(int ns, int position) {
 | 默认比较 `c=42`（value_compare） | `context`, `v1`, `v2` |
 | 位运算/移位 `c=43…48` | `v1`, `v2`；依次为 bit_and/bit_or/bit_xor/shl/shr/ushr，操作数和结果均为 int |
 | 显式转换 `c=49`（convert） | `type` 为目标 0/1/2/3/7，`v` 为源表达式 |
+| 条件选择 `c=50`（select） | `v` 为条件，`then` 为真分支，`else` 为假分支 |
 
 根、函数、签名和表达式记录都使用裸 `AbdStack`；每个字段本身有长度边界，固定记录不保存键名和已知的类型标签。函数列表、参数类型列表、参数表达式和块内语句也都是裸 stack。常量的实际类型不固定，使用单元素 `AbdArray` 保留 int/float/double/bool/string/void/address 标签；扩展元数据仍使用 `AbdMap`。JSON 中的裸常量和块数组在二进制中分别使用 opcode 0 和 1。Java 调用 `Compiler.compile()` 得到的 `ExecProgram` 可继续作为 `AcsObject` 检查，`toValue()` 输出新 wire 格式；从执行文件恢复检查视图使用 `ExecCodec.decode()`，不再直接把根当作 `AcsObject` 解码。
 

@@ -62,7 +62,7 @@ cd /path/to/azscript
 3. 递归下降解析明确处理优先级、左右结合性、嵌套调用、代码块和控制流。
 4. 校验变量和函数、作用域、函数签名、参数类型与数量、重复定义和返回形式，再生成 JSON/ABD 指令树。
 
-完整语法见 [compiler/LANGUAGE.md](compiler/LANGUAGE.md)。保留了原来的 `def(x)`、`return(x)`、`while(condition,{...})`、`if(condition,{...})` 和 `mem_get(pointer)=value` 写法；支持普通 `if/else/while`、变量初始化、一元运算、比较、短路逻辑、int32 位运算/移位和变量复合赋值。
+完整语法见 [compiler/LANGUAGE.md](compiler/LANGUAGE.md)。保留了原来的 `def(x)`、`return(x)`、`while(condition,{...})`、`if(condition,{...})` 和 `mem_get(pointer)=value` 写法；支持普通 `if/else/while`、变量初始化、一元运算、比较、短路逻辑、int32 位运算/移位、条件表达式 `?:` 和变量复合赋值。
 
 ```c
 #namespace 123
@@ -208,10 +208,11 @@ try {
 
 ## 明确的语义与边界
 
-- 条件及 `!`/`&&`/`||` 必须使用布尔值，动态值也在运行时检查。相等比较允许混合数值类型、同类型布尔/字符串、address/null 和兼容类指针；不兼容配对报错，不再直接判为不等。详见[相等规则](compiler/LANGUAGE.md#表达式与流程)。
+- 条件（包括 `?:`）及 `!`/`&&`/`||` 必须使用布尔值，动态值也在运行时检查。相等比较允许混合数值类型、同类型布尔/字符串、address/null 和兼容类指针；不兼容配对报错，不再直接判为不等。详见[相等规则](compiler/LANGUAGE.md#表达式与流程)。
 - 整数是有符号 32 位；整数除法向零截断，算术溢出和除零报错。数值提升按 `double > float > int`；布尔值不隐式参与数值运算。
 - 仅适用于 int 的 `& | ^ ~ << >> >>>` 操作 32 位位模式：左移回绕，`>>` 扩展符号，`>>>` 补零；数量必须为 0…31，简单变量支持复合形式。位测试应写为 `(flags & mask) != 0`。详见[位运算](compiler/LANGUAGE.md#位运算与移位)。
 - 显式 `int/float/double/string/address(x)` 按受检查的配对表执行数值转换、严格十进制字符串解析、数值/address 转字符串及 address 恒等；不支持 int/address 互转、布尔/类转换或 C 风格强转。int 先截断再检查范围，浮点转换允许下溢但拒绝溢出。详见[显式转换](compiler/LANGUAGE.md#显式转换)。
+- `条件 ? a : b` 在外围作用域中只计算一个分支，结果取共同类型并进行数值提升。它在赋值和 `||` 之间右结合；两个分支都须通过类型检查。详见[条件表达式](compiler/LANGUAGE.md#条件表达式)。
 - 小数默认是 double；`1.5f`、`5f`、`2e3f` 是 float 字面量。
 - `extern int host_add(int, int):0xccf0001;` 以完整签名绑定宿主函数；类型必填，旧 `#extern` 指令已删除。参数和回调返回值按实际类型精确匹配，`int`、`float`、`double` 之间不隐式转换。`#namespace 1234` 支持1～4位，拒绝保留的 `0000` 和 `0abd`；独立库用 `#namespace_hint` 声明，`#assume_hint` 绑定调用。
 - 函数按值传参，参数从左到右求值；函数只能访问自己的局部变量和全局变量。块有独立作用域，循环每次创建新的块作用域。`for` 初始化变量的作用域包含整个循环，循环结束后不可见。

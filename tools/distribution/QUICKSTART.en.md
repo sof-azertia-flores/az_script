@@ -53,7 +53,16 @@ Functions support forward calls and recursion. Primitive parameter types may be 
 
 `for (int i = 0; i < 5; i++) { ... }` scopes i to the loop. Initializer, condition, and step are optional; an omitted condition is true. Continue cleans the current iteration's objects, then runs a for step and checks its condition; while continue directly rechecks the condition. Break and return skip the step. ++/-- work only on simple numeric/address variables as standalone statements or for steps, never results or arguments.
 
-Operators include arithmetic `+ - * / %`, comparison `== != < <= > >=`, boolean `&& || !`, int-only bitwise `& | ^ ~`, shifts `<< >> >>>`, and assignment. Simple variables support `+= -= *= /= %= &= |= ^= <<= >>= >>>=`. From higher to lower precedence: unary, multiply/divide/remainder, add/subtract, shifts, ordering, equality, `&`, `^`, `|`, `&&`, `||`, assignment. Only `&&`/`||` short-circuit. Shifts use 32-bit patterns: left shift wraps, `>>` sign-extends, `>>>` zero-fills; counts outside 0…31 fail instead of wrapping. Write `(flags & mask) != 0` for a bit test. Shift characters must touch (`a > > b` is invalid); nested generic closers such as `buffer<buffer<int>>` still work. See [bitwise operators](LANGUAGE.en.md#bitwise-and-shift-operators). Strings use single/double quotes and escapes including `\n`, `\t`, `\\`, `\"`, `\'`, and `\uXXXX`. Comments use // or /* ... */.
+Operators include arithmetic `+ - * / %`, comparison `== != < <= > >=`, boolean `&& || !`, int-only bitwise `& | ^ ~`, shifts `<< >> >>>`, conditional `?:`, and assignment. Simple variables support `+= -= *= /= %= &= |= ^= <<= >>= >>>=`. From higher to lower precedence: unary, multiply/divide/remainder, add/subtract, shifts, ordering, equality, `&`, `^`, `|`, `&&`, `||`, conditional `?:`, assignment. `&&`/`||` short-circuit; `?:` evaluates one arm. Shifts use 32-bit patterns: left shift wraps, `>>` sign-extends, `>>>` zero-fills; counts outside 0…31 fail instead of wrapping. Write `(flags & mask) != 0` for a bit test. Shift characters must touch (`a > > b` is invalid); nested generic closers such as `buffer<buffer<int>>` still work. See [bitwise operators](LANGUAGE.en.md#bitwise-and-shift-operators). Strings use single/double quotes and escapes including `\n`, `\t`, `\\`, `\"`, `\'`, and `\uXXXX`. Comments use // or /* ... */.
+
+### Conditional expressions
+
+```c
+boolean ready = true;
+double value = ready ? 1 : 2.5; // double 1
+```
+
+`condition ? a : b` requires a boolean condition and evaluates only one arm. It is right-associative; `a ? b : c ? d : e` means `a ? b : (c ? d : e)`. Both arms need compatible types: numeric types promote to the widest of double, float, int; related base/derived pointers choose the base, and a pointer may pair with null. Selection uses the surrounding scope and preserves ordinary temporary/object lifetimes. See [conditional expressions](LANGUAGE.en.md#conditional-expressions) for the full type and write rules.
 
 ### Explicit conversions
 

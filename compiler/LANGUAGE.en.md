@@ -278,6 +278,7 @@ Precedence from lowest to highest:
 | Operators | Associativity |
 | --- | --- |
 | `= += -= *= /= %= &= \|= ^= <<= >>= >>>=` | Right |
+| `?:` | Right, one selected arm |
 | `\|\|` | Left, short-circuit |
 | `&&` | Left, short-circuit |
 | `\|` | Left |
@@ -293,7 +294,7 @@ Precedence from lowest to highest:
 
 Thus `20-3-2` is 15, `100/5/2` is 10, and `2+3*(4+1)` is 17. `a=b=3` assigns from the right. Short-circuited right operands of &&/|| are not evaluated.
 
-Conditions in `if`, `while`, and `for`, including functional syntax, and operands of `!`, `&&`, and `||` must be boolean. There is no numeric, string, address, or void truthiness: use `n != 0` or `p != null` explicitly. Known non-boolean operands fail compilation, e.g. `if condition must be boolean, got int`. Dynamic `var`, `def`, or untyped parameter values are checked when evaluated and fail with `Condition must be boolean, got int` when their actual type is int. Short-circuiting still skips the right operand when the left boolean determines the result.
+Conditions in `if`, `while`, and `for`, including functional syntax, the condition of `?:`, and operands of `!`, `&&`, and `||` must be boolean. There is no numeric, string, address, or void truthiness: use `n != 0` or `p != null` explicitly. Known non-boolean operands fail compilation, e.g. `if condition must be boolean, got int`. Dynamic `var`, `def`, or untyped parameter values are checked when evaluated and fail with `Condition must be boolean, got int` when their actual type is int. Short-circuiting still skips the right operand when the left boolean determines the result.
 
 Equality `==` / `!=` accepts these operand pairs and returns boolean:
 
@@ -348,6 +349,32 @@ Operations use 32-bit bit patterns and return signed int32. Left shift discards 
 Shift operators bind less tightly than addition/subtraction and more tightly than comparisons. Equality binds more tightly than bitwise `&`, then `^`, then `|`; all three bind more tightly than `&&` and `||`. Parenthesize a bit test as `(flags & mask) == 0`; `flags & mask == 0` attempts to apply `&` to a boolean and is rejected with a hint to parenthesize the comparison.
 
 Shift characters must be adjacent in the preprocessed text: `a >> b` is a shift, but `a > > b` is not and is rejected. Generic type closers remain separate in type syntax, so `buffer<buffer<int>>` and generic calls followed by shifts remain valid. Simple variables also support `&=`, `|=`, `^=`, `<<=`, `>>=`, and `>>>=`; members, subscripts, and `mem_get` are not compound-assignment targets. Unary `~x` lowers to `bit_xor(x, -1)` and introduces no separate unary opcode.
+
+### Conditional expressions
+
+`condition ? thenValue : elseValue` evaluates a boolean condition once, then evaluates only the selected arm once. The skipped arm has no side effects, but both arms are type-checked. `?:` binds more tightly than assignment and less tightly than `||`, and associates to the right: `a ? b : c ? d : e` means `a ? b : (c ? d : e)`.
+
+```c
+boolean ready = true;
+double value = ready ? 1 : 2.5; // double 1
+int divisor = 0;
+int safe = ready ? 7 : 10 / divisor; // 7; the unused division does not run
+```
+
+The arms must have a common type:
+
+| Arm types | Result type |
+| --- | --- |
+| Numeric types | Widest of double, float, int; a selected narrower arm is converted to that type. |
+| Same non-void type | That type, including same-class values or the same buffer type. |
+| Base and derived class pointers | The base pointer type. |
+| Pointer or address with `null` | The pointer or address type; a pointer-bound type parameter `T` with `null` retains `T`. |
+
+Numeric promotion follows explicit-conversion rounding rules, so int-to-float may round. Void arms, unrelated class pointers, differing class-value types, and incompatible scalar pairs such as string/int are rejected. Related class values do not implicitly slice to a base value. Two dynamic `any` arms retain `any`; pairing `any` with a different known type is rejected, so convert the dynamic operand explicitly when needed.
+
+The selected arm runs in the enclosing scope; selection creates no branch scope like functional `if`. Owned literal temporaries remain alive through the usual statement boundary, and automatic pointer objects retain the surrounding block lifetime. Existing ownership and cleanup rules still apply. Write checks recurse into both arms: `(ready ? items[0] : local).field = 1` is rejected when `items[0]` is a getter-produced class-value copy, even when that arm would not run. Read the copy into a typed local, modify it, and write it back instead.
+
+Spaces around `:` are optional: `ready?1:2`, `ready?true:false`, and `ready?1:1e5` are valid. Expression literals still receive normal numeric checks. This does not change hexadecimal function-ID suffixes such as `:0002` or `:1e5`, constructor base initializers, or qualified `Base::method()` calls.
 
 ### Explicit conversions
 
@@ -561,7 +588,7 @@ Supported entries are binary `+ - * /`, index getter `operator[]`, setter `opera
 
 Arithmetic looks up only the left class value; indexing and invocation also accept class pointers. Existing inheritance and static lookup apply, without reverse lookup, implicit conversion, or ordinary function overloading. The getter takes exactly one key of any supported type. An optional setter must use the same key type, the getter's return type as its second parameter, and void return. `x[key] = value` evaluates receiver, key, and value once each in that order. Index compound assignment is unsupported.
 
-A getter returning a class value or buffer produces a copy. Writing through that copy, such as `matrix[i][j] = x`, `items[i].field = x`, or `items.get(i).field = x`, is rejected. Read into an explicitly typed local, modify it, and write back with the setter/set. Pointer results follow ordinary pointer rules. Arbitrary arithmetic and invocation remain unavailable on unbounded T; a known parameterized class or upper bound must supply the operator.
+A getter returning a class value or buffer produces a copy. Writing through that copy, such as `matrix[i][j] = x`, `items[i].field = x`, or `items.get(i).field = x`, is rejected. Read into an explicitly typed local, modify it, and write back with the setter/set. The same restriction checks both arms of a conditional receiver. Pointer results follow ordinary pointer rules. Arbitrary arithmetic and invocation remain unavailable on unbounded T; a known parameterized class or upper bound must supply the operator.
 
 ## Function-ID reflection and hint queries
 
@@ -593,6 +620,8 @@ int functionId(int ns, int position) {
 ## AST and ABD contract
 
 Readable AST retains metadata/ext/abstract/global-variable/body, plus extern-signatures. `global-variable` lists the `#gvar` names as strings, then each typed global as `{"name", "type", "initializer"?}` with its position; compile-json checks and initializes them like source. Class programs retain definitions, ordered fields, member expressions, and other compile-time data; compile-json reruns checks/lowering. A qualified base call is `{"t":"ctrl","call":"base-call","param":["Base","method",args...]}` with optional `type-args`. Hint, assumes, extern declarations, definition names, and actual definition numbers are retained for byte-identical roundtrips. Abstract maps source names with extern priority: declaration ID when present, otherwise definition ID. Hint definitions retain placeholder 0000; self-assume call addresses are produced during lowering. Independent definition positions live in body namespaces and metadata.position/name. Signatures store return-type and param-types. Expression objects use `t: "ctrl" | "call"`, call, param; blocks are arrays.
+
+A conditional expression is `{"t":"ctrl","call":"select","param":[condition,thenValue,elseValue]}` with exactly three expression parameters. compile-json repeats the boolean-condition and common-arm-type checks, then inserts any numeric conversions before lowering to opcode 50.
 
 The root `sources` table has one entry per expanded inclusion of a file, `{"name": "inc/lib.azs", "included-from": {"source": 0, "line": 2, "column": 1}}`; entry 0 is the main file, an include always names an earlier entry, and an include skipped by `#pragma once` has no entry. Expression objects, function metadata, classes, fields, and extern signatures carry `_line/_column` in their original file and `_file`, the index of their `sources` entry (omitted for 0). Function metadata also records the closing brace as `_end_line/_end_column`, and a parenthesized assignment carries `_parenthesized: true`. Literal values and blocks carry no position; diagnostics use the nearest positioned ancestor. These fields serve diagnostics and, with `-g`, the exec debug records; they never reach ABD instructions. `sources` is optional in compile-json input; without it, all positions belong to one file named after the input. Positions are positive integers and `_file` must index the table; the table has at most 4097 entries, the main file and 4096 include expansions; a `sources` entry names a non-empty file of at most 4096 characters without control or bidirectional formatting characters, and an include chain is at most 64 levels deep. compile-json checks this shape before compiling, see [Multiple errors and exit status](#multiple-errors-and-exit-status).
 
@@ -632,6 +661,7 @@ Generated exec/ABD uses `exec-version: 10`, independent of source version. All c
 | Default comparison c=42 (value_compare) | context, v1, v2 |
 | Bitwise/shift c=43…48 | v1, v2: bit_and/bit_or/bit_xor/shl/shr/ushr; int operands/results |
 | Explicit conversion c=49 (convert) | type: target 0/1/2/3/7, v: source expression |
+| Conditional selection c=50 (select) | v: condition, then: true arm, else: false arm |
 
 Root, functions, signatures, expressions, function/type/argument/statement lists use raw AbdStack. Fields retain length boundaries without names or known-type tags. Dynamic constants use single-element AbdArray preserving int/float/double/bool/string/void/address; extension metadata uses AbdMap. JSON constants and block arrays use binary opcodes 0 and 1. `Compiler.compile()` returns ExecProgram, still inspectable as AcsObject; toValue emits the wire format. Use ExecCodec.decode to recover the inspection view, not direct root AcsObject decoding.
 

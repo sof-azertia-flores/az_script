@@ -101,6 +101,7 @@ public final class ExecCodec {
             BUFFER_OPERATION=KeySpec.of("t c op v args",""),
             VALUE_COMPARE=KeySpec.of("t c context v1 v2",""),
             CONVERSION=KeySpec.of("t c type v",""),
+            SELECT=KeySpec.of("t c v then else",""),
             BINARY=KeySpec.of("t c v1 v2","");
     private static void keys(AcsObject object,KeySpec keys) {
         for(String name:keys.required())if(!object.mmp.containsKey(name)||object.mmp.get(name)==null)throw invalid("missing field "+name);
@@ -454,6 +455,10 @@ public final class ExecCodec {
                 keys(object,CONVERSION);int type=integer(object,"type");conversionType(type);
                 fields.add(n(type));fields.add(expression(object.mmp.get("v"),layout,level+1));
             }
+            case ExecOpcodes.SELECT -> {
+                keys(object,SELECT);fields.add(expression(object.mmp.get("v"),layout,level+1));
+                fields.add(expression(object.mmp.get("then"),layout,level+1));fields.add(expression(object.mmp.get("else"),layout,level+1));
+            }
             default -> {
                 if(!binaryOpcode(op))throw invalid("invalid control opcode "+op);
                 keys(object,BINARY);
@@ -651,6 +656,10 @@ public final class ExecCodec {
             case ExecOpcodes.CONVERT -> {
                 int type=record.integer();conversionType(type);view.put("type",type);
                 view.put("v",decodeExpression(record.next(),level+1));
+            }
+            case ExecOpcodes.SELECT -> {
+                view.put("v",decodeExpression(record.next(),level+1));view.put("then",decodeExpression(record.next(),level+1));
+                view.put("else",decodeExpression(record.next(),level+1));
             }
             default -> {
                 if(!binaryOpcode(op))throw invalid("invalid control opcode "+op);

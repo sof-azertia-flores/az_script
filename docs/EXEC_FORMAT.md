@@ -80,8 +80,9 @@ stack 的成员数量由其 frame 边界确定；固定记录必须恰好包含�
 | 47 | shr | `left:E, right:E` |
 | 48 | ushr | `left:E, right:E` |
 | 49 | convert | `type:int, value:E` |
+| 50 | select | `condition:E, then:E, else:E` |
 
-`if`/`wi` 的条件，以及 `and`/`or`/`not` 中实际求值的每个操作数，必须为 BOOLEAN_VALUE（4）。数值零/非零与 void 不再表示真假；类型错误时抛出 `Condition must be boolean, got <type>`。`and`/`or` 仍从左到右短路，被跳过的右操作数在运行时不求值也不检查。源码编译还会拒绝静态已知的非布尔操作数，包括降级后的 `for` 条件。
+`if`/`wi`/`select` 的条件，以及 `and`/`or`/`not` 中实际求值的每个操作数，必须为 BOOLEAN_VALUE（4）。数值零/非零与 void 不再表示真假；类型错误时抛出 `Condition must be boolean, got <type>`。`and`/`or` 仍从左到右短路，被跳过的右操作数在运行时不求值也不检查。源码编译还会拒绝静态已知的非布尔操作数，包括降级后的 `for` 条件。
 
 `eq`/`ne` 对混合 int/float/double 做数值比较，对两个 boolean 或两个 string 做值比较，对两个 address 比较 uint64 值。null 和类指针擦除为 address；源码编译另外要求类指针类型兼容。其他混合类型会抛错，不再直接产生不等/相等；address 与非 address 的配对仍走地址专用错误。OBJECT_VALUE（类值和 buffer）没有通用相等运算。运行时的两个 void 值（包括尚未赋值的动态变量）比较时，`eq` 为 true，`ne` 为 false；编译器拒绝静态类型为 void 的操作数。这些检查只收紧 exec v10 的执行语义，不改变二进制布局或 opcode 编号。
 
@@ -146,7 +147,15 @@ JNI 快照 v9 递归保存对象已绑定的析构上下文，包括 ABI、kind�
 
 数值标签可以转为 int/float/double 或 string。字符串可解析为十进制 int/float/double，或保持 string 恒等。address 只能转为无符号十进制 string 或保持 address 恒等。boolean、void 和 object 标签被拒绝。类指针和 null 在 exec 中擦除为 address，因此源码编译另行禁止显式转换类指针/null；opcode 49 不能恢复源码的类身份。不支持 int/address 互转或从字符串解析 address。
 
-数值转 int 先向零截断，再检查 int32 范围。float/double 转换拒绝溢出，允许次正规数及下溢为零。解析与区域设置无关：整数字符串只允许可选正负号和十进制数字；浮点字符串可含小数点与指数，不允许空白、十六进制、后缀、NaN/Infinity、嵌入 NUL 或尾部多余文字。错误格式为 `Cannot convert X to Y`，按需附加非法十进制格式或超范围原因；引用的字符串转义为 ASCII，并在 64 个 Unicode 标量后截断。源码转换配对表和示例见语言说明的显式转换一节。exec 仍为 v10，仅支持的 opcode 集合扩展到 49。
+数值转 int 先向零截断，再检查 int32 范围。float/double 转换拒绝溢出，允许次正规数及下溢为零。解析与区域设置无关：整数字符串只允许可选正负号和十进制数字；浮点字符串可含小数点与指数，不允许空白、十六进制、后缀、NaN/Infinity、嵌入 NUL 或尾部多余文字。错误格式为 `Cannot convert X to Y`，按需附加非法十进制格式或超范围原因；引用的字符串转义为 ASCII，并在 64 个 Unicode 标量后截断。源码转换配对表和示例见语言说明的显式转换一节。显式转换扩展 exec v10，不改变根记录或函数布局。
+
+## 条件选择（opcode 50）
+
+记录严格为 `[50, condition:E, then:E, else:E]`，三个子表达式都必填，缺失或多余字段均被拒绝。检查 JSON 为 `{"t":0,"c":50,"v":condition,"then":thenValue,"else":elseValue}`。调试记录遍历子节点时依次访问 condition、then、else。
+
+`select` 对条件求值一次并要求 boolean，然后只对选中的分支求值一次并返回其值。非布尔条件会报错，例如实际标签为 int 时报告 `Condition must be boolean, got int`。求值使用当前作用域，不采用 opcode 27 `if` 的分支作用域，也不新增清理边界。选中的拥有临时值和自动指针对象继续遵守原有语句/块生命周期。
+
+源码编译器检查两个分支是否具有兼容的非 void 共同类型，并以 opcode 49 `convert` 包装较窄的数值分支。指针兼容性和指针上界类型参数与 null 的配对在编译期检查；`select` 本身不转换选中值，也不恢复已擦除的类类型。exec 保持 v10，根记录和函数记录不变；消费方须支持 opcode 50。
 
 ## 返回值检查
 

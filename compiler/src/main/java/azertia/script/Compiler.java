@@ -419,6 +419,7 @@ public class Compiler {
                     && expressionType(params.get(1), environment) == AsTypes.INT_VALUE
                     ? AsTypes.INT_VALUE : AsTypes.ANY_VALUE;
             case "if" -> branchType(params, environment);
+            case "select" -> selectType(params, environment);
             case "vardef", "return", "break", "continue", "while", "for", "increment", "decrement", "object-def", "object-delete", "#bind", "#make-free", "#drop" -> AsTypes.VOID_VALUE;
             default -> AsTypes.ANY_VALUE;
         };
@@ -426,6 +427,24 @@ public class Compiler {
     private static int branchType(JsonArray params, LogicEnvironment environment) {
         if (params.size() != 3) return AsTypes.VOID_VALUE;
         return commonType(expressionType(params.get(1), environment), expressionType(params.get(2), environment), false);
+    }
+    private static int selectType(JsonArray params, LogicEnvironment environment) {
+        arity("select", params, 3, 3);
+        rejectVoidValue("conditional condition", params.get(0), environment);
+        requireConditionOrUnknown("conditional condition", params.get(0), environment);
+        int first = expressionType(params.get(1), environment), second = expressionType(params.get(2), environment);
+        if (first == AsTypes.VOID_VALUE || second == AsTypes.VOID_VALUE)
+            throw new IllegalArgumentException("Conditional expression arms cannot use void values");
+        return commonType(first, second, true);
+    }
+    private static AcsElement selectArm(JsonElement arm, int target, JsonObject source, LogicEnvironment environment) {
+        int actual = expressionType(arm, environment);
+        if (numeric(target) && numeric(actual) && actual != target) {
+            JsonObject conversion = callNode(typeName(target), array(arm));
+            copyPosition(arm.isJsonObject() ? arm : source, conversion, environment);
+            return compileExpression(conversion, environment);
+        }
+        return compileExpression(arm, environment);
     }
     /**
      * The type of a value that is either branch: identical types, a pointer for null,
@@ -444,7 +463,8 @@ public class Compiler {
         } else if (first == NULL_TYPE && assignable(second, NULL_TYPE)) return second;
         else if (second == NULL_TYPE && assignable(first, NULL_TYPE)) return first;
         if (strict || reference(first) || reference(second))
-            throw new IllegalArgumentException("Branches have incompatible types " + typeName(first) + " and " + typeName(second));
+            throw new IllegalArgumentException((strict ? "Conditional expression arms have incompatible types: " : "Branches have incompatible types ")
+                    + typeName(first) + " and " + typeName(second));
         return AsTypes.ANY_VALUE;
     }
     /** Class, buffer, type-parameter and null values, which must keep their static type. */
@@ -1270,6 +1290,17 @@ public class Compiler {
                 return compileExpression(array(params.get(0), firstDefinition,
                         node("while", new JsonPrimitive(true), iteration)), environment);
             }
+            case "select" -> {
+                arity(call, params, 3, 3);
+                warnAssignmentCondition(params.get(0), environment);
+                int selectedType = selectType(params, environment);
+                result.put("c", ExecOpcodes.SELECT);
+                result.put("v", compileExpression(params.get(0), environment));
+                // The selected arm's owned temporaries belong to this statement's
+                // existing scope. A statement-if would end an extra branch scope.
+                result.put("then", selectArm(params.get(1), selectedType, source, environment));
+                result.put("else", selectArm(params.get(2), selectedType, source, environment));
+            }
             case "if", "while" -> {
                 arity(call, params, 2, call.equals("if") ? 3 : 2);
                 warnAssignmentCondition(params.get(0), environment);
@@ -1480,6 +1511,10 @@ public class Compiler {
                 &&params.get(1).getAsString().equals("get"))
             throw new IllegalArgumentException("Cannot modify a value returned by an index getter; modify a local value and write it back");
         if(operation.equals("member"))requireWritableReceiver(params.get(0),environment);
+        if(operation.equals("select")) {
+            arity("select",params,3,3);
+            requireWritableReceiver(params.get(1),environment);requireWritableReceiver(params.get(2),environment);
+        }
     }
     private static final List<String> BUFFER_METHODS=List.of("length","capacity","reserve","get","set","push","resize");
     private static boolean isBufferReceiver(JsonObject source,LogicEnvironment environment) {

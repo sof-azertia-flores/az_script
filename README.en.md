@@ -58,7 +58,7 @@ Artifacts target the current system, architecture, and compatible native ABI; ex
 3. Parse precedence, associativity, nested calls, blocks, and control flow recursively.
 4. Validate symbols, scopes, signatures, argument types/counts, duplicates, and returns, then generate JSON/ABD instructions.
 
-See [the language guide](compiler/LANGUAGE.en.md). Original def(x), return(x), functional while/if blocks, and mem_get(pointer)=value remain supported, alongside conventional if/else/while, initialization, unary operators, comparisons, short-circuit logic, int32 bitwise/shift operators, and variable compound assignment.
+See [the language guide](compiler/LANGUAGE.en.md). Original def(x), return(x), functional while/if blocks, and mem_get(pointer)=value remain supported, alongside conventional if/else/while, initialization, unary operators, comparisons, short-circuit logic, int32 bitwise/shift operators, conditional expressions `?:`, and variable compound assignment.
 
 ```c
 #namespace 123
@@ -202,10 +202,11 @@ Non-library main is 0x0fff0000; ordinary definitions may fix low IDs with :0003,
 
 ## Defined semantics and limits
 
-- Conditions and `!`/`&&`/`||` require booleans, including for dynamic values at runtime. Equality permits mixed numeric types, same-type booleans/strings, addresses/null, and compatible class pointers; incompatible pairs fail rather than comparing unequal. See [equality rules](compiler/LANGUAGE.en.md#expressions-and-control-flow).
+- Conditions, including `?:`, and `!`/`&&`/`||` require booleans, including for dynamic values at runtime. Equality permits mixed numeric types, same-type booleans/strings, addresses/null, and compatible class pointers; incompatible pairs fail rather than comparing unequal. See [equality rules](compiler/LANGUAGE.en.md#expressions-and-control-flow).
 - Integers are signed 32-bit; division truncates toward zero and arithmetic overflow/zero division fail. Numeric promotion is double > float > int; booleans are not implicit numbers.
 - Int-only `& | ^ ~ << >> >>>` operate on 32-bit patterns; left shift wraps, `>>` sign-extends, and `>>>` zero-fills. Counts must be 0…31, and simple variables support the compound forms. Parenthesize bit tests as `(flags & mask) != 0`. See [bitwise operators](compiler/LANGUAGE.en.md#bitwise-and-shift-operators).
 - Explicit `int/float/double/string/address(x)` conversions follow a checked matrix: numeric conversions, strict decimal string parsing, numeric/address-to-string formatting, and address identity. int/address pairs, boolean/class conversions, and C-style casts are unsupported. int truncates before its range check; floating conversion permits underflow but rejects overflow. See [explicit conversions](compiler/LANGUAGE.en.md#explicit-conversions).
+- `condition ? a : b` evaluates one arm in the enclosing scope, with a common result type and numeric promotion. It is right-associative between assignment and `||`; both arms must type-check. See [conditional expressions](compiler/LANGUAGE.en.md#conditional-expressions).
 - Decimals default to double; 1.5f, 5f, and 2e3f are float.
 - Fully typed extern declarations require explicit types; old #extern is removed. Actual arguments/results match exactly without int/float/double conversions. Namespace accepts 1–4 hex digits and rejects the reserved 0000 and 0abd; libraries use namespace_hint/assume_hint.
 - Parameters pass by value, evaluated left to right. Functions access only own locals and globals. Each block/loop iteration has its own scope; for initializer scope ends with the loop.

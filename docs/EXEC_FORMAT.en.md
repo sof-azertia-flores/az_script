@@ -80,8 +80,9 @@ Each expression is also a raw stack, beginning with an int32 opcode. `E` denotes
 | 47 | shr | `left:E, right:E` |
 | 48 | ushr | `left:E, right:E` |
 | 49 | convert | `type:int, value:E` |
+| 50 | select | `condition:E, then:E, else:E` |
 
-`if`/`wi` conditions and every evaluated operand of `and`/`or`/`not` must have BOOLEAN_VALUE (4). Numeric zero/nonzero and void are not truth values; a wrong tag throws `Condition must be boolean, got <type>`. `and`/`or` remain left-to-right and short-circuit, so a skipped right operand is not evaluated or checked at runtime. Source compilation also rejects statically known non-boolean operands, including the lowered `for` condition.
+`if`/`wi`/`select` conditions and every evaluated operand of `and`/`or`/`not` must have BOOLEAN_VALUE (4). Numeric zero/nonzero and void are not truth values; a wrong tag throws `Condition must be boolean, got <type>`. `and`/`or` remain left-to-right and short-circuit, so a skipped right operand is not evaluated or checked at runtime. Source compilation also rejects statically known non-boolean operands, including the lowered `for` condition.
 
 `eq`/`ne` compare mixed int/float/double values numerically, two booleans or two strings by value, and two addresses by their uint64 values. Null and class pointers erase to address; source compilation separately requires compatible class-pointer types. Other mixed tags throw rather than producing unequal/equal. The address-specific rejection still applies to address/non-address pairs. OBJECT_VALUE operands (class values and buffers) have no generic equality. For two runtime void values, `eq` is true and `ne` false, including values read from uninitialized dynamic variables; statically void operands are rejected by the compiler. These checks tighten execution semantics within exec v10; the wire layout and opcode numbers do not change.
 
@@ -146,7 +147,15 @@ The record is exactly `[49, type:int, value:E]`, where the target type is int=0,
 
 Numeric tags convert to int/float/double or string. Strings parse as decimal int/float/double or retain string identity. Address converts only to unsigned-decimal string or address identity. Boolean, void, and object tags are rejected. Class pointers and null are erased addresses in exec, so source compilation must enforce its separate ban on explicit class-pointer/null conversions; opcode 49 does not recover source class identity. int/address conversion and string-to-address parsing are unsupported.
 
-Numeric-to-int truncates toward zero before checking int32 range. Float/double conversions reject overflow and permit subnormals and underflow to zero. Parsing is locale-independent: integer strings require an optional sign and decimal digits only; floating strings permit a decimal point and exponent, with no whitespace, hex, suffix, NaN/Infinity, embedded NUL, or trailing text. Errors use `Cannot convert X to Y` with an invalid-decimal or out-of-range reason as appropriate; quoted strings are ASCII-escaped and truncated after 64 Unicode scalars. The language guide gives the source conversion matrix and examples. Exec remains v10; only the supported opcode set grows through 49.
+Numeric-to-int truncates toward zero before checking int32 range. Float/double conversions reject overflow and permit subnormals and underflow to zero. Parsing is locale-independent: integer strings require an optional sign and decimal digits only; floating strings permit a decimal point and exponent, with no whitespace, hex, suffix, NaN/Infinity, embedded NUL, or trailing text. Errors use `Cannot convert X to Y` with an invalid-decimal or out-of-range reason as appropriate; quoted strings are ASCII-escaped and truncated after 64 Unicode scalars. The language guide gives the source conversion matrix and examples. Explicit conversion extends exec v10 without changing the root or function layout.
+
+## Conditional selection (opcode 50)
+
+The record is exactly `[50, condition:E, then:E, else:E]`. All three child expressions are required; missing or extra fields are rejected. Inspection JSON is `{"t":0,"c":50,"v":condition,"then":thenValue,"else":elseValue}`. Child traversal for debug records follows condition, then, else order.
+
+`select` evaluates the condition once and requires a boolean, then evaluates only the selected arm once and returns its value. A non-boolean condition fails with `Condition must be boolean, got int` when its tag is int. Evaluation uses the current scope rather than the branch scopes of opcode 27 `if`; selection adds no cleanup boundary. Selected owned temporaries and automatic pointer objects retain their ordinary statement/block lifetimes.
+
+The source compiler checks both arms for a compatible non-void common type and inserts opcode 49 `convert` around narrower numeric arms. Pointer compatibility and pointer-bound type parameters with null are compile-time checks; `select` itself does not convert the selected value or recover erased class types. Exec stays v10, with unchanged root/function records; consumers must support opcode 50.
 
 ## Return-value checks
 
