@@ -659,6 +659,16 @@ def main():
             corrupt_virtual.append(candidate)
     for index, candidate in enumerate(corrupt_virtual):
         write_abd(work / f'virtual.invalid-{index}.snapshot.abd', candidate)
+    # deep(n) = 1 + (1 + ... 20 nested ... deep(n - 1)). Before native stack use
+    # was bounded, n = 254 killed the JVM on a default 1 MiB thread.
+    deep_call = call(0x7A010001, {'t': 0, 'c': 'minus', 'v1': var('__func_param0'), 'v2': 1})
+    for _ in range(20):
+        deep_call = {'t': 0, 'c': 'add', 'v1': 1, 'v2': deep_call}
+    write_abd(work / 'deep.exec.abd', {'f': [
+        object_function(0x7A010001, 0, [
+            {'t': 0, 'c': 'if', 'v': {'t': 0, 'c': 'eq', 'v1': var('__func_param0'), 'v2': 0}, 'val': [ret(0)]},
+            ret(deep_call)], [0]),
+        object_function(0x7A010002, 5, [call(0x7A020001)])]})
     # A deep dependency graph is independent of the expression nesting limit.
     # Resolve it on a small JVM stack so a recursive native SCC walk fails here.
     deep_count = 1000

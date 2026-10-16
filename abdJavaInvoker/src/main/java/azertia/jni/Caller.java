@@ -22,6 +22,10 @@ public final class Caller {
     public static native void flush();
     public static native int namespaceForHint(String hint);
     public static native long call(int functionId, long[] args);
+    /** Apply execution limits to the loaded script and to every script loaded later. */
+    public static native void setLimits(long maxSteps, int maxCallDepth, long maxStackBytes);
+    /** Return {maxSteps, maxCallDepth, maxStackBytes}. */
+    public static native long[] limits();
 
     /** Arguments belong to the native callback frame and must never be freed here. */
     public static Object callbackValue(int id, long[] args) {

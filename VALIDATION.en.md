@@ -1,6 +1,17 @@
-# C28 Final Compiler Roadmap Validation (2026-10-15)
+# Merge of main (native stack guard) into the compiler roadmap (2026-10-16)
 
 [中文](VALIDATION.md) | English
+
+Scope: merging main (PR #5, native stack guard and Java execution limits) into the compiler-roadmap branch at c246c20. Conflicts in README, VALIDATION, runtime_tests.cpp, run_jni_tests.py and JniRegression.java keep both sides. JNI exception messages now end with the script stack trace, so the native-stack JNI assertions match the message prefix, and the abdJavaInvoker README says the message starts with `Script native stack limit exceeded`. Every new opcode and call path goes through `tick()`/`call_guard`.
+
+Linux x86_64 only, `JAVA_TOOL_OPTIONS` unset:
+
+- `python3 tools/build_and_test.py --offline`: passed (731 s).
+- `python3 tools/build_and_test.py --offline --sanitize`: passed (849 s), no AddressSanitizer or UndefinedBehaviorSanitizer reports.
+- Distribution export was not rerun for this merge.
+
+# C28 Final Compiler Roadmap Validation (2026-10-15)
+
 
 C01–C28 are complete on `claude/confident-galileo-fic3s1`. Final implementation: `7fc5a12`. C28 changes documentation only. Its V1/V2 evidence is the complete, sequential C27 runs against the same final source; those passing suites were not repeated after documentation edits. V3, all measurements and JFR below were executed afterward from that clean commit. Exec and JNI snapshots remain v10.
 
@@ -177,6 +188,18 @@ Continued `claude/confident-galileo-fic3s1` after C13. Runtime failures now reta
 Sequential validation, with `JAVA_TOOL_OPTIONS` unset: V0 whitespace/untracked-file review; V1 `python3 tools/build_and_test.py --offline`; V2 the same command with `--sanitize`; V3 `python3 tools/export_distribution.py build/dist-check --offline`. All commands exited 0. Both builds passed 221 Java tests and 1428 native runtime checks. Ordinary JNI passed 2680 assertions, 800 calls from four workers, 23 fresh-process entry cases, and 1000-module deep linking. The new compiled runtime-trace suite passed 15 ordinary and 13 sanitizer cases, including byte-identical source/AST/ABD roundtrips, lifecycle and destructor errors, hint/include frames and Unicode positions. No ASan/UBSan reports occurred.
 
 The Linux x86_64 release export passed 24 relocation/consumer checks, including exact debug/stripped error reports, static/shared C++ SDK consumers and real JNI consumers. Its manifest lists 173 files. Logs: `build/c14/v1.log`, `build/c14/v2.log`, `build/c14/v3.log`; package: `build/dist-check/`. Later roadmap items C15–C28 remain separate work.
+
+# Native Stack Guard and Java Execution Limits (2026-10-10)
+
+The interpreter runs calls, blocks and expressions recursively on the native stack, and none of the step, call-depth or 128-level ABD nesting limits bound stack use. On a default 1 MiB Java thread, a function with 20 nested additions recursing 254 times (`AbdInvoker.invoke(0x12340001, 254)`) killed the JVM with SIGSEGV (exit 139), and small C++ threads crashed the same way. Each thread now records where its outermost script call began. `call_guard` (script and host function calls) and `tick` (every block and expression) check the current frame and throw `std::runtime_error("Script native stack limit exceeded")` when execution nears the bottom of the thread's real stack or exceeds the new `script::max_stack_bytes` budget. Stack bounds come from `pthread_getattr_np`, `pthread_get_stackaddr_np` or `GetCurrentThreadStackLimits` (Windows 8+) and are cached per thread. A quarter of the stack (at least 64 KiB, at most 1 MiB) stays in reserve above its bottom; where bounds are unavailable a 256 KiB budget applies. Host callback reentry keeps the thread's outermost position. Existing cleanup and first-error semantics are unchanged: entered calls unwind, scope allocations are released, and destructors facing an exhausted stack behave as under exhausted step or depth budgets.
+
+Java gains `AbdInvoker.setMaxSteps`, `setMaxCallDepth`, `setMaxStackBytes` and matching getters, backed by the JNI `Caller.setLimits`/`limits`. Limits are process-wide, apply to the loaded script and to scripts loaded later, and cannot change while a script or callback runs. `abdjni/azertia_jni_Caller.h` was regenerated with `javac -h`; the other generated JNI headers are unchanged.
+
+Native regressions run deep expression, deep block and host-reentry recursion on 256 KiB and 512 KiB POSIX threads and require that error, with call counts back at zero, scope allocations released and the thread still usable. The 4 MiB thread and the main thread must complete or fail cleanly, and an explicit budget is covered. JNI regressions cover the reported case, 256 KiB and 512 KiB Java threads, and limit reads, writes, validation, persistence and rejection during execution. With the guard disabled, both new regressions fail with SIGSEGV. Sweeps of three deep scripts, one with destructors, found no crash on C++ threads from 64 KiB to 8 MiB (Debug, Release, ASan) or on Java threads from 160 KiB to 2 MiB. A Release micro-benchmark shows the check's overhead within noise.
+
+`python3 tools/build_and_test.py --offline` exited 0: 107 Java unit tests, 767 native checks, 2685 JNI assertions, the small-stack 1000-module link and every cross-language and end-to-end suite passed, with byte-identical Java/C++ ABD fixtures. The subsequent `python3 tools/build_and_test.py --offline --sanitize` exited 1: `runtime-tests` hit a GCC 13.3 ASan stack-use-after-scope in the test fixture encoder `fixture_encoder::node` (the `{a,b}` initializer-list temporary on an exception-cleanup path). Unmodified HEAD reports the same with this toolchain, so it is unrelated to this change. After deleting `build/sanitize`, a rerun with `CXXFLAGS=-fno-sanitize-address-use-after-scope` exited 0 with every other ASan/UBSan check enabled and no reports; 767 native checks and the non-JNI end-to-end suites passed. Clang's ASan runtime is not installed here, and the macOS and Windows stack-bounds branches were not compiled on this machine.
+
+Logs: `build/native-stack-validation.log`, `build/native-stack-sanitize.log`, `build/native-stack-sanitize-no-scope.log`.
 
 # Distribution and Host Entry Update Audit (2026-09-27)
 

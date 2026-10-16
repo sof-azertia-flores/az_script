@@ -1,6 +1,17 @@
-# C28 编译器路线图最终验证（2026-10-15）
+# 将 main（原生栈保护）合并到编译器路线图（2026-10-16）
 
 中文 | [English](VALIDATION.en.md)
+
+范围：把 main（PR #5，原生栈保护与 Java 执行限制）合并到 c246c20 的编译器路线图分支。README、VALIDATION、runtime_tests.cpp、run_jni_tests.py 与 JniRegression.java 的冲突保留双方内容。JNI 异常消息现在附带脚本栈跟踪，因此原生栈 JNI 断言改为匹配消息前缀，abdJavaInvoker README 也改为说明消息以 `Script native stack limit exceeded` 开头。所有新增操作码和调用路径都经过 `tick()`/`call_guard`。
+
+仅在 Linux x86_64 上验证，`JAVA_TOOL_OPTIONS` 已取消：
+
+- `python3 tools/build_and_test.py --offline`：通过（731 秒）。
+- `python3 tools/build_and_test.py --offline --sanitize`：通过（849 秒），没有 AddressSanitizer 或 UndefinedBehaviorSanitizer 报告。
+- 本次合并未重新运行发行导出。
+
+# C28 编译器路线图最终验证（2026-10-15）
+
 
 `claude/confident-galileo-fic3s1` 的 C01–C28 已完成，最终实现为 `7fc5a12`。C28 仅修改文档，V1/V2 证据引用 C27 对同一最终源码顺序完成的完整运行，文档修改后未重复这些已通过的套件。以下 V3、全部实测及 JFR 随后在该干净提交上实际执行。exec 与 JNI 快照均保持 v10。
 
@@ -177,6 +188,18 @@ opcode51 检查类指针、类值、缓冲区及类型参数的反射结果。�
 在取消 `JAVA_TOOL_OPTIONS` 的环境下顺序执行 V0 空白及未跟踪文件审查、V1 `python3 tools/build_and_test.py --offline`、V2 同命令追加 `--sanitize`、V3 `python3 tools/export_distribution.py build/dist-check --offline`，全部退出 0。两种构建均通过 221 项 Java 测试和 1428 项原生运行时检查。普通 JNI 通过 2680 项断言、4 个线程的 800 次调用、23 个独立进程入口用例及 1000 模块深链接。新增源码调用栈套件分别通过普通构建 15 项、sanitizer 构建 13 项，覆盖源码/AST/ABD 字节一致、生命周期和析构错误、hint/include 调用帧及 Unicode 位置。未发现 ASan/UBSan 报告。
 
 Linux x86_64 Release 导出通过 24 项搬迁及消费者检查，包含调试版与无调试信息版精确报错、静态/共享 C++ SDK 及真实 JNI 消费者；清单包含 173 个文件。日志：`build/c14/v1.log`、`build/c14/v2.log`、`build/c14/v3.log`；验收包：`build/dist-check/`。C15–C28 保留为后续独立工作。
+
+# 原生栈保护与 Java 执行限制（2026-10-10）
+
+解释器在原生栈上递归执行调用、代码块和表达式，而步数、调用深度和 128 层 ABD 嵌套限制都不约束栈用量。默认 1 MiB Java 线程上，每层含 20 层嵌套加法的函数递归 254 次（`AbdInvoker.invoke(0x12340001, 254)`）会使 JVM 以 SIGSEGV（退出码 139）终止；C++ 小栈线程同样崩溃。现在每个线程记录最外层脚本调用开始的位置，`call_guard`（脚本与宿主函数调用）和 `tick`（每个代码块和表达式）检查当前帧：接近线程实际栈底，或超过新增的 `script::max_stack_bytes` 预算时，抛出 `std::runtime_error("Script native stack limit exceeded")`。栈范围通过 `pthread_getattr_np`、`pthread_get_stackaddr_np` 或 `GetCurrentThreadStackLimits`（Windows 8+）获取并按线程缓存，栈底前保留栈大小的四分之一（至少 64 KiB、至多 1 MiB）；无法检测时使用 256 KiB 预算。宿主回调重入沿用同一线程的最外层位置。已有清理和首错保留语义不变：已进入的调用正常展开，作用域分配被释放，栈不足时析构的处理与步数或深度耗尽相同。
+
+Java 新增 `AbdInvoker.setMaxSteps`、`setMaxCallDepth`、`setMaxStackBytes` 及对应 getter，经 `Caller.setLimits`/`limits` 进入 JNI。限制为进程级设置，作用于已加载和之后加载的脚本；运行或回调期间修改会被拒绝。`abdjni/azertia_jni_Caller.h` 由 `javac -h` 重新生成，其余 JNI 头文件生成结果不变。
+
+原生回归在 256 KiB 和 512 KiB POSIX 线程上运行深表达式、深代码块和宿主重入递归，要求得到上述错误，并检查调用计数归零、作用域分配释放且线程可继续执行；4 MiB 线程与主线程要求完成或干净失败，另覆盖显式预算。JNI 回归覆盖原报告用例、256 KiB/512 KiB Java 线程、限制的读写、校验、持久性和运行期间拒绝修改。去掉守卫后，两项新回归均以 SIGSEGV 失败。另在 64 KiB～8 MiB 的 C++ 线程（Debug、Release、ASan）和 160 KiB～2 MiB 的 Java 线程上扫描三种深脚本（含析构对象），均无崩溃。Release 微基准中检查开销在噪声范围内。
+
+`python3 tools/build_and_test.py --offline` 退出 0：Java 单元 107 项、原生 767 项、JNI 2685 断言、小栈 1000 模块链接及全部跨语言和端到端套件通过，Java/C++ ABD 样本逐字节一致。随后顺序执行 `python3 tools/build_and_test.py --offline --sanitize`，退出 1：`runtime-tests` 在测试夹具编码器 `fixture_encoder::node` 中报告 GCC 13.3 ASan stack-use-after-scope（异常清理路径上的 `{a,b}` 初始化列表临时对象）。未修改的 HEAD 用同一工具链得到相同报告，与本次修改无关。删除 `build/sanitize` 后以 `CXXFLAGS=-fno-sanitize-address-use-after-scope` 重跑，退出 0：其余 ASan/UBSan 检查全部开启，无报告，原生 767 项和不含 JNI 的端到端套件通过。本机没有 clang 的 ASan 运行时。macOS 与 Windows 的栈范围分支未在本机编译验证。
+
+日志：`build/native-stack-validation.log`、`build/native-stack-sanitize.log`、`build/native-stack-sanitize-no-scope.log`。
 
 # 发行导出与宿主入口遗漏修复（2026-09-27）
 
