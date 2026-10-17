@@ -39,6 +39,8 @@ class Value {
     static_assert(std::is_nothrow_copy_constructible_v<String>&&std::is_nothrow_move_constructible_v<String>);
     static_assert(std::is_nothrow_copy_constructible_v<Object>&&std::is_nothrow_move_constructible_v<Object>);
     static_assert(std::is_trivially_copyable_v<address>);
+    // No reference-counted alternative: assignment is a plain copy.
+    bool trivial() const noexcept {return kind_!=Kind::string&&kind_!=Kind::object;}
     void destroy() noexcept {
         if(kind_==Kind::string)string_.~String();
         else if(kind_==Kind::object)object_.~Object();
@@ -84,10 +86,14 @@ public:
     // Copy/move before releasing the old alternative: the source may be owned,
     // directly or indirectly, by the object this value currently holds.
     Value& operator=(const Value& other) noexcept {
-        if(this!=&other){Value copy(other);destroy();move_from(copy);}return *this;
+        if(this==&other)return *this;
+        if(trivial()&&other.trivial()){copy_from(other);return *this;}
+        Value copy(other);destroy();move_from(copy);return *this;
     }
     Value& operator=(Value&& other) noexcept {
-        if(this!=&other){Value moved(std::move(other));destroy();move_from(moved);}return *this;
+        if(this==&other)return *this;
+        if(trivial()&&other.trivial()){copy_from(other);other.kind_=Kind::none;return *this;}
+        Value moved(std::move(other));destroy();move_from(moved);return *this;
     }
     ~Value(){destroy();}
     int type_tag() const noexcept {
