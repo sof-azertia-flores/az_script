@@ -26,6 +26,9 @@ public:
     static void publish(const std::exception* error) noexcept;
 };
 void discard_active() noexcept;
+// Publishes the exception being handled as a nested entry would; call only
+// inside a catch handler.
+void publish_current() noexcept;
 // True when the exception being handled is the one already published.
 bool current_is_published() noexcept;
 void note_frame(trace_frame frame) noexcept;

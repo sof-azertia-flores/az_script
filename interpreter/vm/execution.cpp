@@ -5,6 +5,7 @@
 #include "../blocks.h"
 #include "../heepalloc.h"
 #include "../core/ids.h"
+#include "../core/trace.h"
 #include <algorithm>
 #include <array>
 #include <bit>
@@ -113,6 +114,12 @@ struct ScalarExecutor::State {
     // Stack-ordered with the object frames on FrameStack. A deque keeps the
     // records in place while reentrant roots push and pop above them.
     std::deque<ObjectFrame> object_frames;
+    // A tree script call opens two entry scopes: entry clears the active trace,
+    // success clears the published trace and failure publishes a copy. Nested
+    // VM frames reproduce that; this flag is set whenever the thread's trace may
+    // differ from cleared state (root entry, any failure, any native call), so
+    // a clean script-to-script return touches no trace state.
+    bool trace_touched=true;
     std::vector<bool> object_function;
     std::unordered_map<int,std::uint32_t> script_functions;
     std::vector<std::vector<std::shared_ptr<const method_table>>> method_tables;
@@ -252,6 +259,7 @@ struct ScalarExecutor::State {
     // Brackets tree-runtime helpers that may run destructors (script code).
     template<class Body> void runtime(const ExecutionOptions& options,Body body) {
         auto& host=host_of(options);const auto mark=host.enter_runtime();
+        trace_touched=true;
         try{body();}catch(...){try{host.leave_runtime(mark);}catch(...){}throw;}
         host.leave_runtime(mark);
     }
@@ -322,12 +330,17 @@ struct ScalarExecutor::State {
     // Called inside an active catch block while an error unwinds an object
     // frame: statement temporaries and scopes above mark end innermost first,
     // and the root scope too when the frame is leaving. Cleanup errors after
-    // the in-flight one are discarded; its trace is restored afterwards.
+    // the in-flight one are discarded. As each tree statement_scope and
+    // with_cleanup level does, every level rethrows the first error after its
+    // cleanup, republishing its trace before the next level's destructors run.
     void unwind_objects(FrameRecord& frame,std::size_t mark,bool whole,const ExecutionOptions& options) noexcept {
         auto* host=options.callbacks?options.callbacks->objects():nullptr;
         auto& record=objects(frame);
         pending_error failure;failure.capture_current();
         const auto runtime_mark=host?host->enter_runtime():0;
+        const auto level_ended=[&]() noexcept {
+            try{failure.rethrow();}catch(...){failure=pending_error{};failure.capture_current();}
+        };
         while(record.controls.size()>mark) {
             const auto control=record.controls.back();record.controls.pop_back();
             try {
@@ -336,6 +349,7 @@ struct ScalarExecutor::State {
                     scope->cleanup(scope);
                 } else blocks::finalize_temporaries(*record.frame,control.temporaries,record.scopes.back());
             } catch(...) {failure.capture_current();}
+            level_ended();
         }
         if(whole)try{auto root=record.scopes.front();root->cleanup(root);}catch(...){failure.capture_current();}
         if(host)try{host->leave_runtime(runtime_mark);}catch(...){failure.capture_current();}
@@ -361,6 +375,7 @@ struct ScalarExecutor::State {
             FrameId caller,Register destination,ExecutionPosition& position,const ExecutionOptions& options,bool admit) {
         const ExecutionPosition entry{index,0,0,0,no_index};
         try {
+            if(caller&&trace_touched)trace::discard_active();
             FrameRecord frame;frame.function=index;frame.caller=caller;frame.return_register=destination;
             if(admit&&options.calls)frame.admission=options.calls->enter();
             const auto& function=program.functions[index];
@@ -410,6 +425,7 @@ struct ScalarExecutor::State {
         } catch(...) {
             position=entry;
             if(options.callbacks)options.callbacks->note_script_error(entry);
+            if(caller){trace_touched=true;trace::publish_current();}
             throw;
         }
     }
@@ -430,7 +446,7 @@ struct ScalarExecutor::State {
     Value invoke(std::uint32_t index,std::span<const Value> arguments,std::span<const SlotId> globals,
             std::uint64_t& steps,ExecutionPosition& position,ExecutionOptions options) {
         if(index>=program.functions.size())throw std::out_of_range("Scalar VM function index is outside its program");
-        position={index,0,0,0,no_index};
+        position={index,0,0,0,no_index};trace_touched=true;
         try {for(const auto global:globals)require_scalar_value(pool.resolve(global));}
         catch(...) {if(options.callbacks)options.callbacks->note_script_error(position);throw;}
         // Native host reentry starts a separate invocation root above this mark.
@@ -568,11 +584,13 @@ struct ScalarExecutor::State {
                             // The result is the returned variable itself, as in
                             // the tree executor; mem_get yields a heap slot.
                             const auto scope=scope_of(frame);
+                            trace_touched=true;
                             auto output=options.callbacks->invoke_external_in(target,snapshots.span(),position,scope);
                             blocks::adopt_result(output,scope);
                             reference(frame,instruction.result,std::move(output));
                             break;
                         }
+                        trace_touched=true;
                         const auto output=options.callbacks->invoke_external(target,snapshots.span(),position,2+frame.scope_count);
                         require_scalar_value(output);value(frame,instruction.result,output);
                     }
@@ -697,6 +715,7 @@ struct ScalarExecutor::State {
                     const bool check=frame.check_return;const int expected=frame.checked_return_type;
                     cleanup(frame);frames.pop();
                     if(!caller)return output;
+                    if(trace_touched){clear_error_trace();trace_touched=false;}
                     auto& resumed_frame=frames.resolve(caller);
                     if(resumed_frame.object!=no_index&&output.type_tag()==OBJECT_VALUE)
                         blocks::adopt_result(wrap(output),scope_of(resumed_frame));
@@ -711,6 +730,7 @@ struct ScalarExecutor::State {
             }
             throw std::logic_error("Scalar VM invocation did not terminate");
         } catch(...) {
+            trace_touched=true;
             bool recovered=false;
             // Recovery only moves already-reserved continuations; an internal
             // failure here would leave frames without a consistent owner.
@@ -726,6 +746,8 @@ struct ScalarExecutor::State {
         auto& frame=frames.top();
         if(frame.object!=no_index)unwind_objects(frame,0,true,options);
         if(options.callbacks)options.callbacks->note_script_error(position_of(frame));
+        // The root frame's entry scopes are real; nested frames publish here.
+        if(frame.caller)trace::publish_current();
         cleanup(frame);frames.pop();
     }
     void unwind_frames(std::size_t mark,const ExecutionOptions& options) noexcept {

@@ -149,6 +149,11 @@ trace::entry_scope::~entry_scope() noexcept {
     if(state){if(!failed)clear_error_trace();--state->entries;}
 }
 void trace::entry_scope::publish(const std::exception* error) noexcept {publish_trace(error);}
+void trace::publish_current() noexcept {
+    try {throw;}
+    catch(const std::exception& error){publish_trace(&error);}
+    catch(...){publish_trace(nullptr);}
+}
 void trace::discard_active() noexcept {
     if(thread_trace)thread_trace->active={};
 }
