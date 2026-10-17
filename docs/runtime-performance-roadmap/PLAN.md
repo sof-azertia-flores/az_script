@@ -1,6 +1,6 @@
 # 运行时性能重构执行计划
 
-日期：2026-10-17（UTC）。状态：已在 `claude/runtime-performance-handoff-5mdt6h` 恢复实施，暂停时的交接见 [HANDOFF.md](HANDOFF.md)，实际进度和验证证据见 [STATUS.md](STATUS.md)。R11a 之后两个执行器改为核心库加两个可选引擎库共存发行，R11b 起的执行顺序、允许差异和验证方式以 [ENGINE_SPLIT.md](ENGINE_SPLIT.md) 为准；该文件与本计划冲突时以该文件为准。
+日期：2026-10-17（UTC）。状态：已在 `claude/runtime-performance-handoff-5mdt6h` 恢复实施，暂停时的交接见 [HANDOFF.md](HANDOFF.md)，实际进度和验证证据见 [STATUS.md](STATUS.md)。R11b 起的执行顺序、允许差异和验证方式以 [ENGINE_SPLIT.md](ENGINE_SPLIT.md) 为准，该文件与本计划冲突时以该文件为准；其中把两个执行器拆为核心库加两个可选引擎库（S5）是可行性结论，须用户在 R12 后确认再实施。
 
 用户目标：优先提高脚本循环、对象和函数调用速度，接受较大的功能与架构调整。执行分为运行时主线和随后进行的编译器内部结构迁移，共 28 个实现/验收提交；环境准备记作 R00，不算实现提交。编号是工作边界，大项必要时可以拆分，不能省略验收或把未完成部分标为完成。
 

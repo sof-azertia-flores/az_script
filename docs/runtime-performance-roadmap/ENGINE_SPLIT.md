@@ -1,6 +1,8 @@
 # 双执行器共存与源码拆分决策
 
-日期：2026-10-17（UTC）。适用分支：`claude/runtime-performance-handoff-5mdt6h`，起点 `97968ba`。本文件记录用户提出“新 VM 与旧解释器是否重叠、去掉不必要重叠、两个执行器作为可二选一的库同时发行一段时间”后的决定，修订 [PLAN.md](PLAN.md) 中 R11 之后的顺序和 R18 的含义。实际进度仍以 [STATUS.md](STATUS.md) 为准。
+日期：2026-10-17（UTC）。适用分支：`claude/runtime-performance-handoff-5mdt6h`，起点 `97968ba`。本文件是用户提出“新 VM 与旧解释器是否重叠、去掉不必要重叠、两个执行器作为可二选一的库同时发行一段时间”后的可行性研究结论，修订 [PLAN.md](PLAN.md) 中 R11 之后的顺序和 R18 的含义。实际进度仍以 [STATUS.md](STATUS.md) 为准。
+
+**状态划分：** S0–S4（证据工具、R11b 所需的核心提取、R11b、核心整理、R12）按本文件实施，因为它们直接服务“先 R11b 再 R12”及严格行为一致；S5（运行时 ABI 2、拆分为三个库、双引擎发行）是可行性结论和建议方案，**须经用户在 R12 之后确认才实施**，在此之前两个执行器仍在同一个库中。
 
 ## 1. 现状：不是两个独立项目
 
@@ -95,7 +97,7 @@ VM 重建的是“怎样执行代码”。exec 格式、链接器、对象/堆�
 
 另登记两类两个引擎相同、但与 F0 不同的变化：`api_migration`（ABI 2 的有意 API 变化，附新旧行为夹具）和 `defect_fix`（只在有复现时修复，例如 `default_element` 对已失效脚本的空指针、`store` 跨析构持有的裸 `owner_env`）。畸形 exec 消息、已发布 trace 状态与 `describe_error`、`getDepth`、`destroy` 与深度 0 的步数核算、实参校验消息、快照字节均不是差异。
 
-## 8. 代为作出的决定（用户可否决）
+## 8. 研究结论中的建议（用户可否决；S5 部分须用户确认后实施）
 
 1. 拓扑采用“核心 + 两个引擎 DSO”，而不是两个导出相同符号的独立库：进程级状态只有一份，插件在所有平台引擎中立，将来删除树引擎只需删除组件。
 2. 沿用 `abdInvoker` 命名：`abdInvoker-2`、`abdInvokerTree-2`、`abdInvokerVM-2`，归档 `abdInvoker{Core,Tree,VM}`，`abdJ-tree`/`abdJ-vm`，`azscript-run`/`azscript-run-vm`。
