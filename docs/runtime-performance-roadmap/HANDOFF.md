@@ -2,7 +2,7 @@
 
 暂停时间：2026-10-17（UTC）。用户要求暂停开发、写交接并提交到新分支。
 
-> 恢复状态：工作已在 `claude/runtime-performance-handoff-5mdt6h` 继续。下文“构建缺口”及恢复顺序第 2–5 步已完成，第 6 步完成了 R10 编译器清理与 R11a 对象帧，实际结果与发现记录在 [STATUS.md](STATUS.md)；本文件其余内容保留暂停时的交接原文。
+> 恢复状态：工作已在 `claude/runtime-performance-handoff-5mdt6h` 继续。下文“构建缺口”及恢复顺序第 2–5 步已完成，第 6 步完成了 R10 编译器清理与 R11a 对象帧，实际结果与发现记录在 [STATUS.md](STATUS.md)。此后两个执行器改为核心库加两个可选引擎库共存，R11b 起的顺序见 [ENGINE_SPLIT.md](ENGINE_SPLIT.md)。本文件其余内容保留暂停时的交接原文。
 
 交接分支：`codex/runtime-performance-handoff`，从 `codex/runtime-performance` 的 `019c440` 创建。此提交是 **WIP 检查点，不是可发布版本**。已停止开发代理和性能采样；没有启动后续编译、sanitizer 或发行导出。未推送此分支。
 
