@@ -1,4 +1,5 @@
 #include "execution.h"
+#include "cleanup.h"
 #include "operations.h"
 #include <algorithm>
 #include <array>
@@ -17,7 +18,8 @@ constexpr std::array supported{
     Opcode::jump,Opcode::branch_false,Opcode::branch_flow,Opcode::branch_returned,
     Opcode::scope_enter,Opcode::scope_leave,Opcode::statement_enter,Opcode::statement_leave,
     Opcode::loop_enter,Opcode::loop_next,Opcode::loop_leave,Opcode::set_break,
-    Opcode::set_continue,Opcode::call,Opcode::set_return,Opcode::function_end
+    Opcode::set_continue,Opcode::call,Opcode::set_return,Opcode::function_end,
+    Opcode::cleanup_enter,Opcode::cleanup_leave,Opcode::cleanup_end
 };
 
 std::string function_text(int id) {
@@ -72,11 +74,15 @@ struct ScalarExecutor::State {
     WorkspaceVector<std::uint32_t> locals,declared,scopes;
     FrameStack frames;
     WorkspaceVector<FrameLayout> layouts;
+    // Compiler cleanup continuations for every active region of every frame,
+    // innermost last. Each frame reserves its own bound before publication,
+    // so entering a region and recovering from a failure never allocate.
+    CompilerCleanupStack regions;
     std::uint32_t free_cell=no_index;
 
     State(const ExecutableProgram& source,SlotPool& storage,WorkspaceBudget& budget)
         :program(source),pool(storage),workspace(budget),registers(budget),cells(budget,no_index),
-         locals(budget),declared(budget),scopes(budget),frames(budget),layouts(budget) {
+         locals(budget),declared(budget),scopes(budget),frames(budget),layouts(budget),regions(budget) {
         verify_program(program);
         require_capabilities(program,scalar_capabilities());
         for(const auto& constant:program.constants)require_scalar_value(constant);
@@ -212,6 +218,7 @@ struct ScalarExecutor::State {
             // Argument readers use offsets, so relocating caller registers is safe.
             registers.prepare_append(layout.registers);locals.prepare_append(layout.locals);
             declared.prepare_append(layout.locals);scopes.prepare_append(layout.scope_marks);
+            regions.prepare(layout.cleanups);
             registers.append_default(layout.registers);locals.append_default(layout.locals);
             declared.append_default(layout.locals);scopes.append_default(layout.scope_marks);
             for(std::size_t i=0;i<layout.locals;++i)local(frame,i)=no_index;
@@ -234,9 +241,15 @@ struct ScalarExecutor::State {
         // Native host reentry starts a separate invocation root above this mark.
         // Script CALL never calls invoke recursively and always sets caller.
         const auto mark=frames.size();
-        try {
-            enter(index,arguments.size(),[&](std::size_t i)->const Value&{return arguments[i];},
-                {},no_index,position,options,options.admit_entry);
+        const auto region_mark=regions.size();
+        // Entry failures leave no frame of this root; enter reports them.
+        enter(index,arguments.size(),[&](std::size_t i)->const Value&{return arguments[i];},
+            {},no_index,position,options,options.admit_entry);
+        // A failure resumed after its finalizer is raised again inside the
+        // dispatch try, so outer regions handle it without native recursion.
+        pending_error resumed;
+        for(;;) try {
+            if(resumed)std::exchange(resumed,pending_error{}).rethrow();
             while(frames.size()>mark) {
                 auto& frame=frames.top();
                 const auto& function=program.functions[frame.function];
@@ -312,6 +325,23 @@ struct ScalarExecutor::State {
                 }
                 case Opcode::set_return:
                     frame.result=read(frame,instruction.left);frame.returned=true;frame.return_location=frame.location;break;
+                case Opcode::cleanup_enter:
+                    regions.enter(frames.top_id(),function.cleanups[instruction.operand],
+                        CleanupWatermark{{},frame.scope_count,0,0,frame.statement_depth,frame.loop_depth});break;
+                case Opcode::cleanup_leave: {
+                    const auto id=frames.top_id();regions.body_finished(id);
+                    auto next=regions.unwound(id,frame);frame.pc=next.pc;
+                    if(next.failure)throw std::logic_error("Scalar VM cleanup completed a body with a pending failure");
+                    break;
+                }
+                case Opcode::cleanup_end: {
+                    const auto id=frames.top_id();regions.finalizer_finished(id);
+                    auto next=regions.unwound(id,frame);frame.pc=next.pc;
+                    // The body failed and the finalizer completed: resume the
+                    // first failure at its original innermost position.
+                    if(next.failure){position=next.position;next.failure.rethrow();}
+                    break;
+                }
                 case Opcode::function_end: {
                     frame.location=frame.return_location;position=position_of(frame);
                     auto output=vm::convert_return(frame.result,function.return_type);
@@ -325,13 +355,44 @@ struct ScalarExecutor::State {
             }
             throw std::logic_error("Scalar VM invocation did not terminate");
         } catch(...) {
-            while(frames.size()>mark) {
-                auto& frame=frames.top();
-                if(options.callbacks)options.callbacks->note_script_error(position_of(frame));
-                cleanup(frame);frames.pop();
-            }
+            bool recovered=false;
+            // Recovery only moves already-reserved continuations; an internal
+            // failure here would leave frames without a consistent owner.
+            try{recovered=recover(mark,region_mark,position,options,resumed);}catch(...){std::terminate();}
+            if(recovered)continue;
+            unwind_frames(mark,options);regions.discard(region_mark);
             throw;
         }
+    }
+    void unwind_frames(std::size_t mark,const ExecutionOptions& options) noexcept {
+        while(frames.size()>mark) {
+            auto& frame=frames.top();
+            if(options.callbacks)options.callbacks->note_script_error(position_of(frame));
+            cleanup(frame);frames.pop();
+        }
+    }
+    // Called inside the active catch block. Frames above the innermost active
+    // region of this invocation root report their trace and release storage as
+    // in a full unwind; the region's frame returns to its entry watermark.
+    bool recover(std::size_t mark,std::size_t region_mark,ExecutionPosition& position,
+            const ExecutionOptions& options,pending_error& resumed) {
+        if(regions.size()<=region_mark)return false;
+        const auto owner=regions.owner();
+        while(frames.size()>mark&&frames.top_id()!=owner) {
+            auto& frame=frames.top();
+            if(options.callbacks)options.callbacks->note_script_error(position_of(frame));
+            cleanup(frame);frames.pop();
+        }
+        if(frames.top_id()!=owner)throw std::logic_error("Scalar VM cleanup region lost its frame");
+        auto& frame=frames.top();
+        const auto failure=regions.failed(owner,frame,&position);
+        while(frame.scope_count>failure.watermark.scopes)leave_scope(frame);
+        frame.statement_depth=failure.watermark.statements;frame.loop_depth=failure.watermark.loops;
+        auto next=regions.unwound(owner,frame);frame.pc=next.pc;
+        // A failing finalizer resumes the body's first failure, if any, else
+        // its own; either way at the original innermost position.
+        if(next.kind==CleanupTransition::Kind::resume){position=next.position;resumed=std::move(next.failure);}
+        return true;
     }
 };
 

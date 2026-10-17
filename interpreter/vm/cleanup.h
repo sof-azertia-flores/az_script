@@ -20,6 +20,8 @@ struct CleanupTransition {
     ProgramCounter pc=no_index;
     CleanupWatermark watermark;
     pending_error failure;
+    // The innermost position of the first failure, restored when resuming it.
+    ExecutionPosition position;
     CleanupTransition() noexcept=default;
     CleanupTransition(CleanupTransition&&) noexcept=default;
     CleanupTransition& operator=(CleanupTransition&&) noexcept=default;
@@ -47,6 +49,7 @@ class CompilerCleanupStack {
         SavedFlow saved;
         pending_error failure;
         std::uint32_t first_error_location=0;
+        ExecutionPosition first_error_position;
     };
     WorkspaceVector<Record> records_;
     Record& current(FrameId frame);
@@ -65,11 +68,15 @@ public:
     CleanupTransition finalizer_finished(FrameId frame);
     // Call only inside the active catch block. Subsequent cleanup errors are
     // discarded by pending_error while retaining the original exception/trace.
-    CleanupTransition failed(FrameId frame,const FrameRecord& state);
+    // position is the innermost failing position, possibly in a callee frame.
+    CleanupTransition failed(FrameId frame,const FrameRecord& state,const ExecutionPosition* position=nullptr);
     // Called after native/scope cleanup reaches the requested watermark. It
     // saves and clears flow before a finalizer; after it, all original flow is
     // restored, including the return result and return source position.
     CleanupTransition unwound(FrameId frame,FrameRecord& state);
+    // Emergency teardown of an invocation root whose frames are being
+    // discarded: drops continuations above mark without running finalizers.
+    void discard(std::size_t mark) noexcept{if(records_.size()>mark)records_.truncate(mark);}
 };
 
 // A cleanup call needs zero arguments (factory), one (destructor/placement),

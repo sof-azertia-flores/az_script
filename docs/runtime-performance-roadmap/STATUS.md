@@ -12,7 +12,7 @@
 | R05 | 普通完整验收通过 | Value 内联标量，145 对差分与全量普通验证通过；完整 sanitizer 和发行验证仍待闭合 |
 | R06–R08 | 标量 VM 已接入构建并通过定向及独立进程差分 | VM 源码与 9 个定向测试、2 个 host 已加入 CMake；见下文“恢复后的集成”。R06 的生产 `blocks/heepalloc` 身份迁移仍未开始 |
 | R09 | 标量 CALL/宿主桥/Session 通过；默认 workspace 定为 128 MiB | 37 案例 / 825 对独立进程观察（冻结 `019c440` 参考及同构建树后端）全部字段一致；workspace 边界见 [STORAGE_DESIGN.md](STORAGE_DESIGN.md) 第 9 节。宿主可配置项待 VM 成为宿主可选后端时加入 |
-| R10 | 清理原语定向通过，尚未接入执行循环 | `vm-cleanup-tests` 普通/ASan/UBSan 通过；executor 仍拒绝 cleanup 指令 |
+| R10 | 编译器 cleanup 节点已接入标量执行循环 | 见下文“R10 编译器清理接入”。CleanupActions 析构 continuation、语句临时量仍依赖 R11 对象模型 |
 | R11–R28 | 尚未完成 | 按依赖顺序执行 |
 
 ## 暂停与交接
@@ -40,6 +40,19 @@
 - 完整普通验证 `python3 tools/build_and_test.py --offline`：退出 0，日志 `build/full-normal.log` 末尾为 `Build and all selected tests passed`；包含真实 JNI、插件、快照、ABI 29 项及上述两个 VM 门禁。
 
 限制：VM 仍只能经迁移入口 `vm::select_backend` 选择，生产默认仍是树执行器；对象、泛型、buffer、虚调用、分配/反射/插件内建在准备阶段明确拒绝，不回退。R05 冻结源码的完整 sanitizer、发行搬迁及正式 7 轮性能采样仍未运行。
+
+## R10 编译器清理接入
+
+wire op 31（`cleanup`）的 `cleanup_enter/leave/end` 由标量 executor 执行，复用 `CompilerCleanupStack`：
+
+- 每帧按 cleanup-enter PC 数在发布帧前预留 continuation 容量（`FrameLayout::cleanups`），进入区域与失败恢复都不再分配。
+- 失败时在同一 dispatch 循环内恢复：弹出区域所属帧之上的帧（逐帧报告 trace、释放存储），所属帧回到进入时的 scope/statement/loop 水位，再进入 finalizer；不递归调用 C++ invoke。finalizer 完成后在原最内层位置重新抛出首个错误；finalizer 自身失败时丢弃后续错误、保留首错及其 trace。
+- return/break/continue 与 result、location、return_location 在 finalizer 前保存清除、之后恢复；`on_error=true` 且正文成功时跳过 finalizer。
+- 宿主重入的每个调用根只使用自己进入后建立的区域；外层暂停帧的区域不会被内层失败消耗。
+
+验证：`scalar-vm-tests` 新增 17 个 cleanup 差分（正常/on-error、正文/finalizer 失败、首错优先、flow 保存、嵌套、作用域与循环水位、callee 失败回到调用者区域），均对旧树执行器逐预算扫描比较错误、位置、剩余预算、返回值和 global；`vm-call-tests` 新增宿主重入隔离 3 组。对无重抛、无作用域回收、无位置恢复、无循环深度恢复及区域跨调用根 5 种故意错误实现逐一确认测试失败。普通与 ASan/UBSan 定向测试通过。
+
+未完成：`CleanupActions`（析构/工厂/比较器的脚本 continuation）、语句临时量与对象所有权清理需要 R11 对象模型；编译器只在构造/析构包装中生成 cleanup 节点，源码级差分要等对象执行接入后才能覆盖。
 
 ## 环境
 

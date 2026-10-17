@@ -49,6 +49,9 @@ Node store(int index,Node value){auto result=op(5,{value});result->immediate=ind
 Node convert_to(int type,Node value){auto result=op(49,{value});result->immediate=type;return result;}
 Node returned(Node value){return op(7,{value});}
 Node block(std::initializer_list<Node> children){return op(1,children);}
+Node cleanup(Node body,Node finalizer,bool on_error=false) {
+    auto result=op(31,{std::move(body),std::move(finalizer)});result->on_error=on_error;return result;
+}
 void number_nodes(const std::shared_ptr<const SourceExpression>& node,std::uint32_t& count,DebugInfo& debug) {
     auto& writable=const_cast<SourceExpression&>(*node);
     writable.node=count++;writable.location=count;
@@ -96,6 +99,7 @@ Raw wire(const std::shared_ptr<const SourceExpression>& node) {
     case 5:record.vs.push_back(integer(node->immediate));child(0);break;
     case 7:record.vs.push_back(boolean(!node->children.empty()));if(!node->children.empty())child(0);break;
     case 27:child(0);child(1);record.vs.push_back(boolean(node->children.size()==3));if(node->children.size()==3)child(2);break;
+    case 31:child(0);child(1);record.vs.push_back(boolean(node->on_error));break;
     case 49:record.vs.push_back(integer(node->immediate));child(0);break;
     default:for(std::size_t i=0;i<node->children.size();++i)child(i);break;
     }
@@ -282,6 +286,56 @@ void scalar_cases() {
     differential("invalid-parse",function(returned(convert_to(INT_VALUE,literal("bad\nvalue")))));
     differential("numeric-convert",function(returned(convert_to(INT_VALUE,literal(-3.9)))),{Value(0)},{},Value(-3));
 }
+// Compiler cleanup regions (wire op 31) with scalar bodies. The tree executor
+// is the reference for flow restoration, first-error retention and positions.
+void cleanup_cases() {
+    const auto global_plus=[](int value){return store(-1,op(12,{slot(-1),literal(value)}));};
+    const auto divide_zero=[]{return op(15,{literal(1),literal(0)});};
+    differential("cleanup-normal",function(block({cleanup(store(-1,literal(1)),store(-1,op(12,{op(14,{slot(-1),literal(10)}),literal(2)}))),
+        returned(slot(-1))})),{Value(0)},{},Value(12));
+    differential("cleanup-on-error-skipped",function(block({cleanup(store(-1,literal(1)),store(-1,literal(99)),true),
+        returned(slot(-1))})),{Value(0)},{},Value(1));
+    differential("cleanup-body-error",function(block({cleanup(block({store(-1,literal(1)),divide_zero()}),global_plus(10)),
+        returned(literal(5))})));
+    differential("cleanup-on-error-body-error",function(block({cleanup(block({store(-1,literal(1)),divide_zero()}),global_plus(10),true),
+        returned(literal(5))})));
+    differential("cleanup-finalizer-error",function(block({cleanup(store(-1,literal(1)),block({store(-1,literal(2)),divide_zero()})),
+        returned(literal(5))})));
+    differential("cleanup-first-error-wins",function(block({cleanup(block({store(-1,literal(1)),divide_zero()}),
+        block({store(-1,literal(2)),op(12,{literal(std::numeric_limits<int>::max()),literal(1)})})),returned(literal(5))})));
+    differential("cleanup-return-preserved",function(block({cleanup(returned(literal(7)),block({store(-1,literal(3)),returned(literal(9))})),
+        returned(literal(1))})),{Value(0)},{},Value(7));
+    differential("cleanup-break-preserved",function(block({op(28,{literal(true),block({cleanup(op(29),global_plus(1)),store(-1,literal(99))})}),
+        returned(slot(-1))})),{Value(0)},{},Value(1));
+    differential("cleanup-continue-preserved",function(block({define(0,literal(0)),op(28,{op(18,{slot(0),literal(3)}),block({
+        store(0,op(12,{slot(0),literal(1)})),cleanup(op(30),global_plus(1)),global_plus(100)})}),returned(slot(-1))}),INT_VALUE,1),
+        {Value(0)},{},Value(3));
+    differential("cleanup-finalizer-flow-discarded",function(block({op(28,{literal(true),block({cleanup(global_plus(1),op(29)),
+        op(27,{op(18,{slot(-1),literal(3)}),op(30)}),op(29)})}),returned(slot(-1))})),{Value(0)},{},Value(3));
+    differential("cleanup-nested",function(block({cleanup(cleanup(divide_zero(),global_plus(1),true),
+        store(-1,op(14,{slot(-1),literal(10)}))),returned(literal(5))})));
+    differential("cleanup-nested-success",function(block({cleanup(cleanup(global_plus(1),global_plus(2)),
+        store(-1,op(14,{slot(-1),literal(10)}))),returned(slot(-1))})),{Value(0)},{},Value(30));
+    // The failed body's declaration is released before the finalizer declares
+    // the same slot; otherwise the finalizer reports a duplicate declaration.
+    differential("cleanup-scope-unwind",function(block({cleanup(block({define(0,literal(5)),divide_zero()}),
+        block({define(0,literal(6)),store(-1,slot(0))})),returned(literal(1))}),INT_VALUE,1));
+    differential("cleanup-loop-unwind",function(block({cleanup(op(28,{literal(true),block({global_plus(1),
+        op(27,{op(19,{slot(-1),literal(3)}),divide_zero()})})}),op(28,{op(18,{slot(-1),literal(5)}),global_plus(1)})),
+        returned(literal(1))})));
+    // A body failing inside its own loop must not leave that loop active for
+    // the finalizer: its nested on-error region sees break outside any loop.
+    differential("cleanup-loop-depth-restored",function(block({cleanup(op(28,{literal(true),divide_zero()}),
+        cleanup(op(29),store(-1,literal(1)),true)),returned(literal(1))})));
+    // Callee failures unwind explicit frames to the caller's region; the
+    // trace keeps the callee as the innermost frame.
+    differential("cleanup-callee-error",function(op(27,{op(19,{slot(0),literal(1)}),returned(divide_zero()),
+        block({cleanup(call(10,{literal(1)}),global_plus(5)),returned(literal(2))})}),INT_VALUE,0,{INT_VALUE}),
+        {Value(0)},{Value(0)});
+    differential("cleanup-callee-success",function(op(27,{op(19,{slot(0),literal(1)}),returned(literal(40)),
+        block({cleanup(store(-1,call(10,{literal(1)})),global_plus(2)),returned(slot(-1))})}),INT_VALUE,0,{INT_VALUE}),
+        {Value(0)},{Value(0)},Value(42));
+}
 void call_cases() {
     differential("recursive-call",function(returned(op(50,{op(17,{slot(0),literal(0)}),
         op(12,{call(10,{op(13,{slot(0),literal(1)})}),literal(1)}),literal(0)})),INT_VALUE,0,{INT_VALUE}),
@@ -384,6 +438,6 @@ void allocation_scaling() {
 }
 }
 int main() {
-    try{scalar_cases();call_cases();refusal_and_resources();entry_indices();internal_program_guards();allocation_scaling();std::cout<<"Scalar VM checks passed: "<<checks<<'\n';}
+    try{scalar_cases();call_cases();cleanup_cases();refusal_and_resources();entry_indices();internal_program_guards();allocation_scaling();std::cout<<"Scalar VM checks passed: "<<checks<<'\n';}
     catch(const std::exception& error){count_allocations=false;std::cerr<<error.what()<<'\n';return 1;}
 }

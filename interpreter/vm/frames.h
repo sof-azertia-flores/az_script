@@ -45,11 +45,19 @@ public:
     std::size_t active_calls() const noexcept{return active_calls_;}
 };
 
+// Exceptions retain their original C++ type/message. The embedding adapter
+// uses this last position to publish the ordinary script trace on failure.
+struct ExecutionPosition {
+    std::uint32_t function=no_index,node=0,location=0,return_location=0;
+    ProgramCounter pc=no_index;
+};
+
 struct WorkspaceRange {std::size_t begin=0,count=0;};
 struct FrameLayout {
-    // scope_marks is a safe upper bound from all scope-enter PCs. Verified
-    // control-flow order can differ from the instructions' physical order.
-    std::size_t registers=0,locals=0,alias_cells=0,scope_marks=0;
+    // scope_marks and cleanups are safe upper bounds from all scope-enter and
+    // cleanup-enter PCs. Verified control-flow order can differ from the
+    // instructions' physical order, but one entry PC is never active twice.
+    std::size_t registers=0,locals=0,alias_cells=0,scope_marks=0,cleanups=0;
 };
 FrameLayout frame_layout(const ExecutableProgram& program,std::uint32_t function);
 

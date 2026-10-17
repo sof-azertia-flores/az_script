@@ -40,6 +40,7 @@ FrameLayout frame_layout(const ExecutableProgram& program,std::uint32_t index) {
         // scope-enter PC cannot be active twice simultaneously. Its count is a
         // safe bound even when branches reorder the physical instruction stream.
         if(opcode==Opcode::scope_enter)++result.scope_marks;
+        else if(opcode==Opcode::cleanup_enter)++result.cleanups;
     }
     return result;
 }

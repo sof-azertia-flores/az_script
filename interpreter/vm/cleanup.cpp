@@ -39,12 +39,13 @@ CleanupTransition CompilerCleanupStack::finalizer_finished(FrameId frame) {
     if(record.phase!=Phase::finalizer)throw std::logic_error("VM cleanup finalizer completed in the wrong phase");
     record.phase=Phase::unwind_finalizer;return transition(record,CleanupTransition::Kind::unwind);
 }
-CleanupTransition CompilerCleanupStack::failed(FrameId frame,const FrameRecord& state) {
+CleanupTransition CompilerCleanupStack::failed(FrameId frame,const FrameRecord& state,const ExecutionPosition* position) {
     if(!std::current_exception())throw std::logic_error("VM cleanup failure reported without an active exception");
     auto& record=current(frame);const bool first=!record.failure;
     record.failure.capture_current();
     if(first) {
         record.first_error_location=state.location;
+        if(position)record.first_error_position=*position;
         if(record.phase==Phase::finalizer||record.phase==Phase::unwind_finalizer)record.saved.location=state.location;
     }
     if(record.phase==Phase::body)record.phase=Phase::unwind_body;
@@ -63,7 +64,8 @@ CleanupTransition CompilerCleanupStack::unwound(FrameId frame,FrameRecord& state
     } else if(record.phase==Phase::unwind_finalizer)record.saved.restore(state);
     else throw std::logic_error("VM cleanup unwind completed in the wrong phase");
     auto result=transition(record,CleanupTransition::Kind::resume,record.region.after);
-    result.failure=std::move(record.failure);records_.pop_back();return result;
+    result.failure=std::move(record.failure);result.position=record.first_error_position;
+    records_.pop_back();return result;
 }
 
 CleanupActions::CleanupActions(WorkspaceBudget& workspace,std::pmr::memory_resource* resource)

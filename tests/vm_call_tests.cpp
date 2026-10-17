@@ -5,6 +5,7 @@
 #include <iostream>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 namespace {
 using namespace azertian;
@@ -136,6 +137,42 @@ void host_reentry_and_lexical_depth() {
     check(executor.invoke(0,{}, {},steps,nullptr,options).get<int>()==9,"Caller continues after native recovery");
     check(active==0&&pool.size()==0,"Recovered native boundary releases its slots and guards");
 }
+Node guarded(Node body,Node finalizer,bool on_error) {
+    auto node=op(31,{std::move(body),std::move(finalizer)});node->on_error=on_error;return node;
+}
+void cleanup_across_host_reentry() {
+    // Function 0 protects a host call that reenters the executor. Each native
+    // reentry is its own invocation root: it may only use its own regions.
+    const auto event=[](int value){return call(0x76540003,{literal(value)});};
+    auto outer=function(10,op(1,{guarded(call(0x76540001),event(1),true),returned(literal(5))}));
+    auto failing=function(11,returned(op(15,{literal(1),literal(0)})));
+    auto protected_failure=function(12,guarded(returned(op(15,{literal(1),literal(0)})),event(2),true));
+    const auto program=lower_program(SourceProgram{{outer,failing,protected_failure},{}});
+    WorkspaceBudget workspace(4*1024*1024);SlotPool pool(workspace);ScalarExecutor executor(program,pool,workspace);
+    std::size_t active=0,limit=8;std::uint64_t steps=0,max_steps=10000;
+    CallDepthAccounting accounting(active,limit,steps,max_steps);Callbacks callbacks;ExecutionOptions options{&accounting,&callbacks};
+    std::vector<int> events;std::uint32_t reentered=1;bool rethrow=false;
+    callbacks.body=[&](const CallTarget& target,std::span<const Value> args,const ExecutionPosition&,std::size_t) {
+        auto host=accounting.enter();
+        if(target.function_id==0x76540003){events.push_back(args[0].get<int>());return Value{};}
+        try{executor.invoke(reentered,{}, {},steps,nullptr,options);}
+        catch(const std::runtime_error&){if(rethrow)throw;}
+        return Value(0);
+    };
+    check(executor.invoke(0,{}, {},steps,nullptr,options).get<int>()==5&&events.empty(),
+        "A caught reentry failure cannot run the suspended caller's on-error finalizer");
+    reentered=2;callbacks.clear();
+    check(executor.invoke(0,{}, {},steps,nullptr,options).get<int>()==5&&events==std::vector<int>{2},
+        "A reentered root runs its own region once and leaves the caller's region pending");
+    check(active==0&&pool.size()==0,"Recovered reentry regions release guards and slots");
+    reentered=1;rethrow=true;events.clear();callbacks.clear();bool rejected=false;
+    try{executor.invoke(0,{}, {},steps,nullptr,options);}
+    catch(const std::runtime_error& error){rejected=std::string(error.what())=="Division by zero";}
+    check(rejected&&events==std::vector<int>{1},"A host-propagated failure runs the caller's finalizer once and keeps its identity");
+    check(callbacks.recorded==2&&callbacks.trace[0].function==1&&callbacks.trace[1].function==0,
+        "The reentered frame and the protected caller report innermost first");
+    check(active==0&&pool.size()==0,"Propagated reentry failure releases every guard and slot");
+}
 void script_trace_and_conversion() {
     auto outer=function(10,returned(call(11)));
     auto middle=function(11,returned(call(12)));
@@ -243,7 +280,7 @@ void workspace_failure_atomicity() {
 }
 }
 int main() {
-    try{recursion_and_depth();host_reentry_and_lexical_depth();script_trace_and_conversion();large_slot_layouts();default_workspace_boundaries();workspace_failure_atomicity();
+    try{recursion_and_depth();host_reentry_and_lexical_depth();cleanup_across_host_reentry();script_trace_and_conversion();large_slot_layouts();default_workspace_boundaries();workspace_failure_atomicity();
         std::cout<<"VM call checks passed: "<<checks<<'\n';}
     catch(const std::exception& error){std::cerr<<error.what()<<'\n';return 1;}
 }

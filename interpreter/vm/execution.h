@@ -7,13 +7,6 @@
 #include <span>
 
 namespace azertian::vm {
-// Exceptions retain their original C++ type/message. The embedding adapter
-// uses this last position to publish the ordinary script trace on failure.
-struct ExecutionPosition {
-    std::uint32_t function=no_index,node=0,location=0,return_location=0;
-    ProgramCounter pc=no_index;
-};
-
 // The embedding adapter performs external lookup and the native/depth guard.
 // Arguments are immutable snapshots in separate budgeted backing, valid even
 // if the callback reenters this executor. lexical_depth is the complete old
