@@ -7,6 +7,7 @@
 #include "core/admission.h"
 #include "core/ids.h"
 #include "core/exec.h"
+#include "core/link.h"
 #include "core/value_ops.h"
 #include <algorithm>
 #include <cmath>
@@ -609,6 +610,10 @@ using X=std::shared_ptr<expression>;
 template<class T> X raw_binary(X a,X b) {
     auto node=std::make_shared<T>();node->exp1=std::move(a);node->exp2=std::move(b);return node;
 }
+exec::reference_kind reference_kind(const function_reference& reference) noexcept {
+    return reference.destructor?exec::reference_kind::destructor:reference.factory?exec::reference_kind::factory:
+        reference.placement?exec::reference_kind::placement:reference.method?exec::reference_kind::method:exec::reference_kind::call;
+}
 class tree_builder {
     std::vector<function_reference>& references;
     std::shared_ptr<context_spec> context(const exec::context& source) {
@@ -758,9 +763,7 @@ parsed_module build_module(exec::module model) {
     parsed_module module;
     module.meta=std::move(model.meta);module.global_count=model.global_count;
     module.hint=std::move(model.hint);module.assumptions=std::move(model.assumptions);
-    for(auto& [id,source]:model.extern_signatures)
-        module.extern_signatures.emplace(id,function_signature{source.return_type,std::move(source.param_types),
-            static_cast<int>(source.hidden_count),source.entry_kind});
+    module.extern_signatures=std::move(model.extern_signatures);
     for(const auto& source:model.functions) {
         auto fn=std::make_shared<ofunction>();
         fn->global_offset=model.global_offset;fn->global_count=module.global_count;
@@ -775,9 +778,7 @@ parsed_module build_module(exec::module model) {
         if(module.references.size()-first!=expected.size())throw std::logic_error("Tree references differ from the exec model");
         for(std::size_t i=0;i<expected.size();++i) {
             const auto& found=module.references[first+i];const auto& wanted=expected[i];
-            const auto kind=found.destructor?exec::reference_kind::destructor:found.factory?exec::reference_kind::factory:
-                found.placement?exec::reference_kind::placement:found.method?exec::reference_kind::method:exec::reference_kind::call;
-            if(found.original_id!=wanted.function_id||kind!=wanted.kind||found.hidden_count!=static_cast<int>(wanted.hidden_count))
+            if(found.original_id!=wanted.function_id||reference_kind(found)!=wanted.kind||found.hidden_count!=static_cast<int>(wanted.hidden_count))
                 throw std::logic_error("Tree references differ from the exec model");
         }
         module.functions.emplace(source.function_id,std::move(fn));
@@ -999,6 +1000,28 @@ void script::insert_script(const unsigned char* bytes,std::size_t length) {
     baseEnv->variables.swap(candidate_globals);modules.swap(candidate_modules);meta=module->meta;setup=false;
     });
 }
+// Link planning sees the mounted modules only through the neutral input.
+link::plan plan_links(const script& owner) {
+    link::input input;input.modules.reserve(owner.modules.size());
+    for(const auto& module:owner.modules) {
+        link::module item;
+        item.assumptions=module->assumptions;item.hint=module->manifest.hint;
+        item.mounted_namespace=module->manifest.actual_namespace;item.extern_signatures=module->extern_signatures;
+        item.references.reserve(module->references.size());
+        for(const auto& reference:module->references)
+            item.references.push_back({reference.original_id,reference_kind(reference),static_cast<std::uint32_t>(reference.hidden_count)});
+        for(const auto& [original,fn]:module->definitions){(void)original;item.definitions.push_back(fn->function_id);}
+        item.dependencies=module->dependencies;
+        input.modules.push_back(std::move(item));
+    }
+    for(const auto& [id,fn]:owner.functions) {
+        const auto defined=std::dynamic_pointer_cast<ofunction>(fn);
+        input.functions.emplace(id,defined?std::optional<function_signature>(function_signature{defined->rett,defined->param_types,
+            defined->hidden_count,defined->entry_kind}):std::nullopt);
+    }
+    input.script_namespaces=owner.script_namespaces;
+    return link::resolve(input);
+}
 void script::flush() {
     entry_scope entry;return entry.run([&]() -> void {
     std::lock_guard<std::recursive_mutex> lock(runtime_mutex());
@@ -1011,112 +1034,7 @@ void script::flush() {
     if(!vm_session_&&std::none_of(modules.begin(),modules.end(),[](const auto& module){return module->manifest.initialized;}))
         if(const char* forced=std::getenv("AZSCRIPT_EXPERIMENTAL_VM_BACKEND");forced&&std::string_view(forced)=="1")
             vm_session_=std::make_shared<vm::Session>(*this,vm::default_workspace_bytes);
-    std::map<std::string,std::size_t> hints;
-    for(std::size_t i=0;i<modules.size();++i)if(!modules[i]->manifest.hint.empty())hints.emplace(modules[i]->manifest.hint,i);
-    std::map<int,std::size_t> function_modules;
-    for(std::size_t i=0;i<modules.size();++i)for(auto& [original,fn]:modules[i]->definitions){(void)original;function_modules.emplace(fn->function_id,i);}
-    std::vector<std::set<std::size_t>> dependencies;
-    for(auto& module:modules)dependencies.push_back(module->dependencies);
-    std::vector<std::map<int,function_signature>> resolved_externs(modules.size());
-    std::vector<std::pair<function_reference*,int>> patches;std::map<int,function_signature> bindings;
-    for(std::size_t index=0;index<modules.size();++index) {
-        auto& module=*modules[index];std::map<int,int> mapping;
-        for(auto& [placeholder,hint]:module.assumptions) {
-            auto target=hints.find(hint);if(target==hints.end())throw std::runtime_error("Missing namespace hint: "+hint);
-            mapping.emplace(placeholder,*modules[target->second]->manifest.actual_namespace);
-            if(target->second!=index)dependencies[index].insert(target->second);
-        }
-        const auto resolve=[&](int id){auto found=mapping.find(namespace_of(id));return found==mapping.end()?id:relocate_id(id,found->second);};
-        for(auto& [original_id,signature]:module.extern_signatures) {
-            const int id=resolve(original_id);auto target=functions.find(id);
-            if(target!=functions.end()) {
-                if(auto defining=function_modules.find(id);defining!=function_modules.end()&&defining->second!=index)dependencies[index].insert(defining->second);
-                auto fn=std::dynamic_pointer_cast<ofunction>(target->second);
-                if(!fn||fn->rett!=signature.return_type||fn->param_types!=signature.param_types||
-                   fn->hidden_count!=signature.hidden_count||fn->entry_kind!=signature.entry_kind)
-                    throw std::runtime_error("External signature does not match script function: "+function_id_text(id));
-            } else if(mapping.contains(namespace_of(original_id))||script_namespaces.contains(namespace_of(id))||namespace_of(id)==0x0fff)
-                throw std::runtime_error("Imported script function is missing: "+function_id_text(id));
-            auto [entry,added]=bindings.emplace(id,signature);
-            if(!added&&!(entry->second==signature))throw std::runtime_error("Conflicting external signature id: "+function_id_text(id));
-            resolved_externs[index].emplace(id,signature);
-        }
-        for(auto& reference:module.references) {
-            const int id=resolve(reference.original_id);
-            if(auto defining=function_modules.find(id);defining!=function_modules.end()&&defining->second!=index)dependencies[index].insert(defining->second);
-            if(mapping.contains(namespace_of(reference.original_id))||reference.destructor||reference.factory||reference.placement||reference.method) {
-                auto target=functions.find(id);
-                if(target==functions.end())throw std::runtime_error("Referenced script function is missing: "+function_id_text(id));
-                if(reference.destructor) {
-                    auto fn=std::dynamic_pointer_cast<ofunction>(target->second);
-                    if(!fn||fn->rett!=VOID_VALUE||fn->param_types!=std::vector<int>{ADDRESS_VALUE})
-                        throw std::runtime_error("Object destructor must be a script function void(address)");
-                }
-                if(reference.placement) {
-                    auto fn=std::dynamic_pointer_cast<ofunction>(target->second);
-                    if(!fn||fn->rett!=VOID_VALUE||fn->param_types!=std::vector<int>{ADDRESS_VALUE}||fn->entry_kind!=1)
-                        throw std::runtime_error("Generic placement initializer must be an internal script function void(address)");
-                }
-                if(reference.method) {
-                    auto fn=std::dynamic_pointer_cast<ofunction>(target->second);
-                    if(!fn||fn->entry_kind!=0||fn->param_types.empty()||fn->param_types.front()!=ADDRESS_VALUE)
-                        throw std::runtime_error("Virtual method entry must be an ordinary script function with an address receiver");
-                }
-                if(reference.factory) {
-                    auto fn=std::dynamic_pointer_cast<ofunction>(target->second);
-                    if(!fn||fn->rett!=OBJECT_VALUE||!fn->param_types.empty())
-                        throw std::runtime_error("Generic default factory must be a script function object()");
-                }
-            }
-            if(auto target=functions.find(id);target!=functions.end()) {
-                auto fn=std::dynamic_pointer_cast<ofunction>(target->second);
-                if(!fn||fn->hidden_count!=reference.hidden_count)throw std::runtime_error("Generic context count does not match function: "+function_id_text(id));
-            } else {
-                auto imported=resolved_externs[index].find(id);
-                if(imported!=resolved_externs[index].end()&&imported->second.hidden_count!=reference.hidden_count)
-                    throw std::runtime_error("Generic context count does not match external function: "+function_id_text(id));
-                if(reference.hidden_count&&imported==resolved_externs[index].end())
-                    throw std::runtime_error("Generic context call requires a matching script import");
-            }
-            patches.emplace_back(&reference,id);
-        }
-    }
-    // Iterative SCC discovery keeps arbitrarily long module dependency chains
-    // off the C++ call stack. Components and ready ties use stable load order.
-    std::vector<bool> visited(modules.size());std::vector<std::size_t> finished;
-    for(std::size_t start=0;start<modules.size();++start)if(!visited[start]) {
-        std::vector<std::pair<std::size_t,bool>> pending{{start,false}};
-        while(!pending.empty()) {
-            auto [current,expanded]=pending.back();pending.pop_back();
-            if(expanded){finished.push_back(current);continue;}
-            if(visited[current])continue;
-            visited[current]=true;pending.emplace_back(current,true);
-            for(auto next=dependencies[current].rbegin();next!=dependencies[current].rend();++next)
-                if(!visited[*next])pending.emplace_back(*next,false);
-        }
-    }
-    std::vector<std::vector<std::size_t>> incoming(modules.size()),groups;
-    for(std::size_t i=0;i<dependencies.size();++i)for(auto next:dependencies[i])incoming[next].push_back(i);
-    std::vector<int> component(modules.size(),-1);
-    for(auto start=finished.rbegin();start!=finished.rend();++start)if(component[*start]<0) {
-        const int id=static_cast<int>(groups.size());std::vector<std::size_t> pending{*start},group;
-        component[*start]=id;
-        while(!pending.empty()) {
-            auto current=pending.back();pending.pop_back();group.push_back(current);
-            for(auto next:incoming[current])if(component[next]<0){component[next]=id;pending.push_back(next);}
-        }
-        std::sort(group.begin(),group.end());groups.push_back(std::move(group));
-    }
-    std::vector<std::set<int>> waits(groups.size());
-    for(std::size_t i=0;i<dependencies.size();++i)for(auto next:dependencies[i])if(component[i]!=component[next])waits[component[i]].insert(component[next]);
-    std::set<std::pair<std::size_t,int>> ready;
-    for(std::size_t i=0;i<groups.size();++i)if(waits[i].empty())ready.emplace(groups[i][0],static_cast<int>(i));
-    std::vector<std::size_t> order;
-    while(!ready.empty()) {
-        const int current=ready.begin()->second;ready.erase(ready.begin());
-        order.insert(order.end(),groups[current].begin(),groups[current].end());
-        for(std::size_t i=0;i<groups.size();++i)if(waits[i].erase(current)&&waits[i].empty())ready.emplace(groups[i][0],static_cast<int>(i));
-    }
+    auto plan=plan_links(*this);
     on_destory.reserve(on_destory.size()+modules.size());
     std::vector<std::pair<ofunction*,std::uint32_t>> vm_bindings;
     std::shared_ptr<vm::Session> vm_candidate;
@@ -1158,19 +1076,20 @@ void script::flush() {
     // every module has a valid resolution and the complete order is available.
     for(const auto& [function,index]:vm_bindings)function->vm_function_index_=index;
     if(vm_candidate)vm_session_.swap(vm_candidate);
-    for(auto& [reference,id]:patches){*reference->target=id;reference->original_id=id;}
     for(std::size_t i=0;i<modules.size();++i) {
-        modules[i]->extern_signatures.swap(resolved_externs[i]);
-        modules[i]->dependencies.swap(dependencies[i]);
+        auto& references=modules[i]->references;
+        for(std::size_t k=0;k<references.size();++k){*references[k].target=plan.references[i][k];references[k].original_id=plan.references[i][k];}
+        modules[i]->extern_signatures.swap(plan.externs[i]);
+        modules[i]->dependencies.swap(plan.dependencies[i]);
         modules[i]->assumptions.clear();
         for(auto& [original,fn]:modules[i]->definitions){(void)original;fn->linked=true;}
         if(modules[i]->onload)modules[i]->onload->linked=true;
         if(modules[i]->pre_destroy)modules[i]->pre_destroy->linked=true;
     }
-    extern_signatures.swap(bindings);vm_candidate.reset();initializing=true;
+    extern_signatures.swap(plan.bindings);vm_candidate.reset();initializing=true;
     try {
         call_guard guard(baseEnv);
-        for(auto index:order) {
+        for(auto index:plan.order) {
             auto& module=*modules[index];if(module.manifest.initialized)continue;
             if(module.onload)module.onload->invoke(baseEnv,{});
             module.manifest.initialized=true;

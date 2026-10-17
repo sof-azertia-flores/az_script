@@ -413,16 +413,15 @@ module read_fields(raw_view root,std::size_t offset) {
     result.meta=std::make_shared<AbdMap>(std::make_shared<AbdStack>(copy_raw(extension)));
     raw_cursor signatures(fields.take());
     while(!signatures.empty()) {
-        raw_cursor entry(signatures.take());const int id=entry.integer();signature value;
+        raw_cursor entry(signatures.take());const int id=entry.integer();function_signature value;
         if(id==0||id==1||id==ids::main_function||namespace_of(id)==ids::builtin_namespace)throw std::invalid_argument("Invalid external function id");
         value.return_type=entry.integer();
         if(value.return_type<INT_VALUE||value.return_type>OBJECT_VALUE)throw std::invalid_argument("Invalid external return type");
         value.param_types=read_types(entry.take());
-        const int hidden=entry.integer();value.entry_kind=entry.integer();entry.finish();
-        if(hidden<0||static_cast<std::size_t>(hidden)>max_slots||value.entry_kind<0||value.entry_kind>1)
+        value.hidden_count=entry.integer();value.entry_kind=entry.integer();entry.finish();
+        if(value.hidden_count<0||static_cast<std::size_t>(value.hidden_count)>max_slots||value.entry_kind<0||value.entry_kind>1)
             throw std::invalid_argument("Invalid external generic ABI");
-        value.hidden_count=static_cast<std::uint32_t>(hidden);
-        if(!hidden&&(value.return_type==ANY_VALUE||std::find(value.param_types.begin(),value.param_types.end(),ANY_VALUE)!=value.param_types.end()))
+        if(!value.hidden_count&&(value.return_type==ANY_VALUE||std::find(value.param_types.begin(),value.param_types.end(),ANY_VALUE)!=value.param_types.end()))
             throw std::invalid_argument("External any types require generic contexts");
         if(!result.extern_signatures.emplace(id,std::move(value)).second)throw std::invalid_argument("Duplicate external signature id: "+function_id_text(id));
     }

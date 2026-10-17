@@ -19,12 +19,14 @@
 #include "core/errors.h"
 #include "core/format.h"
 #include "core/limits.h"
+#include "core/signature.h"
 
 namespace azertian {
 inline constexpr std::size_t MAX_VARIABLE_SLOTS=limits::max_slots;
 // The only exec format the loader reads; ExecCodec.VERSION in the compiler matches it.
 inline constexpr int EXEC_FORMAT_VERSION=exec::format_version;
 class expression; class function; class environment; class variable; class script; struct loaded_module;
+namespace link { struct plan; }
 namespace vm {
 class Session;
 struct WorkspaceUsage;
@@ -48,12 +50,6 @@ struct bound_method {int function_id;type_contexts contexts;};
 using method_table=std::vector<bound_method>;
 void validate_method_table(const method_table& methods,const std::shared_ptr<script>& script);
 struct context_spec;
-struct function_signature {
-    int return_type=VOID_VALUE;
-    std::vector<int> param_types;
-    int hidden_count=0,entry_kind=0;
-    bool operator==(const function_signature&) const=default;
-};
 // The compatibility heap/executor registry is shared. All entry points use this
 // recursive lock so host callbacks may call back into the VM on the same thread.
 std::recursive_mutex& runtime_mutex();
@@ -108,6 +104,7 @@ public:
     void require_execution() const;
 private:
     friend class ofunction;
+    friend link::plan plan_links(const script& owner);
     friend void vm::select_backend(script& owner,std::size_t workspace_limit);
     friend vm::WorkspaceUsage vm::workspace_usage(const script& owner);
     std::vector<std::shared_ptr<loaded_module>> modules;
@@ -116,6 +113,9 @@ private:
     std::shared_ptr<vm::Session> vm_session_;
     bool initializing=false;
 };
+// The link plan of the script's mounted modules (core/link.h); both engines
+// apply the same plan.
+link::plan plan_links(const script& owner);
 class function {
 public:
     virtual ~function()=default;

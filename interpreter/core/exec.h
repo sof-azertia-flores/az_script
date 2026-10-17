@@ -2,6 +2,7 @@
 #define AZSCRIPT_CORE_EXEC_H
 #include "debug.h"
 #include "format.h"
+#include "signature.h"
 #include "types.h"
 #include "value.h"
 #include <cstddef>
@@ -50,12 +51,6 @@ struct expression {
     std::vector<method> methods;
     std::vector<int> slot_types;
 };
-struct signature {
-    int return_type=VOID_VALUE;
-    std::vector<int> param_types;
-    std::uint32_t hidden_count=0;
-    int entry_kind=0;
-};
 struct function {
     int function_id=0,return_type=VOID_VALUE,entry_kind=0;
     std::vector<int> param_types;
@@ -66,7 +61,7 @@ struct function {
 struct module {
     std::size_t global_offset=0,global_count=0;
     std::shared_ptr<AbdMap> meta;
-    std::map<int,signature> extern_signatures;
+    std::map<int,function_signature> extern_signatures;
     // Wire order; IDs are unique. 0 and 1 are the module's lifecycle hooks.
     std::vector<function> functions;
     std::string hint;
