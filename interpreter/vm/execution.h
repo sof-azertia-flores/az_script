@@ -44,7 +44,7 @@ public:
     virtual ObjectHost* objects() noexcept{return nullptr;}
 };
 struct ExecutionOptions {
-    CallDepthAccounting* calls=nullptr;
+    admission::accounting* calls=nullptr;
     ExecutionCallbacks* callbacks=nullptr;
     // A public adapter that already owns a call admission sets this false.
     // Internal script CALL always acquires its own logical admission.

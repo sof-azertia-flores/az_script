@@ -55,7 +55,7 @@ void recursion_and_depth() {
     WorkspaceBudget workspace(128*1024*1024);SlotPool pool(workspace);ScalarExecutor executor(program,pool,workspace);
     std::size_t active=0,depth_limit=20002;
     std::uint64_t steps=0,max_steps=1000000;
-    CallDepthAccounting accounting(active,depth_limit,steps,max_steps);Callbacks callbacks;
+    admission::accounting accounting(active,depth_limit,steps,max_steps);Callbacks callbacks;
     std::size_t deepest=0;
     callbacks.body=[&](const CallTarget&,std::span<const Value> args,const ExecutionPosition&,std::size_t lexical_depth) {
         auto admission=accounting.enter();deepest=active;
@@ -106,7 +106,7 @@ void host_reentry_and_lexical_depth() {
     const auto program=lower_program(SourceProgram{{outer,inner,nested},{}});
     WorkspaceBudget workspace(4*1024*1024);SlotPool pool(workspace);ScalarExecutor executor(program,pool,workspace);
     std::size_t active=0,limit=8;std::uint64_t steps=0,max_steps=10000;
-    CallDepthAccounting accounting(active,limit,steps,max_steps);Callbacks callbacks;ExecutionOptions options{&accounting,&callbacks};
+    admission::accounting accounting(active,limit,steps,max_steps);Callbacks callbacks;ExecutionOptions options{&accounting,&callbacks};
     callbacks.body=[&](const CallTarget& target,std::span<const Value> args,const ExecutionPosition&,std::size_t depth) {
         auto host=accounting.enter();
         if(target.function_id==0x76540002) {
@@ -150,7 +150,7 @@ void cleanup_across_host_reentry() {
     const auto program=lower_program(SourceProgram{{outer,failing,protected_failure},{}});
     WorkspaceBudget workspace(4*1024*1024);SlotPool pool(workspace);ScalarExecutor executor(program,pool,workspace);
     std::size_t active=0,limit=8;std::uint64_t steps=0,max_steps=10000;
-    CallDepthAccounting accounting(active,limit,steps,max_steps);Callbacks callbacks;ExecutionOptions options{&accounting,&callbacks};
+    admission::accounting accounting(active,limit,steps,max_steps);Callbacks callbacks;ExecutionOptions options{&accounting,&callbacks};
     std::vector<int> events;std::uint32_t reentered=1;bool rethrow=false;
     callbacks.body=[&](const CallTarget& target,std::span<const Value> args,const ExecutionPosition&,std::size_t) {
         auto host=accounting.enter();
@@ -252,7 +252,7 @@ void default_workspace_boundaries() {
     const auto program=lower_program(SourceProgram{{source},{}});
     WorkspaceBudget workspace(default_workspace_bytes);SlotPool pool(workspace);ScalarExecutor executor(program,pool,workspace);
     std::size_t active=0,depth_limit=256;std::uint64_t steps=0,max_steps=1000000;
-    CallDepthAccounting accounting(active,depth_limit,steps,max_steps);ExecutionOptions options{&accounting,nullptr};
+    admission::accounting accounting(active,depth_limit,steps,max_steps);ExecutionOptions options{&accounting,nullptr};
     const std::array deepest{Value(255)};
     check(executor.invoke(0,deepest,{},steps,nullptr,options).get<int>()==255,"Default workspace admits 32k-local headers at the default depth");
     check(active==0&&pool.size()==0&&workspace.peak_bytes()<=default_workspace_bytes,"Default-depth recursion releases all admissions and slots");
@@ -268,7 +268,7 @@ void workspace_failure_atomicity() {
     const auto program=lower_program(SourceProgram{{recursive()},{}});
     WorkspaceBudget workspace(128*1024);SlotPool pool(workspace);ScalarExecutor executor(program,pool,workspace);
     std::size_t active=0,limit=10000;std::uint64_t steps=0,max_steps=1000000;
-    CallDepthAccounting accounting(active,limit,steps,max_steps);Callbacks callbacks;ExecutionOptions options{&accounting,&callbacks};
+    admission::accounting accounting(active,limit,steps,max_steps);Callbacks callbacks;ExecutionOptions options{&accounting,&callbacks};
     const std::array arguments{Value(1000)};bool rejected=false;
     try{executor.invoke(0,arguments,{},steps,nullptr,options);}
     catch(const std::runtime_error& error){rejected=std::string(error.what())=="VM workspace limit exceeded";}

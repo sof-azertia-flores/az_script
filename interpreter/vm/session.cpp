@@ -203,7 +203,7 @@ std::shared_ptr<variable> Session::invoke(std::uint32_t function,
     if(!position)position=&local_position;
     *position={function};
     HostBridge callbacks(owner_,state.compiled.program,state);
-    CallDepthAccounting calls(owner_.active_calls,owner_.max_call_depth,
+    admission::accounting calls(owner_.active_calls,owner_.max_call_depth,
         owner_.remaining_steps,owner_.max_steps);
     try {
     // A runtime helper of a suspended invocation may be running this one

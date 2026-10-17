@@ -6,7 +6,6 @@ namespace azertian::vm {
 // Pure value operations: callers own evaluation order, budget checks, source
 // locations, argument snapshots and object lifetime. Scalar operations do not
 // allocate variable wrappers or numeric payloads.
-const char* type_name(int type) noexcept;
 bool numeric(const Value& value) noexcept;
 double number(const Value& value);
 bool truth(const Value& value);

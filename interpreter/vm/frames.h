@@ -3,47 +3,9 @@
 
 #include "program.h"
 #include "workspace.h"
+#include "../core/admission.h"
 
 namespace azertian::vm {
-
-// Logical admission is independent of the native stack and the number of
-// script frames: host/builtin calls and lifecycle anchors also consume depth.
-// References remain live until every Admission has been destroyed. The caller
-// serializes access; nested host entries share the same counters and workspace.
-class CallDepthAccounting {
-    std::size_t& active_calls_;
-    const std::size_t& max_call_depth_;
-    std::uint64_t& remaining_steps_;
-    const std::uint64_t& max_steps_;
-    void leave() noexcept;
-public:
-    class Admission {
-        CallDepthAccounting* owner_=nullptr;
-        friend class CallDepthAccounting;
-        explicit Admission(CallDepthAccounting& owner);
-    public:
-        Admission() noexcept=default;
-        Admission(const Admission&)=delete;
-        Admission& operator=(const Admission&)=delete;
-        Admission(Admission&& other) noexcept:owner_(std::exchange(other.owner_,nullptr)) {}
-        Admission& operator=(Admission&& other) noexcept;
-        ~Admission(){reset();}
-        void reset() noexcept;
-        explicit operator bool() const noexcept{return owner_!=nullptr;}
-    };
-    CallDepthAccounting(std::size_t& active_calls,const std::size_t& max_call_depth,
-                        std::uint64_t& remaining_steps,const std::uint64_t& max_steps) noexcept
-        :active_calls_(active_calls),max_call_depth_(max_call_depth),
-         remaining_steps_(remaining_steps),max_steps_(max_steps) {}
-    CallDepthAccounting(const CallDepthAccounting&)=delete;
-    CallDepthAccounting& operator=(const CallDepthAccounting&)=delete;
-    // Native entry adapters check logical depth first, then enter their native
-    // stack guard, then take an Admission. Ordinary script CALL uses no native
-    // stack guard and is driven by the execution loop.
-    void check_can_enter() const;
-    Admission enter(){return Admission(*this);}
-    std::size_t active_calls() const noexcept{return active_calls_;}
-};
 
 // Exceptions retain their original C++ type/message. The embedding adapter
 // uses this last position to publish the ordinary script trace on failure.
@@ -82,7 +44,7 @@ struct FrameRecord {
     // Index of the executor's object-frame ownership records, if any.
     std::uint32_t object=no_index;
     Value result;
-    CallDepthAccounting::Admission admission;
+    admission::accounting::ticket admission;
     FrameRecord() noexcept=default;
     FrameRecord(FrameRecord&&) noexcept=default;
     FrameRecord& operator=(FrameRecord&&) noexcept=default;

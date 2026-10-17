@@ -4,6 +4,7 @@
 #include "internelFunctions.h"
 #include "vm/session.h"
 #include "core/trace.h"
+#include "core/admission.h"
 #include <charconv>
 #include <algorithm>
 #include <bit>
@@ -126,35 +127,6 @@ type_contexts bind_contexts(const std::vector<std::shared_ptr<context_spec>>& sp
     for(auto& spec:specs)result.push_back(bind_context(spec,env));
     return result;
 }
-const char* type_name(int type) {
-    switch(type) {
-    case INT_VALUE:return "int";
-    case STRING_VALUE:return "string";
-    case FLOAT_VALUE:return "float";
-    case DOUBLE_VALUE:return "double";
-    case BOOLEAN_VALUE:return "boolean";
-    case VOID_VALUE:return "void";
-    case ANY_VALUE:return "any";
-    case ADDRESS_VALUE:return "address";
-    case OBJECT_VALUE:return "object";
-    default:return "unknown";
-    }
-}
-void validate_arguments(const std::string& kind,int id,const std::vector<int>& expected,
-                        const std::vector<V>& actual,bool allow_any) {
-    if(actual.size()!=expected.size())
-        throw std::runtime_error(kind+" "+function_id_text(id)+" argument count mismatch: expected "+
-            std::to_string(expected.size())+", got "+std::to_string(actual.size()));
-    for(std::size_t i=0;i<expected.size();++i) {
-        if(!actual[i])
-            throw std::runtime_error(kind+" "+function_id_text(id)+" argument "+std::to_string(i+1)+
-                " is a null pointer; use variable(nullptr) for void");
-        const int got=static_cast<int>(actual[i]->type_tag());
-        if(expected[i]!=got&&!(allow_any&&expected[i]==ANY_VALUE))
-            throw std::runtime_error(kind+" "+function_id_text(id)+" argument "+std::to_string(i+1)+
-                " type mismatch: expected "+type_name(expected[i])+", got "+type_name(got));
-    }
-}
 struct parsed_module {
     M meta;
     std::size_t global_count=0;
@@ -209,75 +181,9 @@ std::shared_ptr<script> owner(E env) {
     if(!s || s->closed) throw std::runtime_error("Script is closed");
     return s;
 }
-// Calls, blocks and expressions recurse natively, so call depth and nesting
-// limits alone do not bound stack use. Each thread records where its outermost
-// script call began; execution stops at the script's byte budget or near the
-// bottom of the thread's real stack, keeping a reserve for unwinding, cleanup,
-// host calls and host guard pages such as the JVM's. Stacks grow downwards.
-constexpr std::size_t min_stack_reserve=64*1024,max_stack_reserve=1024*1024;
-// Applies only where the thread's stack bounds cannot be determined.
-constexpr std::size_t fallback_stack_budget=256*1024;
-struct native_stack {
-    std::uintptr_t base=0,floor=0;
-    std::size_t depth=0;
-    // Cached per thread: the main thread's bounds can require reading /proc.
-    std::uintptr_t low=0,high=0;
-};
-thread_local native_stack stack_state;
-std::uintptr_t stack_position() noexcept {
-#if defined(_MSC_VER)
-    return reinterpret_cast<std::uintptr_t>(_AddressOfReturnAddress());
-#else
-    // The frame address, unlike a local's address, is never on a sanitizer's fake stack.
-    return reinterpret_cast<std::uintptr_t>(__builtin_frame_address(0));
-#endif
-}
-void query_stack_bounds(native_stack& state) noexcept {
-    state.low=state.high=0;
-#if defined(_WIN32)
-#if defined(_WIN32_WINNT)&&_WIN32_WINNT>=0x0602
-    ULONG_PTR low=0,high=0;GetCurrentThreadStackLimits(&low,&high);
-    state.low=low;state.high=high;
-#endif
-#elif defined(__APPLE__)
-    const auto self=pthread_self();
-    state.high=reinterpret_cast<std::uintptr_t>(pthread_get_stackaddr_np(self));
-    state.low=state.high-pthread_get_stacksize_np(self);
-#elif defined(__linux__)
-    pthread_attr_t attributes;
-    if(pthread_getattr_np(pthread_self(),&attributes)!=0)return;
-    void* low=nullptr;std::size_t size=0;
-    if(pthread_attr_getstack(&attributes,&low,&size)==0) {
-        state.low=reinterpret_cast<std::uintptr_t>(low);state.high=state.low+size;
-    }
-    pthread_attr_destroy(&attributes);
-#endif
-}
-void check_native_stack(const script& s,std::uintptr_t here) {
-    const auto& state=stack_state;
-    const std::size_t budget=s.max_stack_bytes?s.max_stack_bytes:state.floor?0:fallback_stack_budget;
-    if((state.floor&&here<state.floor)||(budget&&here<state.base&&state.base-here>budget))
-        throw std::runtime_error("Script native stack limit exceeded");
-}
-// Counts the entry only after the check passes; each counted entry is paired
-// with leave_native_stack.
-void enter_native_stack(const script& s) {
-    auto& state=stack_state;
-    const auto here=stack_position();
-    if(!state.depth) {
-        // Bounds that do not contain this frame are stale, e.g. after a stack switch.
-        if(here<=state.low||here>state.high)query_stack_bounds(state);
-        state.base=here;state.floor=0;
-        if(here>state.low&&here<=state.high)
-            state.floor=state.low+std::clamp<std::size_t>((state.high-state.low)/4,min_stack_reserve,max_stack_reserve);
-    }
-    check_native_stack(s,here);
-    ++state.depth;
-}
-void leave_native_stack() noexcept {--stack_state.depth;}
 void tick(E env) {
     auto s=owner(env);
-    if(stack_state.depth)check_native_stack(*s,stack_position());
+    if(admission::native_stack.depth)admission::check_native_stack(s->max_stack_bytes,admission::stack_position());
     if(!s->remaining_steps) throw std::runtime_error("Script execution step limit exceeded");
     --s->remaining_steps;
 }
@@ -598,16 +504,21 @@ public:
         return binary(op,x,y);
     }
 };
+// Native admission: logical depth, then the native stack, then the count.
 struct call_guard {
     std::shared_ptr<script> s;
-    explicit call_guard(E env):s(owner(env)) {
-        if(s->active_calls>=s->max_call_depth) throw std::runtime_error("Script call depth limit exceeded");
-        enter_native_stack(*s);
-        if(s->active_calls==0) s->remaining_steps=s->max_steps;
-        ++s->active_calls;
+    admission::accounting calls;
+    admission::accounting::ticket admitted;
+    explicit call_guard(E env):s(owner(env)),calls(s->active_calls,s->max_call_depth,s->remaining_steps,s->max_steps) {
+        calls.check_can_enter();
+        admission::enter_native_stack(s->max_stack_bytes);
+        admitted=calls.admit();
     }
-    ~call_guard(){--s->active_calls;leave_native_stack();}
+    ~call_guard(){admitted.reset();admission::leave_native_stack();}
 };
+std::optional<int> argument_tag(const V& argument) noexcept {
+    return argument?std::optional<int>(argument->type_tag()):std::nullopt;
+}
 class checked_external_function final:public function {
     std::shared_ptr<function> target;
     function_signature signature;
@@ -627,7 +538,8 @@ public:
         script->require_execution();
         if(typed&&signature.hidden_count)throw std::runtime_error("Generic external function requires a script implementation and bound contexts");
         call_guard guard(env);
-        if(typed)validate_arguments("External function",id,signature.param_types,args,signature.hidden_count>0);
+        if(typed)admission::check_arguments("External function",id,signature.param_types,args.size(),
+            [&](std::size_t i){return argument_tag(args[i]);},signature.hidden_count>0);
         auto result=target->invoke(std::move(env),std::move(args));
         // Returning normally means any nested failure was handled by the
         // callback. It cannot become part of a later signature error.
@@ -1924,7 +1836,8 @@ V ofunction::invoke_bound(E ev,std::vector<V> args,type_contexts contexts) {
     if(contexts.size()!=static_cast<std::size_t>(hidden_count))throw std::runtime_error("Generic context count mismatch");
     validate_type_contexts(contexts,bound);
     call_guard guard(ev);
-    validate_arguments("Script function",function_id,param_types,args,true);
+    admission::check_arguments("Script function",function_id,param_types,args.size(),
+        [&](std::size_t i){return argument_tag(args[i]);},true);
     if(bound->vm_session_) {
         if(vm_function_index_==vm::no_index)throw std::logic_error("VM function has not been linked");
         vm::ExecutionPosition position;

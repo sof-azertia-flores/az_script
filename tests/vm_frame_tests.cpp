@@ -46,7 +46,7 @@ struct Counted {
 };
 static_assert(std::is_nothrow_move_constructible_v<FrameRecord>);
 static_assert(std::is_nothrow_move_constructible_v<WorkspaceVector<Value>>);
-static_assert(!std::is_copy_constructible_v<CallDepthAccounting::Admission>);
+static_assert(!std::is_copy_constructible_v<admission::accounting::ticket>);
 
 void workspace_arrays() {
     WorkspaceBudget budget(1024*1024);ObservedResource resource;
@@ -100,7 +100,7 @@ void workspace_arrays() {
 void logical_call_accounting() {
     std::size_t active=0,limit=3;
     std::uint64_t remaining=9,max_steps=100;
-    CallDepthAccounting accounting(active,limit,remaining,max_steps);
+    admission::accounting accounting(active,limit,remaining,max_steps);
     {
         auto lifecycle=accounting.enter();
         check(active==1&&remaining==100,"Lifecycle anchor initializes the execution budget without a script frame");
@@ -150,7 +150,7 @@ void layouts() {
 void frames_and_reentry() {
     WorkspaceBudget budget(32*1024*1024);ObservedResource resource;
     std::size_t active=0,limit=25000;std::uint64_t remaining=0,max_steps=50000;
-    CallDepthAccounting accounting(active,limit,remaining,max_steps);
+    admission::accounting accounting(active,limit,remaining,max_steps);
     {
         FrameStack frames(budget,22000,&resource);
         FrameRecord first;first.function=3;first.pc=17;first.admission=accounting.enter();

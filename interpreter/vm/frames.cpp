@@ -3,24 +3,6 @@
 #include <exception>
 
 namespace azertian::vm {
-void CallDepthAccounting::check_can_enter() const {
-    if(active_calls_>=max_call_depth_)throw std::runtime_error("Script call depth limit exceeded");
-}
-CallDepthAccounting::Admission::Admission(CallDepthAccounting& owner) {
-    owner.check_can_enter();
-    if(!owner.active_calls_)owner.remaining_steps_=owner.max_steps_;
-    ++owner.active_calls_;owner_=&owner;
-}
-void CallDepthAccounting::leave() noexcept {
-    if(!active_calls_)std::terminate();
-    --active_calls_;
-}
-CallDepthAccounting::Admission& CallDepthAccounting::Admission::operator=(Admission&& other) noexcept {
-    if(this!=&other){reset();owner_=std::exchange(other.owner_,nullptr);}return *this;
-}
-void CallDepthAccounting::Admission::reset() noexcept {
-    if(owner_){auto* owner=std::exchange(owner_,nullptr);owner->leave();}
-}
 FrameLayout frame_layout(const ExecutableProgram& program,std::uint32_t index) {
     if(index>=program.functions.size())throw std::out_of_range("VM function index is outside its program");
     const auto& function=program.functions[index];

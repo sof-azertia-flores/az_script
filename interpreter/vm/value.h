@@ -2,6 +2,7 @@
 #define AZSCRIPT_VM_VALUE_H
 
 #include "../../abdC/address.h"
+#include "../core/types.h"
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -10,8 +11,6 @@
 #include <utility>
 
 namespace azertian {
-inline constexpr int INT_VALUE=0, STRING_VALUE=1, FLOAT_VALUE=2, DOUBLE_VALUE=3,
-                     BOOLEAN_VALUE=4, VOID_VALUE=5, ANY_VALUE=6, ADDRESS_VALUE=7, OBJECT_VALUE=8;
 struct slot_block;
 
 namespace vm {

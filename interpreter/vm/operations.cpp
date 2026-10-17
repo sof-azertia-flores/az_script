@@ -11,20 +11,6 @@
 #include <type_traits>
 
 namespace azertian::vm {
-const char* type_name(int type) noexcept {
-    switch(type) {
-    case INT_VALUE:return "int";
-    case STRING_VALUE:return "string";
-    case FLOAT_VALUE:return "float";
-    case DOUBLE_VALUE:return "double";
-    case BOOLEAN_VALUE:return "boolean";
-    case VOID_VALUE:return "void";
-    case ANY_VALUE:return "any";
-    case ADDRESS_VALUE:return "address";
-    case OBJECT_VALUE:return "object";
-    default:return "unknown";
-    }
-}
 bool numeric(const Value& v) noexcept { return (v.type_tag()==INT_VALUE||v.type_tag()==FLOAT_VALUE||v.type_tag()==DOUBLE_VALUE); }
 double number(const Value& v) {
     switch(v.type_tag()) {

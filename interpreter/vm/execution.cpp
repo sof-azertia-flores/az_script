@@ -34,10 +34,6 @@ constexpr std::array supported{
     Opcode::check_method_receiver,Opcode::set_methods,Opcode::call_virtual
 };
 
-std::string function_text(int id) {
-    char text[16];std::snprintf(text,sizeof text,"0x%08x",static_cast<unsigned>(static_cast<std::uint32_t>(id)));
-    return text;
-}
 void require_scalar_value(const Value& value) {
     if(value.type_tag()==OBJECT_VALUE)
         throw std::invalid_argument("Scalar VM does not support object values");
@@ -61,20 +57,15 @@ bool object_opcode(Opcode opcode) {
     default:return false;
     }
 }
+// Scalar frames refuse object arguments before each argument's type check.
 template<class Argument> void validate_arguments(const FunctionRecord& function,
         std::size_t count,Argument argument,bool objects) {
-    const auto& expected=function.param_types;
-    if(count!=expected.size())
-        throw std::runtime_error("Script function "+function_text(function.function_id)+" argument count mismatch: expected "+
-            std::to_string(expected.size())+", got "+std::to_string(count));
-    for(std::size_t i=0;i<count;++i) {
-        const auto& value=argument(i);
-        if(!objects)require_scalar_value(value);
-        const auto got=value.type_tag();
-        if(expected[i]!=got&&expected[i]!=ANY_VALUE)
-            throw std::runtime_error("Script function "+function_text(function.function_id)+" argument "+std::to_string(i+1)+
-                " type mismatch: expected "+type_name(expected[i])+", got "+type_name(got));
-    }
+    admission::check_arguments("Script function",function.function_id,function.param_types,count,
+        [&](std::size_t i) -> std::optional<int> {
+            const auto& value=argument(i);
+            if(!objects)require_scalar_value(value);
+            return value.type_tag();
+        },true);
 }
 ExecutionPosition position_of(const FrameRecord& frame) noexcept {
     return {frame.function,frame.node,frame.location,frame.return_location,
@@ -575,7 +566,7 @@ struct ScalarExecutor::State {
                     } else {
                         // Resolve only after all preceding materialize/argument
                         // instructions have completed, preserving side effects.
-                        if(!options.callbacks)throw std::runtime_error("Unknown function id: "+function_text(target.function_id));
+                        if(!options.callbacks)throw std::runtime_error("Unknown function id: "+function_id_text(target.function_id));
                         WorkspaceVector<Value> snapshots(workspace);
                         snapshots.reserve(operation.arguments.size());
                         for(const auto argument:operation.arguments)snapshots.emplace_back(read(frame,argument));
@@ -692,7 +683,7 @@ struct ScalarExecutor::State {
                     const auto& method=(*table)[slot];
                     if(!method.contexts.empty())throw std::invalid_argument("Scalar VM does not support generic virtual methods");
                     const auto found=script_functions.find(method.function_id);
-                    if(found==script_functions.end())throw std::runtime_error("Unknown function id: "+function_text(method.function_id));
+                    if(found==script_functions.end())throw std::runtime_error("Unknown function id: "+function_id_text(method.function_id));
                     enter(found->second,operation.arguments.size(),
                         [&](std::size_t i)->const Value&{return read(frame,operation.arguments[i]);},
                         frames.top_id(),instruction.result,position,options,true);
