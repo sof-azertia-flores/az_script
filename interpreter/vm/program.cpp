@@ -43,14 +43,14 @@ void valid_utf8(const std::string& text,bool display=false) {
 void debug_info(const DebugInfo& debug) {
     if(debug.name.empty())bad("empty debug function name");
     valid_utf8(debug.name,true);
-    if(debug.files.empty()||debug.files.size()>max_slots||debug.locations.size()>max_slots)bad("invalid debug table size");
+    if(!debug.files||debug.files->empty()||debug.files->size()>max_slots||debug.locations.size()>max_slots)bad("invalid debug table size");
     std::set<std::string> files;
-    for(const auto& file:debug.files) {
+    for(const auto& file:*debug.files) {
         if(file.empty()||!files.insert(file).second)bad("empty or duplicate debug file");
         valid_utf8(file,true);
     }
     const auto position=[&](const SourcePosition& position,bool header) {
-        if(position.file>=debug.files.size()||(position.line==0)!=(position.column==0)||(!header&&!position.line))bad("invalid source position");
+        if(position.file>=debug.files->size()||(position.line==0)!=(position.column==0)||(!header&&!position.line))bad("invalid source position");
     };
     position(debug.header,true);for(const auto& at:debug.locations)position(at,false);
 }

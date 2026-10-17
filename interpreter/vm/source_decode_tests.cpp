@@ -289,7 +289,7 @@ void lowered_metadata() {
     SourceProgram source;SourceFunction function;
     function.function_id=0x0fff0000;function.hidden_count=1;
     function.body=decode_source(body,std::vector<std::uint32_t>{0,3,7});
-    function.debug=DebugInfo{"bridge",{"bridge.azs"},{0,1,1},{{0,2,1},{0,3,1},{0,4,1}}};
+    function.debug=DebugInfo{"bridge",std::make_shared<const std::vector<std::string>>(std::vector<std::string>{"bridge.azs"}),{0,1,1},{{0,2,1},{0,3,1},{0,4,1}}};
     source.functions.push_back(function);
     auto make=source_function(factory,address_constant(1));make.return_type=OBJECT_VALUE;make.hidden_count=1;
     source.functions.push_back(std::move(make));

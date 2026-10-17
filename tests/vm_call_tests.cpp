@@ -28,7 +28,7 @@ void number(const std::shared_ptr<const SourceExpression>& node,std::uint32_t& n
 SourceFunction function(int id,Node body,std::vector<int> parameters={},int result=INT_VALUE) {
     SourceFunction value;value.function_id=id;value.return_type=result;value.param_types=std::move(parameters);value.body=body;
     std::uint32_t count=0;number(body,count);
-    DebugInfo debug;debug.files={"vm-calls.azs"};debug.name="function";debug.header={0,1,1};
+    DebugInfo debug;debug.files=std::make_shared<const std::vector<std::string>>(std::vector<std::string>{"vm-calls.azs"});debug.name="function";debug.header={0,1,1};
     for(std::uint32_t i=0;i<count;++i)debug.locations.push_back({0,10+i,1});
     value.debug=std::move(debug);return value;
 }

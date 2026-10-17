@@ -62,7 +62,7 @@ SourceFunction function(Node body,int result=INT_VALUE,std::uint32_t locals=0,
         std::vector<int> params={},std::uint32_t globals=1,std::uint32_t offset=0) {
     SourceFunction source;source.function_id=10;source.return_type=result;source.local_count=locals;
     source.param_types=std::move(params);source.global_count=globals;source.global_offset=offset;source.body=std::move(body);
-    DebugInfo debug;debug.name="scalar_case";debug.files={"scalar-vm.azs"};debug.header={0,1,1};
+    DebugInfo debug;debug.name="scalar_case";debug.files=std::make_shared<const std::vector<std::string>>(std::vector<std::string>{"scalar-vm.azs"});debug.header={0,1,1};
     std::uint32_t count=0;number_nodes(source.body,count,debug);source.debug=std::move(debug);return source;
 }
 Raw raw(std::initializer_list<Raw> values){AbdStack stack;stack.vs=values;return stack.toAbdValue();}

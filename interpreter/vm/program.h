@@ -2,6 +2,7 @@
 #define AZSCRIPT_VM_PROGRAM_H
 
 #include "value.h"
+#include "../core/debug.h"
 #include <cstdint>
 #include <limits>
 #include <optional>
@@ -73,13 +74,10 @@ struct SourceMapEntry {
     // Effective inherited location; zero means the function header/unknown.
     std::uint32_t location=0;
 };
-struct SourcePosition {std::uint32_t file=0,line=0,column=0;};
-struct DebugInfo {
-    std::string name;
-    std::vector<std::string> files;
-    SourcePosition header;
-    std::vector<SourcePosition> locations;
-};
+// The debug record is the runtime's one function_debug type, shared with the
+// tree engine so both report trace frames from the same record.
+using SourcePosition=source_position;
+using DebugInfo=function_debug;
 struct Context {
     // References index a function's bound hidden contexts. Fixed contexts use
     // indices into that same function's context pool, never frame pointers.

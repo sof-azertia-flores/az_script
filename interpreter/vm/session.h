@@ -15,10 +15,6 @@ namespace azertian::vm {
 void select_backend(script& owner,std::size_t workspace_limit);
 struct WorkspaceUsage {std::size_t used_bytes=0,peak_bytes=0,limit_bytes=0;};
 WorkspaceUsage workspace_usage(const script& owner);
-// Append one VM frame to the runtime's shared error trace. The executor reports
-// frames innermost first, including the entry frame, before their storage is
-// unwound. This retains the same cap and debug rendering as tree execution.
-void record_script_frame(const FunctionRecord& function,std::uint32_t location) noexcept;
 
 struct HostValueAccess {
     static const Value& read(const variable& source) noexcept;

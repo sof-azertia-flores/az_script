@@ -182,7 +182,7 @@ std::vector<int> parameter_types(Bytes bytes) {
     while(!fields.empty())result.push_back(fields.integer());
     return result;
 }
-DebugInfo debug_info(Bytes bytes,const std::vector<std::string>& files,std::vector<std::uint32_t>& nodes) {
+DebugInfo debug_info(Bytes bytes,const std::shared_ptr<const std::vector<std::string>>& files,std::vector<std::uint32_t>& nodes) {
     Cursor fields(bytes);DebugInfo result;result.name=fields.string();result.files=files;
     result.header.file=unsigned_count(fields.integer());result.header.line=unsigned_count(fields.integer());
     result.header.column=unsigned_count(fields.integer());Cursor locations(fields.take());fields.finish();
@@ -286,6 +286,8 @@ DecodedModuleSources decode_module_sources(Bytes bytes,std::uint32_t global_offs
     Cursor files(fields.take());
     while(!files.empty())result.debug_files.push_back(files.string());
     fields.finish();
+    // Functions of one module share its file table, as the tree loader does.
+    const auto shared_files=std::make_shared<const std::vector<std::string>>(result.debug_files);
     while(!functions.empty()) {
         Cursor entry(functions.take());SourceFunction function;
         function.function_id=entry.integer();function.return_type=entry.integer();
@@ -295,7 +297,7 @@ DecodedModuleSources decode_module_sources(Bytes bytes,std::uint32_t global_offs
         function.lifecycle=function.function_id==0||function.function_id==1;
         function.global_offset=global_offset;function.global_count=result.global_count;
         std::vector<std::uint32_t> located;
-        if(entry.boolean())function.debug=debug_info(entry.take(),result.debug_files,located);
+        if(entry.boolean())function.debug=debug_info(entry.take(),shared_files,located);
         entry.finish();
         if(parameters!=function.param_types.size())bad("parameter count mismatch in validated input");
         function.body=decode_source(body,located);result.functions.push_back(std::move(function));

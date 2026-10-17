@@ -74,15 +74,19 @@ def compile_java(module, deps):
 def check_error_storage():
     # Cleanup must retain both exception identity and its trace. Raw exception
     # pointers outside pending_error would silently lose the latter on unwind.
-    for name in ('library.h', 'library.cpp', 'blocks.h', 'blocks.cpp', 'heepalloc.cpp'):
-        text = (ROOT/'interpreter'/name).read_text(encoding='utf-8')
-        if name == 'library.h':
+    # Every runtime source of both engines and the shared core is checked.
+    interpreter = ROOT/'interpreter'
+    sources = sorted(path for pattern in ('*.h', '*.cpp', 'core/*.h', 'core/*.cpp', 'vm/*.h', 'vm/*.cpp')
+                     for path in interpreter.glob(pattern) if not path.stem.endswith('_tests'))
+    for path in sources:
+        text = path.read_text(encoding='utf-8')
+        if path.relative_to(interpreter).as_posix() == 'core/errors.h':
             start = text.index('class pending_error {')
             end = text.index('\n};', start) + len('\n};')
             text = text[:start] + text[end:]
         if 'std::exception_ptr' in text:
-            raise RuntimeError(f'Raw exception storage outside pending_error in interpreter/{name}')
-    print('Error trace storage check passed.', flush=True)
+            raise RuntimeError(f'Raw exception storage outside pending_error in {path.relative_to(ROOT)}')
+    print(f'Error trace storage check passed ({len(sources)} runtime sources).', flush=True)
 
 def main():
     parser=argparse.ArgumentParser(description=__doc__)

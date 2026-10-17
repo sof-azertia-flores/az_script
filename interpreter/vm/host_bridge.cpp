@@ -2,6 +2,7 @@
 #include "session.h"
 #include "workspace.h"
 #include "../library.h"
+#include "../core/trace.h"
 #include <algorithm>
 #include <stdexcept>
 
@@ -101,7 +102,8 @@ std::shared_ptr<variable> HostBridge::invoke_external_in(const CallTarget& targe
 }
 void HostBridge::note_script_error(const ExecutionPosition& position) noexcept {
     if(position.function<program_.functions.size()) {
-        record_script_frame(program_.functions[position.function],position.location);
+        const auto& function=program_.functions[position.function];
+        trace::note_script_frame(function.function_id,function.debug?&*function.debug:nullptr,position.location);
         reported_=true;
     }
 }

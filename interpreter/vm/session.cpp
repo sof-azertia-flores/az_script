@@ -2,6 +2,7 @@
 #include "host_bridge.h"
 #include "workspace.h"
 #include "../library.h"
+#include "../core/trace.h"
 #include <algorithm>
 #include <functional>
 #include <stdexcept>
@@ -239,8 +240,10 @@ std::shared_ptr<variable> Session::invoke(std::uint32_t function,
     return host_result;
     } catch(...) {
         if(!state.active_invocations)state.retire_unreachable(owner_);
-        if(!callbacks.reported_error()&&position->function<state.compiled.program.functions.size())
-            record_script_frame(state.compiled.program.functions[position->function],position->location);
+        if(!callbacks.reported_error()&&position->function<state.compiled.program.functions.size()) {
+            const auto& function=state.compiled.program.functions[position->function];
+            trace::note_script_frame(function.function_id,function.debug?&*function.debug:nullptr,position->location);
+        }
         throw;
     }
 }

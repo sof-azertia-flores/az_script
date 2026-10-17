@@ -69,7 +69,7 @@ void short_circuit_and_locations() {
     left->location=1;left->children[0]=boolean(false);
     auto selection=node(50,{boolean(),integer(10),integer(20)});selection->location=2;
     auto body=node(1,{left,selection});auto function=source_function(body);
-    function.debug=DebugInfo{"main",{"case.az"},{0,1,1},{{0,4,3},{0,8,2}}};
+    function.debug=DebugInfo{"main",std::make_shared<const std::vector<std::string>>(std::vector<std::string>{"case.az"}),{0,1,1},{{0,4,3},{0,8,2}}};
     SourceProgram source;source.functions.push_back(function);auto program=lower_program(source);
     expect(std::count_if(program.instructions.begin(),program.instructions.end(),[](const auto& instruction){return instruction.opcode==Opcode::branch_false;})==3,"lazy expressions lower to branches");
     expect(std::none_of(program.instructions.begin(),program.instructions.end(),[](const auto& instruction){return instruction.opcode==Opcode::scope_enter;}),"select and boolean operators do not introduce scopes");
