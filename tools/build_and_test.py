@@ -206,6 +206,16 @@ def main():
                  '--libdir', native/'interpreter']
     if args.sanitize:runtime_abi += ['--sanitize']
     run(runtime_abi)
+    # Migration VM gates: lowering of real modules, then independent-process
+    # scalar/call execution compared field by field with the default backend.
+    run([sys.executable, ROOT/'tests/vm_program_end_to_end.py', '--classpath', classpath,
+         '--host', native/'interpreter/vm-loader-host'])
+    vm_work=BUILD/'runtime-perf'/('vm-execution-sanitize' if args.sanitize else 'vm-execution')
+    if vm_work.exists():shutil.rmtree(vm_work)
+    vm_work.parent.mkdir(parents=True,exist_ok=True)
+    run([sys.executable, ROOT/'tests/vm_execution_end_to_end.py', '--classpath', classpath,
+         '--reference-host', native/'interpreter/vm-execution-tree-host',
+         '--candidate-host', native/'interpreter/vm-execution-host', '--work', vm_work])
     print('Build and all selected tests passed. Use ./azscript --help.')
 
 if __name__=='__main__':

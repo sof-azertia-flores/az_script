@@ -13,7 +13,7 @@ using Node=std::shared_ptr<SourceExpression>;
 std::size_t checks=0;
 void check(bool value,const char* detail){++checks;if(!value)throw std::runtime_error(detail);}
 Node op(int code,std::initializer_list<Node> children={}) {
-    auto value=std::make_shared<SourceExpression>();value->opcode=code;value->children=children;return value;
+    auto value=std::make_shared<SourceExpression>();value->opcode=code;value->children.assign(children.begin(),children.end());return value;
 }
 Node literal(Value value){auto node=op(0);node->constant=std::move(value);return node;}
 template<class T> Node literal(T value){return literal(Value(value));}
@@ -185,6 +185,48 @@ void large_slot_layouts() {
         std::cout<<"vm-call locals="<<count<<" declared="<<(dense?count:1)<<" workspace="<<workspace.used_bytes()<<" peak="<<workspace.peak_bytes()<<'\n';
     }
 }
+void default_workspace_boundaries() {
+    // The densest legal frame declares every one of the 1,048,576 slots. The
+    // smallest v10 encoding of that body still fits the 64 MiB exec cap.
+    {
+        constexpr std::uint32_t count=1048576;
+        ExecutableProgram program;program.constants.emplace_back(7);
+        program.instructions.reserve(2*count+4);
+        program.instructions.push_back({Opcode::constant,0,no_index,no_index,0});
+        for(std::uint32_t index=0;index<count;++index) {
+            program.instructions.push_back({Opcode::check_declaration,no_index,no_index,no_index,index});
+            program.instructions.push_back({Opcode::declare_slot,no_index,0,no_index,index});
+        }
+        program.instructions.push_back({Opcode::load_slot,1,no_index,no_index,count-1});
+        program.instructions.push_back({Opcode::set_return,no_index,1,no_index,0});
+        program.instructions.push_back({Opcode::function_end});program.sources.resize(program.instructions.size());
+        FunctionRecord function;function.function_id=10;function.return_type=INT_VALUE;
+        function.local_count=count;function.register_count=2;function.node_count=1;
+        function.end=static_cast<std::uint32_t>(program.instructions.size());program.functions.push_back(function);
+        WorkspaceBudget workspace(default_workspace_bytes);SlotPool pool(workspace);ScalarExecutor executor(program,pool,workspace);
+        std::uint64_t steps=0;
+        check(executor.invoke(0,{}, {},steps).get<int>()==7,"Default workspace admits a fully dense legal-MAX frame");
+        check(pool.size()==0&&workspace.peak_bytes()<=default_workspace_bytes,"Dense legal-MAX frame retires every slot within the default");
+        std::cout<<"vm-call default dense locals="<<count<<" workspace="<<workspace.used_bytes()<<" peak="<<workspace.peak_bytes()<<'\n';
+    }
+    // Large sparse headers recurse to the runtime's default depth limit of 256:
+    // the public entry holds one admission and script CALL takes the rest.
+    auto source=recursive();source.local_count=32767;
+    const auto program=lower_program(SourceProgram{{source},{}});
+    WorkspaceBudget workspace(default_workspace_bytes);SlotPool pool(workspace);ScalarExecutor executor(program,pool,workspace);
+    std::size_t active=0,depth_limit=256;std::uint64_t steps=0,max_steps=1000000;
+    CallDepthAccounting accounting(active,depth_limit,steps,max_steps);ExecutionOptions options{&accounting,nullptr};
+    const std::array deepest{Value(255)};
+    check(executor.invoke(0,deepest,{},steps,nullptr,options).get<int>()==255,"Default workspace admits 32k-local headers at the default depth");
+    check(active==0&&pool.size()==0&&workspace.peak_bytes()<=default_workspace_bytes,"Default-depth recursion releases all admissions and slots");
+    std::cout<<"vm-call default recursion depth=256 locals=32767 workspace="<<workspace.used_bytes()<<" peak="<<workspace.peak_bytes()<<'\n';
+    // Raising only the call depth cannot raise the workspace limit.
+    depth_limit=1024;const std::array beyond{Value(1000)};bool rejected=false;
+    try{executor.invoke(0,beyond,{},steps,nullptr,options);}
+    catch(const std::runtime_error& error){rejected=std::string(error.what())=="VM workspace limit exceeded";}
+    check(rejected&&active==0&&pool.size()==0,"Deeper recursion is rejected by the default workspace without partial frames");
+    check(workspace.used_bytes()<=default_workspace_bytes,"Rejected growth keeps charged backing within the default");
+}
 void workspace_failure_atomicity() {
     const auto program=lower_program(SourceProgram{{recursive()},{}});
     WorkspaceBudget workspace(128*1024);SlotPool pool(workspace);ScalarExecutor executor(program,pool,workspace);
@@ -201,7 +243,7 @@ void workspace_failure_atomicity() {
 }
 }
 int main() {
-    try{recursion_and_depth();host_reentry_and_lexical_depth();script_trace_and_conversion();large_slot_layouts();workspace_failure_atomicity();
+    try{recursion_and_depth();host_reentry_and_lexical_depth();script_trace_and_conversion();large_slot_layouts();default_workspace_boundaries();workspace_failure_atomicity();
         std::cout<<"VM call checks passed: "<<checks<<'\n';}
     catch(const std::exception& error){std::cerr<<error.what()<<'\n';return 1;}
 }

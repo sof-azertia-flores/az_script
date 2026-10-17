@@ -38,7 +38,7 @@ def cases(stage='all'):
         case('unicode-string', 'string main(){string s="A😀";return s+"!";}\n', 'A😀!'.encode().hex(), tag=1),
         case('mixed-numeric', 'double main(){double n=1.5;float m=float(2);return n+m;}\n', '400c000000000000', tag=3),
         case('float-negative-zero', 'float main(){return -0.0f;}\n', '80000000', tag=2),
-        case('address-offset', 'address main(){address p=address(3);return p+4;}\n', '0000000000000007', tag=7),
+        case('address-offset', 'address main(){address p=null;p=p+3;return p+4;}\n', '0000000000000007', tag=7),
         case('void-entry', 'void main(){int n=1;n=n+1;}\n', None, tag=5),
         case('comparisons', 'boolean main(){return !(3<2)&&("x"=="x");}\n', True, tag=4),
         case('bit-pattern', 'int main(){return (-1>>>1)^((3<<2)&15);}\n', 2147483635),
@@ -64,9 +64,11 @@ def cases(stage='all'):
              '4b800000', tag=2, stage='calls'),
         case('bad-return', 'int narrow(value):0011{return value;}\nint main(){return narrow(1.5);}\n',
              error='Function return type mismatch: expected int, got double', trace=('narrow', 'main'), stage='calls'),
-        case('argument-type-after-effects', 'int n=0;\nint consume(int a,int b):0011{return a+b;}\nint change():0012{n=9;return n;}\nint main(){def(value,"bad");return consume(value,change());}\n',
-             error='Script function 0x0fff0011 argument 1 type mismatch: expected int, got string',
-             globals=[typed(0, 9)], stage='calls'),
+        # Typed source cannot pass a dynamic value to a typed parameter; the
+        # runtime CALL type check after argument effects is covered by the
+        # hand-written scalar_vm_tests case call-type-after-side-effect.
+        case('argument-error-after-effects', 'int n=0;\nint consume(int a,int b):0011{return a+b;}\nint change():0012{n=9;return n;}\nint main(){int zero=0;return consume(change(),10/zero);}\n',
+             error='Division by zero', globals=[typed(0, 9)], trace=('main',), stage='calls'),
         case('entry-argument-type', 'int consume(int n):0011{return n;}\nint main(){return 0;}\n',
              error='Script function 0x0fff0011 argument 1 type mismatch: expected int, got double', stage='calls',
              options=['--function', '0x0fff0011', '--arg', 'd:3ff0000000000000']),

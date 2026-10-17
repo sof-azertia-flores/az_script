@@ -1,6 +1,6 @@
 # 运行时性能重构实施记录
 
-基线：`c2b572d6b36ca521c5faf2658adc296e403f47f1`。原实施分支：`codex/runtime-performance`；暂停检查点分支：`codex/runtime-performance-handoff`。本文件记录实际完成和待验证内容；完整目标见 [PLAN.md](PLAN.md)。
+基线：`c2b572d6b36ca521c5faf2658adc296e403f47f1`。原实施分支：`codex/runtime-performance`；暂停检查点分支：`codex/runtime-performance-handoff`（`ad26db9`）；恢复后的继续分支：`claude/runtime-performance-handoff-5mdt6h`。本文件记录实际完成和待验证内容；完整目标见 [PLAN.md](PLAN.md)。
 
 | 阶段 | 当前状态 | 证据或下一步 |
 | --- | --- | --- |
@@ -10,13 +10,36 @@
 | R03 | 基础设施验证通过 | 23 案例 / 145 对独立进程观察，5 组完整预算扫描；故意错误候选被拒绝并缩小。54 opcode 已登记，28 静态出现，不代表完整 VM 覆盖 |
 | R04 | 普通验收通过 | 类型化访问与消费者迁移、运行时 ABI 1、插件预注册检查完成；ABI 29 项检查通过，发行搬迁待运行 |
 | R05 | 普通完整验收通过 | Value 内联标量，145 对差分与全量普通验证通过；完整 sanitizer 和发行验证仍待闭合 |
-| R06–R08 | 原语已验证，入口接入待验证 | R07 和较早 R08 的 4257 个定向检查通过普通/ASan/UBSan；加入 R09 后的 executor、Session 与实际入口尚未编译 |
-| R09–R10 | 暂停于集成阶段 | 显式 CALL、宿主桥、清理原语及新测试已写；未完成编译和语义验收；清理尚未接入执行循环 |
+| R06–R08 | 标量 VM 已接入构建并通过定向及独立进程差分 | VM 源码与 9 个定向测试、2 个 host 已加入 CMake；见下文“恢复后的集成”。R06 的生产 `blocks/heepalloc` 身份迁移仍未开始 |
+| R09 | 标量 CALL/宿主桥/Session 通过；默认 workspace 定为 128 MiB | 37 案例 / 825 对独立进程观察（冻结 `019c440` 参考及同构建树后端）全部字段一致；workspace 边界见 [STORAGE_DESIGN.md](STORAGE_DESIGN.md) 第 9 节。宿主可配置项待 VM 成为宿主可选后端时加入 |
+| R10 | 清理原语定向通过，尚未接入执行循环 | `vm-cleanup-tests` 普通/ASan/UBSan 通过；executor 仍拒绝 cleanup 指令 |
 | R11–R28 | 尚未完成 | 按依赖顺序执行 |
 
 ## 暂停与交接
 
-按用户要求暂停，完整交接见 [HANDOFF.md](HANDOFF.md)。当前 VM 接入尚未加入 CMake，新增 Session/CALL/宿主桥尚未编译；下面的通过结果属于各自明确的较早源码阶段，不代表本检查点整体可构建。
+按用户要求暂停，完整交接见 [HANDOFF.md](HANDOFF.md)。暂停检查点 `ad26db9` 的 VM 接入尚未加入 CMake；恢复后的集成与验证记录见下一节。“已运行的定向检查（R01–R05）”中的通过结果仍属于各自明确的较早源码阶段。
+
+## 恢复后的集成（2026-10-17）
+
+工具链：OpenJDK 21.0.12.1+1、CMake 3.28.3、GCC 13.3.0、Python 3.13.16；4 CPU、15 GiB 内存。依赖 jar 按 `tools/build_and_test.py` 的固定 SHA-256 下载校验。没有沿用交接文档中的本机 `build/` 证据；冻结参考由 `git archive 019c440` 重新生成到 `build/runtime-perf/r05-source/`。
+
+集成改动与实际发现：
+
+- `interpreter/CMakeLists.txt` 把 `vm/{storage,frames,program,lowering,source_decode,loader,operations,execution,session,host_bridge,cleanup}.cpp` 加入运行库，按交接表增加 9 个 ctest 目标及 `vm-loader-host`、`vm-execution-host`；另增 `vm-execution-tree-host`（同一适配器、不选择 VM）作为统一构建中的树后端参考。
+- 首次编译只有 `tests/vm_call_tests.cpp` 一处 initializer_list 赋值错误。`scalar-vm-tests` 的 return-as-call-argument 夹具使用 `int == void`，与 main 已有的相等类型规则冲突（旧执行器和 VM 同样报错）；改为只比较 void==void 并保留“return 作为实参是 flow 状态，被调函数以 void 实参运行”的目的。
+- 真实编译器把生命周期钩子标为内部入口（`entry_kind=1`），executor 原先拒绝所有内部入口，导致含 onload 的真实模块全部在 flush 时被拒绝；Session 单测因手写钩子用 `entry_kind=0` 未发现。现只允许无上下文的生命周期内部入口，构造/析构/工厂形状的内部入口仍在准备阶段拒绝；Session 测试钩子改用编译器形式并新增拒绝回归。
+- `tests/vm_execution_cases.py` 中两条夹具与当前语言不符：`address(3)` 已被显式转换规则拒绝，改由 `null` 偏移得到同一地址；动态值传给 `int` 形参已在编译期拒绝，运行时实参类型检查改由手写 wire 测试覆盖，源码夹具改为“实参求值副作用后报错”。
+- `tools/build_and_test.py` 在全部原有检查后运行 `vm_program_end_to_end.py` 和 `vm_execution_end_to_end.py`（VM 对同构建树后端）。
+
+实际结果（Debug）：
+
+- `ctest`：普通构建 15/15 通过（含真实 JNI）；ASan/UBSan 构建（无 JNI）14/14 通过。
+- 独立进程差分：37 个 scalar/calls 案例、825 个参考进程 / 825 个候选进程，协议全部字段（返回、事件、stdout、global/堆状态、错误、trace、剩余预算、faulted、teardown）一致，含逐预算扫描；参考为冻结 `019c440` 源码构建的 `AZSCRIPT_VM_REFERENCE_ONLY` host，另与同一构建的树后端 host 重复一次，均通过。
+- `vm_program_end_to_end.py`：6 次 debug source/AST/ABD 往返、6 次多模块 lower/verify 通过（不执行 VM）。
+- 默认 workspace 测量与 128 MiB 定稿依据见 [STORAGE_DESIGN.md](STORAGE_DESIGN.md) 第 9 节；`vm-call-tests` 断言默认值容纳最密合法帧和默认深度的大局部头递归，并拒绝更深递归而不留下部分帧。
+- 完整普通验证 `python3 tools/build_and_test.py --offline`：退出 0，日志 `build/full-normal.log` 末尾为 `Build and all selected tests passed`；包含真实 JNI、插件、快照、ABI 29 项及上述两个 VM 门禁。
+
+限制：VM 仍只能经迁移入口 `vm::select_backend` 选择，生产默认仍是树执行器；对象、泛型、buffer、虚调用、分配/反射/插件内建在准备阶段明确拒绝，不回退。R05 冻结源码的完整 sanitizer、发行搬迁及正式 7 轮性能采样仍未运行。
 
 ## 环境
 

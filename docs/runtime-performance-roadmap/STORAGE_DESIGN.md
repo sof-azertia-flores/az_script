@@ -137,3 +137,20 @@ Frame、寄存器和索引数组扩容均计入 WorkspaceBudget；局部 Cell fr
 失败时 callback 依次接收最内层到最外层脚本位置；深度/参数/空间错误发生在帧发布前时，也报告被调用函数的 header 位置。宿主重入只清理自己的 FrameStack mark 以上的帧，因此宿主捕获内层异常后外层调用能够继续。每个正在执行的外部调用拥有独立且已计费的 Value 参数快照，重入增长其他数组不会使参数 span 失效。
 
 定向测试入口为 `tests/vm_call_tests.cpp`（20k 普通递归、逻辑深度、重入、词法深度、完整 workspace、失败恢复、32k 密集局部与合法 MAX 稀疏最后槽）和 `interpreter/scalar_vm_tests.cpp`（旧树执行器逐步数差分，包括递归、参数错误前副作用、return-as-call-argument 和动态未知调用）。宿主生产适配、对象/泛型、清理 continuation 与完整差分仍需分别验收；这部分标量实现不能代表全部 R09/R10 已完成。
+
+## 9. 默认 workspace 定稿依据
+
+测量日期：2026-10-17（UTC）。来源为 `tests/vm_call_tests.cpp`、`interpreter/vm_session_tests.cpp` 的实际输出和一次独立 O2 测量程序（Session + 真实 v10 加载器）；数字为 `WorkspaceBudget` 计费的 backing capacity，`peak` 含增长期间新旧数组并存的空间。
+
+| 场景 | used | peak | 说明 |
+| --- | --- | --- | --- |
+| 1,048,576 局部头，只声明并读取最后一槽 | 8,454,328 | 8,454,328 | executor 级；Session 级同序 |
+| 32,768 局部全部声明 | 2,415,768 | 2,415,768 | Session 级为 2,415,816 |
+| 1,048,576 局部全部声明（最密合法帧） | 75,585,688 | 75,585,688 | 约 72.1 MiB；无初始化声明的 v10 模块为 34,603,248 字节，低于 64 MiB exec 上限，真实加载器路径测得 75,585,784 |
+| 1 参数小函数递归到默认深度 256 | 152,648 | 182,856 | Session 级 |
+| 1,024 局部头递归到深度 256 | 2,249,800 | 2,768,968 | Session 级 |
+| 32,767 局部头递归到深度 256 | 67,270,704 | 84,042,800 | peak 约 80.1 MiB，来自寄存器/索引数组的几何增长 |
+
+结论：64 MiB 候选值不足以容纳最密合法单帧（72.1 MiB）及大局部头在默认调用深度的峰值（80.1 MiB），不能定为默认。`vm::default_workspace_bytes` 定为 128 MiB，覆盖上述合法边界并保留约 40% 余量。它仍是独立资源限制：只提高 `max_call_depth` 不会提高 workspace，`vm-call-tests` 用深度 1,024 的同一递归验证在发布新帧前以 `VM workspace limit exceeded` 拒绝，且不留下 admission 或局部槽。
+
+旧树执行器没有对应上限；同一 32,767 局部头递归到深度 256 时，旧帧仅 `shared_ptr` 槽向量就约 128 MiB。新上限造成的拒绝属于计划登记的新资源契约差异，不伪造旧失败。宿主可配置项（C++ 配置及 Java getter/setter）在 VM 成为宿主可选后端时与文档一并加入；当前只有迁移入口 `vm::select_backend(script&, workspace_limit)` 及测试 host 的 `--workspace-bytes`。

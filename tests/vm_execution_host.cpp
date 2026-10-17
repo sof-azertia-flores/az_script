@@ -200,7 +200,11 @@ int main(int argc, char** argv) {
     try {
         if (argc < 2) throw std::invalid_argument("Missing module");
         std::uint64_t steps = 1000000; std::size_t depth = 64;
-        std::size_t workspace_bytes = 256u * 1024u * 1024u;
+#ifndef AZSCRIPT_VM_REFERENCE_ONLY
+        std::size_t workspace_bytes = vm::default_workspace_bytes;
+#else
+        std::size_t workspace_bytes = 1; // Parsed for a shared command line; unused by the tree build.
+#endif
         bool tree = false; std::vector<std::string> inserted;
         int function_id = 0x0fff0000; std::vector<V> arguments;
         std::vector<std::pair<std::size_t, V>> mutations;

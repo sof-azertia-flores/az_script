@@ -47,6 +47,12 @@ public:
     void release(std::size_t bytes) noexcept;
 };
 
+// Default VM execution workspace for one script session. Legal boundaries need
+// up to 72.1 MiB (one fully dense 1,048,576-local frame) and 80.1 MiB peak
+// (32,767-local frames recursing to the default call depth of 256); see
+// docs/runtime-performance-roadmap/STORAGE_DESIGN.md section 9.
+inline constexpr std::size_t default_workspace_bytes=std::size_t{128}*1024*1024;
+
 std::size_t checked_capacity_bytes(std::size_t count,std::size_t element_size);
 inline constexpr std::uint32_t invalid_slot_index=std::numeric_limits<std::uint32_t>::max();
 // A slot count may be UINT32_MAX, but the index with those bits is reserved.

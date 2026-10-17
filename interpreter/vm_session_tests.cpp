@@ -30,14 +30,17 @@ R block(std::initializer_list<R> values){return op(1,{raw(values)});}
 R returned(R value){return op(7,{boolean(true),std::move(value)});}
 R slot(int index){return op(3,{integer(index)});}
 R store(int index,int value){return op(5,{integer(index),constant(value)});}
-R function(int id,int type,R body,std::initializer_list<int> params={},bool debug=false,int locals=0) {
+R function(int id,int type,R body,std::initializer_list<int> params={},bool debug=false,int locals=0,int entry=0) {
     AbdStack types;for(int type:params)types.vs.push_back(integer(type));
     AbdStack fields;fields.vs={integer(id),integer(type),integer(static_cast<int>(params.size())),integer(locals),
-        types.toAbdValue(),body,integer(0),integer(0),boolean(debug)};
+        types.toAbdValue(),body,integer(0),integer(entry),boolean(debug)};
     if(debug)fields.vs.push_back(raw({text("session_case"),integer(0),integer(10),integer(3),
         raw({integer(0),integer(0),integer(41),integer(2)})}));
     return fields.toAbdValue();
 }
+// The compiler marks lifecycle hooks, constructors, destructors and factories
+// as internal entries (entry_kind=1); only the hooks are scalar VM entries.
+R hook(int id,R body){return function(id,VOID_VALUE,std::move(body),{},false,0,1);}
 R module(std::initializer_list<R> functions,int globals=0) {
     return raw({text("AZSCRIPT"),integer(EXEC_FORMAT_VERSION),integer(1),text("vm_session_test"),integer(globals),
         std::make_shared<AbdMap>()->toAbdValue(),raw({}),raw(functions),text(""),raw({}),raw({text("session.azs")})});
@@ -53,17 +56,17 @@ constexpr std::size_t workspace=4*1024*1024;
 void lifecycle_and_rebuild() {
     // Both modules have global_offset=0. Lifecycle IDs 0/1 must be bound by
     // module ordinal, even when the first module owns no globals.
-    auto script=load(module({function(0,VOID_VALUE,block({constant(5)})),
-        function(1,VOID_VALUE,block({constant(6)}))}));
-    insert(script,module({function(0,VOID_VALUE,block({store(-1,41)})),
-        function(1,VOID_VALUE,block({store(-1,99)})),function(10,INT_VALUE,returned(slot(-1)))},1));
+    auto script=load(module({hook(0,block({constant(5)})),
+        hook(1,block({constant(6)}))}));
+    insert(script,module({hook(0,block({store(-1,41)})),
+        hook(1,block({store(-1,99)})),function(10,INT_VALUE,returned(slot(-1)))},1));
     vm::select_backend(*script,workspace);script->flush();
     check(script->baseEnv->variables[0]->get<int>()==41,"module-local onload index was mixed up");
     auto cached=script->getFunction(10);
     check(cached->invoke(script->baseEnv)->get<int>()==41,"cached function did not use VM binding");
     rejects([&]{vm::select_backend(*script,workspace);},"before the first flush");
     script->baseEnv->variables[0]->setValue(51);
-    insert(script,module({function(0,VOID_VALUE,block({store(-1,77)})),
+    insert(script,module({hook(0,block({store(-1,77)})),
         function(20,INT_VALUE,returned(slot(-1)))},1));
     rejects([&]{vm::select_backend(*script,workspace);},"before the first flush");
     rejects([&]{cached->invoke(script->baseEnv);},"setup is incomplete");
@@ -110,7 +113,7 @@ void preflight_and_selection() {
     rejects([&]{vm::require_scalar_host_targets(host_program);},"generic or object host call contexts");
     host_program.targets[0].entry_kind=0;host_program.targets[0].return_type=OBJECT_VALUE;
     rejects([&]{vm::require_scalar_host_targets(host_program);},"object callback signatures");
-    auto source=module({function(0,VOID_VALUE,block({store(-1,99)})),
+    auto source=module({hook(0,block({store(-1,99)})),
         function(10,VOID_VALUE,block({op(32,{integer(1)})}))},1);
     auto script=load(source);script->baseEnv->variables[0]->setValue(3);
     rejects([&]{vm::select_backend(*script,0);},"workspace limit must be positive");
@@ -123,7 +126,18 @@ void preflight_and_selection() {
         "preflight failure published tree relocation");
     script->destroy();
 
-    script=load(module({function(0,VOID_VALUE,block({store(-1,8)})),
+    // A non-lifecycle internal entry (constructor/destructor/factory shape)
+    // is still refused while preparing, before onload changes the global.
+    script=load(module({hook(0,block({store(-1,99)})),
+        function(10,VOID_VALUE,block({constant(1)}),{ADDRESS_VALUE},false,0,1)},1));
+    script->baseEnv->variables[0]->setValue(3);
+    vm::select_backend(*script,workspace);
+    rejects([&]{script->flush();},"generic or object function contexts");
+    check(script->baseEnv->variables[0]->get<int>()==3&&!script->setup&&!script->faulted,
+        "internal object entry refusal ran onload or partially initialized the module");
+    script->destroy();
+
+    script=load(module({hook(0,block({store(-1,8)})),
         function(10,INT_VALUE,returned(slot(-1)))},1));
     vm::select_backend(*script,1);
     rejects([&]{script->flush();},"VM workspace limit exceeded");
@@ -154,8 +168,8 @@ void aliased_host_globals() {
 
 void teardown_with_unprepared_insert() {
     for(bool attempt_flush:{false,true}) {
-        auto script=load(module({function(0,VOID_VALUE,block({store(-1,5)})),
-            function(1,VOID_VALUE,block({store(-1,99)}))},1));
+        auto script=load(module({hook(0,block({store(-1,5)})),
+            hook(1,block({store(-1,99)}))},1));
         vm::select_backend(*script,workspace);script->flush();
         auto retained=script->baseEnv->variables[0];
         insert(script,module({function(20,VOID_VALUE,block({op(32,{integer(1)})}))},1));

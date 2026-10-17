@@ -292,8 +292,12 @@ void call_cases() {
         {Value(0)},{Value(0)});
     // Return is flow state, not an immediate jump out of expression evaluation.
     // The callee must still run with the void result of the return expression.
+    // Equality rejects int/void operands, so the global set by the returned
+    // expression selects the callee branch and only void==void is compared.
     differential("return-as-call-argument",function(block({
-        op(27,{op(19,{slot(0),nil()}),block({store(-1,literal(7)),returned(literal(1))}),call(10,{returned(literal(42))})}),
+        op(27,{op(19,{slot(-1),literal(1)}),
+            block({op(27,{op(19,{slot(0),nil()}),store(-1,literal(7))}),returned(literal(1))}),
+            call(10,{returned(op(12,{store(-1,literal(1)),literal(41)}))})}),
         returned(literal(99))}),INT_VALUE,0,{ANY_VALUE}),{Value(0)},{Value(0)},Value(42));
     differential("dynamic-call-after-side-effect",function(call(0x76540001,{store(-1,literal(8))})),{Value(0)});
 }

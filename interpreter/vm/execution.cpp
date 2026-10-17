@@ -83,7 +83,10 @@ struct ScalarExecutor::State {
         layouts.reserve(program.functions.size());
         for(std::uint32_t index=0;index<program.functions.size();++index) {
             const auto& function=program.functions[index];
-            if(function.hidden_count||function.bound_context_count||function.entry_kind)
+            // Lifecycle hooks are internal entries but have no contexts or
+            // object signature. Constructors, destructors and factories remain
+            // internal object entries until the object VM supports them.
+            if(function.hidden_count||function.bound_context_count||(function.entry_kind&&!function.lifecycle))
                 throw std::invalid_argument("Scalar VM does not support generic or object function contexts");
             if(function.return_type==OBJECT_VALUE||
                     std::find(function.param_types.begin(),function.param_types.end(),OBJECT_VALUE)!=function.param_types.end())

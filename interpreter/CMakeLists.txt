@@ -8,7 +8,9 @@ find_package(Threads REQUIRED)
 if(NOT TARGET azertianBinaryData)
     add_subdirectory(../abdC "${CMAKE_CURRENT_BINARY_DIR}/abdC")
 endif()
-set(AZSCRIPT_RUNTIME_SOURCES library.cpp internelFunctions.cpp heepalloc.cpp blocks.cpp p256.cpp extern_library.cpp runtime_abi.cpp)
+set(AZSCRIPT_RUNTIME_SOURCES library.cpp internelFunctions.cpp heepalloc.cpp blocks.cpp p256.cpp extern_library.cpp runtime_abi.cpp
+    vm/storage.cpp vm/frames.cpp vm/program.cpp vm/lowering.cpp vm/source_decode.cpp vm/loader.cpp
+    vm/operations.cpp vm/execution.cpp vm/session.cpp vm/host_bridge.cpp vm/cleanup.cpp)
 add_library(abdInvoker SHARED ${AZSCRIPT_RUNTIME_SOURCES})
 add_library(abdInvokero STATIC ${AZSCRIPT_RUNTIME_SOURCES})
 foreach(target abdInvoker abdInvokero)
@@ -78,4 +80,34 @@ if(BUILD_TESTING)
     add_executable(value-tests value_tests.cpp)
     target_link_libraries(value-tests PRIVATE abdInvokero)
     add_test(NAME value-tests COMMAND value-tests)
+    # Migration-stage VM tests link the static runtime because they exercise
+    # internal interfaces that are not part of the installed headers.
+    foreach(vm_test IN ITEMS
+            "vm-storage-tests:../tests/vm_storage_tests.cpp"
+            "vm-frame-tests:../tests/vm_frame_tests.cpp"
+            "vm-program-tests:vm/program_tests.cpp"
+            "source-decode-tests:vm/source_decode_tests.cpp"
+            "operations-tests:operations_tests.cpp"
+            "scalar-vm-tests:scalar_vm_tests.cpp"
+            "vm-call-tests:../tests/vm_call_tests.cpp"
+            "vm-session-tests:vm_session_tests.cpp"
+            "vm-cleanup-tests:vm/cleanup_tests.cpp")
+        string(REPLACE ":" ";" vm_test_parts "${vm_test}")
+        list(GET vm_test_parts 0 vm_test_name)
+        list(GET vm_test_parts 1 vm_test_source)
+        add_executable(${vm_test_name} ${vm_test_source})
+        target_link_libraries(${vm_test_name} PRIVATE abdInvokero)
+        add_test(NAME ${vm_test_name} COMMAND ${vm_test_name})
+    endforeach()
+    target_compile_definitions(source-decode-tests PRIVATE
+        AZSCRIPT_SOURCE_BRIDGE_LEGACY_ORACLE AZSCRIPT_SOURCE_BRIDGE_LOWERING_ORACLE)
+    add_executable(vm-loader-host ../tests/vm_loader_host.cpp)
+    target_link_libraries(vm-loader-host PRIVATE abdInvokero)
+    add_executable(vm-execution-host ../tests/vm_execution_host.cpp)
+    target_link_libraries(vm-execution-host PRIVATE abdInvokero)
+    # Same adapter without VM selection: the unified build compares the VM
+    # with this runtime's default tree backend in separate processes.
+    add_executable(vm-execution-tree-host ../tests/vm_execution_host.cpp)
+    target_compile_definitions(vm-execution-tree-host PRIVATE AZSCRIPT_VM_REFERENCE_ONLY)
+    target_link_libraries(vm-execution-tree-host PRIVATE abdInvoker)
 endif()
