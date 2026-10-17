@@ -4,17 +4,18 @@ R03 基础设施；参考源码 `c2b572d6b36ca521c5faf2658adc296e403f47f1`。本
 
 ## 独立进程和证据
 
-`tests/runtime_differential_host.cpp` 是测试适配器，同一份源码分别链接冻结运行库和候选运行库。它不修改运行库、不加入执行器扣费点、不用于性能计时。基线适配器和基线运行库分别记录摘要；后续适配器 API 迁移也要重新记录摘要，不能覆盖原始计时基线。
+`tests/observation_host.cpp`（构建目标 `observation-host`）是测试适配器，同一份源码分别链接冻结参考运行库和候选运行库，`--engine tree|vm` 选择每个进程使用的执行器。它不修改运行库、不加入执行器扣费点、不用于性能计时。基线适配器和基线运行库分别记录摘要；后续适配器 API 迁移也要重新记录摘要，不能覆盖原始计时基线。R03 及 R05 的历史证据由当时的 `tests/runtime_differential_host.cpp`（协议 1）产生；该适配器已被协议 2 的 `observation_host.cpp` 取代，自 S0.2 起的冻结参考见 [ENGINE_SPLIT.md](ENGINE_SPLIT.md) 第 6 节的 F0。
 
 ```sh
 python3 tests/runtime_differential.py --self-test
 python3 tests/runtime_differential.py \
-  --baseline-host build/runtime-perf/reference/runtime-differential-host \
-  --candidate-host build/native/interpreter/runtime-differential-host \
+  --baseline-host build/runtime-perf/f0-source/build/native/interpreter/observation-host \
+  --candidate-host build/native/interpreter/observation-host \
+  --candidate-engine vm \
   --baseline-library build/runtime-perf/reference/libabdInvoker.so \
   --candidate-library build/native/interpreter/libabdInvoker.so \
   --classpath 'build/java/compiler.jar:build/java/abdJava.jar:build/deps/gson-2.11.0.jar' \
-  --baseline-revision c2b572d6b36ca521c5faf2658adc296e403f47f1 \
+  --baseline-revision '<F0 提交>' \
   --candidate-revision '<实际候选提交>' \
   --work build/runtime-perf/r03-observations
 ```
@@ -25,13 +26,16 @@ python3 tests/runtime_differential.py \
 
 ## 精确比较内容
 
-宿主仅在完整观察写出后退出 0，脚本失败属于观察值。观察协议版本为 1：
+宿主仅在完整观察写出后退出 0，脚本失败属于观察值。观察协议版本为 2（在协议 1 字段之外增加下文最后三项）：
 
 - 返回实际 ABI 标签和值；int32 为精确整数，float/double 为 IEEE 位模式，address 为完整 uint64 十六进制，字符串及 stdout 为原始字节十六进制；区分 void 与 null 宿主指针。
 - 宿主回调的有序实参快照、嵌套调用返回事件；脚本 print/析构 print 的 stdout；构造/析构事件通过明确 extern 回调记录。
 - 调用结束或异常后的 global 内容、活动堆分配起点/长度及每个 slot 的值、对象登记/方法表数量。销毁单独记录异常、事件、stdout 和剩余堆状态，不覆盖原调用错误。
 - 错误公共异常类别、精确消息、完整已发布 trace（function ID、native 标记、name/file/line/column、截断帧数）、失败阶段、faulted 标记和 remaining_steps。
 - 对象值按结构访问分配测试观察编号，并保留重复引用关系；不使用 native 指针作为比较值。**address 标签的值不规范化**，包括 first-fit 起点、用户输入高位地址和脚本暴露的对象地址。
+- 回调 `0x6dff0005` 在宿主回调内记录当时的 `active_calls`、`remaining_steps` 和已发布 trace，用于检查析构、重入及错误展开期间的调用深度、预算和 trace 状态；错误另记录 `describe_error` 文本，异常类别区分 `logic_error`。
+- 进程级对象状态探针：调用后与销毁后各取一次全局作用域 owned 列表、对象登记明细（起点、manual、析构 ID、上下文数、方法表长度）、下一个块 ID（`blocks::create(0)` 的地址）和 first-fit 位置（`heap::alloc(1)` 后立即释放）。探针本身消耗一个块 ID，两个执行器在相同位置执行相同探针，扰动一致且同样受比较。
+- `engine` 为运行库实际报告的执行器（是否存在 VM 会话），不是命令行回显；按指定执行器检查，报告其它执行器的观察直接失败，其余字段按上文严格比较。
 
 没有忽略错误、trace、地址或浮点的通用开关。已登记的少数架构资源差异必须以后按具体案例实现；R03 不提供豁免。对象结构观察目前不是完整快照对照：buffer slab 的所有 element、绑定 context 内容、持久化 snapshot 字节以及 JNI throwable 身份仍由既有专项回归覆盖，后续阶段须接入新 VM 对照。
 

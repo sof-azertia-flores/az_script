@@ -24,8 +24,10 @@ import compact_exec_end_to_end as wire
 ROOT = Path(__file__).resolve().parents[1]
 HOST = 0x6DFF0000
 DEFAULT_STEPS = 1_000_000
-OBSERVATION_KEYS = {'protocol', 'phase', 'return', 'error', 'events', 'stdout_hex',
+PROTOCOL = 2
+OBSERVATION_KEYS = {'protocol', 'engine', 'phase', 'return', 'error', 'events', 'stdout_hex',
                     'state', 'remaining_steps', 'faulted', 'teardown'}
+ADAPTER = ROOT / 'tests/observation_host.cpp'
 
 
 class HostFailure(RuntimeError):
@@ -62,11 +64,26 @@ def differences(left, right, path='$'):
     return [] if left == right else [f'{path}: {left!r} != {right!r}']
 
 
+def engine_neutral(observation):
+    """Every field except the engine the runtime reported; engines are checked separately."""
+    return {key: value for key, value in observation.items() if key != 'engine'}
+
+
+def compare_engines(reference, candidate, reference_engine, candidate_engine):
+    """Strict comparison of two observations from explicitly selected engines."""
+    result = []
+    for label, observation, expected in (('reference', reference, reference_engine),
+                                         ('candidate', candidate, candidate_engine)):
+        if observation.get('engine') not in (expected, 'unloaded'):
+            result.append(f'$.engine: {label} reported {observation.get("engine")!r}, expected {expected!r}')
+    return result + differences(engine_neutral(reference), engine_neutral(candidate))
+
+
 def checked_observation(result):
     if result.returncode != 0 or result.stderr:
         raise RuntimeError(f'host infrastructure failure: exit={result.returncode}, stderr={result.stderr!r}')
     value = json.loads(result.stdout)
-    if not isinstance(value, dict) or set(value) != OBSERVATION_KEYS or value.get('protocol') != 1:
+    if not isinstance(value, dict) or set(value) != OBSERVATION_KEYS or value.get('protocol') != PROTOCOL:
         raise RuntimeError('host returned an unsupported or incomplete observation')
     return value
 
@@ -245,10 +262,15 @@ def self_test():
     inventory = (ROOT / 'docs/runtime-performance-roadmap/SEMANTICS.md').read_text(encoding='utf-8')
     for opcode, name in wire.REGISTRY.items():
         assert f'| {opcode} | {name} |' in inventory, f'undocumented opcode: {opcode} {name}'
-    base = {'protocol': 1, 'phase': 'complete', 'return': typed(3, '8000000000000000'),
-            'error': None, 'events': [{'n': 1}, {'n': 2}], 'stdout_hex': '00ff',
-            'state': {'globals': [typed(0, 1)], 'heap': [{'address': '0000000000000001'}]},
-            'remaining_steps': 7, 'faulted': False, 'teardown': {'error': None}}
+    state = {'globals': [typed(0, 1)], 'heap': [{'address': '0000000000000001'}], 'object_records': 1,
+             'objects': [{'address': '0000000000000001', 'manual': True, 'destructor': 5, 'contexts': 0, 'methods': 0}],
+             'method_tables': 0, 'owned': ['0000000000000001'],
+             'probe': {'next_block': '8000000003000000', 'first_fit': '0000000000000002'}}
+    base = {'protocol': PROTOCOL, 'engine': 'tree', 'phase': 'complete', 'return': typed(3, '8000000000000000'),
+            'error': None, 'events': [{'n': 1}, {'callback': 5, 'arguments': [typed(0, 1)], 'active_calls': 2,
+                                                 'remaining_steps': 9, 'published_trace': {'frames': [], 'omitted': 0}}],
+            'stdout_hex': '00ff', 'state': state, 'remaining_steps': 7, 'faulted': False,
+            'teardown': {'error': None, 'state': copy.deepcopy(state)}}
     assert not differences(base, copy.deepcopy(base))
     wrong = []
     for key, replacement in [('return', typed(3, '0000000000000000')), ('return', typed(2, '80000000')),
@@ -256,8 +278,22 @@ def self_test():
                              ('remaining_steps', 8), ('faulted', 0), ('phase', 'invoke'),
                              ('state', {'globals': [typed(0, 2)], 'heap': []}),
                              ('error', {'message': 'wrong', 'trace': {'frames': []}}),
-                             ('teardown', {'error': {'message': 'wrong'}})]:
+                             ('teardown', {'error': {'message': 'wrong'}}), ('engine', 'vm')]:
         value = copy.deepcopy(base); value[key] = replacement; wrong.append(value)
+    # Protocol-2 probes: each field alone must be detected.
+    for path, replacement in [(('events', 1, 'active_calls'), 3), (('events', 1, 'remaining_steps'), 8),
+                              (('events', 1, 'published_trace', 'frames'), [{'function': 1}]),
+                              (('state', 'probe', 'next_block'), '8000000004000000'),
+                              (('state', 'probe', 'first_fit'), '0000000000000003'),
+                              (('state', 'owned'), []), (('state', 'objects', 0, 'manual'), False),
+                              (('teardown', 'state', 'probe', 'first_fit'), '0000000000000001')]:
+        value = copy.deepcopy(base); target = value
+        for step in path[:-1]: target = target[step]
+        target[path[-1]] = replacement; wrong.append(value)
+    vm_base = copy.deepcopy(base); vm_base['engine'] = 'vm'
+    assert not compare_engines(base, vm_base, 'tree', 'vm')
+    assert compare_engines(base, copy.deepcopy(base), 'tree', 'vm'), 'a tree run accepted as a VM run'
+    assert compare_engines(base, vm_base, 'vm', 'vm')
     deleted = copy.deepcopy(base); del deleted['remaining_steps']; wrong.append(deleted)
     trace_a = {'message': 'same', 'trace': {'frames': [{'function': 3, 'line': 1}]}}
     trace_b = copy.deepcopy(trace_a); trace_b['trace']['frames'][0]['line'] = 2
@@ -294,6 +330,8 @@ def main():
     parser.add_argument('--timeout', type=float, default=20)
     parser.add_argument('--baseline-revision', default='unspecified')
     parser.add_argument('--candidate-revision', default='unspecified')
+    parser.add_argument('--baseline-engine', choices=['tree', 'vm'], default='tree')
+    parser.add_argument('--candidate-engine', choices=['tree', 'vm'], default='tree')
     parser.add_argument('--self-test', action='store_true')
     parser.add_argument('--shrink-attempts', type=int, default=24)
     args = parser.parse_args()
@@ -306,8 +344,9 @@ def main():
     hosts = [args.baseline_host.resolve(), args.candidate_host.resolve()]
     for host in hosts:
         if not host.is_file(): parser.error(f'host does not exist: {host}')
-    if hosts[0] == hosts[1]:
-        parser.error('baseline and candidate must be distinct executables (separate builds)')
+    if hosts[0] == hosts[1] and args.baseline_engine == args.candidate_engine:
+        parser.error('baseline and candidate must be distinct executables or engines')
+    engines = [args.baseline_engine, args.candidate_engine]
     build = ROOT / 'build/runtime-perf'; build.mkdir(parents=True, exist_ok=True)
     work = args.work.resolve() if args.work else Path(tempfile.mkdtemp(prefix='r03-', dir=build))
     if args.work:
@@ -316,10 +355,10 @@ def main():
     for key in ('JAVA_TOOL_OPTIONS', 'JDK_JAVA_OPTIONS', '_JAVA_OPTIONS'):
         env.pop(key, None)
     all_cases = cases(args.seed if args.seed is not None else [7, 91, 20261017], bool(args.classpath))
-    manifest = {'protocol': 1, 'seed': args.seed if args.seed is not None else [7, 91, 20261017], 'created_unix': time.time(),
+    manifest = {'protocol': PROTOCOL, 'engines': engines, 'seed': args.seed if args.seed is not None else [7, 91, 20261017], 'created_unix': time.time(),
                 'baseline': {'path': str(hosts[0]), 'sha256': digest(hosts[0]), 'revision': args.baseline_revision},
                 'candidate': {'path': str(hosts[1]), 'sha256': digest(hosts[1]), 'revision': args.candidate_revision},
-                'adapter_sha256': digest(ROOT / 'tests/runtime_differential_host.cpp'),
+                'adapter_sha256': digest(ADAPTER),
                 'harness_sha256': digest(__file__), 'cases': []}
     for label, library in [('baseline', args.baseline_library), ('candidate', args.candidate_library)]:
         manifest[label]['runtime_library'] = ({'path': str(library.resolve()), 'sha256': digest(library)}
@@ -345,8 +384,8 @@ def main():
 
     def pair(case, binary, steps, folder):
         results = []
-        for label, host in zip(['baseline', 'candidate'], hosts):
-            command = [str(host), str(binary), '--steps', str(steps), *case.options]
+        for label, host, engine in zip(['baseline', 'candidate'], hosts, engines):
+            command = [str(host), str(binary), '--steps', str(steps), '--engine', engine, *case.options]
             # Commands are retained verbatim; shlex rendering is for convenient reproduction only.
             try:
                 value = execute(command, args.timeout)
@@ -370,12 +409,13 @@ def main():
                 attempt = folder / f'attempt-{attempts}'; attempts += 1
                 binary = compile_case(candidate, attempt)
                 observed = pair(candidate, binary, steps, attempt)
-                if differences(*observed):
+                if compare_engines(*observed, *engines):
                     recipe = candidate_recipe; reduced = True; break
             if not reduced: width //= 2
         minimized = generated(case.seed, recipe); binary = compile_case(minimized, folder / 'minimal')
         write_json(folder / 'recipe.json', {'seed': case.seed, 'recipe': recipe, 'steps': steps, 'attempts': attempts,
-            'commands': [[str(host), str(binary), '--steps', str(steps), *case.options] for host in hosts]})
+            'commands': [[str(host), str(binary), '--steps', str(steps), '--engine', engine, *case.options]
+                         for host, engine in zip(hosts, engines)]})
         return str(binary)
 
     try:
@@ -387,7 +427,7 @@ def main():
                 'wire_opcodes_present': sorted(reader.opcodes), 'sweep': case.sweep})
             write_json(work / 'manifest.json', manifest)
             observations = pair(case, binary, DEFAULT_STEPS, folder)
-            mismatch = differences(*observations)
+            mismatch = compare_engines(*observations, *engines)
             if mismatch:
                 minimized = shrink(case, DEFAULT_STEPS, folder / 'shrink')
                 raise AssertionError(json.dumps({'case': case.name, 'steps': DEFAULT_STEPS, 'differences': mismatch, 'minimal': minimized}))
@@ -401,7 +441,7 @@ def main():
                 sweep_end = min(used + 1, args.budget_max)
                 for steps in range(1, sweep_end + 1):
                     result = pair(case, binary, steps, folder)
-                    mismatch = differences(*result)
+                    mismatch = compare_engines(*result, *engines)
                     if mismatch:
                         raise AssertionError(json.dumps({'case': case.name, 'steps': steps, 'differences': mismatch}))
                     checks += 1

@@ -214,8 +214,8 @@ def main():
     if vm_work.exists():shutil.rmtree(vm_work)
     vm_work.parent.mkdir(parents=True,exist_ok=True)
     run([sys.executable, ROOT/'tests/vm_execution_end_to_end.py', '--classpath', classpath,
-         '--reference-host', native/'interpreter/vm-execution-tree-host',
-         '--candidate-host', native/'interpreter/vm-execution-host', '--work', vm_work])
+         '--reference-host', native/'interpreter/observation-host', '--reference-engine', 'tree',
+         '--candidate-host', native/'interpreter/observation-host', '--candidate-engine', 'vm', '--work', vm_work])
     print('Build and all selected tests passed. Use ./azscript --help.')
 
 if __name__=='__main__':

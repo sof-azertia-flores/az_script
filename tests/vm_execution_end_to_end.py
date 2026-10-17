@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
-"""Collect/replay independent-process scalar and script-call execution observations.
+"""Collect/replay independent-process execution observations of two engines.
 
-Reference-only collection is explicitly not a VM pass. The optional candidate
-must implement runtime differential protocol 1. Saved ABD bytes, commands, binary
-hashes and complete observations are retained so later VM stages replay the same
-inputs without rebuilding the reference or changing semantic comparisons.
+Reference-only collection is explicitly not a VM pass. Hosts implement
+observation protocol 2 (tests/observation_host.cpp) and are told which engine to
+run; each observation reports the engine the runtime actually used, and a run
+reporting another engine fails. Saved ABD bytes, commands, binary hashes and
+complete observations are retained so later stages replay the same inputs
+without rebuilding the reference or changing semantic comparisons.
 """
 import argparse
 import copy
@@ -17,7 +19,8 @@ import tempfile
 import time
 
 import compact_exec_end_to_end as wire
-from runtime_differential import DEFAULT_STEPS, HostFailure, digest, differences, execute, semantic_checks, write_json
+from runtime_differential import (ADAPTER, DEFAULT_STEPS, PROTOCOL, HostFailure, compare_engines, digest, execute,
+                                  semantic_checks, write_json)
 from vm_execution_cases import cases
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -38,8 +41,8 @@ def identity(path, revision, library=None):
     return result
 
 
-def observed(host, binary, inserted, options, extra, budget, destination, timeout):
-    command = [str(host), str(binary), '--steps', str(budget), *options]
+def observed(host, engine, binary, inserted, options, extra, budget, destination, timeout):
+    command = [str(host), str(binary), '--steps', str(budget), '--engine', engine, *options]
     for module in inserted:
         command += ['--insert', str(module)]
     command += extra
@@ -82,10 +85,12 @@ def main():
     parser.add_argument('--reference-host', type=Path)
     parser.add_argument('--reference-library', type=Path)
     parser.add_argument('--reference-revision', default='unspecified')
+    parser.add_argument('--reference-engine', choices=['tree', 'vm'], default='tree')
     parser.add_argument('--reference-work', type=Path, help='replay an existing completed reference collection')
     parser.add_argument('--candidate-host', type=Path)
     parser.add_argument('--candidate-library', type=Path)
     parser.add_argument('--candidate-revision', default='unspecified')
+    parser.add_argument('--candidate-engine', choices=['tree', 'vm'], default='vm')
     parser.add_argument('--candidate-arg', action='append', default=[], help='extra host argument; use = for leading --')
     parser.add_argument('--stage', choices=['scalar', 'calls', 'objects', 'all'], default='all')
     parser.add_argument('--only', help='select fixture names containing this text during collection')
@@ -103,8 +108,9 @@ def main():
     for host in (args.reference_host, args.candidate_host):
         if host and not host.is_file():
             parser.error(f'host does not exist: {host}')
-    if args.reference_host and args.candidate_host and args.reference_host.resolve() == args.candidate_host.resolve():
-        parser.error('reference/candidate hosts must be distinct executable paths')
+    if (args.reference_host and args.candidate_host and args.reference_host.resolve() == args.candidate_host.resolve()
+            and args.reference_engine == args.candidate_engine):
+        parser.error('reference/candidate must be distinct executables or engines')
     root = ROOT / 'build/runtime-perf'; root.mkdir(parents=True, exist_ok=True)
     work = args.work.resolve() if args.work else Path(tempfile.mkdtemp(prefix='vm-execution-', dir=root))
     if args.work:
@@ -112,21 +118,22 @@ def main():
     report = {'status': 'running', 'reference_only': args.candidate_host is None,
               'independent_candidate_processes': 0, 'independent_reference_processes': 0,
               'cases': [], 'failures': []}
-    manifest = {'protocol': 1, 'created_unix': time.time(), 'harness_sha256': digest(__file__),
+    manifest = {'protocol': PROTOCOL, 'created_unix': time.time(), 'harness_sha256': digest(__file__),
                 'fixtures_sha256': digest(ROOT / 'tests/vm_execution_cases.py'),
-                'adapter_sha256': digest(ROOT / 'tests/vm_execution_host.cpp'), 'cases': []}
+                'adapter_sha256': digest(ADAPTER), 'cases': []}
     if args.candidate_host:
         args.candidate_host = args.candidate_host.resolve()
         manifest['candidate'] = identity(args.candidate_host, args.candidate_revision, args.candidate_library)
+        manifest['candidate']['engine'] = args.candidate_engine
         manifest['candidate_arguments'] = args.candidate_arg
 
     def compare(record, budget, reference):
         folder = work / record['name']; folder.mkdir(exist_ok=True)
-        candidate = observed(args.candidate_host, record['binary']['path'],
+        candidate = observed(args.candidate_host, args.candidate_engine, record['binary']['path'],
                              [item['path'] for item in record['inserted']], record['options'], args.candidate_arg,
                              budget, folder / f'{budget}.candidate.json', args.timeout)
         report['independent_candidate_processes'] += 1
-        mismatch = differences(reference, candidate)
+        mismatch = compare_engines(reference, candidate, reference_engine, args.candidate_engine)
         if mismatch:
             raise AssertionError(json.dumps({'case': record['name'], 'budget': budget, 'differences': mismatch}))
 
@@ -140,8 +147,9 @@ def main():
             manifest['reference_collection'] = {'path': str(reference_root),
                                                 'manifest_sha256': digest(reference_root / 'manifest.json')}
             manifest['reference'] = original['reference']
-            if str(args.candidate_host) == original['reference']['path']:
-                raise AssertionError('candidate must have a distinct executable path')
+            reference_engine = original['reference'].get('engine', 'tree')
+            if str(args.candidate_host) == original['reference']['path'] and reference_engine == args.candidate_engine:
+                raise AssertionError('candidate must be a distinct executable or engine')
             for record in original['cases']:
                 if args.stage != 'all' and record['stage'] != args.stage:
                     continue
@@ -162,6 +170,7 @@ def main():
         else:
             args.reference_host = args.reference_host.resolve()
             manifest['reference'] = identity(args.reference_host, args.reference_revision, args.reference_library)
+            manifest['reference']['engine'] = reference_engine = args.reference_engine
             manifest['compiler_inputs'] = [{'path': path, 'sha256': digest(path)}
                                           for path in args.classpath.split(os.pathsep) if Path(path).is_file()]
             env = os.environ.copy()
@@ -182,10 +191,12 @@ def main():
 
                 def collect(budget):
                     destination = folder / f'{budget}.reference.json'
-                    value = observed(args.reference_host, record['binary']['path'],
+                    value = observed(args.reference_host, args.reference_engine, record['binary']['path'],
                                      [entry['path'] for entry in record['inserted']], item.options, [],
                                      budget, destination, args.timeout)
                     report['independent_reference_processes'] += 1
+                    if value['engine'] not in (args.reference_engine, 'unloaded'):
+                        raise AssertionError(f'{item.name}: reference ran on {value["engine"]!r}, expected {args.reference_engine!r}')
                     record['budgets'].append(budget)
                     record['reference_observation_sha256'][str(budget)] = digest(destination)
                     if args.candidate_host:

@@ -72,8 +72,6 @@ if(BUILD_TESTING)
     target_link_libraries(runtime-benchmark-vm-host PRIVATE abdInvoker)
     target_compile_definitions(runtime-benchmark-vm-host PRIVATE
         AZSCRIPT_BENCHMARK_BUILD_TYPE="${CMAKE_BUILD_TYPE}" AZSCRIPT_BENCHMARK_VM)
-    add_executable(runtime-differential-host ../tests/runtime_differential_host.cpp)
-    target_link_libraries(runtime-differential-host PRIVATE abdInvoker)
     add_executable(heap-growth-tests heap_growth_tests.cpp heepalloc.cpp)
     target_compile_definitions(heap-growth-tests PRIVATE AZSCRIPT_HEAP_GROWTH_TESTS)
     target_link_libraries(heap-growth-tests PRIVATE abdInvokero)
@@ -107,11 +105,8 @@ if(BUILD_TESTING)
         AZSCRIPT_SOURCE_BRIDGE_LEGACY_ORACLE AZSCRIPT_SOURCE_BRIDGE_LOWERING_ORACLE)
     add_executable(vm-loader-host ../tests/vm_loader_host.cpp)
     target_link_libraries(vm-loader-host PRIVATE abdInvokero)
-    add_executable(vm-execution-host ../tests/vm_execution_host.cpp)
-    target_link_libraries(vm-execution-host PRIVATE abdInvokero)
-    # Same adapter without VM selection: the unified build compares the VM
-    # with this runtime's default tree backend in separate processes.
-    add_executable(vm-execution-tree-host ../tests/vm_execution_host.cpp)
-    target_compile_definitions(vm-execution-tree-host PRIVATE AZSCRIPT_VM_REFERENCE_ONLY)
-    target_link_libraries(vm-execution-tree-host PRIVATE abdInvoker)
+    # Protocol-2 observation adapter for every runtime under comparison; the
+    # engine is chosen per process with --engine and reported by the runtime.
+    add_executable(observation-host ../tests/observation_host.cpp)
+    target_link_libraries(observation-host PRIVATE abdInvokero)
 endif()
