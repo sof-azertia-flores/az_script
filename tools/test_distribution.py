@@ -15,10 +15,10 @@ from typing import Dict, List, Optional
 
 WINDOWS = sys.platform == "win32"
 EXECUTABLE_SUFFIX = ".exe" if WINDOWS else ""
-EXEC_VERSION = 9
+EXEC_VERSION = 10
 # Constants, blocks and calls use other JSON representations (wire opcodes 0–2).
 # The unit suite checks this set against the compiler's opcode registry.
-CONTROL_OPCODES = frozenset(range(3, 43))
+CONTROL_OPCODES = frozenset(range(3, 54))
 
 
 def _require(condition: bool, message: str) -> None:
@@ -87,6 +87,7 @@ def _outputs(abd: Path, ast: Path, executable_json: Path) -> None:
         if path == executable_json:
             _require(decoded.get("exec-version") == EXEC_VERSION,
                      f"Expected exec v{EXEC_VERSION} output in {path}")
+            _require(isinstance(decoded.get("debug-files"), list), f"Missing debug-files table in {path}")
             _control_opcodes(decoded["f"], f"{path}:f")
 
 
@@ -144,7 +145,8 @@ def verify(package: Path, java: Optional[Path] = None) -> Dict[str, object]:
                 package / "stdlib/containers.exec.json",
                 package / "examples/hello.azs", package / "examples/classes.azs",
                 package / "examples/loops-regressions.azs", package / "examples/inheritance-regressions.azs",
-                package / "examples/address-regressions.azs", package / "include/azscript/detail/abdC/address.h",
+                package / "examples/address-regressions.azs", package / "examples/operators-regressions.azs", package / "examples/virtual-regressions.azs",
+                package / "include/azscript/detail/abdC/address.h",
                 package / "include/azscript/extern_library.hpp",
                 package / "include/azscript/detail/interpreter/library.h",
                 package / "include/azscript/detail/interpreter/internelFunctions.h",
@@ -214,7 +216,22 @@ def verify(package: Path, java: Optional[Path] = None) -> Dict[str, object]:
                  cwd / "metadata/instruction tree.json")
         _require(not (cwd / "chosen/program.ast.json").exists(), "Explicit AST path was ignored")
         _require(not (cwd / "chosen/program.exec.json").exists(), "Explicit exec JSON path was ignored")
-        passed("explicit AST and executable JSON locations")
+        # Options may precede the source; the launcher still derives the default JSON paths.
+        _run([compiler, "-o", "leading options/first.abd", source], cwd, compiler_environment)
+        _outputs(cwd / "leading options/first.abd", cwd / "leading options/first.ast.json",
+                 cwd / "leading options/first.exec.json")
+        # "--" ends the options, so a relative source may begin with '-'; defaults still apply.
+        (cwd / "-dash.azs").write_bytes(original_source)
+        _run([compiler, "-dash.azs"], cwd, compiler_environment, succeeds=False)
+        _run([compiler, "--", "-dash.azs"], cwd, compiler_environment)
+        _outputs(cwd / "-dash.exec.abd", cwd / "-dash.ast.json", cwd / "-dash.exec.json")
+        # Trailing diagnostic and warning options keep the default outputs.
+        _run([compiler, source, "-o", "flags/last.abd", "--max-errors", "5", "--debug-compiler"], cwd,
+             compiler_environment)
+        _outputs(cwd / "flags/last.abd", cwd / "flags/last.ast.json", cwd / "flags/last.exec.json")
+        _run([compiler, source, "-o", "flags/warnings.abd", "-Wall"], cwd, compiler_environment)
+        _outputs(cwd / "flags/warnings.abd", cwd / "flags/warnings.ast.json", cwd / "flags/warnings.exec.json")
+        passed("explicit AST and executable JSON locations, options before the source, -- and diagnostic and warning flags")
 
         ast_bytes = default_ast.read_bytes()
         _run([compiler, "compile-json", default_ast, "-o", "roundtrip/from ast.abd"], cwd,
@@ -225,14 +242,105 @@ def verify(package: Path, java: Optional[Path] = None) -> Dict[str, object]:
         _require(default_ast.read_bytes() == ast_bytes, "compile-json overwrote the input AST")
         passed("AST roundtrip is byte-identical and preserves its input")
 
+        # Debug records are opt-in: -g adds names and positions without changing instructions.
+        default_view = json.loads(default_exec.read_text(encoding="utf-8"))
+        _require(default_view["debug-files"] == [] and all("debug" not in f for f in default_view["f"]),
+                 "The default executable carries debug records")
+        _run([compiler, source, "-o", "debug output/hello.abd", "-g"], cwd, compiler_environment)
+        debug_abd = cwd / "debug output/hello.abd"
+        _outputs(debug_abd, cwd / "debug output/hello.ast.json", cwd / "debug output/hello.exec.json")
+        debug_view = json.loads((cwd / "debug output/hello.exec.json").read_text(encoding="utf-8"))
+        _require(debug_view["debug-files"] == ["hello world.azs"], f"Unexpected debug files: {debug_view['debug-files']!r}")
+        _require([f["debug"]["name"] for f in debug_view["f"]] == ["main"] and debug_view["f"][0]["debug"]["line"] > 0,
+                 "-g did not add a located debug record for main")
+        _require([{k: v for k, v in f.items() if k != "debug"} for f in debug_view["f"]] == default_view["f"],
+                 "-g changed the instructions")
+        _run([compiler, "compile-json", cwd / "debug output/hello.ast.json", "-o", "debug output/roundtrip.abd", "-g"], cwd,
+             compiler_environment)
+        _require((cwd / "debug output/roundtrip.abd").read_bytes() == debug_abd.read_bytes(),
+                 "Source to AST to ABD roundtrip with -g changed executable bytes")
+        result = _run([runner, debug_abd], cwd, environment)
+        _require(result.stdout.splitlines() == ["Hello, AzScript!", "42"], f"-g changed the program output: {result.stdout!r}")
+        passed("opt-in -g debug records keep instructions, outputs and the AST roundtrip")
+
+        trace_source = source_directory / "runtime trace.azs"
+        trace_text = "int fail():0002{return 1 / 0;}\nint main(){return fail();}\n"
+        trace_source.write_text(trace_text, encoding="utf-8")
+        trace_abd = cwd / "debug output/failure.abd"
+        _run([compiler, trace_source, "-o", trace_abd, "-g"], cwd, compiler_environment)
+        failure = _run([runner, trace_abd], cwd, environment, succeeds=False)
+        _require(failure.returncode == 1 and not failure.stdout and failure.stderr == (
+                     "AzScript error: Division by zero\n"
+                     f"  at fail (runtime trace.azs:1:{trace_text.splitlines()[0].index('/') + 1})\n"
+                     f"  at main (runtime trace.azs:2:{trace_text.splitlines()[1].index('fail(') + 1})\n"),
+                 f"Packaged runtime lost debug error locations: {failure.stderr!r}")
+        _run([compiler, trace_source, "-o", trace_abd], cwd, compiler_environment)
+        failure = _run([runner, trace_abd], cwd, environment, succeeds=False)
+        _require(failure.returncode == 1 and not failure.stdout and failure.stderr == (
+                     "AzScript error: Division by zero\n"
+                     "  at function 0x0fff0002\n  at function 0x0fff0000\n"),
+                 f"Packaged runtime lost stripped error frames: {failure.stderr!r}")
+        passed("packaged debug and stripped runtime traces preserve exact error reports")
+
+        strict_source = source_directory / "strict conditions.azs"
+        strict_source.write_text("void main(){if(1)print(99);}\n", encoding="utf-8")
+        failure = _run([compiler, strict_source], cwd, compiler_environment, succeeds=False)
+        _require(failure.returncode == 1 and "if condition must be boolean, got int" in failure.stderr,
+                 f"Packaged compiler accepted a numeric condition: {failure.stderr!r}")
+        strict_abd = cwd / "strict runtime/program.abd"
+        for text, message in [
+                ("void main(){def(value,1);if(value)print(99);}\n", "Condition must be boolean, got int"),
+                ('boolean main(){def(value,"1");return value==1;}\n',
+                 "Equality requires compatible operand types, got string and int")]:
+            strict_source.write_text(text, encoding="utf-8")
+            _run([compiler, strict_source, "-o", strict_abd], cwd, compiler_environment)
+            failure = _run([runner, strict_abd], cwd, environment, succeeds=False)
+            _require(failure.returncode == 1 and not failure.stdout and failure.stderr == (
+                         f"AzScript error: {message}\n  at function 0x0fff0000\n"),
+                     f"Packaged runtime lost strict condition/equality checks: {failure.stderr!r}")
+        passed("boolean-only conditions and compatible equality in compiler and runtime")
+
         broken_source = source_directory / "invalid source.azs"
         broken_source.write_text("int main() { return missing_name; }\n", encoding="utf-8")
-        _run([compiler, broken_source], cwd, compiler_environment, succeeds=False)
+        broken = _run([compiler, broken_source], cwd, compiler_environment, succeeds=False)
+        _require(broken.stderr.splitlines() == [
+                     "invalid source.azs:1:21: error: in function main: Unknown variable: missing_name",
+                     "Error: compilation failed: 1 error"],
+                 f"Compile errors are not reported as located diagnostics: {broken.stderr!r}")
+        _require(broken.returncode == 1, f"A compile error must exit with status 1, got {broken.returncode}")
+        # Independent errors are reported together, up to --max-errors.
+        broken_source.write_text("int f() { return 1 +; }\nint main() { return 0 +; }\n", encoding="utf-8")
+        several = _run([compiler, broken_source], cwd, compiler_environment, succeeds=False)
+        _require(several.stderr.splitlines() == [
+                     "invalid source.azs:1:21: error: Expected expression, found ';'",
+                     "invalid source.azs:2:24: error: Expected expression, found ';'",
+                     "Error: compilation failed: 2 errors"],
+                 f"Independent compile errors are not reported together: {several.stderr!r}")
+        limited = _run([compiler, broken_source, "--max-errors", "1"], cwd, compiler_environment, succeeds=False)
+        _require(limited.stderr.splitlines() == [
+                     "invalid source.azs:1:21: error: Expected expression, found ';'",
+                     "Error: compilation failed: 1 error"],
+                 f"--max-errors 1 did not stop at the first error: {limited.stderr!r}")
+        # Warnings keep the status and the outputs; -Werror turns them into errors.
+        warned_source = source_directory / "warned source.azs"
+        warned_source.write_text("void main() {\n  return;\n  print(1);\n}\n", encoding="utf-8")
+        warning = "warned source.azs:3:3: {}: in function main: unreachable statement after return [-W{}unreachable-code]"
+        warned = _run([compiler, warned_source, "-o", "warned/program.abd"], cwd, compiler_environment)
+        _require(warned.stderr.splitlines() == [warning.format("warning", "")],
+                 f"A warning was not reported on a successful compilation: {warned.stderr!r}")
+        _outputs(cwd / "warned/program.abd", cwd / "warned/program.ast.json", cwd / "warned/program.exec.json")
+        strict = _run([compiler, warned_source, "-o", "warned/strict.abd", "-Werror"], cwd, compiler_environment,
+                      succeeds=False)
+        _require(strict.returncode == 1 and strict.stderr.splitlines() == [
+                     warning.format("error", "error="), "Error: compilation failed: 1 error"],
+                 f"-Werror did not fail the compilation: {strict.returncode} {strict.stderr!r}")
+        for name in ("strict.abd", "strict.ast.json", "strict.exec.json"):
+            _require(not (cwd / "warned" / name).exists(), f"-Werror wrote {name}")
         _run([compiler, source, "-o"], cwd, compiler_environment, succeeds=False)
         _run([compiler, source, "-o", source], cwd, compiler_environment, succeeds=False)
         _require(source.read_bytes() == original_source, "Rejected output alias changed source")
         _run([runner, cwd / "missing script.abd"], cwd, environment, succeeds=False)
-        passed("compile/runner failures return nonzero and preserve input")
+        passed("warnings keep the outputs; -Werror and compile/runner failures return nonzero and preserve input")
 
         result = _run([runner, default_abd], cwd, environment)
         _require(result.stdout.splitlines() == ["Hello, AzScript!", "42"],
@@ -248,7 +356,7 @@ def verify(package: Path, java: Optional[Path] = None) -> Dict[str, object]:
                  f"Class example or destructor order failed: {result.stdout!r}")
         passed("literal objects, pointer objects and destructor execution")
 
-        for name, expected in (("loops-regressions", "9"), ("inheritance-regressions", "0"), ("address-regressions", "0")):
+        for name, expected in (("loops-regressions", "9"), ("inheritance-regressions", "0"), ("address-regressions", "0"), ("operators-regressions", "0"), ("virtual-regressions", "0")):
             output = cwd / "language output" / (name + ".exec.abd")
             _run([compiler, package / "examples" / (name + ".azs"), "-o", output], cwd, compiler_environment)
             ast = output.with_name(name + ".ast.json")
@@ -290,6 +398,45 @@ def verify(package: Path, java: Optional[Path] = None) -> Dict[str, object]:
         _require(result.stdout.splitlines() == ["0"], f"Packaged math library regression failed: {result.stdout!r}")
         passed("precompiled math hint library, relocated rebuild and separate consumer")
 
+        # The launcher searches the package's stdlib/ after every -I directory, so a client
+        # outside examples/ includes the math header by name, with no -I at all.
+        plain_client = source_directory / "plain math client.azs"
+        plain_client.write_text('#include "math.include.azs"\n'
+                                'int main() { return math_round(math_hypot(3.0, 4.0)); }\n', encoding="utf-8")
+        _run([compiler, plain_client], cwd, compiler_environment)
+        plain_abd = source_directory / "plain math client.exec.abd"
+        _outputs(plain_abd, source_directory / "plain math client.ast.json", source_directory / "plain math client.exec.json")
+        result = _run([runner, plain_abd, "--insert", package / "stdlib/math.exec.abd"], cwd, environment)
+        _require(result.stdout.splitlines() == ["5"], f"Client of the default include directory failed: {result.stdout!r}")
+        include_directory = work / "include dir with spaces"
+        include_directory.mkdir()
+        (include_directory / "offset.azs").write_text("int offset() { return 1; }\n", encoding="utf-8")
+        named_client = source_directory / "math client.azs"
+        named_client.write_text('#include "math.include.azs"\n#include "offset.azs"\n'
+                                'int main() { return math_round(math_hypot(3.0, 4.0)) + offset(); }\n', encoding="utf-8")
+        _run([compiler, named_client, "-I", include_directory], cwd, compiler_environment)
+        named_abd = source_directory / "math client.exec.abd"
+        named_ast = source_directory / "math client.ast.json"
+        _outputs(named_abd, named_ast, source_directory / "math client.exec.json")
+        # File names are relative to their include root, independent of the package location.
+        names = [entry["name"] for entry in json.loads(named_ast.read_text(encoding="utf-8"))["sources"]]
+        _require(names == ["math client.azs", "math.include.azs", "offset.azs"], f"Unexpected include names: {names!r}")
+        result = _run([runner, named_abd, "--insert", package / "stdlib/math.exec.abd"], cwd, environment)
+        _require(result.stdout.splitlines() == ["6"], f"Client of the default include directory failed: {result.stdout!r}")
+        missing = _run([compiler, named_client, "-o", "missing include/client.abd"], cwd, compiler_environment, succeeds=False)
+        _require('error: Include not found: "offset.azs"' in missing.stderr and str((package / "stdlib").resolve()) in missing.stderr,
+                 f"A missing include did not list the package stdlib/: {missing.stderr!r}")
+        absolute_client = source_directory / "absolute client.azs"
+        absolute_client.write_text(f'#include "{(package / "stdlib/math.include.azs").as_posix()}"\n'
+                                   'int main() { return math_round(math_hypot(3.0, 4.0)); }\n', encoding="utf-8")
+        rejected = _run([compiler, absolute_client, "-o", "absolute/client.abd"], cwd, compiler_environment, succeeds=False)
+        _require("error: Absolute include path" in rejected.stderr and "--unrestricted-includes" in rejected.stderr,
+                 f"An absolute include was not rejected: {rejected.stderr!r}")
+        _require(not (cwd / "absolute").exists(), "A rejected include wrote outputs")
+        _run([compiler, absolute_client, "-o", "absolute/client.abd", "--unrestricted-includes"], cwd, compiler_environment)
+        _outputs(cwd / "absolute/client.abd", cwd / "absolute/client.ast.json", cwd / "absolute/client.exec.json")
+        passed("default stdlib include directory, -I with spaces and the absolute include policy")
+
         containers_output = cwd / "containers output"
         containers_abd = containers_output / "containers.exec.abd"
         _run([compiler, package / "stdlib/containers.azs", "-o", containers_abd], cwd, compiler_environment)
@@ -319,10 +466,13 @@ def verify(package: Path, java: Optional[Path] = None) -> Dict[str, object]:
 
         # Exercise every post-literal-object opcode through the exported tools.
         # Merely bumping the root version misses stale opcode ranges and SDKs.
-        modern_source = source_directory / "generic buffer operators.azs"
+        modern_source = source_directory / "generic buffer bitwise operators.azs"
         modern_source.write_text('''#namespace 1234
 #gvar drops
 class Item { int value = 7; ~Item() { drops = drops + 1; } }
+class VirtualBase { int field = 7; virtual int read() { return field; } }
+class VirtualChild : VirtualBase { override int read() { return VirtualBase::read() + 100; } }
+<T extends VirtualBase*> int virtual_read(T value) { return value.read(); }
 class Box<T> { T value; T get() { return value; } }
 class Indexed<T> {
     buffer<T> data;
@@ -337,6 +487,7 @@ class Number {
 }
 <T> T invoke(int id, T value) { return reflect_invoke_function<T>(id, value); }
 int increment(int value):0042 { return value + 1; }
+Item* checked_item():0070 { return new Item(); }
 int main() {
     drops = 0;
     {
@@ -352,6 +503,62 @@ int main() {
     buffer<buffer<int>> nested; nested.reserve(1); nested.push(copy);
     if (nested.get(0).get(0) != 9) return -5;
     Number a(1); Number b(2); if ((a + b).value != 3) return -6;
+    int bits = 10; int mask = 12; int shift = 1; int negative = -8;
+    if ((bits & mask) != 8 || (bits | mask) != 14 || (bits ^ mask) != 6) return -7;
+    if (~bits != -11 || (negative >> shift) != -4 || (negative >>> shift) != 2147483644) return -8;
+    if ((bits << shift) != 20 || (1 << 31) != (-2147483647 - 1)) return -9;
+    bits &= mask; bits |= 2; bits ^= 4;
+    bits <<= 2; bits >>= 1; bits >>>= 1;
+    if (bits != 14) return -10;
+    int truncated = int(-7.75); float narrowed = float(3.5); double widened = double(6.25f);
+    if (truncated != -7 || narrowed != 3.5f || widened != 6.25) return -11;
+    if (int("42") != 42 || float("1.5") != 1.5f || double("2.5e1") != 25.0) return -12;
+    if (string(42) != "42" || string(1.5f) != "1.5" || string(2.5) != "2.5") return -13;
+    address raw = alloc(1); address same = address(raw);
+    if (same != raw || string(raw) != "" + raw) return -14;
+    def(dynamic_raw, raw); def(dynamic_int, 42); def(dynamic_string, "same");
+    if (address(dynamic_raw) != raw || int(dynamic_int) != 42 || string(dynamic_string) != "same") return -15;
+    int(bits);
+    mem_free(raw);
+    def(choose, true);
+    int first = choose ? 42 : 1 / 0; int second = false ? 1 / 0 : 42;
+    int associated = false ? 1 : true ? 42 : 2;
+    if (first != 42 || second != 42 || associated != 42) return -16;
+    float floatChoice = true ? 7 : 1.5f; double doubleChoice = false ? 1.5 : 7;
+    double floatToDoubleChoice = true ? 1.25f : 2.5;
+    if (floatChoice != 7.0f || doubleChoice != 7.0 || floatToDoubleChoice != 1.25) return -17;
+    int switched = 0;
+    for (int index = 0; index < 4; index++) {
+        switch (index) {
+            case 0: case 1: switched += index + 1; break;
+            default: switched += 10; break;
+            case 2: continue;
+        }
+        switched += 100;
+    }
+    if (switched != 313) return -18;
+    string label = "ready";
+    switch (label) {
+        case "other": return -19;
+        default: return -20;
+        case "ready": switched += 1;
+    }
+    if (switched != 314) return -21;
+    string text = "A中😀\\u0000Z";
+    if (str_length(text) != 5 || str_byte_length(text) != 10) return -40;
+    if (str_substring(text, 1, 3) != "中😀" || str_char_at(text, 2) != "😀") return -41;
+    if (str_code_at(text, 2) != 128512 || str_from_code(128512) != "😀") return -42;
+    if (str_index_of(text, "😀") != 2 || str_index_of(text, "", 5) != 5) return -43;
+    if (!str_starts_with(text, "A中") || !str_ends_with(text, "Z")) return -44;
+    Item* closed = new Item(); closed.value = 9;
+    if (closed.value != 9 || address(closed) != address(closed)) return -45;
+    delete closed;
+    Item* checked = reflect_invoke_function<Item*>(305397872);
+    if (checked.value != 7) return -46;
+    delete checked;
+    VirtualBase* virtual_item = new VirtualChild();
+    if (virtual_read(virtual_item) != 107) return -47;
+    delete virtual_item;
     return invoke<int>(305397826, values[0]) + value_compare<string>("b", "a");
 }
 ''', encoding="utf-8")
@@ -361,16 +568,107 @@ int main() {
         _run([compiler, modern_source, "-o", modern_abd], cwd, compiler_environment)
         _outputs(modern_abd, modern_ast, modern_json)
         modern_view = json.loads(modern_json.read_text(encoding="utf-8"))
-        _require(set(range(36, 43)) <= _control_opcodes(modern_view["f"], str(modern_json)),
-                 "Generic/buffer probe must exercise operation contexts and all v9 buffer instructions")
+        modern_opcodes = _control_opcodes(modern_view["f"], str(modern_json))
+        _require(set(range(36, 43)) <= modern_opcodes,
+                 f"Generic/buffer probe must exercise operation contexts and all exec v{EXEC_VERSION} buffer instructions")
+        _require(set(range(43, 49)) <= modern_opcodes,
+                 f"Bitwise/shift probe must exercise all exec v{EXEC_VERSION} bitwise and shift instructions")
+        _require(49 in modern_opcodes,
+                 f"Conversion probe must exercise the exec v{EXEC_VERSION} convert instruction")
+        _require(50 in modern_opcodes,
+                 f"Conditional expression probe must exercise the exec v{EXEC_VERSION} select instruction")
+
+        def builtin_calls(value):
+            if isinstance(value, dict):
+                if value.get("t") == 1:
+                    yield value["id"]
+                for child in value.values():
+                    yield from builtin_calls(child)
+            elif isinstance(value, list):
+                for child in value:
+                    yield from builtin_calls(child)
+
+        _require(set(range(0x0abd000b, 0x0abd0014)) <= set(builtin_calls(modern_view["f"])),
+                 "String probe must exercise all nine Unicode string builtins")
+        _require(0x0abd0014 in set(builtin_calls(modern_view["f"])),
+                 "Heap object construction must use the tagged internal object allocator")
+        _require(51 in modern_opcodes, "Class reflection must emit checked references")
+        _require({52, 53} <= modern_opcodes, "Virtual construction and dispatch must remain in the packaged feature probe")
         modern_roundtrip = modern_abd.with_name("features.roundtrip.abd")
         _run([compiler, "compile-json", modern_ast, "-o", modern_roundtrip], cwd, compiler_environment)
         _require(modern_abd.read_bytes() == modern_roundtrip.read_bytes(),
-                 "Generic/buffer/operator AST roundtrip changed executable bytes")
+                 "Packaged feature probe AST roundtrip changed executable bytes")
         result = _run([runner, modern_abd], cwd, environment)
         _require(result.stdout.splitlines() == ["42"],
-                 f"Generic/buffer/operator probe failed: {result.stdout!r}")
-        passed("generic contexts, owning buffers, class operators and reflection through relocated tools")
+                 f"Packaged feature probe failed: {result.stdout!r}")
+        passed("generic contexts, owning buffers, class operators, reflection, bitwise, shifts, conversions, conditional expressions, switch and Unicode strings through relocated tools")
+
+        # This nested expression exceeds the wire budget before C25 spilling.
+        limits_source = source_directory / "spilled expression.azs"
+        limits_source.write_text("int main(){int one=1;return " + "+".join(["one"] * 130) + ";}\n", encoding="utf-8")
+        limits_abd = cwd / "limits output/depth.exec.abd"
+        limits_ast = limits_abd.with_name("depth.ast.json")
+        limits_json = limits_abd.with_name("depth.exec.json")
+        _run([compiler, limits_source, "-o", limits_abd], cwd, compiler_environment)
+        _outputs(limits_abd, limits_ast, limits_json)
+        limits_view = json.loads(limits_json.read_text(encoding="utf-8"))
+        _require(any(fn["local-count"] > 1 for fn in limits_view["f"] if fn["id"] == 0x0fff0000),
+                 "The packaged compiler must spill an expression that exceeds the wire budget")
+        rebuilt_limits = limits_abd.with_name("depth.roundtrip.abd")
+        _run([compiler, "compile-json", limits_ast, "-o", rebuilt_limits], cwd, compiler_environment)
+        _require(limits_abd.read_bytes() == rebuilt_limits.read_bytes(), "Spilled package AST roundtrip differs")
+        limits_result = _run([runner, limits_abd], cwd, environment)
+        _require(limits_result.stdout == "130\n", f"Spilled package expression failed: {limits_result.stdout!r}")
+        passed("statement spilling through relocated compiler and runner")
+
+        chain_source = source_directory / "flat ten thousand operands.azs"
+        chain_source.write_text("int main(){string unit=\"x\";string value=" + "+".join(["unit"] * 10000) + ";return value.length();}\n", encoding="utf-8")
+        chain_abd = cwd / "limits output/chain.exec.abd"
+        chain_ast = chain_abd.with_name("chain.ast.json")
+        chain_json = chain_abd.with_name("chain.exec.json")
+        _run([compiler, chain_source, "-o", chain_abd], cwd, compiler_environment)
+        _outputs(chain_abd, chain_ast, chain_json)
+        pending = [json.loads(chain_ast.read_text(encoding="utf-8"))]
+        has_chain = False
+        while pending:
+            item = pending.pop()
+            if isinstance(item, dict):
+                has_chain |= item.get("call") == "chain"
+                pending.extend(item.values())
+            elif isinstance(item, list):
+                pending.extend(item)
+        _require(has_chain, "Long source operator chains must retain the flat readable AST")
+        chain_rebuilt = chain_abd.with_name("chain.roundtrip.abd")
+        _run([compiler, "compile-json", chain_ast, "-o", chain_rebuilt], cwd, compiler_environment)
+        _require(chain_abd.read_bytes() == chain_rebuilt.read_bytes(), "Flat-chain package AST roundtrip differs")
+        result = _run([runner, chain_abd], cwd, environment)
+        _require(result.stdout == "10000\n", f"Flat-chain package execution failed: {result.stdout!r}")
+        passed("ten thousand string operands through relocated tools")
+
+        ladder_source = source_directory / "flat ten thousand branches.azs"
+        ladder = "".join(("if" if i == 0 else "else if") + f"(n=={i}){{return {i};}}" for i in range(10000))
+        ladder_source.write_text("int choose(int n){" + ladder + "else{return -1;}}int main(){return choose(9999);}\n", encoding="utf-8")
+        ladder_abd = cwd / "limits output/ladder.exec.abd"
+        ladder_ast = ladder_abd.with_name("ladder.ast.json")
+        ladder_json = ladder_abd.with_name("ladder.exec.json")
+        _run([compiler, ladder_source, "-o", ladder_abd], cwd, compiler_environment)
+        _outputs(ladder_abd, ladder_ast, ladder_json)
+        pending = [json.loads(ladder_ast.read_text(encoding="utf-8"))]
+        has_ladder = False
+        while pending:
+            item = pending.pop()
+            if isinstance(item, dict):
+                has_ladder |= item.get("call") == "if-chain"
+                pending.extend(item.values())
+            elif isinstance(item, list):
+                pending.extend(item)
+        _require(has_ladder, "Long source else-if ladders must retain the flat readable AST")
+        ladder_rebuilt = ladder_abd.with_name("ladder.roundtrip.abd")
+        _run([compiler, "compile-json", ladder_ast, "-o", ladder_rebuilt], cwd, compiler_environment)
+        _require(ladder_abd.read_bytes() == ladder_rebuilt.read_bytes(), "Flat-ladder package AST roundtrip differs")
+        result = _run([runner, ladder_abd], cwd, environment)
+        _require(result.stdout == "9999\n", f"Flat-ladder package execution failed: {result.stdout!r}")
+        passed("ten thousand else-if branches through relocated tools")
 
         standalone = work / "standalone runner"
         standalone_bin = standalone / "bin"
@@ -414,7 +712,7 @@ int main() {
         _require("Host received: 42" in result.stdout, "Static C++ consumer returned an unexpected value")
         result = _run([_host_executable(static_build), modern_abd], cwd, environment)
         _require(result.stdout.splitlines() == ["Host received: 42"],
-                 "Static C++ consumer could not execute generic/buffer instructions")
+                 "Static C++ consumer could not execute packaged language features")
         passed("relocated CMake package and static C++ consumer")
 
         shared_source = work / "shared consumer source"
@@ -431,7 +729,7 @@ int main() {
         _require("Host received: 42" in result.stdout, "Shared C++ consumer returned an unexpected value")
         result = _run([_host_executable(shared_build), modern_abd], cwd, environment)
         _require(result.stdout.splitlines() == ["Host received: 42"],
-                 "Shared C++ consumer could not execute generic/buffer instructions")
+                 "Shared C++ consumer could not execute packaged language features")
         passed("relocated CMake package and shared C++ consumer")
 
         result = _run([java_executable, "-Xcheck:jni", "--class-path", package / "java/abdJavaInvoker.jar",
@@ -444,10 +742,10 @@ int main() {
         result = _run([java_executable, "-Xcheck:jni", "--class-path", package / "java/abdJavaInvoker.jar",
                        package / "examples/java/RunScript.java", package, modern_abd], cwd, environment)
         _require(result.stdout.splitlines() == ["Host received: 42"],
-                 "Java JNI consumer could not execute generic/buffer instructions")
+                 "Java JNI consumer could not execute packaged language features")
         _require("WARNING in native method" not in result.stdout + result.stderr,
-                 "JVM reported a JNI contract warning for generic/buffer execution")
-        passed("real JNI execution of generic contexts, buffers and class operators")
+                 "JVM reported a JNI contract warning for packaged language features")
+        passed("real JNI execution of generic contexts, buffers, class operators, bitwise, shifts, conversions, conditional expressions and switch")
 
         native_name = "abdJ.dll" if WINDOWS else ("libabdJ.dylib" if sys.platform == "darwin" else "libabdJ.so")
         native_library = package / ("bin" if WINDOWS else "lib") / native_name

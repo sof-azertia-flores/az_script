@@ -21,7 +21,8 @@ int main(int argc,char** argv) {
         std::cout<<"Host received: "<<azertian::value_to_string(value)<<'\n';
         script->destroy();
     }catch(const std::exception& e){
+        const auto message=azertian::describe_error(e);
         if(script)try{script->destroy();}catch(...){}
-        std::cerr<<e.what()<<'\n';return 1;
+        std::cerr<<"AzScript error: "<<message<<'\n';return 1;
     }
 }

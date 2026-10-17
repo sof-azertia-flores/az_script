@@ -39,7 +39,7 @@ def main():
                                     '--ast', str(ast), '--exec-json', str(executable)],
                                     cwd=ROOT, capture_output=True, text=True, timeout=30)
             if not valid:
-                assert result.returncode != 0 and 'Error:' in result.stderr, (name, result.stdout, result.stderr)
+                assert result.returncode == 1 and 'Error:' in result.stderr and 'internal compiler error' not in result.stderr, (name, result.stdout, result.stderr)
                 assert 'Exception in thread' not in result.stderr, (name, result.stderr)
                 return None, None
             assert result.returncode == 0, (name, result.stdout, result.stderr)
@@ -49,7 +49,7 @@ def main():
             assert again.returncode == 0, (name, again.stdout, again.stderr)
             assert abd.read_bytes() == roundtrip.read_bytes(), (name, 'AST roundtrip differs')
             tree = json.loads(executable.read_text(encoding='utf-8'))
-            assert tree['exec-version'] == 9, (name, tree)
+            assert tree['exec-version'] == 10, (name, tree)
             return abd, tree
 
         def run_case(name, abd, output='', error=None, libraries=()):
@@ -111,9 +111,8 @@ def main():
             void main(){Child * c();c.pointer=alloc(2);c.next=c.pointer+1;
             mem_get(c.get())=11;mem_get(c.next)=13;Base* b=c;
             print(mem_get(b.get()));print(mem_get(c.next));print(b.value+c.extra);}''', '11\n13\n12\n')
-        execute('structural-address-fields', '''class A{address p;A* next;}
-            class B{address renamed;B* link;}
-            address offset(){address p=null;return p+4;}void main(){A a;a.p=offset();B b=a;print(b.renamed);print(b.link==null);}''', '4\ntrue\n')
+        execute('same-class-address-fields', '''class A{address p;A* next;}
+            address offset(){address p=null;return p+4;}void main(){A a;a.p=offset();A b=a;print(b.p);print(b.next==null);}''', '4\ntrue\n')
         execute('raw-return-transfer', '''address create(){address p=alloc(2);mem_get(p)=7;
             mem_get(p+1)=9;mem_send_up(p);return p;}
             address forward(){address p=create();mem_send_up(p);return p;}
@@ -144,10 +143,34 @@ def main():
             address next(address p){evaluations+=1;return p;}
             void main(){evaluations=0;address p=alloc(1);mem_get(p)=-0.0;
             print(+mem_get(next(p)));print(evaluations);}''', '-0\n1\n')
-        execute('dynamic-class-reference-erases-to-address', '''class C{int x=17;}
-            void main(){var raw=new C();print(mem_get(raw));print(mem_free(raw));}''', '17\ntrue\n')
+        execute('explicit-class-erasure-raw-read-rejected', '''class C{int x=17;}
+            void main(){C* object=new C();address raw=address(object);print(mem_get(raw));}''',
+                error='mem_get cannot access object storage; use typed member access')
+
+        # Address erasure preserves the storage guard at object starts,
+        # interiors, literal blocks and allocations still in construction.
+        for storage, declaration in [('manual', 'C* object=new C();address raw=address(object);'),
+                                     ('automatic', 'C* object();address raw=address(object);'),
+                                     ('literal', 'C object;address raw=address(object.self());')]:
+            for offset in (0, 1):
+                for operation in ('mem_get', 'mem_free', 'make_free', 'mem_send_up'):
+                    source = 'class C{int first=7;int second=9;C* self(){return this;}}void main(){' + declaration
+                    source += operation + '(raw+' + str(offset) + ');}'
+                    execute(f'closed-object-{storage}-{offset}-{operation}', source,
+                            error=operation + ' cannot access object storage; use typed member access')
+        for operation in ('mem_get', 'mem_free', 'make_free', 'mem_send_up'):
+            source = 'class C{int first;int second;C(){' + operation + '(address(this)+1);}}void main(){C* object=new C();}'
+            execute('closed-object-construction-' + operation, source,
+                    error=operation + ' cannot access object storage; use typed member access')
+        execute('typed-object-members-still-work', 'class C{int first=7;int second=9;}void main(){C* object=new C();object.first=11;print(object.first+object.second);delete object;}', '20\n')
 
         bad_sources = {
+            'internal-object-allocator': 'void main(){object_alloc(1);}',
+            'class-pointer-var': 'class C{int n;}void main(){var p=new C();}',
+            'class-pointer-def': 'class C{int n;}void main(){C* p();def(raw,p);}',
+            'class-pointer-global': '#gvar raw\nclass C{int n;}void main(){C* p();raw=p;}',
+            'class-pointer-untyped-argument': 'class C{int n;}void take(value){}void main(){C* p();take(p);}',
+            'class-pointer-raw-store': 'class C{int n;}void main(){C* p();address raw=alloc(1);mem_get(raw)=p;}',
             'dynamic-address-argument': 'address take(address p){return p;}void main(){var n=null;take(n);}',
             'dynamic-int-argument': 'int take(int p){return p;}void main(){var n=1;take(n);}',
             'dynamic-address-initializer': 'void main(){address slot=alloc(1);mem_get(slot)=null;address p=mem_get(slot);}',
@@ -184,6 +207,8 @@ def main():
             'class-equals-raw': 'class C{int x;}void main(){C c;address p=null;print(c==p);}',
             'address-int-layout': 'class A{address p;}class B{int n;}void main(){A a;B b=a;}',
             'address-class-layout': 'class A{address p;}class B{B* next;}void main(){A a;B b=a;}',
+            # Classes are nominal: an identical layout under another name does not convert.
+            'address-same-layout': 'class A{address p;A* next;}class B{address renamed;B* link;}void main(){A a;B b=a;}',
             'address-reserved-class': 'class address{int n;}void main(){}',
         }
         for name, source in bad_sources.items():
@@ -223,13 +248,13 @@ def main():
             ('overflow-add', 'print(maximum()+1);', 'Address overflow'),
             ('overflow-negative-subtract', 'print(maximum()-(-1));', 'Address overflow'),
             ('overflow-increment', 'address p=maximum();p++;', 'Address overflow'),
-            # Bit 63 marks literal-object storage; no object has id 0, so the address never resolves.
-            ('high-address-access', 'address p=alloc(1);mem_get(p)=17;print(mem_get(high()));', 'Invalid or expired object address'),
+            # Bit 63 marks object storage, so raw builtins reject even expired literal IDs.
+            ('high-address-access', 'address p=alloc(1);mem_get(p)=17;print(mem_get(high()));', 'mem_get cannot access object storage; use typed member access'),
         ]:
             execute(name, IMPORTS + 'void main(){' + body + '}', error=message, libraries=(library,))
-        execute('high-address-free', IMPORTS + 'void main(){print(mem_free(maximum()));}', 'false\n', libraries=(library,))
+        execute('high-address-free', IMPORTS + 'void main(){print(mem_free(maximum()));}', error='mem_free cannot access object storage; use typed member access', libraries=(library,))
 
-        # Structural type erasure still distinguishes object/raw-address values
+        # ABI type erasure still distinguishes object/raw-address values
         # from ordinary integer values in every runtime function signature.
         _, layout = compile_case('''class C{address p;C* next;C(address p){this.p=p;}
             address get(){return p;}C* self(){return this;}~C(){}}

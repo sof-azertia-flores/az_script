@@ -2,7 +2,7 @@
 
 [中文](USAGE.md) | English
 
-Move this directory as a unit. The compiler produces ABD; the standalone interpreter defaults to main (0x0fff0000). C++ and Java hosts use the same ABD. Relative input/output paths resolve against the terminal working directory; includes resolve against their containing source file.
+Move this directory as a unit. The compiler produces ABD; the standalone interpreter defaults to main (0x0fff0000). C++ and Java hosts use the same ABD. Relative input/output paths resolve against the terminal working directory; includes resolve against their containing source file, then each `-I` directory, then the package's stdlib/ (see [compile and run](#compile-and-run)).
 
 Export from source with `python3 tools/export_distribution.py /path/to/azscript --offline`, replacing the destination. Offline mode requires cached dependencies. A Java runtime is bundled by default; `--system-java` reduces package size and requires installed Java 17+ on the recipient.
 
@@ -28,6 +28,12 @@ run.cmd examples\hello.exec.abd
 
 Three outputs default beside the source: hello.exec.abd executable, hello.ast.json readable syntax tree, and hello.exec.json lowered instructions. -o chooses ABD output; --ast and --exec-json override JSON paths. Hello prints `Hello, AzScript!` and main result 42. The interpreter prints nonvoid results to stdout; successful process exit is 0, not the script's integer return value. Failure returns nonzero and diagnostics go to stderr.
 
+Compile errors go to stderr as `file:line:column: error: message`, positioned in the original file, including included headers and macro uses; following `note:` lines give the include chain. Independent errors are reported together, at most 20 by default; `--max-errors N` changes the limit (0 for none). A failed compilation ends with a summary such as `Error: compilation failed: 2 errors`, exits with status 1, and writes no outputs. Status 2 means an internal compiler error, a bug of the compiler itself; `--debug-compiler` adds its Java stack trace to the report. Options may precede or follow the source path; `--` ends the options, for a source path that begins with `-`. See [the language guide](LANGUAGE.en.md#diagnostics) for the format.
+
+Warnings, such as an assignment used as a condition or unreachable code, read `file:line:column: warning: message [-W<name>]`; they keep exit status 0 and the outputs. `-Wall` enables all warnings, `-W<name>` enables one (for example `-Wunused-variable`, which is off by default), `-Wno-<name>` disables one, `-w` suppresses them, and `-Werror` turns them into errors that fail the compilation. See [warnings](LANGUAGE.en.md#warnings) for the list.
+
+Includes are searched in the directory of the including file, then in each `-I dir` / `--include-dir dir` in order, then in the package's stdlib/, so a client anywhere can write `#include "math.include.azs"`. An include must stay inside the source file's directory or one of these directories: absolute paths, paths that lead out of them such as `../../private.azs`, and symbolic links pointing outside are rejected without reading the file. `--unrestricted-includes` lifts this restriction. A missing include lists every searched path. Include options apply to source compilation only, not to `compile-json`.
+
 With `-o output/demo.abd` or `-o output/demo.exec.abd`, JSON defaults are output/demo.ast.json and output/demo.exec.json, individually overridden by explicit flags.
 
 Compiler launchers prefer bundled runtime/. Without it, install Java 17+ and use JAVA_HOME or PATH. Compilation needs no Gradle, source checkout, or downloads. The native interpreter needs no Java.
@@ -37,17 +43,31 @@ Compiler launchers prefer bundled runtime/. Without it, install Java 17+ and use
     --ast hello.ast.json --exec-json hello.exec.json
 ```
 
-AST names bind with extern priority; independent definition IDs live in body namespaces and metadata.position/name. Name-based host calls need matching AST output; hint definitions also require the actual mounted namespace. Fixed-main execution needs no debug JSON deployment. ABD is a binary instruction tree, not encryption.
+AST names bind with extern priority; independent definition IDs live in body namespaces and metadata.position/name. Name-based host calls need matching AST output; hint definitions also require the actual mounted namespace. Fixed-main execution needs neither JSON file deployed. ABD is a binary instruction tree, not encryption.
 
-Exec v9 uses numeric opcodes and raw ordered ABD stacks. Exec JSON retains field names for inspection with numeric c; it is not the binary Map layout. Only v9 is accepted; recompile older ABD from source/readable AST. See [binary format](EXEC_FORMAT.en.md).
+Exec v10 uses numeric opcodes and raw ordered ABD stacks. Exec JSON retains field names for inspection with numeric c; it is not the binary Map layout. Only v10 is accepted; recompile older ABD from source/readable AST. See [binary format](EXEC_FORMAT.en.md).
+
+`-g` adds debug records to the executable: source file names, function names and source positions. They are off by default and never change instructions or behavior, but they put function, class and file names into the ABD, so leave `-g` out of builds that should not carry them. A JNI snapshot can be restored only into a build with the same module bytes, so a `-g` build and a build without `-g` do not share snapshots.
 
 Launchers also accept full CLI commands: `./compile.sh compile-json hello.ast.json -o restored.abd` rebuilds ABD and defaults restored.exec.json without overwriting the input AST. Use `./compile.sh --help`; pack/unpack archive/extract files.
 
-Call bin/azscript-run (Windows bin\azscript-run.exe) directly or through run.sh/run.cmd. An optional second argument is a hex/decimal function ID, for parameterless functions only. Repeated --insert path assembles libraries, then automatically flushes, runs dependency-ordered onload, executes entry, and closes.
+Call bin/azscript-run (Windows bin\azscript-run.exe) directly or through run.sh/run.cmd. An optional second argument is a hex/decimal function ID, for parameterless functions only. Repeated --insert path assembles libraries, then automatically flushes, runs dependency-ordered onload, executes entry, and closes. A rejected library is reported as `AzScript error: Cannot insert <path>: ...`; function IDs in errors are printed in hex, such as `0x0fff0001`. See [hint linking](HINT_LINKING.en.md) for separately compiled ordinary modules that collide in the default namespace.
+
+### Runtime errors
+
+Use `./compile.sh -g program.azs` for source locations. Execution errors exit with status 1 and print to stderr:
+
+```text
+AzScript error: Division by zero
+  at divide (program.azs:2:14)
+  at main (program.azs:5:12)
+```
+
+Without `-g`, frames read `  at function 0x0fff0002`. Native callbacks read `  at native function 0x12340001`; built-ins add no native frame. Frames list the failing function first, retain at most 64 entries, and end with `  ... N more frames` when truncated. Lines and UTF-16 columns start at 1. Cleanup preserves the first error and its trace. See [runtime errors and debug info](LANGUAGE.en.md#runtime-errors-and-debug-info).
 
 ## Math library
 
-Clients include declarations from stdlib/math.include.azs, e.g. `#include "../stdlib/math.include.azs"` under examples/. Implementation stdlib/math.azs compiles independently with AZSCRIPT_MATH; do not include it in clients. Precompiled ABD and matching AST/exec JSON are bundled. Recompilation updates all three:
+Clients include declarations from stdlib/math.include.azs, by name as `#include "math.include.azs"` from anywhere, since the package's stdlib/ is searched by default, or by relative path, e.g. `#include "../stdlib/math.include.azs"` under examples/. Implementation stdlib/math.azs compiles independently with AZSCRIPT_MATH; do not include it in clients. Precompiled ABD and matching AST/exec JSON are bundled. Recompilation updates all three:
 
 ```sh
 ./compile.sh stdlib/math.azs
@@ -61,7 +81,7 @@ C++ insert_script or Java insertScript(new File("stdlib/math.exec.abd")) assembl
 
 ## Container library
 
-Clients include stdlib/containers.include.azs, for example `#include "../stdlib/containers.include.azs"` under examples/. Implementation stdlib/containers.azs compiles independently as AZSCRIPT_CONTAINERS. The package ships stdlib/containers.exec.abd and both JSON views:
+Clients include stdlib/containers.include.azs, by name as `#include "containers.include.azs"` or, under examples/, as `#include "../stdlib/containers.include.azs"`. Implementation stdlib/containers.azs compiles independently as AZSCRIPT_CONTAINERS. The package ships stdlib/containers.exec.abd and both JSON views:
 
 ```sh
 ./compile.sh stdlib/containers.azs
@@ -95,6 +115,8 @@ script->destroy();
 C++ azertian::address stores uint64 in .value. Variable(address) differs from variable(int); explicitly construct address arguments, e.g. azertian::address{bits}. Class pointers also use address; fields still occupy one slot. Literal values use OBJECT_VALUE (8); returned literals are host-owned without later user destructors. Public azertian::blocks create/resize/length/address_of APIs directly manage slot blocks.
 
 Load only mounts code. Flush links and initializes pending modules before invoke. Destroy runs destruction hooks and cleanup and is repeatable. Explicitly close on normal and exceptional exits. Do not use the old unbounded pointer API for external files. See examples/cpp/main.cpp for bounded reading, errors, and budgets.
+
+Catch the original C++ exception type and call `azertian::describe_error(error)` before `destroy()` or another runtime entry. It returns `what()` plus matching frames, without the CLI prefix or a trailing newline. `last_error_trace()` returns an `error_trace` containing `frames` and `omitted_frames`; `format_error_trace(trace)` formats the frames and `clear_error_trace()` clears them. Collection is thread-local and restarts at each entry, including callback reentry. Trace APIs and virtual-method storage change the public C++ ABI: rebuild hosts and plugins against this package's matching headers and libraries.
 
 Insert_script records each module's global offset per function, so two -1 globals refer to separate slots. Parameter/local frames and block destructors remain independent. Fixed namespaces must avoid ID collisions; namespace_hint libraries receive runtime namespaces. Successful insertion requires another flush. Query namespace_for_hint("NAME"). See [global offsets](LANGUAGE.en.md#insert-and-module-global-offsets).
 
@@ -151,6 +173,8 @@ java -cp "java-build;java\abdJavaInvoker.jar" RunScript "%CD%" examples\hello.ex
 
 Before the first JNI call, applications may set `System.setProperty("azertia.native.library", absoluteLibraryPath)` or use -Djava.library.path to find abdJ. The OS must still locate its interpreter dependency.
 
+Native failures retain their Java exception mapping; their messages can contain multiple UTF-8 trace lines. Java callback throwables keep their original object identity and message. Each JNI entry, including reentry, starts fresh trace collection.
+
 Invoke accepts Integer, Float, Double, Boolean, String, azertia.Address, and null without truncating Long to int. Register matching IDs and exact script signatures:
 
 ```java
@@ -159,6 +183,8 @@ AbdInvoker.registerJfunction(0x12340001,
 ```
 
 The script declares `extern int host_add(int, int):0x12340001;`. Built-ins need no registration. The bridge maintains one active script per process, serializes calls, and permits same-thread reentry. Do not wait in a callback for another thread calling this runtime. Class pointers/address cross as azertia.Address; literals cannot cross JNI and returned literals fail after destruction. Return pointers instead. Address.of(long bits)/bits() retain all unsigned 64 bits. Address.NULL is address zero, distinct from void's Java null; Integer/Long cannot replace addresses implicitly. An address is a runtime reference, not an independently owned Java object. Close releases script and callback registrations; place it in finally.
+
+Class-pointer arguments and extern results remain trusted address values; member access checks object storage and bounds, not nominal class identity. Script raw memory APIs and JNI raw writes/free cannot access object storage. Use typed script wrappers for fields and `delete`; `address(p)` does not bypass these restrictions or transfer ownership. Stale aliases after heap reuse and escaped automatic objects remain known limitations.
 
 ## Multi-file assembly
 
@@ -170,7 +196,7 @@ The script declares `extern int host_add(int, int):0x12340001;`. Built-ins need 
 
 Java calls loadScript(mainFile), insertScript for each library, flush, then invoke. namespaceForHint("POINT_LIB") supplies the actual namespace; public IDs are `(namespace << 16) | localId`. Identical assumed namespaces in different modules may identify different libraries. Missing libraries/signature errors fail flush atomically and permit retry after dependencies are added. Onload failure requires close/recreation. Insert, flush, and snapshot replacement are forbidden during execution/callbacks.
 
-JNI v9 snapshots require initialized idle scripts, including literals in heap fields, and identical ordered module bytes, actual namespaces, and global layouts. Restore does not rerun onload. Old executables/snapshots are unsupported. See [hint linking](HINT_LINKING.en.md) for syntax, out-of-class implementations, and lifetimes.
+JNI v10 snapshots require initialized idle scripts, including literals in heap fields, and identical ordered module bytes, actual namespaces, and global layouts. Restore does not rerun onload. Old executables/snapshots are unsupported. See [hint linking](HINT_LINKING.en.md) for syntax, out-of-class implementations, and lifetimes. Snapshot v10 preserves virtual bindings and their generic contexts through required `methods:[{id,contexts}]` arrays on every heap-object and literal/view record; buffers use `[]`.
 
 ## Signed external libraries
 

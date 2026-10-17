@@ -162,6 +162,13 @@ public final class AbdRegression {
         AbdValue owned = new AbdValue(backing); backing[0] = 9;
         owned.getData()[0] = 5;
         check(owned.getData()[0] == 1, "payload owns its bytes");
+        check(owned.size() == 2 && new AbdValue().size() == 0, "payload size");
+        AbdSimpleStack framed = new AbdSimpleStack();
+        framed.values.add(owned); framed.values.add(new AbdValue()); framed.values.add(AbdBasicType.int2Abd(-2));
+        byte[] stackBytes = framed.toAbd().getData();
+        check(Arrays.equals(stackBytes, new byte[]{2, 0, 0, 0, 1, 2, 0, 0, 0, 0, 4, 0, 0, 0, (byte)0xfe, (byte)0xff, (byte)0xff, (byte)0xff}), "stack framing");
+        stackBytes[4] = 9;
+        check(framed.toAbd().getData()[4] == 1 && owned.getData()[0] == 1, "stack payload owns its bytes");
         AcsObject binary = new AcsObject();
         binary.put("empty", new byte[0]);
         binary.put("leadingZero", new byte[]{0, 0, 1});

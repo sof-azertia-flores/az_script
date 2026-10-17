@@ -71,6 +71,19 @@ def compile_java(module, deps):
     run(['jar','--create','--file',jar,'-C',classes,'.'])
     return jar
 
+def check_error_storage():
+    # Cleanup must retain both exception identity and its trace. Raw exception
+    # pointers outside pending_error would silently lose the latter on unwind.
+    for name in ('library.h', 'library.cpp', 'blocks.h', 'blocks.cpp', 'heepalloc.cpp'):
+        text = (ROOT/'interpreter'/name).read_text(encoding='utf-8')
+        if name == 'library.h':
+            start = text.index('class pending_error {')
+            end = text.index('\n};', start) + len('\n};')
+            text = text[:start] + text[end:]
+        if 'std::exception_ptr' in text:
+            raise RuntimeError(f'Raw exception storage outside pending_error in interpreter/{name}')
+    print('Error trace storage check passed.', flush=True)
+
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--offline',action='store_true')
@@ -78,6 +91,7 @@ def main():
     parser.add_argument('--skip-tests',action='store_true')
     parser.add_argument('--sanitize',action='store_true',help='Address/UB sanitizers on native tests (builds without JNI)')
     args=parser.parse_args()
+    check_error_storage()
     BUILD.mkdir(exist_ok=True)
     (BUILD/'tmp').mkdir(exist_ok=True)
     jars=[dependency(s,args.offline) for s in (DEPS[:1] if args.skip_tests else DEPS)]
@@ -107,7 +121,8 @@ def main():
             if '@Test' in p.read_text(encoding='utf-8'):
                 rel=p.relative_to(next(parent for parent in p.parents if parent.name=='java'))
                 junit_tests.append('.'.join(rel.with_suffix('').parts))
-        if junit_tests:run(['java','-Djava.io.tmpdir='+str(BUILD/'tmp'),'-cp',test_cp,'JunitRunner',*junit_tests],cwd=ROOT/'compiler')
+        # The 20,000-function scaling guard needs a 1 GiB heap, more than the default on small machines.
+        if junit_tests:run(['java','-Xmx1g','-Djava.io.tmpdir='+str(BUILD/'tmp'),'-cp',test_cp,'JunitRunner',*junit_tests],cwd=ROOT/'compiler')
         run(['java','-cp',test_cp,'azertia.binary.AbdRegression'])
     run(['ctest','--test-dir',native,'--output-on-failure'])
     cpp_fixture=BUILD/'cpp-fixture.abd';java_fixture=BUILD/'java-fixture.abd'
@@ -149,6 +164,24 @@ def main():
                  '--runner',native/'interpreter/azscript-run','--host',native/'interpreter/numeric-module-host']
     if jni:inheritance += ['--bridge',bridge,'--library',native/'abdjni'/libname]
     run(inheritance)
+    virtuals=[sys.executable, ROOT/'tests/virtual_methods_end_to_end.py', '--classpath', classpath,
+              '--runner', native/'interpreter/azscript-run', '--host', native/'interpreter/numeric-module-host']
+    if jni:virtuals += ['--bridge', bridge, '--library', native/'abdjni'/libname]
+    run(virtuals)
+    run([sys.executable, ROOT/'tests/limits_end_to_end.py', '--classpath', classpath,
+         '--runner', native/'interpreter/azscript-run', '--host', native/'interpreter/numeric-module-host'])
+    types=[sys.executable, ROOT/'tests/type_safety_end_to_end.py', '--classpath', classpath,
+           '--runner', native/'interpreter/azscript-run']
+    if jni:types += ['--bridge', bridge, '--library', native/'abdjni'/libname]
+    run(types)
+    traces=[sys.executable, ROOT/'tests/runtime_trace_end_to_end.py', '--classpath', classpath,
+            '--runner', native/'interpreter/azscript-run']
+    if jni:traces += ['--bridge', bridge, '--library', native/'abdjni'/libname]
+    run(traces)
+    language_ops=[sys.executable, ROOT/'tests/language_ops_end_to_end.py', '--classpath', classpath,
+                  '--runner', native/'interpreter/azscript-run']
+    if jni:language_ops += ['--bridge', bridge, '--library', native/'abdjni'/libname]
+    run(language_ops)
     run([sys.executable, ROOT/'tests/address_end_to_end.py', '--classpath', classpath,
          '--runner', native/'interpreter/azscript-run', '--host', native/'interpreter/numeric-module-host'])
     run([sys.executable, ROOT/'tests/numeric_slots_end_to_end.py', '--classpath', classpath,

@@ -6,4 +6,5 @@ root=Path(__file__).resolve().parent
 classpath=root/'build/java/classpath.txt'
 if not classpath.is_file():
     sys.exit('Run python3 tools/build_and_test.py first, from the new directory.')
-os.execvp('java',['java','-cp',classpath.read_text(encoding='utf-8'),'azertia.Main',*sys.argv[1:]])
+# Includes search the repository's standard library after every -I directory.
+os.execvp('java',['java','-Dazscript.stdlib='+str(root/'compiler/stdlib'),'-cp',classpath.read_text(encoding='utf-8'),'azertia.Main',*sys.argv[1:]])

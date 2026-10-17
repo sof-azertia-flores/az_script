@@ -7,6 +7,7 @@
 #include <vector>
 
 int main(int argc, char** argv) {
+    std::shared_ptr<azertian::script> script;
     try {
         if (argc != 2) {
             throw std::invalid_argument("Usage: azscript-host script.exec.abd");
@@ -17,22 +18,18 @@ int main(int argc, char** argv) {
         }
         input.seekg(0);
         std::vector<unsigned char> bytes(std::istreambuf_iterator<char>(input), {});
-        auto script = azertian::load_script(bytes.data(), bytes.size());
+        script = azertian::load_script(bytes.data(), bytes.size());
         script->max_steps = 200000;
         script->max_call_depth = 128;
-        try {
-            script->flush();
-            auto value = script->invoke(0x0fff0000);
-            std::cout << "Host received: " << azertian::value_to_string(value) << '\n';
-            script->destroy();
-        } catch (...) {
-            // Preserve the original failure if cleanup also throws.
-            try { script->destroy(); } catch (...) {}
-            throw;
-        }
+        script->flush();
+        auto value = script->invoke(0x0fff0000);
+        std::cout << "Host received: " << azertian::value_to_string(value) << '\n';
+        script->destroy();
         return 0;
     } catch (const std::exception& error) {
-        std::cerr << "AzScript error: " << error.what() << '\n';
+        const auto message = azertian::describe_error(error);
+        if (script && !script->closed) try { script->destroy(); } catch (...) {}
+        std::cerr << "AzScript error: " << message << '\n';
         return 1;
     }
 }

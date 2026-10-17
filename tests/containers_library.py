@@ -119,12 +119,15 @@ def main():
     runner = args.runner.resolve()
     library = (ROOT / 'compiler/stdlib/containers.azs').resolve()
     header = (ROOT / 'compiler/stdlib/containers.include.azs').resolve()
+    # Clients include the header by name from the standard library include directory.
+    include_stdlib = ['-I', ROOT / 'compiler/stdlib']
+    header_include = '#include "containers.include.azs"\n'
     example = ROOT / 'compiler/examples/containers-regressions.azs'
     regression_checks = example.read_text(encoding='utf-8').count('failures += containers_check(')
     assert regression_checks == 35
 
     def compile_source(source, output, inspect=False):
-        command = ['java', '-cp', args.classpath, 'azertia.Main', 'compile', source, '-o', output]
+        command = ['java', '-cp', args.classpath, 'azertia.Main', 'compile', source, '-o', output, *include_stdlib]
         if inspect:
             command += ['--ast', output.with_suffix('.ast.json'), '--exec-json', output.with_suffix('.exec.json')]
         result = subprocess.run(command, cwd=ROOT, capture_output=True, text=True, timeout=30)
@@ -146,7 +149,7 @@ def main():
         work = Path(temp)
         library_binary = work / 'containers.abd'
         library_ast, library_exec = compile_source(library, library_binary, inspect=True)
-        assert library_exec['exec-version'] == 9
+        assert library_exec['exec-version'] == 10
         assert library_exec['namespace-hint'] == HINT
         assert library_exec['assume-hints'] == [{'hint': HINT, 'namespace': ALIAS}]
         assert all(function['id'] >> 16 == 0 for function in library_exec['f'])
@@ -180,7 +183,7 @@ def main():
 
         empty_source = work / 'empty-pop.azs'
         empty_source.write_text(
-            f'#include "{header.as_posix()}"\n'
+            header_include +
             'void main(){List<int>* xs=new List<int>();xs.pop_back();delete xs;}\n',
             encoding='utf-8',
         )
@@ -196,8 +199,8 @@ def main():
         # ids 1 and 2 fail. The tail (id 3) must still be destroyed, then the locals.
         bomb_source = work / 'element-dtor.azs'
         bomb_source.write_text(
-            '#gvar armed\n'
-            f'#include "{header.as_posix()}"\n'
+            '#gvar armed\n' +
+            header_include +
             'class Bomb {\n'
             '    int id;\n'
             '    ~Bomb() {\n'
@@ -242,7 +245,6 @@ def main():
             compile_source(path, binary)
             return execute(binary, [library_binary])
 
-        header_include = f'#include "{header.as_posix()}"\n'
         for name, body in {
             'vector-empty-front.azs': 'void main(){Vector<int>* xs=new Vector<int>();xs.front();delete xs;}\n',
             'vector-empty-pop.azs': 'void main(){Vector<int>* xs=new Vector<int>();xs.pop_back();delete xs;}\n',

@@ -51,7 +51,7 @@ def main():
             abd, ast, executable = [work / (name + ext) for ext in ('.abd', '.ast.json', '.exec.json')]
             result = command(compiler + ['compile', path, '-o', abd, '--ast', ast, '--exec-json', executable])
             if not valid:
-                assert result.returncode != 0 and 'Error:' in result.stderr, (name, result.stdout, result.stderr)
+                assert result.returncode == 1 and 'Error:' in result.stderr and 'internal compiler error' not in result.stderr, (name, result.stdout, result.stderr)
                 assert 'Exception in thread' not in result.stderr and 'StackOverflow' not in result.stderr, (name, result.stderr)
                 return None
             assert result.returncode == 0 and not result.stderr, (name, result.stdout, result.stderr)
@@ -60,7 +60,7 @@ def main():
             assert result.returncode == 0 and not result.stderr, (name, 'AST rebuild', result.stdout, result.stderr)
             assert abd.read_bytes() == rebuilt.read_bytes(), (name, 'AST roundtrip differs')
             tree = json.loads(executable.read_text(encoding='utf-8'))
-            assert tree['exec-version'] == 9, (name, tree.get('exec-version'))
+            assert tree['exec-version'] == 10, (name, tree.get('exec-version'))
             assert 'classes' not in tree and 'operators' not in tree, name
             return abd, json.loads(ast.read_text(encoding='utf-8')), tree
 

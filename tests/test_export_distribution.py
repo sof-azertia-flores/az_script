@@ -26,7 +26,7 @@ class DistributionOutputTests(unittest.TestCase):
         self.ast.write_text('{"body":{}}', encoding='utf-8')
 
     def check_output(self, script, version=verifier.EXEC_VERSION):
-        self.executable.write_text(json.dumps({'exec-version': version, 'f': [{'script': script}]}),
+        self.executable.write_text(json.dumps({'exec-version': version, 'debug-files': [], 'f': [{'script': script}]}),
                                    encoding='utf-8')
         verifier._outputs(self.abd, self.ast, self.executable)
 
@@ -38,8 +38,32 @@ class DistributionOutputTests(unittest.TestCase):
         script = [{'t': 0, 'c': opcode, 'context': context} for opcode in range(36, 43)]
         self.check_output([{'t': 1, 'id': 0x12340002, 'param': [script], 'contexts': [context]}])
 
+    def test_bitwise_and_shift_instructions_are_accepted(self):
+        for opcode in range(43, 49):
+            with self.subTest(opcode=opcode):
+                self.check_output([{'t': 0, 'c': opcode}])
+
+    def test_conversion_instruction_is_accepted_for_all_target_types(self):
+        for target, value in ((0, 3.5), (1, 42), (2, '1.5'), (3, '2.5'), (7, {'address': '0'})):
+            with self.subTest(target=target):
+                self.check_output([{'t': 0, 'c': 49, 'type': target, 'v': value}])
+
+    def test_conditional_instruction_is_accepted_with_condition_and_arms(self):
+        condition = {'t': 0, 'c': 19, 'v1': 1, 'v2': 1}
+        promoted = {'t': 0, 'c': 49, 'type': 3, 'v': 7}
+        self.check_output([{'t': 0, 'c': 50, 'v': condition, 'then': promoted, 'else': 1.5}])
+
+    def test_checked_reference_instruction_is_accepted(self):
+        self.check_output([{'t': 0, 'c': 51, 'v': {'address': '0'}, 'context': {'abi': 7, 'kind': 2, 'width': 1}, 'slot-types': [0]}])
+
+    def test_virtual_method_binding_and_dispatch_are_accepted(self):
+        self.check_output([{'t': 0, 'c': 52, 'v': {'address': '0'},
+                            'entries': [{'id': 0x12340002, 'contexts': [{'ref': 0}]}]},
+                           {'t': 0, 'c': 53, 'slot': 0, 'type': 0, 'param': [{'address': '0'}]}])
+
     def test_invalid_controls_report_the_actual_value_and_location(self):
-        for opcode in (None, True, 'return_typed', 38.0, -1, 0, 2, 43):
+        # The first opcode past the registry is unknown.
+        for opcode in (None, True, 'return_typed', 38.0, -1, 0, 2, max(verifier.CONTROL_OPCODES) + 1):
             with self.subTest(opcode=opcode):
                 with self.assertRaises(RuntimeError) as raised:
                     self.check_output([{'t': 0, 'c': opcode}])
@@ -47,8 +71,13 @@ class DistributionOutputTests(unittest.TestCase):
                 self.assertIn(str(self.executable), message)
                 self.assertIn('script[0]', message)
                 self.assertIn(repr(opcode), message)
-        with self.assertRaisesRegex(RuntimeError, 'Expected exec v9'):
-            self.check_output([], version=8)
+        with self.assertRaisesRegex(RuntimeError, f'Expected exec v{verifier.EXEC_VERSION}'):
+            self.check_output([], version=verifier.EXEC_VERSION - 1)
+
+    def test_exec_json_requires_the_debug_file_table(self):
+        self.executable.write_text(json.dumps({'exec-version': verifier.EXEC_VERSION, 'f': []}), encoding='utf-8')
+        with self.assertRaisesRegex(RuntimeError, 'Missing debug-files'):
+            verifier._outputs(self.abd, self.ast, self.executable)
 
     def test_verifier_tracks_the_compiler_format_and_opcode_registry(self):
         source = exporter.ROOT / 'compiler/src/main/java/azertia/script'
@@ -62,6 +91,9 @@ class DistributionOutputTests(unittest.TestCase):
         version = int(re.search(r'\bVERSION\s*=\s*(\d+)', codec).group(1))
         self.assertEqual(verifier.EXEC_VERSION, version,
                          'Update distribution verification when the executable format changes')
+        runtime = (exporter.ROOT / 'interpreter/library.h').read_text(encoding='utf-8')
+        loader = int(re.search(r'\bEXEC_FORMAT_VERSION\s*=\s*(\d+)', runtime).group(1))
+        self.assertEqual(loader, version, 'The C++ loader and the compiler must use one exec format version')
 
     def test_manifest_tracks_exec_and_snapshot_versions_independently(self):
         exporter.write_manifest(self.root, SimpleNamespace(system_java=True, cmake_arg=[]), {}, {}, {})

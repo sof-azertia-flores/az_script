@@ -34,7 +34,7 @@ public final class Caller {
         Function<Object[], Object> returning = returningExecutors.get(id);
         if (returning != null) return returning.apply(values);
         JfuncExecutor executor = executors.get(id);
-        if (executor == null) throw new IllegalArgumentException("Unknown Java function id: " + id);
+        if (executor == null) throw new IllegalArgumentException("Unknown Java function id: " + String.format("0x%08x", id));
         executor.run(values);
         return null;
     }

@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """Check source -> JSON AST -> ABD -> native execution, including bad programs."""
 import argparse
+import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 
 ROOT=Path(__file__).resolve().parents[1]
@@ -62,6 +64,7 @@ def main():
         execute('string main(){return "n="+16777217.0f;}','n=16777216\n')
         # Flat operator chains are limited by the ABD depth, not the old syntax budget.
         execute('int main(){return '+'+'.join(['1']*100)+';}','100\n')
+        execute('int main(){return '+'+'.join(['1']*130)+';}','130\n')
         execute('int main(){return f();}int f(){while(true){return 5;}}','5\n')
         execute('﻿#define X 5\nint main(){return X;}','5\n')
         for zero_division in [
@@ -84,8 +87,7 @@ def main():
                        'extern int host_add(int, int):0xccf0001;\nint main(){return host_add(1);}',
                        'int f(){} int main(){return f();}',
                        'int while(){return 1;} int main(){return 2;}',
-                       'int main(){def(if,1);return 1;}',
-                       'int main(){return '+'+'.join(['1']*130)+';}']:
+                       'int main(){def(if,1);return 1;}']:
             path=work/'bad.azs';path.write_text(source,encoding='utf-8')
             result=compiler('compile',path,'-o',work/'bad.abd',success=False)
             assert 'Error:' in result.stderr and 'Exception in thread' not in result.stderr,result.stderr
@@ -95,6 +97,91 @@ def main():
             result=compiler('compile-json',path,'-o',work/'invalid.abd',success=False)
             assert 'Error:' in result.stderr and 'Exception in thread' not in result.stderr,result.stderr
             checks+=1
+        # Diagnostics name the original file and line through includes, and compile and
+        # compile-json report the same text for the same program.
+        (work/'inc').mkdir()
+        header=work/'inc/lib.azs'
+        header.write_text('// header\nint helper(){\n  string s = "x";\n  return 1;\n}\n',encoding='utf-8')
+        program=work/'with-include.azs'
+        program.write_text('// main\n#include "inc/lib.azs"\nint main(){return helper();}\n',encoding='utf-8')
+        compiler('compile',program,'-o',work/'with-include.abd','--ast',work/'with-include.ast.json')
+        tree=json.loads((work/'with-include.ast.json').read_text(encoding='utf-8'))
+        assert tree['sources']==[{'name':'with-include.azs'},{'name':'inc/lib.azs','included-from':{'source':0,'line':2,'column':1}}],tree['sources']
+        helper=next(item for namespace in tree['body'].values() for item in namespace.values() if item['metadata']['name']=='helper')
+        assert helper['metadata']['_file']==1 and helper['metadata']['_line']==2,helper['metadata']
+        helper['script'][0]['param'][1]=1
+        (work/'broken.ast.json').write_text(json.dumps(tree),encoding='utf-8')
+        header.write_text('// header\nint helper(){\n  string s = 1;\n  return 1;\n}\n',encoding='utf-8')
+        from_source=compiler('compile',program,'-o',work/'broken.abd',success=False)
+        assert from_source.stderr==('inc/lib.azs:3:3: error: in function helper: Initializer for s expected string, got int\n'
+                                    'with-include.azs:2:1: note: in file included from here\n'
+                                    'Error: compilation failed: 1 error\n'),from_source.stderr
+        from_json=compiler('compile-json',work/'broken.ast.json','-o',work/'broken.abd',success=False)
+        assert from_json.stderr==from_source.stderr,(from_json.stderr,from_source.stderr)
+        header.write_text('int helper(){\n  return 1 +* 2;\n}\n',encoding='utf-8')
+        syntax=compiler('compile',program,'-o',work/'broken.abd',success=False)
+        assert syntax.stderr.startswith("inc/lib.azs:2:13: error: Expected expression, found '*'\n"
+                                        'with-include.azs:2:1: note: in file included from here\n'),syntax.stderr
+        assert not (work/'broken.abd').exists()
+        checks+=3
+        # Includes search the including directory, then every -I/--include-dir in order, and
+        # must stay inside those roots unless --unrestricted-includes is given.
+        for name,body in (('first','int first(){return 1;}\n'),('second','int second(){return 2;}\n')):
+            (work/name).mkdir();(work/name/(name+'.azs')).write_text(body,encoding='utf-8')
+        (work/'app').mkdir()
+        searching=work/'app/searching.azs'
+        searching.write_text('#include "first.azs"\n#include "second.azs"\nint main(){return first()+second();}\n',encoding='utf-8')
+        compiler('compile',searching,'-I',work/'first','--include-dir',work/'second','-o',work/'searching.abd')
+        result=subprocess.run([str(a.runner),str(work/'searching.abd')],capture_output=True,text=True,timeout=10)
+        assert result.returncode==0 and result.stdout=='3\n',(result.stdout,result.stderr)
+        missing=compiler('compile',searching,'-I',work/'first','-o',work/'searching.abd',success=False)
+        assert missing.stderr.startswith('searching.azs:2:1: error: Include not found: "second.azs" (searched '+str(work.resolve()/'app/second.azs')+', '
+                                         +str(work.resolve()/'first/second.azs')+')\n'),missing.stderr
+        secret=work/'secret.azs';secret.write_text('SECRET_MARKER_42 x;\n',encoding='utf-8')
+        absolute=work/'app/absolute.azs'
+        absolute.write_text(f'#include "{secret.resolve()}"\nint main(){{return 0;}}\n',encoding='utf-8')
+        rejected=compiler('compile',absolute,'-o',work/'absolute.abd',success=False)
+        assert rejected.stderr.startswith('absolute.azs:1:1: error: Absolute include path "') and 'SECRET_MARKER_42' not in rejected.stderr,rejected.stderr
+        opened=compiler('compile',absolute,'-o',work/'absolute.abd','--unrestricted-includes',success=False)
+        assert opened.stderr.startswith('../secret.azs:1:1: error: ') and 'SECRET_MARKER_42' in opened.stderr,opened.stderr
+        escaping=work/'app/escaping.azs'
+        escaping.write_text('#include "../first/first.azs"\nint main(){return first();}\n',encoding='utf-8')
+        escaped=compiler('compile',escaping,'-o',work/'escaping.abd',success=False)
+        assert escaped.stderr.startswith('escaping.azs:1:1: error: Include "../first/first.azs" escapes the allowed include roots ('+str(work.resolve()/'app')+'); add a directory with -I/--include-dir or compile with --unrestricted-includes\n'),escaped.stderr
+        compiler('compile',escaping,'-I',work/'first','-o',work/'escaping.abd','--ast',work/'escaping.ast.json')
+        assert [source['name'] for source in json.loads((work/'escaping.ast.json').read_text(encoding='utf-8'))['sources']]==['escaping.azs','first.azs']
+        aliased=compiler('compile',searching,'-I',work/'first','-I',work/'second','-o',work/'second/second.azs',success=False)
+        assert aliased.stderr.startswith('Error: Output must not overwrite an included source: '),aliased.stderr
+        assert (work/'second/second.azs').read_text(encoding='utf-8')=='int second(){return 2;}\n'
+        json_options=compiler('compile-json',work/'escaping.ast.json','-I',work/'first','-o',work/'json.abd',success=False)
+        assert json_options.stderr=='Error: -I, --include-dir and --unrestricted-includes apply only to compile\n',json_options.stderr
+        # Examples include ../stdlib, which the ./azscript wrapper allows through its default
+        # standard library directory; the plain compiler needs it as -I.
+        example=ROOT/'compiler/examples/math-regressions.azs'
+        plain=compiler('compile',example,'-o',work/'math-client.abd',success=False)
+        assert 'escapes the allowed include roots' in plain.stderr,plain.stderr
+        compiler('compile',example,'-I',ROOT/'compiler/stdlib','-o',work/'math-client.abd')
+        wrapped=subprocess.run([sys.executable,ROOT/'azscript','compile',example,'-o',work/'math-wrapper.abd'],capture_output=True,text=True,timeout=30,cwd=ROOT)
+        assert wrapped.returncode==0 and wrapped.stderr=='',wrapped.stderr
+        assert (work/'math-wrapper.abd').read_bytes()==(work/'math-client.abd').read_bytes()
+        checks+=6
+        # Independent errors are reported together and --max-errors limits them.
+        multiple=work/'multiple.azs'
+        multiple.write_text('int f(){\n  string s = 1;\n  return 0;\n}\nint main(){\n  return missing;\n}\n',encoding='utf-8')
+        several=compiler('compile',multiple,'-o',work/'multiple.abd',success=False)
+        assert several.returncode==1 and several.stderr==('multiple.azs:2:3: error: in function f: Initializer for s expected string, got int\n'
+                                                          'multiple.azs:6:10: error: in function main: Unknown variable: missing\n'
+                                                          'Error: compilation failed: 2 errors\n'),several.stderr
+        first=compiler('compile',multiple,'--max-errors','1','-o',work/'multiple.abd',success=False)
+        assert first.stderr==several.stderr.split('\n')[0]+'\nError: compilation failed: 1 error\n',first.stderr
+        # A malformed compile-json field is named by its JSON path, never by a raw Java message.
+        main_meta=next(item for namespace in tree['body'].values() for item in namespace.values() if item['metadata']['name']=='main')['metadata']
+        main_meta['position']='abc'
+        (work/'position.ast.json').write_text(json.dumps(tree),encoding='utf-8')
+        malformed=compiler('compile-json',work/'position.ast.json','-o',work/'position.abd',success=False)
+        assert malformed.returncode==1 and malformed.stderr.startswith('position.ast.json: error: Malformed script JSON at /body/fff/_funcfff0000/metadata/position: expected an integer, got "abc"\n'),malformed.stderr
+        assert 'Character a is neither' not in malformed.stderr and 'Exception' not in malformed.stderr,malformed.stderr
+        checks+=3
         original=ROOT/'compiler/examples/parser-regressions.azs'
         binary=work/'regressions.abd';ast=work/'ast.json';instructions=work/'instructions.json'
         compiler('compile',original,'-o',binary,'--ast',ast,'--exec-json',instructions)

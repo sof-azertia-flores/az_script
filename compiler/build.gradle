@@ -12,4 +12,8 @@ dependencies {
     testImplementation 'org.junit.jupiter:junit-jupiter'
     testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
 }
-test { useJUnitPlatform() }
+test {
+    useJUnitPlatform()
+    // CompilerScalingTest compiles 20,000 functions, which needs a 1 GiB heap.
+    maxHeapSize = '1g'
+}

@@ -1,6 +1,195 @@
-# 原生栈保护与 Java 执行限制（2026-10-10）
+# 将 main（原生栈保护）合并到编译器路线图（2026-10-16）
 
 中文 | [English](VALIDATION.en.md)
+
+范围：把 main（PR #5，原生栈保护与 Java 执行限制）合并到 c246c20 的编译器路线图分支。README、VALIDATION、runtime_tests.cpp、run_jni_tests.py 与 JniRegression.java 的冲突保留双方内容。JNI 异常消息现在附带脚本栈跟踪，因此原生栈 JNI 断言改为匹配消息前缀，abdJavaInvoker README 也改为说明消息以 `Script native stack limit exceeded` 开头。所有新增操作码和调用路径都经过 `tick()`/`call_guard`。
+
+仅在 Linux x86_64 上验证，`JAVA_TOOL_OPTIONS` 已取消：
+
+- `python3 tools/build_and_test.py --offline`：通过（731 秒）。
+- `python3 tools/build_and_test.py --offline --sanitize`：通过（849 秒），没有 AddressSanitizer 或 UndefinedBehaviorSanitizer 报告。
+- 本次合并未重新运行发行导出。
+
+# C28 编译器路线图最终验证（2026-10-15）
+
+
+`claude/confident-galileo-fic3s1` 的 C01–C28 已完成，最终实现为 `7fc5a12`。C28 仅修改文档，V1/V2 证据引用 C27 对同一最终源码顺序完成的完整运行，文档修改后未重复这些已通过的套件。以下 V3、全部实测及 JFR 随后在该干净提交上实际执行。exec 与 JNI 快照均保持 v10。
+
+V0 检查空白、新文件、文档链接及回归覆盖清单。V1/V2 各通过330项 Java 测试、5944项原生检查、355项深度差分及405项独立线格式检查。V1另通过3402项真实JVM JNI断言、四线程800次调用及1000模块链接；V2不含JNI，无ASan/UBSan报告。全新V3通过30项搬迁发行/消费者验收，包含两种万项链、静态/动态C++消费者、内置Java执行及真实JNI；175个清单文件大小及SHA-256逐一吻合。
+
+激活 `/workspace/azscript-toolchain/activate.sh` 后实际顺序执行：
+
+```sh
+env -u JAVA_TOOL_OPTIONS python3 tools/build_and_test.py --offline
+env -u JAVA_TOOL_OPTIONS python3 tools/build_and_test.py --offline --sanitize
+env -u JAVA_TOOL_OPTIONS -u JDK_JAVA_OPTIONS -u _JAVA_OPTIONS python3 tools/export_distribution.py build/c28-distribution --offline
+```
+
+V1/V2日志与报告：`build/c27/v1.log`、`v2.log`、`limits-v1.json`、`limits-v2.json`（`validation.exit=0`）；V3日志为 `build/c28-evidence/v3.log`，发行包位于 `build/c28-distribution`。两份差分报告均含254条通过、73条明确不可行、24条已编译依赖及16条非独立单元记录；不可行记录中35条带精确的链作用域拒绝分类。逐条原因保存在报告中，这些属于预期拒绝检查；非独立库通过链接客户端执行。96/64/48预算分别在17/24/24个案例中实际增加局部槽/定义指令，并保持适用案例的输出、异常和析构行为。
+
+实测环境为Linux x86_64、Temurin21.0.12.1+1、4 CPU配额、32GiB内存上限及 `-Xmx1g`。每个输入运行三次独立JVM，并移除所有继承的Java选项变量。下表各耗时列分别取中位数。进程总耗时包含JVM启动、指标遍历和ABD写入；流水线包含解析/AST、编译、编码和计数器读取。RSS为三次GNU time进程峰值中的最大值，包含JVM原生内存；另行记录的堆池峰值并非同时发生，不能当作峰值堆或RSS。
+
+| 输入 | 解析+AST秒 | 编译秒 | 编码秒 | 流水线秒 | 进程总秒 | 最大RSS MiB | ABD字节 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 局部变量2千 | 0.232 | 0.297 | 0.035 | 0.575 | 0.704 | 143.21 | 362247 |
+| 局部变量8千 | 0.420 | 0.848 | 0.083 | 1.361 | 1.556 | 339.69 | 1448247 |
+| 局部变量3.2万 | 0.804 | 2.237 | 0.252 | 3.245 | 3.511 | 801.62 | 5792247 |
+| 语句2万 | 0.525 | 1.131 | 0.162 | 1.777 | 2.022 | 519.46 | 2560247 |
+| 函数2万 | 1.565 | 4.072 | 0.417 | 6.051 | 6.327 | 1089.61 | 13919764 |
+| 字符串链1万 | 0.166 | 0.634 | 0.039 | 0.850 | 0.998 | 178.83 | 320293 |
+| else-if链1万 | 0.404 | 1.122 | 0.147 | 1.639 | 1.832 | 519.66 | 1580518 |
+
+每个输入的三次运行中，五种确定性工作计数、总计、局部槽总数、指定opcode计数及ABD字节/SHA-256均一致。局部变量每增加4倍，工作量比为3.99962和3.99990，观测进程耗时比为2.20895和2.25624；这些耗时只描述本机，不作为跨机器性能阈值。已有确定性规模回归继续约束增长。
+
+| 输入 | scope_probes | type_evaluations | compiled_nodes | id_probes | table_probes | total_work |
+| --- | --- | --- | --- | --- | --- | --- |
+| 局部变量2千 | 36004 | 50003 | 16005 | 0 | 1 | 102013 |
+| 局部变量8千 | 144004 | 200003 | 64005 | 0 | 1 | 408013 |
+| 局部变量3.2万 | 576004 | 800003 | 256005 | 0 | 1 | 1632013 |
+| 语句2万 | 260004 | 580003 | 120005 | 0 | 1 | 960013 |
+| 函数2万 | 3679869 | 2039931 | 619981 | 20000 | 100001 | 6459782 |
+| 字符串链1万 | 515464 | 920924 | 20007 | 0 | 1 | 1456396 |
+| else-if链1万 | 200014 | 90014 | 80016 | 1 | 5 | 370050 |
+
+| 输入 | 函数记录 | 局部槽 | define/move/drop | 原生输出 |
+| --- | --- | --- | --- | --- |
+| 局部变量2千 | 1 | 2001 | 2001/0/0 | 995 |
+| 局部变量8千 | 1 | 8001 | 8001/0/0 | 997 |
+| 局部变量3.2万 | 1 | 32001 | 32001/0/0 | 994 |
+| 语句2万 | 1 | 1 | 1/0/0 | 997 |
+| 函数2万 | 20001 | 19999 | 19999/0/0 | 仅编译 |
+| 字符串链1万 | 1 | 2 | 2/0/0 | 10000 |
+| else-if链1万 | 2 | 1 | 1/0/0 | 9999 |
+
+`define/move/drop`仅统计这三种opcode，局部槽同时包括源码变量和生成变量；它们不是总指令数，也不能识别全部生成临时量。六组可执行输入的原生stdout均精确匹配上表且stderr为空。2万函数生成器连同main共有20001条函数记录，仅验证编译，因为运行其递归调用链会超过运行时深度预算。
+
+单独的2万函数JFR运行成功，未计入耗时中位数，共含224条ExecutionSample事件。每条采样栈首次出现的项目帧包括 `AstShape.drainNodes`28次、`Compiler.compileProgram`13次、`AstShape.field`12次、`Compiler.scopeDependencies`12次及 `GeneraterJson$Lexer.scan`11次。这些是采样次数，并非耗时或CPU占比；采样也包含测量程序遍历，未据此推断前后热点改进。
+
+证据：`build/c28-evidence/metrics/metrics.json`（逐次命令、计数、大小、摘要、RSS及输出）、`functions-20000.jfr`、`functions-hotspots.json`，以及 `build/c28-evidence/metrics.log` 和 `validation.exit=0`。输入复用 `tools/bench_compiler.py` 生成器；外部测量程序位于 `/workspace/azscript-toolchain/c28-validation`，Java探针SHA-256为 `ee6448488e28304bae6945c00ffcd220030c0d01bb266304cee59922bd76fef2`。
+
+最终[探针清单](docs/compiler-roadmap/PROBE_COVERAGE.md)将可取得、具体且属于本轮范围的路线图探针映射到回归源码。原scratchpad/交接输入缺失，无法认证未披露的原始输入。堆分配代次、删除后使用、重复删除、自动对象逃逸及已拒绝的ID工具仍不在本轮范围内；Windows/macOS及[STATUS](docs/compiler-roadmap/STATUS.en.md)所列后续事项仍按其说明保持未验证或未解决。
+
+# C27 扁平 else-if 链（2026-10-15）
+
+中文 | [English](VALIDATION.en.md)
+
+解析器迭代收集分支，128个条件以内保持旧 AST。降级按实际剩余物理深度选择嵌套形式或单次循环形式。首个经过布尔检查的条件作为兄弟语句保留在原作用域，后续条件和移动的分支体需要间接作用域影响证明；不能保持生命周期/作用域时给出带位置的局部变量提示。已一起核对原循环/switch跳转、函数式if值、返回分析、警告、AST校验、帮助及双语契约。exec与JNI快照均保持v10。
+
+清除 JAVA_TOOL_OPTIONS 后顺序通过 V0–V2：两次构建各330项 Java 测试、5944项原生检查、3402项JNI断言/四线程800次调用、1000模块链接及405项独立线格式检查。普通/ Sanitizer各通过355项深度差分，覆盖121/125/128/129/200/10000条件、三层循环内110条件、首条件精确调用栈、首次命中计数、原跳转目标及清理。每份报告含254条通过、73条明确不可行记录（其中35条带精确的链作用域拒绝分类）、24条已编译依赖及16条非独立单元；96/64/48预算分别在17/24/24个案例中实际增加locals/defines，无ASan/UBSan报告。
+
+完整运行前，114项定向Java测试和125项链检查通过。集成时修正两处Java指针返回声明，并将首次命中夹具的ANY全局计数器改为int，保留副作用断言；独立源码复核未发现其他阻塞。日志/报告：build/c27/v1.log、v2.log、limits-v1.json、limits-v2.json、ladder-target.log、ladder-target.json；validation.exit为0。C27无需V3，C28引用这些最终实现的完整运行并补充全新发行验收和实测。
+
+# C26 扁平运算链（2026-10-15）
+
+中文 | [English](VALIDATION.en.md)
+
+超过128操作数的链使用带位置且严格校验的扁平 AST，较短 AST 保持字节一致。安全字符串/布尔链平衡处理，数值与混合链通过私有类型化占位符及64操作数分段保留左折叠顺序。无需新增 SourceRules 关键字；已一起核对语言契约、警告遍历及 CLI/发行启动器帮助。
+
+清除 JAVA_TOOL_OPTIONS 后顺序通过 V0–V2：两次构建各321项 Java 测试、5944项原生检查、已有真实 JVM JNI/模块套件及405项独立线格式检查。普通/ Sanitizer各通过226项深度差分，覆盖万项字符串、调用、混合加法、中途溢出、浮点舍入和短路。96/64/48预算分别在16/23/23个案例中实际增加 locals/defines；每份报告含177条通过、38条有明确原因的不可行记录、22条已编译依赖及16条非独立单元记录，无 ASan/UBSan 报告。
+
+验证发现解析器可能因 JVM 编译状态而在320语法保护前栈溢出。显式优先级组移除了每层括号附带的十层优先级递归，保持分组及上限。新增 -Xint/-Xss512k 回归已确认旧编译器失败、修复后通过；完整重跑前另有91项定向 Java 测试通过。中断的运行未计入结果。最终日志：build/c26/v1-final.log、v2-final.log，final-validation.exit为0；报告为 limits-v1.json、limits-v2.json。C26无需V3，最终发行验收记录于C28。
+
+# C25 精确 ABD 深度与语句拆分（2026-10-15）
+
+中文 | [English](VALIDATION.en.md)
+
+新增覆盖全部指令的迭代式 ExecShape 测量、逐函数降级元数据，以及适用急切表达式的同级语句拆分。保留求值顺序、类型化 OA 偏移/目标验证和拥有的临时对象；惰性、while 条件、独立表达式或无法证明复制/生命周期/作用域安全的拆分，会给出定位后的局部变量提示。跨函数作用域效果分析采用迭代算法。IF 条件临时对象在分支前释放，构造完成记录保持原子。无需更改线格式、运行时或版本。
+
+清除 JAVA_TOOL_OPTIONS 后顺序通过所需 V0–V2：316项 Java 测试、5944项原生检查、405项独立线格式用例及既有 JNI、模块和生命周期套件。普通和 Sanitizer完整运行各通过152项深度差分检查；96/64/48预算分别在12/13/13个用例中产生额外槽和定义。可行示例保持精确输出；每份报告35条不可行记录附明确原因，16条声明/库记录不单独执行。实际新建 OBJECT 接收者的保留增加一次 DROP，析构顺序保持一致。完整构建之后，两个运行时各另通过20项返回对象检查，覆盖缓冲区复制、调用参数消费、OBJECT/MOVE_OUT返回和首错保留；完整运行之后未再改生产代码。无 ASan/UBSan 报告。
+
+集成时修正了源码锚点类型、AbdLinearizer 限制错误分类、旧诊断夹具构造参数和两处原始读取初始化转换，然后成功重跑。独立审查未发现剩余阻塞问题。日志/报告：build/c25/v1.log、v2.log、limits-v1.json、limits-v2.json、owned-return-normal.log、owned-return-sanitize.log。本项无需 V3；保留 C24 已验收发行包，C28 将重新完成最终发行验收。
+
+# C24 虚方法与快照 v10（2026-10-15）
+
+中文 | [English](VALIDATION.en.md)
+
+新增 virtual/override/final、opcode52–53 和用户 slots 之外的绑定方法上下文；Base::、类值和 final 调用静态绑定，指针、this、T 动态派发。构造/析构阶段即使方法表为空也会替换。派生类构造失败时先清理已完成的自有字段，再清理已完成的基类，不调用失败派生类的用户析构函数。平衡 finalizer 在异常后继续清理，并保留首个异常及调用栈。JNI 快照 v10 要求经过校验的方法数组，损坏快照被原子拒绝；exec 保持 v10。已同步中英文 SDK、语言、hint 和 AGENTS 契约。
+
+清除 JAVA_TOOL_OPTIONS 后顺序通过 V0–V3：293项 Java 测试、5944项原生检查、3402项 JNI 断言、四线程800次调用及1000模块链接。虚方法套件普通/ Sanitizer分别80/79项，覆盖阶段、错误、所有权、跨 hint 和快照；独立线格式各389项，无 ASan/UBSan 报告。审查和针对性验证修正了构造指令索引断言、一处 Java lambda 捕获及无效的外部方法夹具，然后完整重跑。发行包通过27项迁移/消费者验收，包含真实 JNI 和静态/动态 SDK 消费者，175个清单文件大小和 SHA-256 全部吻合。日志：build/c24/v1.log、build/c24/v2.log、build/c24/v3.log。
+
+# C23 反射结果检查（2026-10-15）
+
+中文 | [English](VALIDATION.en.md)
+
+opcode51 检查类指针、类值、缓冲区及类型参数的反射结果。具体类指针必须为空或存活的已注册对象/字面对象起点，并符合已知字段前缀标签；类值要求运行时宽度精确一致，缓冲区比较结构化元素上下文。未知泛型指针仅检查存活状态。文档明确名义类身份和指针字段目标不在检查范围内。exec 保持 v10，快照保持 v9。
+
+清除 JAVA_TOOL_OPTIONS 后依次通过 V0–V3：两次构建各275项 Java 测试和5837项原生检查；普通/ Sanitizer泛型反射套件分别90/81项，独立线格式各354项，地址套件各119项。既有 JNI、模块和生命周期套件均通过，无 ASan/UBSan 报告。独立审查未发现生产阻塞问题；完整验证前修正新原生夹具中的变量遮蔽和新 Java 夹具中的缺失括号。发行包通过26项迁移/消费者验收，174个清单文件大小和 SHA-256 全部吻合。日志：build/c23/v1.log、build/c23/v2.log、build/c23/v3.log。
+
+# C22 类型化指针与对象存储（2026-10-15）
+
+中文 | [English](VALIDATION.en.md)
+
+类指针必须放入有类型的位置，或显式用 address(p) 擦除类型。内部 object_alloc 在构造前标记整个存储范围；原始内存操作与 JNI 写入/释放拒绝对象起点、内部地址和字面对象/视图地址。类型化成员解码保留检查，手动对象仅在注册成功后解除自动所有权，快照恢复重建标记且不更改版本。已记录可信宿主构造方式和约定的堆安全限制。
+
+清除 JAVA_TOOL_OPTIONS 后顺序通过 V0–V3：270项 Java 测试、5768项原生检查、2940项 JNI 断言、四线程800次调用与1000模块链接。运算符套件普通/ Sanitizer分别362/354项，地址套件各119项，独立线格式各330项，无 ASan/UBSan 报告。独立审查未发现生产阻塞问题；完整重跑前修正了过时的分配器 ID 断言和一处析构日志重置。发行包通过26项迁移/消费者验收，174个清单文件大小和 SHA-256 全部吻合。exec 保持 v10，快照保持 v9。日志：build/c22/v1.log、build/c22/v2.log、build/c22/v3.log。
+
+# C21 Unicode 字符串函数（2026-10-15）
+
+中文 | [English](VALIDATION.en.md)
+
+新增九个严格 UTF-8 字符串内建函数、码点索引和不可变的方法语法。流式校验覆盖内嵌 NUL、非法编码、码点与范围错误及搜索，无需分配码点数组。方法调用直接绑定内建 ID；私有 UTF-8 辅助头文件不属于 SDK。exec 保持 v10，快照保持 v9。
+
+清除 JAVA_TOOL_OPTIONS 后依次通过 V0–V3：264 项 Java 测试、5619 项原生检查、普通构建361项及 Sanitizer构建353项运算符/字符串用例、314项独立线格式用例。既有 JNI、模块和生命周期套件均通过，无 ASan/UBSan 报告。审查修正两处过时或无效的 Java 测试夹具后完整重跑。发行包通过26项迁移/消费者验收，174个清单文件的大小和 SHA-256 全部吻合。日志：build/c21/v1.log、build/c21/v2.log、build/c21/v3.log。
+
+# C20 switch 语句（2026-10-15）
+
+中文 | [English](VALIDATION.en.md)
+
+新增 int/string switch，支持分组字面量标签、任意位置的 default、各节独立作用域，禁止贯穿。标签比较平衡组合，各节通过 SyntheticLoop 扁平降级，不新增 opcode。break 退出 switch，continue 转向最近的真实循环。覆盖重复标签、类型和贯穿错误、返回值分析、警告、严格 AST 验证及 CLI/启动器帮助。
+
+取消 JAVA_TOOL_OPTIONS 后通过所需 V0、V1、V3：257项 Java 测试、5079项原生检查、313项操作符/switch 端到端用例、290项独立格式用例及既有 JNI/模块/生命周期套件。发行导出通过25项搬迁/消费者检查，173个清单文件的大小及 SHA-256 全部匹配。独立审查未发现阻塞问题。exec 保持 v10，快照保持 v9；运行时代码未变，本项不要求单独执行 V2。日志：build/c20/v1.log、build/c20/v3.log。
+
+# C19 三元表达式（2026-10-15）
+
+中文 | [English](VALIDATION.en.md)
+
+新增右结合的布尔 `?:`，仅在外层作用域执行选中分支，通过 convert 提升数值类型，严格检查分支类型并递归检查接收者是否可写。opcode50 select 保留语句及拥有对象的寿命。冒号词法保留十六进制 ID 原文，表达式字面量则执行正常的严格扫描。exec 保持 v10，JNI 快照保持 v9。
+
+取消 JAVA_TOOL_OPTIONS 后顺序通过 V0–V3：247 项 Java 测试、5079 项原生检查、普通构建272项及 Sanitizer266项操作符/三元表达式用例、290项独立格式用例。既有 JNI、生命周期、栈信息、数学库和模块套件均通过，无 ASan/UBSan 报告。审查未发现生产实现阻塞问题；新增测试夹具改为十进制0010及受支持的类 operator[]/buffer.get 语法后完整重跑。发行导出通过25项搬迁/消费者检查，173个清单文件大小与 SHA-256 全部匹配。日志：build/c19/v1.log、build/c19/v2.log、build/c19/v3.log。
+
+# C18 数值返回值只允许拓宽（2026-10-15）
+
+中文 | [English](VALIDATION.en.md)
+
+函数返回值现在只允许精确类型、相容的名义类型引用，以及 int→float/double、float→double。已知收窄产生显式转换提示，动态收窄报告预期与实际类型。math_trunc 改用受检查的 int()，整数域错误路径保持 Division by zero。公开数学库 ID、exec v10 和 JNI 快照 v9 均未改变。
+
+取消 JAVA_TOOL_OPTIONS 后顺序通过 V0–V3。两个完整构建均通过 241 项 Java 测试和 4964 项原生检查。类型安全套件普通构建通过 52 项，Sanitizer 通过 50 项；数学库回归、数值对比及错误用例全部通过。既有格式、生命周期、JNI 和模块套件均通过，无 ASan/UBSan 报告。审查在执行前将一个无效的普通 ANY 返回值测试夹具改为合法泛型上下文。发行导出通过 25 项搬迁/消费者检查，173 个清单文件的大小与 SHA-256 全部匹配。日志：build/c18/v1.log、build/c18/v2.log、build/c18/v3.log。
+
+# C17 显式标量转换（2026-10-15）
+
+中文 | [English](VALIDATION.en.md)
+
+新增受检查的 `int()`、`float()`、`double()`、`string()`、`address()` 转换及 opcode 49。数值转 int 先截断再检查范围；字符串采用严格十进制语法，浮点解析使用独立 C locale，并允许下溢。不支持的类型组合、溢出和格式错误产生带位置的运行时错误。静态同类型转换不生成指令。本阶段仍拒绝布尔、类及 int/address 互转。exec 保持 v10，JNI 快照保持 v9。
+
+取消 `JAVA_TOOL_OPTIONS` 后顺序通过 V0–V3。两个完整构建均通过 238 项 Java 测试和 4824 项原生检查。操作符/转换套件普通构建通过 226 项（含真实 JNI），Sanitizer 通过 222 项；273 项独立二进制格式用例全部通过。既有跨语言、生命周期、数学库、模块及 JNI 套件均通过，无 ASan/UBSan 报告。一个新增 Java 断言最初预期保留字诊断，而解析器正确报告类型名声明错误；修正为准确预期后完整重跑。独立审查未发现生产实现阻塞问题。发行导出通过 25 项搬迁/消费者检查，173 个清单文件的大小及 SHA-256 全部匹配。日志：`build/c17/v1.log`、`build/c17/v2.log`、`build/c17/v3.log`。
+
+# C16 位运算与移位（2026-10-15）
+
+中文 | [English](VALIDATION.en.md)
+
+新增 int32 的 `& | ^ ~ << >> >>>` 与局部变量复合赋值，使用 opcode 43–48。表达式按预处理文本偏移合并相邻尖括号符号，同时保留泛型结束符。运行时以无符号位运算实现位模式及算术/逻辑右移，移位数量限于 0–31。exec 保持 v10，JNI 快照保持 v9。
+
+在取消 `JAVA_TOOL_OPTIONS` 后顺序通过 V0–V3。两个完整构建均通过 232 项 Java 测试和 4515 项原生检查；操作符端到端套件普通构建通过 104 项（含真实 JNI），Sanitizer 通过 102 项。既有跨语言、生命周期、hint 和 JNI 套件均通过，无 ASan/UBSan 报告。首次 Java 测试错误地预期解析诊断包含 `?`，已改为核对准确位置和消息后完整重跑。独立代码审查未发现阻塞问题。发行导出通过 25 项搬迁/消费者检查，173 个清单文件的大小及 SHA-256 全部匹配。日志：`build/c16/v1.log`、`build/c16/v2.log`、`build/c16/v3.log`。
+
+# C15 布尔条件与相容相等比较（2026-10-15）
+
+中文 | [English](VALIDATION.en.md)
+
+条件和逻辑运算数现在必须为 boolean：已知类型在编译时检查，动态值在运行时检查。相等运算允许混合数值、相同基础类型及既有的兼容地址/类指针配对，不相容的动态标签会报错。运行时 void/void 仍相等，也覆盖未赋值的动态变量；静态 void 表达式仍被拒绝。未改变 opcode、exec 或快照版本。
+
+取消 `JAVA_TOOL_OPTIONS` 后顺序完成 V1 和 V2，均通过 225 项 Java 测试、2067 项原生检查，以及既有 JNI、跨语言和端到端套件。普通类型套件通过 35 项，补入的动态 void 用例另行通过，sanitizer 类型套件包含完整 36 项；未发现 ASan/UBSan 报告。V3 `python3 tools/export_distribution.py build/dist-check --offline --force` 通过 25 项搬迁及消费者检查，包括发行工具拒绝数字条件和不相容相等比较；173 个清单文件的大小及 SHA-256 均一致。V0 空白与改动文件审查通过。日志：`build/c15/v1.log`、`build/c15/void-targeted.log`、`build/c15/v2.log`、`build/c15/v3.log`。
+
+# C14 脚本运行时调用栈（2026-10-15）
+
+中文 | [English](VALIDATION.en.md)
+
+从 C13 之后继续 `claude/confident-galileo-fic3s1`。运行时错误现在保留脚本及原生调用帧；显式 `-g` 提供源码位置，未开启时显示十六进制函数 ID。清理保留首个异常及其调用栈。JNI 保持原有异常映射和 Java 回调异常对象身份，同时携带多行 UTF-8 信息。C++ 宿主在清理前调用 `describe_error()`；宿主及插件须按配套公开 ABI 重建。exec 仍为 v10，JNI 快照仍为 v9。
+
+在取消 `JAVA_TOOL_OPTIONS` 的环境下顺序执行 V0 空白及未跟踪文件审查、V1 `python3 tools/build_and_test.py --offline`、V2 同命令追加 `--sanitize`、V3 `python3 tools/export_distribution.py build/dist-check --offline`，全部退出 0。两种构建均通过 221 项 Java 测试和 1428 项原生运行时检查。普通 JNI 通过 2680 项断言、4 个线程的 800 次调用、23 个独立进程入口用例及 1000 模块深链接。新增源码调用栈套件分别通过普通构建 15 项、sanitizer 构建 13 项，覆盖源码/AST/ABD 字节一致、生命周期和析构错误、hint/include 调用帧及 Unicode 位置。未发现 ASan/UBSan 报告。
+
+Linux x86_64 Release 导出通过 24 项搬迁及消费者检查，包含调试版与无调试信息版精确报错、静态/共享 C++ SDK 及真实 JNI 消费者；清单包含 173 个文件。日志：`build/c14/v1.log`、`build/c14/v2.log`、`build/c14/v3.log`；验收包：`build/dist-check/`。C15–C28 保留为后续独立工作。
+
+# 原生栈保护与 Java 执行限制（2026-10-10）
 
 解释器在原生栈上递归执行调用、代码块和表达式，而步数、调用深度和 128 层 ABD 嵌套限制都不约束栈用量。默认 1 MiB Java 线程上，每层含 20 层嵌套加法的函数递归 254 次（`AbdInvoker.invoke(0x12340001, 254)`）会使 JVM 以 SIGSEGV（退出码 139）终止；C++ 小栈线程同样崩溃。现在每个线程记录最外层脚本调用开始的位置，`call_guard`（脚本与宿主函数调用）和 `tick`（每个代码块和表达式）检查当前帧：接近线程实际栈底，或超过新增的 `script::max_stack_bytes` 预算时，抛出 `std::runtime_error("Script native stack limit exceeded")`。栈范围通过 `pthread_getattr_np`、`pthread_get_stackaddr_np` 或 `GetCurrentThreadStackLimits`（Windows 8+）获取并按线程缓存，栈底前保留栈大小的四分之一（至少 64 KiB、至多 1 MiB）；无法检测时使用 256 KiB 预算。宿主回调重入沿用同一线程的最外层位置。已有清理和首错保留语义不变：已进入的调用正常展开，作用域分配被释放，栈不足时析构的处理与步数或深度耗尽相同。
 
@@ -13,6 +202,8 @@ Java 新增 `AbdInvoker.setMaxSteps`、`setMaxCallDepth`、`setMaxStackBytes` �
 日志：`build/native-stack-validation.log`、`build/native-stack-sanitize.log`、`build/native-stack-sanitize-no-scope.log`。
 
 # 发行导出与宿主入口遗漏修复（2026-09-27）
+
+中文 | [English](VALIDATION.en.md)
 
 发行验收仍把控制指令限制为 3～35，导致泛型与 buffer 的 36～42 被误报为非数字。现已覆盖当前指令，并在错误中显示文件、节点和实际值；发行清单中残留的 exec/快照版本 7 改为 9。新增回归分别核对编译器指令表、exec 版本和 JNI 快照读写版本，避免再次遗漏。原生缺失字段回归补入 40～42；hint 中英文说明补充无参类的原地构造辅助入口。
 

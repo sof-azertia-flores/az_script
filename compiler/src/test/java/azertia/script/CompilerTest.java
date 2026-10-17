@@ -17,9 +17,13 @@ import static org.junit.jupiter.api.Assertions.*;
 
 class CompilerTest {
     @TempDir Path temporary;
+    /** Parses and compiles with one collector, so a compiler bug fails the test instead of passing as a rejection. */
     private JsonObject compile(String source) throws Exception {
-        var script = new GeneraterJson.AzScript(); script.execute(source);
-        return Compiler.compile(script.toObj()).toJson().getAsJsonObject();
+        var diagnostics = new Diagnostics(); var script = new GeneraterJson.AzScript();
+        try {
+            script.execute(source, diagnostics);
+            return Compiler.compile(script.toObj(), diagnostics).toJson().getAsJsonObject();
+        } catch (CompileException error) { assertFalse(error.internal(), error::getMessage); throw error; }
     }
     private JsonObject main(String source) throws Exception {
         for (JsonElement function : compile(source).getAsJsonArray("f"))
@@ -84,7 +88,7 @@ class CompilerTest {
                 + "int main(){return helper(3,\"__func_param0\");}");
         tree.getAsJsonObject("metadata").addProperty("version", 29);
         JsonObject compiled = Compiler.compile(tree).toJson().getAsJsonObject();
-        assertEquals(9, compiled.get("exec-version").getAsInt());
+        assertEquals(ExecCodec.VERSION, compiled.get("exec-version").getAsInt());
         assertEquals(29, compiled.get("version").getAsInt(), "source version is not the executable format version");
         assertTrue(compiled.get("gvs").getAsJsonPrimitive().isNumber());
         assertEquals(2, compiled.get("gvs").getAsInt());
@@ -173,7 +177,9 @@ class CompilerTest {
         assertEquals(2, main("int main(int a,b){return a+b;}").get("param-count").getAsInt());
         assertThrows(IllegalArgumentException.class, () -> compile("int main(){return f(1);} int f(a,b){return a+b;}"));
         var unknown = assertThrows(IllegalArgumentException.class, () -> compile("int main(){\n return missing;\n}"));
-        assertTrue(unknown.getMessage().contains("main:2:")); assertTrue(unknown.getMessage().contains("missing"));
+        assertTrue(unknown.getMessage().startsWith("<source>:2:"), unknown::getMessage);
+        assertTrue(unknown.getMessage().contains("error: in function main: "), unknown::getMessage);
+        assertTrue(unknown.getMessage().contains("missing"));
         assertThrows(IllegalArgumentException.class, () -> compile("void main(){unknown();}"));
         assertThrows(IllegalArgumentException.class, () -> compile("void main(){return 1;}"));
         assertThrows(IllegalArgumentException.class, () -> compile("int main(){return();}"));
@@ -231,6 +237,73 @@ class CompilerTest {
                 "extern int builtin():0xabd0001;\nvoid main(){}", "extern int lifecycle():0xfff0000;\nvoid main(){}",
                 "float main(){return 1e100f;}"})
             assertThrows(IllegalArgumentException.class, () -> compile(invalid), invalid);
+    }
+    @Test void reservedNamespacesAreRejectedInSourceAndAst() throws Exception {
+        String lifecycle = "Namespace 0000 is reserved for lifecycle hooks and hint-library placeholders";
+        String runtime = "Namespace 0abd is reserved for runtime built-ins";
+        for (String spelling : List.of("0", "0000", "0x0", "0X0000"))
+            assertEquals("<source>:1:1: error: " + lifecycle, assertThrows(CompileException.class,
+                    () -> compile("#namespace " + spelling + "\nint helper(){return 1;}")).getMessage(), spelling);
+        for (String spelling : List.of("abd", "0abd", "0x0abd", "0ABD"))
+            assertEquals("<source>:1:1: error: " + runtime, assertThrows(CompileException.class,
+                    () -> compile("#namespace " + spelling + "\nint helper(){return 1;}")).getMessage(), spelling);
+        // Each rejected directive is reported where it stands; a rejected one does not count as the unit's namespace.
+        assertEquals("<source>:2:3: error: " + lifecycle + "\n<source>:3:1: error: " + runtime,
+                assertThrows(CompileException.class, () -> compile("int main(){return 0;}\n  #namespace 0\n#namespace abd\n")).getMessage());
+        // 0fff is the default namespace, so naming it explicitly changes nothing.
+        byte[] implicit = Compiler.compile(newTree("int helper(){return 1;} int main(){return helper();}")).toValue().toAbdFormat();
+        for (String spelling : List.of("fff", "0fff", "0x0fff")) {
+            JsonObject explicit = newTree("#namespace " + spelling + "\nint helper(){return 1;} int main(){return helper();}");
+            assertEquals(0xfff, explicit.getAsJsonObject("metadata").get("function-namespace").getAsInt(), spelling);
+            assertArrayEquals(implicit, Compiler.compile(explicit).toValue().toAbdFormat(), spelling);
+        }
+        for (String spelling : List.of("1", "ffff", "0abc", "0abe"))
+            assertDoesNotThrow(() -> compile("#namespace " + spelling + "\nint helper(){return 1;}"), spelling);
+        // Lifecycle hooks of an ordinary module keep ids 0 and 1, and externs may still name namespace 0000.
+        String hooks = "extern int placeholder():00000005;void __script_onload(){}void __script_pre_destroy(){}int main(){return 0;}";
+        assertDoesNotThrow(() -> Compiler.compile(newTree(hooks)).toValue());
+
+        // compile-json applies the same rules to an AST that bypassed the parser.
+        String source = "int helper(){return 1;}\nint main(){return helper();}\n";
+        JsonObject zero = newTree(source); zero.getAsJsonObject("metadata").addProperty("function-namespace", 0);
+        assertEquals("<source>: error: Invalid function namespace: 0000 is reserved for lifecycle hooks and hint-library placeholders",
+                assertRejected(zero, "function-namespace 0").getMessage());
+        JsonObject builtin = newTree(source); builtin.getAsJsonObject("metadata").addProperty("function-namespace", 0xabd);
+        assertEquals("<source>: error: Invalid function namespace: 0abd is reserved for runtime built-ins",
+                assertRejected(builtin, "function-namespace abd").getMessage());
+        JsonObject explicitDefault = newTree(source); explicitDefault.getAsJsonObject("metadata").addProperty("function-namespace", 0xfff);
+        assertArrayEquals(Compiler.compile(newTree(source)).toValue().toAbdFormat(), Compiler.compile(explicitDefault).toValue().toAbdFormat());
+        for (String namespace : List.of("0", "abd")) {
+            JsonObject moved = newTree(source); JsonObject body = moved.getAsJsonObject("body");
+            JsonObject helper = body.getAsJsonObject("fff").remove("_funcfff0001").getAsJsonObject();
+            // Position 2, because 0000/0001 are the lifecycle hooks an ordinary module may define.
+            helper.getAsJsonObject("metadata").addProperty("position", 2);
+            JsonObject target = new JsonObject(); target.add("_func" + Integer.toHexString(Integer.parseInt(namespace, 16) << 16 | 2), helper);
+            body.add(namespace, target);
+            assertEquals(namespace.equals("0")
+                            ? "<source>:1:11: error: Invalid definition namespace: outside hint libraries, namespace 0000 holds only the lifecycle functions 0x00000000 and 0x00000001"
+                            : "<source>:1:11: error: Invalid definition namespace: 0abd is reserved for runtime built-ins",
+                    assertRejected(moved, "definition in", namespace).getMessage());
+        }
+        // A hint library keeps its definitions in the 0000 placeholder namespace.
+        assertDoesNotThrow(() -> Compiler.compile(newTree("#namespace_hint LIB\n" + source)).toValue());
+    }
+    @Test void ordinaryDefinitionsInheritIdsFromSelfExterns() throws Exception {
+        // The shared header writes the full ID once; the implementation omits the number and inherits it.
+        String source = "#namespace 1234\nextern int other():12340003;\n"
+                + "int helper(){return 1;} int two(){return 2;} int other(){return helper()+two();} int four(){return 4;}\n"
+                + "int main(){return other()+four();}";
+        var script = new GeneraterJson.AzScript(); script.execute(source);
+        for (var expected : List.of(List.of("helper", 0x12340001), List.of("two", 0x12340002), List.of("other", 0x12340003), List.of("four", 0x12340004)))
+            assertEquals(expected.get(1), script.functions.stream().filter(item -> item.name.equals(expected.get(0))).findFirst().orElseThrow().id,
+                    expected.get(0).toString());
+        JsonObject tree = script.toObj();
+        assertTrue(tree.getAsJsonObject("body").getAsJsonObject("1234").has("_func12340003"));
+        assertEquals("12340003", tree.getAsJsonObject("abstract").get("other").getAsString());
+        assertTrue(Compiler.compile(tree).toJson().getAsJsonObject().getAsJsonArray("f").asList().stream()
+                .anyMatch(item -> item.getAsJsonObject().get("id").getAsInt() == 0x12340003));
+        // A repeated number must still agree with the declaration.
+        assertThrows(CompileException.class, () -> compile(source.replace("int other()", "int other():0004")));
     }
     @Test void typedExternSignaturesAndDeclaredScriptTypesReachAbd() throws Exception {
         var script = new GeneraterJson.AzScript();
@@ -380,7 +453,7 @@ class CompilerTest {
             var reserved = new GeneraterJson.AzScript(); reserved.execute("void main(){}");
             JsonObject reservedTree = reserved.toObj();
             reservedTree.getAsJsonObject("abstract").addProperty(builtin, "ccf0001");
-            assertThrows(IllegalArgumentException.class, () -> Compiler.compile(reservedTree), builtin);
+            assertRejected(reservedTree, builtin);
         }
         assertThrows(IllegalArgumentException.class, () -> compile(
                 "#unknown_directive ignored\nvoid main(){}"));
@@ -389,13 +462,13 @@ class CompilerTest {
         var forgedRuntime = new GeneraterJson.AzScript(); forgedRuntime.execute("void main(){}");
         JsonObject forgedRuntimeTree = forgedRuntime.toObj();
         forgedRuntimeTree.getAsJsonObject("abstract").addProperty("hidden", "abd0000");
-        assertThrows(IllegalArgumentException.class, () -> Compiler.compile(forgedRuntimeTree));
+        assertRejected(forgedRuntimeTree);
         var forgedAlias = new GeneraterJson.AzScript();
         forgedAlias.execute("int helper(){return 1;} int main(){return helper();}");
         JsonObject forgedAliasTree = forgedAlias.toObj();
         String helperId = forgedAliasTree.getAsJsonObject("abstract").get("helper").getAsString();
         forgedAliasTree.getAsJsonObject("abstract").addProperty("helper_again", helperId);
-        assertThrows(IllegalArgumentException.class, () -> Compiler.compile(forgedAliasTree));
+        assertRejected(forgedAliasTree);
         for (String invalidBuiltinCall : new String[]{
                 "void main(){print();}", "void main(){print(1,2);}", "void main(){getDepth(1);}",
                 "void main(){mem_free(\"x\");}", "void main(){alloc(\"x\");}",
@@ -418,7 +491,7 @@ class CompilerTest {
                 "return \"a\"-1;", "return -\"a\";", "return 1.0%1;"})
             assertThrows(IllegalArgumentException.class,
                     () -> compile("int main(){" + body + "}"), body);
-        assertDoesNotThrow(() -> compile("boolean main(){if(1){return true;}return false;}"));
+        assertThrows(IllegalArgumentException.class, () -> compile("boolean main(){if(1){return true;}return false;}"));
     }
     @Test void breakIsLimitedToLoopsAndMacroExpansionIsBounded() throws Exception {
         JsonArray body = main("int main(){var i=0;while(i<5){i+=1;if(i==2){break;}i+=10;}return i;}")
@@ -498,16 +571,21 @@ class CompilerTest {
             Path source = temporary.resolve("invalid.json"); Files.writeString(source, content);
             var bytes = new ByteArrayOutputStream(); var errors = new PrintStream(bytes);
             assertEquals(1, Main.run(new String[]{"compile-json", source.toString()}, errors, errors));
-            assertTrue(bytes.toString().startsWith("Error: "));
+            assertTrue(bytes.toString().matches("(?s)invalid\\.json(:\\d+:\\d+)?: error: .*\\RError: compilation failed: \\d+ errors?\\R"), bytes::toString);
             assertFalse(Files.exists(temporary.resolve("invalid.exec.abd")));
         }
+    }
+    @Test void longFlatAdditiveChainsCompileAndRoundTrip() throws Exception {
+        var script = new GeneraterJson.AzScript();
+        script.execute("int main(){return " + "1+".repeat(2000) + "1;}");
+        var instructions = Compiler.compile(script.toObj());
+        assertEquals(instructions.toJson(), ExecCodec.decode(AbdValue.fromAbd(instructions.toValue().toAbdFormat())).toJson());
     }
     @Test void deeplyNestedSourceAndAstFailWithDiagnosticsAndLeaveCompilerReusable() throws Exception {
         for (String source : new String[]{
                 "int main(){return " + "(".repeat(2000) + "1" + ")".repeat(2000) + ";}",
                 "boolean main(){return " + "!".repeat(2000) + "true;}",
-                "int main(){var x=1;return " + "x=".repeat(2000) + "1;}",
-                "int main(){return " + "1+".repeat(2000) + "1;}"}) {
+                "int main(){var x=1;return " + "x=".repeat(2000) + "1;}"}) {
             var failure = assertThrows(IllegalArgumentException.class, () -> compile(source));
             assertTrue(failure.getMessage().contains("nesting"));
         }
@@ -518,7 +596,7 @@ class CompilerTest {
         var script = new GeneraterJson.AzScript(); script.execute("int main(){return 1;}");
         var tree = script.toObj();
         tree.getAsJsonObject("body").getAsJsonObject("fff").getAsJsonObject("_funcfff0000").add("script", deepExpression);
-        assertThrows(IllegalArgumentException.class, () -> Compiler.compile(tree));
+        assertRejected(tree);
         assertEquals(1, main("int main(){return 1;}").getAsJsonArray("script").get(0).getAsJsonObject().get("r").getAsInt());
         Path json = temporary.resolve("deep.json"); Files.writeString(json, "[".repeat(2000) + "1" + "]".repeat(2000));
         var errors = new PrintStream(new ByteArrayOutputStream());
@@ -541,18 +619,17 @@ class CompilerTest {
         assertEquals(1, Main.run(new String[]{"compile", source.toString(), "-o", source.toString()}, messages, messages));
         assertEquals("int main(){return 6*7;}", Files.readString(source));
     }
-    @Test void flatOperatorChainsFitTheAbdLimitAndDeeperOnesAreLocated() throws Exception {
+    @Test void eagerChainsAndNestedCallsSpillWhileTrueNestingStaysLocated() throws Exception {
         assertDoesNotThrow(() -> compile("int main(){return " + "1+".repeat(100) + "1;}"));
         assertDoesNotThrow(() -> compile("boolean main(){return " + "true&&".repeat(100) + "true;}"));
         assertDoesNotThrow(() -> compile("string main(){return " + "\"a\"+".repeat(100) + "\"b\";}"));
         assertDoesNotThrow(() -> compile("int main(){" + "if(true){".repeat(40) + "return 1;" + "}".repeat(40) + "return 0;}"));
+        assertDoesNotThrow(() -> compile("int main(){\nreturn " + "1+".repeat(130) + "1;}"));
+        assertDoesNotThrow(() -> compile("int id(int v){return v;} int main(){return " + "id(".repeat(70) + "1" + ")".repeat(70) + ";}"));
         var failure = assertThrows(IllegalArgumentException.class,
-                () -> compile("int main(){\nreturn " + "1+".repeat(130) + "1;}"));
-        assertTrue(failure.getMessage().contains("ABD limit"), failure::getMessage);
-        assertTrue(failure.getMessage().contains("main:2:"), failure::getMessage);
-        var calls = assertThrows(IllegalArgumentException.class,
-                () -> compile("int id(int v){return v;} int main(){return " + "id(".repeat(70) + "1" + ")".repeat(70) + ";}"));
-        assertTrue(calls.getMessage().contains("ABD limit"), calls::getMessage);
+                () -> compile("boolean main(){\nreturn " + "!".repeat(700) + "true;}"));
+        assertTrue(failure.getMessage().contains("nesting"), failure::getMessage);
+        assertTrue(failure.getMessage().contains("<source>:2:"), failure::getMessage);
     }
     @Test void reservedWordsCannotBeDeclaredAndByteOrderMarkIsIgnored() throws Exception {
         for (String source : new String[]{"int while(){return 1;} int main(){return 2;}",
@@ -579,7 +656,7 @@ class CompilerTest {
                 "int f(x){while(true){return 1;}} int main(){return f(1);}",
                 "int f(x){if(x,{return 1;},{return 2;});} int main(){return f(1);}",
                 "int f(x){while(true){if(x){return 1;}}} int main(){return f(1);}",
-                "int f(x){while(1){while(x){break;}return 3;}} int main(){return f(1);}",
+                "int f(x){while(true){while(x){break;}return 3;}} int main(){return f(1);}",
                 "void g(){} int main(){return 1;}"})
             assertDoesNotThrow(() -> compile(source), source);
     }
@@ -621,7 +698,7 @@ class CompilerTest {
         assertTrue(instructions.contains("\"c\":" + ExecOpcodes.code("od")));
         assertTrue(instructions.contains("\"c\":" + ExecOpcodes.code("ro")));
         assertTrue(instructions.contains("\"offset\":1"));
-        assertTrue(instructions.contains("\"id\":" + 0x0abd0003 + ",\"param\":[2]"), instructions);
+        assertTrue(instructions.contains("\"id\":" + 0x0abd0014 + ",\"param\":[2]"), instructions);
     }
     @Test void classFieldsKeepTheirTypesThroughReadsCallsAndDefaults() throws Exception {
         String source = "class Values{int i;float f;double d;boolean b;string s;Values* next;Values* self(){return this;}}"
@@ -642,6 +719,13 @@ class CompilerTest {
                 "class P{int x;}void main(){P p;print(\"x\"+p);}",
                 "class P{int x;}void main(){P p;print(p==0);}"})
             assertThrows(IllegalArgumentException.class, () -> compile(invalid), invalid);
+    }
+    /** A forged AST is rejected as an error in the program, never as an internal or unexpected compiler failure. */
+    private static CompileException assertRejected(JsonObject tree, String... label) {
+        CompileException error = assertThrows(CompileException.class, () -> Compiler.compile(tree), String.join(" ", label));
+        assertFalse(error.internal(), error::getMessage);
+        assertFalse(error.getMessage().contains("Malformed script JSON near"), error::getMessage);
+        return error;
     }
     private JsonObject newTree(String source) throws Exception {
         var script = new GeneraterJson.AzScript(); script.execute(source); return script.toObj();
@@ -671,22 +755,22 @@ class CompilerTest {
         JsonObject original = newTree("class P{int x;int get(){return x;}}void main(){P p;}");
         JsonObject forged = original.deepCopy();
         forged.getAsJsonArray("classes").get(0).getAsJsonObject().getAsJsonArray("fields").get(0).getAsJsonObject().addProperty("type", "any");
-        assertThrows(IllegalArgumentException.class, () -> Compiler.compile(forged));
+        assertRejected(forged);
         JsonObject wrongMapping = original.deepCopy();
         wrongMapping.getAsJsonArray("classes").get(0).getAsJsonObject().getAsJsonObject("methods").addProperty("get", "main");
-        assertThrows(IllegalArgumentException.class, () -> Compiler.compile(wrongMapping));
+        assertRejected(wrongMapping);
         JsonObject forgedInstruction = original.deepCopy();
         JsonArray body = forgedInstruction.getAsJsonObject("body").getAsJsonObject("fff").getAsJsonObject("_funcfff0000").getAsJsonArray("script");
         body.add(JsonParser.parseString("{\"t\":\"ctrl\",\"call\":\"#allocate\",\"param\":[\"P\"]}"));
-        assertThrows(IllegalArgumentException.class, () -> Compiler.compile(forgedInstruction));
+        assertRejected(forgedInstruction);
         JsonObject wrongThis = original.deepCopy();
         String getId = wrongThis.getAsJsonObject("abstract").get("P::get").getAsString();
         wrongThis.getAsJsonObject("body").getAsJsonObject("fff").getAsJsonObject("_func" + getId)
                 .getAsJsonObject("metadata").getAsJsonArray("param-types").set(0, new JsonPrimitive("int"));
-        assertThrows(IllegalArgumentException.class, () -> Compiler.compile(wrongThis));
+        assertRejected(wrongThis);
         JsonObject conflictingName = original.deepCopy();
         conflictingName.getAsJsonObject("abstract").addProperty("P", "fff0000");
-        assertThrows(IllegalArgumentException.class, () -> Compiler.compile(conflictingName));
+        assertRejected(conflictingName);
     }
     @Test void standaloneExpressionEntryAndClassStateRemainReusable() throws Exception {
         var script = new GeneraterJson.AzScript();
@@ -702,20 +786,19 @@ class CompilerTest {
         JsonObject withoutClass = script.toObj();
         JsonArray body = withoutClass.getAsJsonObject("body").getAsJsonObject("fff").getAsJsonObject("_funcfff0000").getAsJsonArray("script");
         body.add(JsonParser.parseString("{\"t\":\"ctrl\",\"call\":\"vardef\",\"param\":[\"p\",0],\"declared-type\":\"P\"}"));
-        assertThrows(IllegalArgumentException.class, () -> Compiler.compile(withoutClass));
+        assertRejected(withoutClass);
         assertDoesNotThrow(() -> compile("int main(){return 1;}"));
     }
-    @Test void memberLoweringCountsAdditionalAbdAddressContainers() throws Exception {
+    @Test void memberLoweringSpillsAdditionalAbdAddressContainers() throws Exception {
         String prefix = "class P{P* next;int x;}int main(){P p;return p";
         assertDoesNotThrow(() -> compile(prefix + ".next".repeat(10) + ".x;}"));
-        var error = assertThrows(IllegalArgumentException.class, () -> compile(prefix + ".next".repeat(40) + ".x;}"));
-        assertTrue(error.getMessage().contains("ABD limit"), error::getMessage);
-        assertTrue(error.getMessage().contains("main:"), error::getMessage);
+        assertDoesNotThrow(() -> compile(prefix + ".next".repeat(40) + ".x;}"));
+        assertDoesNotThrow(() -> compile(prefix + ".next".repeat(70) + ".x;}"));
     }
     @Test void fieldInitializationDiagnosticsRetainTheDeclarationLocation() {
         var error = assertThrows(IllegalArgumentException.class,
                 () -> compile("class P{\n  int value=\"wrong\";\n}\nvoid main(){P p;}"));
-        assertTrue(error.getMessage().contains("P initialization:2:3"), error::getMessage);
+        assertTrue(error.getMessage().startsWith("<source>:2:3: error: in initializer of class P: "), error::getMessage);
         assertTrue(error.getMessage().contains("value"), error::getMessage);
     }
     @Test void readableMemoryMovesCannotBypassClassFieldOrReferenceTypes() throws Exception {
@@ -724,7 +807,7 @@ class CompilerTest {
             JsonObject tree = newTree("class P{int x;}void main(){P p;}");
             tree.getAsJsonObject("body").getAsJsonObject("fff").getAsJsonObject("_funcfff0000").getAsJsonArray("script")
                     .add(JsonParser.parseString("{\"t\":\"ctrl\",\"call\":\"mov\",\"param\":[" + target + ",\"wrong\"]}"));
-            assertThrows(IllegalArgumentException.class, () -> Compiler.compile(tree));
+            assertRejected(tree);
         }
     }
     @Test void methodsNamedAfterMemoryBuiltinsCannotCaptureCompilerGeneratedOperations() throws Exception {
@@ -755,14 +838,16 @@ class CompilerTest {
                 assertEquals("new_block", ExecOpcodes.name(allocation.get("c").getAsInt()));
                 assertEquals(1, allocation.get("size").getAsInt());
             } else {
-                assertEquals(0x0abd0003, allocation.get("id").getAsInt());
+                assertEquals(0x0abd0014, allocation.get("id").getAsInt());
                 assertEquals(1, allocation.getAsJsonArray("param").get(0).getAsInt());
             }
             assertEquals(1, statements.get(1).getAsJsonObject().get("t").getAsInt(), "factory directly calls the constructor");
             JsonObject binding = statements.asList().stream().filter(JsonElement::isJsonObject).map(JsonElement::getAsJsonObject)
                     .filter(statement -> statement.has("c") && ExecOpcodes.name(statement.get("c").getAsInt()).equals("ob")).findFirst().orElseThrow();
-            if (binding.get("manual").getAsBoolean())
-                assertEquals(0x0abd0004, statements.get(statements.size() - 2).getAsJsonObject().get("id").getAsInt());
+            assertSame(binding, statements.get(statements.size() - 2), "binding completes construction and manual ownership transfer");
+            assertTrue(statements.asList().stream().filter(JsonElement::isJsonObject).map(JsonElement::getAsJsonObject)
+                    .noneMatch(statement -> statement.has("id") && statement.get("id").getAsInt() == 0x0abd0004),
+                    "object factories must not use raw make_free");
         }
         assertEquals(3, generatedFactories);
     }
@@ -782,11 +867,13 @@ class CompilerTest {
         assertInstanceOf(ExecProgram.class, compiled);
         assertThrows(IllegalArgumentException.class, compiled::typeValue);
         AbdValue payload = compiled.toValue(); var root = payload.getAsAss().values;
-        assertEquals(10, root.size()); assertEquals("AZSCRIPT", AbdBasicType.abd2str(root.get(0)));
-        assertEquals(9, AbdBasicType.abd2int(root.get(1)));
+        assertEquals(11, root.size()); assertEquals("AZSCRIPT", AbdBasicType.abd2str(root.get(0)));
+        assertEquals(ExecCodec.VERSION, AbdBasicType.abd2int(root.get(1)));
+        assertEquals(0, root.get(10).getAsAss().values.size(), "no debug files without -g");
         var functionList = root.get(7).getAsAss().values;
         assertEquals(1, functionList.size()); var function = functionList.get(0).getAsAss().values;
-        assertEquals(8, function.size()); assertEquals(0x0fff0000, AbdBasicType.abd2int(function.get(0)));
+        assertEquals(9, function.size()); assertEquals(0x0fff0000, AbdBasicType.abd2int(function.get(0)));
+        assertFalse(AbdBasicType.abd2bol(function.get(8)), "no debug record without -g");
         assertEquals(0, AbdBasicType.abd2int(function.get(6)));
         assertEquals(0, AbdBasicType.abd2int(function.get(7)));
         var block = function.get(5).getAsAss().values;
@@ -805,8 +892,15 @@ class CompilerTest {
         AcsObject decoded = ExecCodec.decode(payload);
         assertEquals(compiled.toJson(), decoded.toJson());
         assertArrayEquals(payload.toAbdFormat(), decoded.toValue().toAbdFormat());
-        for(int opcode = 0; opcode <= ExecOpcodes.VALUE_COMPARE; opcode++)
+        for(int opcode = 0; opcode <= ExecOpcodes.SELECT; opcode++)
             assertEquals(opcode, ExecOpcodes.code(ExecOpcodes.name(opcode)));
+        // -g appends a debug record to each function and fills the debug file table; instructions stay the same.
+        var debugRoot = Compiler.compile(newTree("int main(){return 1+2;}"), true).toValue().getAsAss().values;
+        assertEquals(11, debugRoot.size()); assertEquals(1, debugRoot.get(10).getAsAss().values.size());
+        var debugFunction = debugRoot.get(7).getAsAss().values.get(0).getAsAss().values;
+        assertEquals(10, debugFunction.size()); assertTrue(AbdBasicType.abd2bol(debugFunction.get(8)));
+        assertEquals(5, debugFunction.get(9).getAsAss().values.size());
+        assertArrayEquals(function.get(5).toAbdFormat(), debugFunction.get(5).toAbdFormat());
     }
     @Test void compactExecPreservesScalarTypesAndDynamicExtensionMetadata() throws Exception {
         AcsObject compiled = Compiler.compile(newTree("void main(){}"));
@@ -835,10 +929,10 @@ class CompilerTest {
         assertArrayEquals(bytes, ExecCodec.decode(compiled.toValue()).toValue().toAbdFormat());
         JsonObject cycle = tree.deepCopy();
         cycle.getAsJsonArray("classes").get(0).getAsJsonObject().addProperty("base", "B");
-        assertThrows(IllegalArgumentException.class, () -> Compiler.compile(cycle));
+        assertRejected(cycle);
         JsonObject unknown = tree.deepCopy();
         unknown.getAsJsonArray("classes").get(1).getAsJsonObject().addProperty("base", "Missing");
-        assertThrows(IllegalArgumentException.class, () -> Compiler.compile(unknown));
+        assertRejected(unknown);
     }
     @Test void compactExecRejectsMalformedRecordsTypesWidthsAndLegacyMaps() throws Exception {
         AbdValue program = Compiler.compile(newTree("void main(){}")).toValue();
@@ -884,8 +978,8 @@ class CompilerTest {
         assertArrayEquals(chain.toValue().toAbdFormat(), ExecCodec.decode(chain.toValue()).toValue().toAbdFormat());
         var sourceDepth = assertThrows(IllegalArgumentException.class,
                 () -> compile("void main(){" + "if(true){".repeat(45) + "print(1);" + "}".repeat(45) + "}"));
-        assertTrue(sourceDepth.getMessage().contains("main:1:"), sourceDepth::getMessage);
-        assertTrue(sourceDepth.getMessage().contains("ABD limit"), sourceDepth::getMessage);
+        assertTrue(sourceDepth.getMessage().contains("<source>:1:"), sourceDepth::getMessage);
+        assertTrue(sourceDepth.getMessage().contains("ABD"), sourceDepth::getMessage);
         AbdValue program = Compiler.compile(newTree("void main(){}")).toValue();
         AbdValue body = rawStack(AbdBasicType.int2Abd(ExecOpcodes.BREAK));
         for(int i=0;i<64;i++) body=rawStack(AbdBasicType.int2Abd(ExecOpcodes.BLOCK),rawStack(body));
@@ -910,7 +1004,7 @@ class CompilerTest {
         JsonObject tree = newTree("string main(){return \"x\";}");
         tree.getAsJsonObject("body").getAsJsonObject("fff").getAsJsonObject("_funcfff0000")
                 .getAsJsonArray("script").get(0).getAsJsonObject().getAsJsonArray("param").set(0, new JsonPrimitive("\ud800"));
-        assertThrows(IllegalArgumentException.class, () -> Compiler.compile(tree));
+        assertRejected(tree);
     }
     @Test void macrosDoNotExpandInsideNumericLiteralSuffixes() throws Exception {
         for (String source : new String[]{
@@ -929,7 +1023,7 @@ class CompilerTest {
     @Test void classDiagnosticsUseSourceLocationsNamesAndUserArgumentNumbers() throws Exception {
         var scoped = assertThrows(IllegalArgumentException.class, () -> compile(
                 "class P { int v; P(int a) { v = a; } }\nvoid main() {\n    P p(1, 2);\n}"));
-        assertTrue(scoped.getMessage().contains("main:3:"), scoped::getMessage);
+        assertTrue(scoped.getMessage().startsWith("<source>:3:5: error: in function main: "), scoped::getMessage);
         assertTrue(scoped.getMessage().contains("P constructor expects 1 arguments, got 2"), scoped::getMessage);
         var manual = assertThrows(IllegalArgumentException.class, () -> compile(
                 "class P { int v; P(int a) { v = a; } }\nvoid main() { P* p = new P(\"x\"); }"));
@@ -1025,9 +1119,10 @@ class CompilerTest {
                 + "Point::~Point():0003{print(x);}int Point::get():0004{return x;}"));
         JsonObject json = library.toJson().getAsJsonObject();JsonArray ctor = function(json, 2).getAsJsonArray("script");
         assertEquals(ExecOpcodes.OBJECT_ADDRESS, ctor.get(0).getAsJsonObject().get("c").getAsInt());
-        assertEquals(ExecOpcodes.MOVE, ctor.get(1).getAsJsonObject().get("c").getAsInt());
-        assertEquals(0, ctor.get(1).getAsJsonObject().get("v2").getAsInt());
-        assertEquals(0xabcd0005, ctor.get(2).getAsJsonObject().getAsJsonObject("v2").get("id").getAsInt());
+        assertEquals(ExecOpcodes.SET_METHODS, ctor.get(1).getAsJsonObject().get("c").getAsInt());
+        assertEquals(ExecOpcodes.MOVE, ctor.get(2).getAsJsonObject().get("c").getAsInt());
+        assertEquals(0, ctor.get(2).getAsJsonObject().get("v2").getAsInt());
+        assertEquals(0xabcd0005, ctor.get(3).getAsJsonObject().getAsJsonObject("v2").get("id").getAsInt());
         assertEquals(library.toJson(), ExecCodec.decode(library.toValue()).toJson());
         assertFalse(new String(library.toValue().getData(), java.nio.charset.StandardCharsets.ISO_8859_1).contains("Point"));
         for (String invalid : List.of("#namespace_hint X\nclass P{int x;int get(){return x;}}",
@@ -1039,23 +1134,27 @@ class CompilerTest {
         JsonObject ast = newTree("class C{int x=7;int y=x;C(int x){this.x=x;}}void main(){C c(9);}");
         int id = Integer.parseUnsignedInt(ast.getAsJsonObject("abstract").get("C::<ctor>").getAsString(), 16);
         JsonArray body = function(Compiler.compile(ast).toJson().getAsJsonObject(), id).getAsJsonArray("script");
-        assertEquals(6, body.size());
-        assertEquals(0, body.get(1).getAsJsonObject().get("v2").getAsInt());
+        assertEquals(7, body.size());
+        assertEquals(ExecOpcodes.SET_METHODS, body.get(1).getAsJsonObject().get("c").getAsInt());
         assertEquals(0, body.get(2).getAsJsonObject().get("v2").getAsInt());
-        assertEquals(7, body.get(3).getAsJsonObject().get("v2").getAsInt());
-        assertEquals(0x0abd0006, body.get(4).getAsJsonObject().getAsJsonObject("v2").get("id").getAsInt());
-        assertEquals(1, body.get(5).getAsJsonObject().getAsJsonObject("v2").get("v").getAsInt());
+        assertEquals(0, body.get(3).getAsJsonObject().get("v2").getAsInt());
+        assertEquals(7, body.get(4).getAsJsonObject().get("v2").getAsInt());
+        assertEquals(0x0abd0006, body.get(5).getAsJsonObject().getAsJsonObject("v2").get("id").getAsInt());
+        assertEquals(1, body.get(6).getAsJsonObject().getAsJsonObject("v2").get("v").getAsInt());
         assertThrows(IllegalArgumentException.class, () -> compile("class C{int x=parameter;C(int parameter){}}void main(){}"));
         assertDoesNotThrow(() -> compile("class C{int x=missingPrivate();extern C():abcd0002;}void main(){C c;}"));
         assertThrows(IllegalArgumentException.class, () -> compile("class C{int x;extern C(int n):abcd0002;}void main(){C c;}"));
     }
-    @Test void structuralClassTypesRecurseIgnoreNamesAndNeverBecomeIntegers() throws Exception {
+    @Test void classTypesAreNominalAndNeverBecomeIntegers() throws Exception {
         String declarations = "class A{A* next;int x;}class B{B* link;int value;int method(){return value;}}";
-        assertDoesNotThrow(() -> compile(declarations + "B* convert(A* a){return a;}void main(){A * a();B* b=a;b=convert(a);print(a==b);}"));
-        // Literal objects of structurally equivalent classes also convert (both have no destructor).
-        assertDoesNotThrow(() -> compile(declarations + "extern A f(B):abcd0002;B f(A a){return a;}void main(){A a;B b=f(a);}"));
-        assertDoesNotThrow(() -> compile("class A{B* next;}class B{A* next;}class C{C* next;}void main(){A * a();C* c=a;}"));
-        for (String bad : List.of("class A{A* next;int x;}class B{B* next;string x;}void main(){A a;B b=a;}",
+        assertDoesNotThrow(() -> compile(declarations + "A* same(A* a){return a.next;}void main(){A * a();A* b=same(a);print(a==b);}"));
+        // Equal layouts do not make classes interchangeable: pointers, literal objects and externs keep their class.
+        for (String bad : List.of(declarations + "B* convert(A* a){return a;}void main(){}",
+                declarations + "void main(){A * a();B* b=a;}",
+                declarations + "void main(){A * a();B * b();print(a==b);}",
+                declarations + "extern A f(B):abcd0002;B f(A a){return a;}void main(){}",
+                "class A{B* next;}class B{A* next;}class C{C* next;}void main(){A * a();C* c=a;}",
+                "class A{A* next;int x;}class B{B* next;string x;}void main(){A a;B b=a;}",
                 "class A{int x;}void main(){A a;int n=a;}", "class A{int x;}void main(){A a=0;}",
                 "class A{int x;string y;}class B{string x;int y;}void main(){A a;B b=a;}"))
             assertThrows(IllegalArgumentException.class, () -> compile(bad), bad);
@@ -1080,23 +1179,24 @@ class CompilerTest {
             assertThrows(IllegalArgumentException.class, () -> ExecCodec.decode(invalid));
     }
 
-    @Test void structuralEquivalenceHandlesLongReferenceChainsWithoutJavaRecursion() throws Exception {
+    @Test void nominalTypingIgnoresLongReferenceChains() throws Exception {
         StringBuilder source = new StringBuilder(); int length = 1500;
         for (String prefix : List.of("A", "B")) for (int i = 0; i < length; i++)
             source.append("class ").append(prefix).append(i).append("{").append(prefix).append((i+1)%length).append("* next;}\n");
-        source.append("void main(){A0 * a();B0* b=a;}");
-        assertDoesNotThrow(() -> compile(source.toString()));
+        assertDoesNotThrow(() -> compile(source + "void main(){A0 * a();A0* b=a;A1* c=b.next;}"));
+        assertThrows(IllegalArgumentException.class, () -> compile(source + "void main(){A0 * a();B0* b=a;}"));
         assertThrows(IllegalArgumentException.class, () -> compile("#namespace_hint OWN\n#assume_hint OWN abcd\n"
                 + "extern int reserved():abcd0003;int unrelated():0003{return 1;}"));
     }
 
-    @Test void structuralExternAliasesKeepEachDeclaredSurfaceType() throws Exception {
+    @Test void externAliasesMustDeclareTheSameClasses() throws Exception {
         String classes = "class A{int x;int onlyA(){return x;}}class B{int y;int onlyB(){return y;}}";
-        assertDoesNotThrow(() -> compile(classes + "extern A makeA():abcd0002;extern B makeB():abcd0002;"
-                + "int main(){return makeA().onlyA()+makeB().onlyB();}"));
-        assertDoesNotThrow(() -> compile(classes + "extern A f(B):abcd0002;extern B f(A value):abcd0002;void main(){}"));
-        assertThrows(IllegalArgumentException.class, () -> compile("class A{int x;}class B{string y;}"
-                + "extern A f():abcd0002;extern B f():abcd0002;void main(){}"));
+        assertDoesNotThrow(() -> compile(classes + "extern A makeA():abcd0002;extern A makeAlias():abcd0002;"
+                + "int main(){return makeA().onlyA()+makeAlias().onlyA();}"));
+        for (String bad : List.of(classes + "extern A makeA():abcd0002;extern B makeB():abcd0002;void main(){}",
+                classes + "extern A f(B):abcd0002;extern B f(A value):abcd0002;void main(){}",
+                "class A{int x;}class B{string y;}extern A f():abcd0002;extern B f():abcd0002;void main(){}"))
+            assertThrows(IllegalArgumentException.class, () -> compile(bad), bad);
     }
 
     @Test void addressesHaveDistinctSignaturesAndLosslessNullConstants() throws Exception {
@@ -1182,7 +1282,7 @@ class CompilerTest {
                 point + "class Box{P * p(1);}void main(){}", point + "class Box{P p;}void main(){}"))
             assertThrows(IllegalArgumentException.class, () -> compile(invalid), invalid);
         var field = assertThrows(IllegalArgumentException.class, () -> compile(point + "class Box{\n  P inner;\n}\nvoid main(){}"));
-        assertTrue(field.getMessage().contains("Box initialization:2:"), field::getMessage);
+        assertTrue(field.getMessage().startsWith("<source>:2:3: error: in initializer of class Box: "), field::getMessage);
     }
 
     @Test void flexibleParametersTakePointersAndLiteralObjectsByAddress() throws Exception {
@@ -1225,12 +1325,10 @@ class CompilerTest {
             return argument.isJsonObject() && argument.getAsJsonObject().has("c")
                     && argument.getAsJsonObject().get("c").getAsInt() == ExecOpcodes.BLOCK_ADDRESS;
         }).count());
-        // Unspaced spelling, extern members defined out of class, and structurally equivalent (*) externs.
+        // Unspaced spelling and extern members defined out of class.
         assertDoesNotThrow(() -> compile(point + "int f(P(*)p){return p.x;}void main(){P a(1);print(f(a));}"));
         assertDoesNotThrow(() -> compile(point + "class H{int n;extern int plus(P (*) o):0fff0005;}"
                 + "int H::plus(P (*) o):0005{return o.x+n;}void main(){H h;P a(1);print(h.plus(a));}"));
-        assertDoesNotThrow(() -> compile(point + "class Q{int x;Q(int v){x=v;}}"
-                + "extern int f(P (*)):12340002;extern int f(Q (*)):12340002;void main(){Q q(1);print(f(q));}"));
         for (String invalid : List.of(point + "int f(int (*) p){return 1;}", point + "int f(P * (*) p){return 1;}",
                 point + "class H{int n;extern int plus(P (*) o):0fff0005;}int H::plus(P * o):0005{return o.x;}",
                 point + "void main(){P (*) p=null;}", point + "P (*) f(){return null;}", point + "class B{P (*) p;}",
@@ -1239,7 +1337,10 @@ class CompilerTest {
                 point + "class T:P{string tag;T():P(1){}}int f(T (*) p){return 1;}void main(){P a(1);f(a);}",
                 point + "int f(P (*) p){return 1;}void main(){f(3);}",
                 point + "extern int f(P (*)):12340002;int f(P * p){return 1;}",
-                point + "extern int f(P (*)):12340002;extern int f(P *):12340002;"))
+                point + "extern int f(P (*)):12340002;extern int f(P *):12340002;",
+                // Classes are nominal, so (*) parameters of equally laid out classes differ.
+                point + "class Q{int x;Q(int v){x=v;}}extern int f(P (*)):12340002;extern int f(Q (*)):12340002;",
+                point + "class Q{int x;Q(int v){x=v;}}int f(P (*) p){return p.x;}void main(){Q q(1);f(q);}"))
             assertThrows(IllegalArgumentException.class, () -> compile(invalid), invalid);
         var local = assertThrows(IllegalArgumentException.class, () -> compile(point + "void main(){\n  P (*) p=null;\n}"));
         assertTrue(local.getMessage().contains(":2:") && local.getMessage().contains("only allowed as a function parameter"),
@@ -1266,6 +1367,27 @@ class CompilerTest {
             assertThrows(IllegalArgumentException.class, () -> compile("class C{int x;}void main(){"+body+"}"), body);
         assertThrows(IllegalArgumentException.class, () -> compile("class A{int x;}class B{address x;}void main(){A a;B b=a;}"));
         assertThrows(IllegalArgumentException.class, () -> compile("extern int f(address):abcd0002;extern int f(int):abcd0002;void main(){}"));
+    }
+
+    private static Compiler.LogicVariable variable(String alias, int slot) {
+        var variable = new Compiler.LogicVariable(); variable.name = alias; variable.slot = slot; variable.alias.add(alias); return variable;
+    }
+    @Test void environmentLookupsFollowDirectChangesToItsVariables() {
+        var environment = new Compiler.LogicEnvironment();
+        Compiler.LogicVariable a = variable("a", -1), b = variable("b", -2), c = variable("c", -3);
+        // Variables appended directly are indexed at the next lookup.
+        environment.vars.add(a);
+        assertSame(a, environment.getVariable("a"));
+        environment.vars.add(b);
+        assertSame(b, environment.getVariable("b"));
+        // A replaced entry is never returned.
+        environment.vars.set(0, c);
+        assertEquals("Unknown variable: a", assertThrows(IllegalArgumentException.class, () -> environment.getVariable("a")).getMessage());
+        assertSame(c, environment.getVariable("c"));
+        // A replacement list is indexed too.
+        environment.vars = new ArrayList<>(List.of(a));
+        assertSame(a, environment.getVariable("a"));
+        assertThrows(IllegalArgumentException.class, () -> environment.getVariable("b"));
     }
 
 }

@@ -1,6 +1,195 @@
-# Native Stack Guard and Java Execution Limits (2026-10-10)
+# Merge of main (native stack guard) into the compiler roadmap (2026-10-16)
 
 [中文](VALIDATION.md) | English
+
+Scope: merging main (PR #5, native stack guard and Java execution limits) into the compiler-roadmap branch at c246c20. Conflicts in README, VALIDATION, runtime_tests.cpp, run_jni_tests.py and JniRegression.java keep both sides. JNI exception messages now end with the script stack trace, so the native-stack JNI assertions match the message prefix, and the abdJavaInvoker README says the message starts with `Script native stack limit exceeded`. Every new opcode and call path goes through `tick()`/`call_guard`.
+
+Linux x86_64 only, `JAVA_TOOL_OPTIONS` unset:
+
+- `python3 tools/build_and_test.py --offline`: passed (731 s).
+- `python3 tools/build_and_test.py --offline --sanitize`: passed (849 s), no AddressSanitizer or UndefinedBehaviorSanitizer reports.
+- Distribution export was not rerun for this merge.
+
+# C28 Final Compiler Roadmap Validation (2026-10-15)
+
+
+C01–C28 are complete on `claude/confident-galileo-fic3s1`. Final implementation: `7fc5a12`. C28 changes documentation only. Its V1/V2 evidence is the complete, sequential C27 runs against the same final source; those passing suites were not repeated after documentation edits. V3, all measurements and JFR below were executed afterward from that clean commit. Exec and JNI snapshots remain v10.
+
+V0 checked whitespace, added files, documentation links and the coverage inventory. V1/V2 each passed 330 Java tests, 5944 native checks, 355 depth/differential checks and 405 independent wire cases. V1 also passed 3402 real-JVM JNI assertions, 800 calls from four workers and 1000-module linking; V2 excludes JNI and produced no ASan/UBSan reports. Fresh V3 passed 30 relocated distribution/consumer checks, including both 10k chains, static/shared C++ consumers, bundled-Java execution and real JNI. All 175 manifest file sizes and SHA-256 digests matched.
+
+Actual commands, run sequentially after sourcing `/workspace/azscript-toolchain/activate.sh`:
+
+```sh
+env -u JAVA_TOOL_OPTIONS python3 tools/build_and_test.py --offline
+env -u JAVA_TOOL_OPTIONS python3 tools/build_and_test.py --offline --sanitize
+env -u JAVA_TOOL_OPTIONS -u JDK_JAVA_OPTIONS -u _JAVA_OPTIONS python3 tools/export_distribution.py build/c28-distribution --offline
+```
+
+V1/V2 logs and reports: `build/c27/v1.log`, `v2.log`, `limits-v1.json`, `limits-v2.json` (`validation.exit=0`). V3: `build/c28-evidence/v3.log`; export: `build/c28-distribution`. Both differential reports contain 254 passed records, 73 explicitly infeasible records, 24 compiled dependencies and 16 non-standalone units. Of the infeasible records, 35 carry the exact ladder-scope rejection category. Individual reasons remain in the reports; these are expected rejection checks, not unreported test failures. Non-standalone libraries are exercised by linked clients. Forced 96/64/48 budgets actually increased local-slot/definition counts in 17/24/24 cases, while preserving eligible output/error/destructor behavior.
+
+Measurements used Linux x86_64, Temurin 21.0.12.1+1, a 4-CPU quota, 32 GiB memory limit and `-Xmx1g`. Each input ran in three fresh JVMs with all inherited Java option variables removed. Every time column below is an independent median. Process wall includes JVM startup, metric traversal and ABD writes; pipeline covers parsing/AST, compilation, encoding and counter reads. RSS is the maximum observed per-process GNU time peak among the three runs, including JVM native memory. Separately recorded heap-pool peaks are not simultaneous peak heap or RSS.
+
+| Input | Parse+AST s | Compile s | Encode s | Pipeline s | Process wall s | Max RSS MiB | ABD bytes |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Locals 2k | 0.232 | 0.297 | 0.035 | 0.575 | 0.704 | 143.21 | 362247 |
+| Locals 8k | 0.420 | 0.848 | 0.083 | 1.361 | 1.556 | 339.69 | 1448247 |
+| Locals 32k | 0.804 | 2.237 | 0.252 | 3.245 | 3.511 | 801.62 | 5792247 |
+| Statements 20k | 0.525 | 1.131 | 0.162 | 1.777 | 2.022 | 519.46 | 2560247 |
+| Functions 20k | 1.565 | 4.072 | 0.417 | 6.051 | 6.327 | 1089.61 | 13919764 |
+| String chain 10k | 0.166 | 0.634 | 0.039 | 0.850 | 0.998 | 178.83 | 320293 |
+| Else-if ladder 10k | 0.404 | 1.122 | 0.147 | 1.639 | 1.832 | 519.66 | 1580518 |
+
+The five deterministic counters, their total, local-slot totals, selected opcode counts and ABD bytes/SHA-256 were identical across all three samples per input. A 4× locals increase produced work ratios 3.99962 and 3.99990; observed process-time ratios were 2.20895 and 2.25624. These timings describe this machine and are not portable performance thresholds. Existing deterministic scaling regressions remain the growth guard.
+
+| Input | scope_probes | type_evaluations | compiled_nodes | id_probes | table_probes | total_work |
+| --- | --- | --- | --- | --- | --- | --- |
+| Locals 2k | 36004 | 50003 | 16005 | 0 | 1 | 102013 |
+| Locals 8k | 144004 | 200003 | 64005 | 0 | 1 | 408013 |
+| Locals 32k | 576004 | 800003 | 256005 | 0 | 1 | 1632013 |
+| Statements 20k | 260004 | 580003 | 120005 | 0 | 1 | 960013 |
+| Functions 20k | 3679869 | 2039931 | 619981 | 20000 | 100001 | 6459782 |
+| String chain 10k | 515464 | 920924 | 20007 | 0 | 1 | 1456396 |
+| Else-if ladder 10k | 200014 | 90014 | 80016 | 1 | 5 | 370050 |
+
+| Input | Function records | Local slots | define/move/drop | Native stdout |
+| --- | --- | --- | --- | --- |
+| Locals 2k | 1 | 2001 | 2001/0/0 | 995 |
+| Locals 8k | 1 | 8001 | 8001/0/0 | 997 |
+| Locals 32k | 1 | 32001 | 32001/0/0 | 994 |
+| Statements 20k | 1 | 1 | 1/0/0 | 997 |
+| Functions 20k | 20001 | 19999 | 19999/0/0 | compile only |
+| String chain 10k | 1 | 2 | 2/0/0 | 10000 |
+| Else-if ladder 10k | 2 | 1 | 1/0/0 | 9999 |
+
+`define/move/drop` counts only those opcode kinds; local slots include source and generated locals. They do not count all instructions or identify every generated temporary. All six executable inputs returned the exact native stdout above with empty stderr. The generator for 20,000 functions creates 20001 function records including main; it was compiled only because invoking its recursive chain exceeds the runtime call-depth budget.
+
+The separate 20,000-function JFR run succeeded and was excluded from medians. It contained 224 ExecutionSample events. First project frames included `AstShape.drainNodes` 28, `Compiler.compileProgram` 13, `AstShape.field` 12, `Compiler.scopeDependencies` 12 and `GeneraterJson$Lexer.scan` 11. These are sample counts, not durations or CPU percentages; the profile also includes harness traversal. No before/after hotspot improvement is inferred.
+
+Evidence: `build/c28-evidence/metrics/metrics.json` (sample commands, counters, sizes, hashes, RSS and stdout), `functions-20000.jfr`, `functions-hotspots.json`, plus `build/c28-evidence/metrics.log` and `validation.exit=0`. Generators reuse `tools/bench_compiler.py`; the external measurement runner/probe are under `/workspace/azscript-toolchain/c28-validation` (probe SHA-256 `ee6448488e28304bae6945c00ffcd220030c0d01bb266304cee59922bd76fef2`).
+
+The final [probe inventory](docs/compiler-roadmap/PROBE_COVERAGE.en.md) maps every concretely described, available in-scope roadmap probe to regression source. Original scratchpad/handback inputs were absent, so undisclosed originals cannot be certified. Heap generation/use-after-delete/double-delete/automatic escape and declined ID tooling remain outside this round. Windows/macOS and the follow-ups listed in [STATUS](docs/compiler-roadmap/STATUS.en.md) remain unvalidated or unresolved as stated there.
+
+# C27 Flat Else-if Ladders (2026-10-15)
+
+[中文](VALIDATION.md) | English
+
+The parser collects ladders iteratively and preserves legacy AST through128 conditions. Lowering chooses the nested or one-shot-loop form from the actual remaining physical depth. The first checked predicate remains a sibling in its original containing scope; later predicates and moved bodies require transitive scope-effect proof. Unsafe lifetime/scope changes report a located local-variable hint. Original loop/switch jumps, functional-if values, return analysis, warnings, AST validation, help and paired contracts were reviewed together. Exec and JNI snapshots remain v10.
+
+V0–V2 passed sequentially with JAVA_TOOL_OPTIONS unset:330 Java tests,5944 native checks,3402 JNI assertions/800 calls from four workers,1000-module linking and405 independent wire cases. Each complete ordinary/sanitizer run passed355 depth/differential checks. Cases cover121/125/128/129/200/10000 conditions,110 inside three loops, exact first-predicate traces, first-match counts, original jump targets and cleanup. Each report has254 passed,73 explicitly infeasible (35 carrying the exact ladder-scope rejection category),24 compiled dependencies and16 non-standalone records; forced96/64/48 showed extra locals/defines in17/24/24 cases. No ASan/UBSan reports occurred.
+
+Before full runs,114 targeted Java tests and125 targeted ladder checks passed. Integration corrected two Java pointer-return declarations and changed the first-match fixture's ANY globals to typed int counters, preserving its side-effect assertions. Independent source review found no additional blocker. Logs/reports: build/c27/v1.log,v2.log,limits-v1.json,limits-v2.json,ladder-target.log,ladder-target.json; validation.exit=0. This step requires no V3. C28 records these complete final-implementation runs and adds fresh export and measurements.
+
+# C26 Flat Operator Chains (2026-10-15)
+
+[中文](VALIDATION.md) | English
+
+Chains above128 operands use a positioned, strictly validated flat AST; shorter ASTs remain byte-identical. Safe string/boolean chains balance, while numeric/mixed chains retain left-fold order through private typed placeholders and64-operand segments. SourceRules needs no new keyword. Language contracts, warning traversal and CLI/launcher help were reviewed together.
+
+V0–V2 passed sequentially with JAVA_TOOL_OPTIONS unset:321 Java tests,5944 native checks, existing real-JVM JNI/module suites and405 independent wire cases per build. Each ordinary/sanitizer run passed226 depth/differential checks, including10k strings, calls, mixed plus, intermediate overflow, float rounding and short circuit. Forced96/64/48 budgets exercised extra locals/defines in16/23/23 cases; each report has177 passed,38 explicitly infeasible,22 compiled dependencies and16 non-standalone records. No ASan/UBSan reports occurred.
+
+Validation exposed a JVM-state-sensitive parser stack overflow before the320 syntax guard. Explicit precedence groups removed the ten recursive precedence frames per parenthesis without changing grouping or limits. The new -Xint/-Xss512k regression fails with the old compiler and passes with the fix;91 targeted Java tests also passed before complete reruns. Interrupted runs were excluded. Final logs: build/c26/v1-final.log,v2-final.log; exit0 in final-validation.exit; reports limits-v1.json,limits-v2.json. C26 requires no V3; C28 supplies final export evidence.
+
+# C25 Exact ABD Depth and Statement Spilling (2026-10-15)
+
+[中文](VALIDATION.md) | English
+
+Added exhaustive iterative ExecShape measurement, per-function lowering metadata and sibling-statement cuts for eligible eager expressions. Cuts preserve order, typed OA offsets/target validation and owned temporaries; lazy/while/standalone or unproved copy/lifetime/scope cuts report located local-variable hints. Transitive scope-effect analysis is iterative. IF condition captures end before branches; constructor completion records remain atomic. No wire/runtime/version change was required.
+
+Required V0–V2 passed sequentially with JAVA_TOOL_OPTIONS unset:316 Java tests,5944 native checks,405 independent wire cases and all existing JNI/module/lifetime suites. Each complete ordinary/sanitizer run passed152 depth/differential checks; forced96/64/48 exercised extra locals/defines in12/13/13 cases. Feasible examples retained exact output;35 infeasible records per report carry explicit reasons, and16 declaration/library records are not standalone. Real fresh OBJECT retention added one DROP and preserved destructor order. After both full builds,20 supplemental owned-return checks passed separately on each runtime, covering retained-buffer copies, consumed call arguments, returned OBJECT/MOVE_OUT and primary-error preservation; no production change followed the full runs. No ASan/UBSan reports occurred.
+
+Integration corrected source-anchor typing, explicit user-error classification for AbdLinearizer limits, old diagnostic-fixture constructor arguments and two raw-read initializer casts before successful runs. Independent reviews found no remaining blocker. Logs/reports: build/c25/v1.log,v2.log,limits-v1.json,limits-v2.json,owned-return-normal.log,owned-return-sanitize.log. This step requires no V3; C24's verified export remains available and C28 reruns final distribution validation.
+
+# C24 Virtual Methods and Snapshot v10 (2026-10-15)
+
+[中文](VALIDATION.md) | English
+
+Added virtual/override/final, opcodes52–53, bound method contexts outside user slots, static Base::/value/final calls and dynamic pointer/this/T dispatch. Constructor/destructor phases replace even empty tables. Failed derived construction cleans completed owned fields before its completed base, without calling the failed derived destructor. Balanced finalizers continue after failures while preserving the first exception/trace. JNI snapshot v10 requires validated method arrays and rejects corrupt replacement atomically; exec stays v10. Paired SDK, language, hint and AGENTS contracts were updated.
+
+V0–V3 passed sequentially with JAVA_TOOL_OPTIONS unset:293 Java tests,5944 native checks,3402 JNI assertions,800 calls from four workers and1000-module linking. Virtual suites passed80 ordinary/79 sanitizer checks, including phase/error/ownership/cross-hint/snapshot cases; independent wire suites389 each. No ASan/UBSan reports occurred. Review and targeted validation corrected constructor-index assertions, a Java lambda capture and an invalid foreign-method test fixture before complete runs. Export passed27 relocation/consumer checks, including real JNI and static/shared SDK consumers; all175 manifest file sizes/SHA-256 digests matched. Logs: build/c24/v1.log,build/c24/v2.log,build/c24/v3.log.
+
+# C23 Checked Reflection Results (2026-10-15)
+
+[中文](VALIDATION.md) | English
+
+Opcode51 checks class pointer/value, buffer and type-parameter reflection results. Concrete pointers require null or a live registered/literal object start and matching known prefix tags. Class values require exact runtime width; buffers compare structural element contexts. Unknown generic pointers check liveness only. Nominal identity and pointer-field targets remain unchecked, as documented. Exec remains v10 and snapshots v9.
+
+V0–V3 passed sequentially with JAVA_TOOL_OPTIONS unset:275 Java tests and5837 native checks in both builds;90 ordinary/81 sanitizer generic/reflection cases;354 independent wire cases and119 address cases in each build. Existing JNI/module/lifetime suites passed without ASan/UBSan reports. Independent review found no production blocker. A shadowing local in a new native fixture and a missing parenthesis in a new Java fixture were corrected before complete validation. Export passed26 relocation/consumer checks; all174 manifest file sizes/SHA-256 digests matched. Logs: build/c23/v1.log,build/c23/v2.log,build/c23/v3.log.
+
+# C22 Typed Pointers and Object Storage (2026-10-15)
+
+[中文](VALIDATION.md) | English
+
+Class pointers now require typed positions or explicit address(p) erasure. Internal object_alloc tags complete ranges before construction; raw memory operations and JNI writes/free reject object starts, interiors and literal/view addresses. Typed member decoding retains checked access, manual registration detaches ownership only on success, and snapshot restore rebuilds tags without a version change. Trusted host construction and the agreed heap-safety limitations are documented.
+
+V0–V3 passed sequentially with JAVA_TOOL_OPTIONS unset:270 Java tests,5768 native checks,2940 JNI assertions,800 calls from four workers and1000-module linking. Operator suites passed362 ordinary/354 sanitizer cases; address suites119 each and independent wire suites330 each. No ASan/UBSan reports occurred. Independent review found no production blocker. Obsolete allocator-ID assertions and one destructor-log reset in test fixtures were corrected before complete reruns. Export passed26 relocation/consumer checks; all174 manifest file sizes/SHA-256 digests matched. Exec remains v10 and snapshots v9. Logs: build/c22/v1.log,build/c22/v2.log,build/c22/v3.log.
+
+# C21 Unicode String Functions (2026-10-15)
+
+[中文](VALIDATION.md) | English
+
+Added nine strict UTF-8 string built-ins, code-point indexing and immutable method sugar. Streaming validation covers embedded NUL, malformed sequences, scalar/range errors and searches without code-point arrays. Method lowering binds the built-in IDs directly. The private UTF-8 helper is not installed as SDK API. Exec remains v10 and snapshots v9.
+
+V0–V3 passed sequentially with JAVA_TOOL_OPTIONS unset: 264 Java tests,5619 native checks,361 ordinary and353 sanitizer operator/string cases, and314 independent wire cases. Existing JNI, modules and lifetime suites passed without ASan/UBSan reports. Review corrected two obsolete/invalid Java fixtures before complete reruns. The release export passed26 relocation/consumer checks; all174 manifest file sizes and SHA-256 digests matched. Logs: build/c21/v1.log,build/c21/v2.log,build/c21/v3.log.
+
+# C20 Switch Statements (2026-10-15)
+
+[中文](VALIDATION.md) | English
+
+Added int/string switch statements with grouped literal labels, default anywhere, separate section scopes and no fall-through. Balanced label comparisons and sibling branches lower through SyntheticLoop without a new opcode. Break exits the switch; continue relays to the nearest real loop. Duplicate/type/fall-through errors, return analysis, warnings, strict AST validation and CLI/launcher help are covered.
+
+Required V0,V1,V3 passed with JAVA_TOOL_OPTIONS unset:257 Java tests,5079 native checks,313 operator/switch end-to-end cases,290 independent wire cases and all existing JNI/module/lifetime suites. The release export passed25 relocation/consumer checks, and all173 manifest file sizes/SHA-256 digests matched. Independent review found no blocker. Exec stays v10 and snapshots v9; runtime code was unchanged and this step requires no separate V2. Logs: build/c20/v1.log,build/c20/v3.log.
+
+# C19 Conditional Expressions (2026-10-15)
+
+[中文](VALIDATION.md) | English
+
+Added right-associative boolean `?:` with lazy arms evaluated in the enclosing scope, numeric promotion through convert, strict compatible arm types and recursive writable-receiver checks. Opcode50 select preserves statement/owning lifetimes. Colon lexing retains hexadecimal ID spelling while expression literals receive strict normal scanning. Exec stays v10 and JNI snapshots v9.
+
+V0–V3 passed sequentially with JAVA_TOOL_OPTIONS unset: 247 Java tests,5079 native checks,272 ordinary and266 sanitizer operator/selection cases, and290 independent wire cases. Existing JNI, lifetime, trace, math and module suites passed without ASan/UBSan reports. Review found no production blocker. New test fixtures were corrected to use decimal0010 and supported class operator[]/buffer.get syntax before complete reruns. The release export passed25 relocation/consumer checks; all173 manifest sizes and SHA-256 digests matched. Logs: build/c19/v1.log,build/c19/v2.log,build/c19/v3.log.
+
+# C18 Widening-Only Numeric Returns (2026-10-15)
+
+[中文](VALIDATION.md) | English
+
+Function returns now allow exact types, compatible nominal references, int→float/double and float→double. Known narrowing reports an explicit-conversion hint; dynamic narrowing throws an expected/actual-tag error. Updated math_trunc to use checked int() and integer domain-error paths to retain Division by zero. Public math IDs, exec v10 and JNI snapshot v9 are unchanged.
+
+V0–V3 passed sequentially with JAVA_TOOL_OPTIONS unset. Both complete builds passed 241 Java tests and 4964 native checks. The type-safety suite passed 52 ordinary and 50 sanitizer cases; all math regressions, numerical comparisons and error cases passed. Existing wire, lifetime, JNI and module suites passed without ASan/UBSan reports. Review corrected an invalid ordinary-ANY native test fixture to use a valid generic context before execution. The release export passed 25 relocation/consumer checks, with all 173 manifest file sizes and SHA-256 digests verified. Logs: build/c18/v1.log, build/c18/v2.log, build/c18/v3.log.
+
+# C17 Explicit Scalar Conversions (2026-10-15)
+
+[中文](VALIDATION.md) | English
+
+Added checked `int()`, `float()`, `double()`, `string()` and `address()` conversions and opcode 49. Numeric-to-int truncates before range validation; strings use strict decimal grammar and private C-locale floating parsing, with permitted underflow. Invalid pairs, overflow and malformed text throw located runtime errors. Same-type static conversions emit no instruction. Boolean, class and int/address cross-conversions remain rejected at this stage. Exec stays v10 and JNI snapshots v9.
+
+V0–V3 passed sequentially with `JAVA_TOOL_OPTIONS` unset. Both complete builds passed 238 Java tests and 4824 native checks. The operator/conversion suite passed 226 ordinary cases (including real JNI) and 222 sanitizer cases; all 273 independent wire cases passed. Existing cross-language, lifetime, math, module and JNI suites passed without ASan/UBSan reports. One new Java assertion initially expected a reserved-word diagnostic where the parser correctly reports a type-name declaration error; its exact expectation was fixed before the complete rerun. Independent review found no production blocker. The release export passed 25 relocation/consumer checks, and all 173 manifest file sizes and SHA-256 digests matched. Logs: `build/c17/v1.log`, `build/c17/v2.log`, `build/c17/v3.log`.
+
+# C16 Bitwise and Shift Operators (2026-10-15)
+
+[中文](VALIDATION.md) | English
+
+Added int32 `& | ^ ~ << >> >>>` and local compound assignments, opcodes 43–48. Expression parsing joins adjacent angle tokens by their preprocessed offsets while preserving generic closers. Runtime bit patterns and arithmetic/logical right shifts use unsigned operations; counts are checked in 0–31. Exec stays v10 and JNI snapshots v9.
+
+V0–V3 passed sequentially with `JAVA_TOOL_OPTIONS` unset. Both complete builds passed 232 Java tests and 4515 native checks; the language-operator suite passed 104 ordinary cases including real JNI and 102 sanitizer cases. Existing cross-language, lifetime, hint and JNI suites passed, with no ASan/UBSan reports. An initial Java test expected `?` in a parser diagnostic; its expectation was corrected to the exact source location and message before the complete rerun. Independent code review found no blocker. The release export passed 25 relocation/consumer checks and all 173 manifest file sizes and SHA-256 digests matched. Logs: `build/c16/v1.log`, `build/c16/v2.log`, `build/c16/v3.log`.
+
+# C15 Boolean Conditions and Compatible Equality (2026-10-15)
+
+[中文](VALIDATION.md) | English
+
+Conditions and logical operands now require boolean, checked statically when known and at runtime for dynamic values. Equality permits mixed numeric values, identical primitive types and the existing compatible address/class-pointer cases; incompatible dynamic tags throw. Runtime void/void equality remains true, including uninitialized dynamic variables; statically void expressions remain rejected. No opcode, exec or snapshot version changed.
+
+With `JAVA_TOOL_OPTIONS` unset, V1 and V2 completed sequentially with 225 Java tests and 2067 native checks, plus all existing JNI and cross-language/end-to-end suites. The ordinary type suite passed 35 cases; the added dynamic-void case also passed separately, and all 36 cases ran under sanitizer. No ASan/UBSan reports occurred. V3 `python3 tools/export_distribution.py build/dist-check --offline --force` passed 25 relocation/consumer checks, including packaged rejection of numeric conditions and incompatible equality. All 173 manifest file sizes and SHA-256 digests matched. V0 whitespace and changed-file review passed. Logs: `build/c15/v1.log`, `build/c15/void-targeted.log`, `build/c15/v2.log`, `build/c15/v3.log`.
+
+# C14 Script Runtime Traces (2026-10-15)
+
+[中文](VALIDATION.md) | English
+
+Continued `claude/confident-galileo-fic3s1` after C13. Runtime failures now retain script and native frames, with opt-in `-g` source positions or stripped hexadecimal IDs. Cleanup preserves the first exception and its trace. JNI keeps native exception mappings and original Java callback throwable identity while carrying multiline UTF-8 messages. C++ hosts capture `describe_error()` before cleanup; hosts/plugins must rebuild against the matching public ABI. Exec remains v10 and JNI snapshots remain v9.
+
+Sequential validation, with `JAVA_TOOL_OPTIONS` unset: V0 whitespace/untracked-file review; V1 `python3 tools/build_and_test.py --offline`; V2 the same command with `--sanitize`; V3 `python3 tools/export_distribution.py build/dist-check --offline`. All commands exited 0. Both builds passed 221 Java tests and 1428 native runtime checks. Ordinary JNI passed 2680 assertions, 800 calls from four workers, 23 fresh-process entry cases, and 1000-module deep linking. The new compiled runtime-trace suite passed 15 ordinary and 13 sanitizer cases, including byte-identical source/AST/ABD roundtrips, lifecycle and destructor errors, hint/include frames and Unicode positions. No ASan/UBSan reports occurred.
+
+The Linux x86_64 release export passed 24 relocation/consumer checks, including exact debug/stripped error reports, static/shared C++ SDK consumers and real JNI consumers. Its manifest lists 173 files. Logs: `build/c14/v1.log`, `build/c14/v2.log`, `build/c14/v3.log`; package: `build/dist-check/`. Later roadmap items C15–C28 remain separate work.
+
+# Native Stack Guard and Java Execution Limits (2026-10-10)
 
 The interpreter runs calls, blocks and expressions recursively on the native stack, and none of the step, call-depth or 128-level ABD nesting limits bound stack use. On a default 1 MiB Java thread, a function with 20 nested additions recursing 254 times (`AbdInvoker.invoke(0x12340001, 254)`) killed the JVM with SIGSEGV (exit 139), and small C++ threads crashed the same way. Each thread now records where its outermost script call began. `call_guard` (script and host function calls) and `tick` (every block and expression) check the current frame and throw `std::runtime_error("Script native stack limit exceeded")` when execution nears the bottom of the thread's real stack or exceeds the new `script::max_stack_bytes` budget. Stack bounds come from `pthread_getattr_np`, `pthread_get_stackaddr_np` or `GetCurrentThreadStackLimits` (Windows 8+) and are cached per thread. A quarter of the stack (at least 64 KiB, at most 1 MiB) stays in reserve above its bottom; where bounds are unavailable a 256 KiB budget applies. Host callback reentry keeps the thread's outermost position. Existing cleanup and first-error semantics are unchanged: entered calls unwind, scope allocations are released, and destructors facing an exhausted stack behave as under exhausted step or depth budgets.
 
@@ -13,6 +202,8 @@ Native regressions run deep expression, deep block and host-reentry recursion on
 Logs: `build/native-stack-validation.log`, `build/native-stack-sanitize.log`, `build/native-stack-sanitize-no-scope.log`.
 
 # Distribution and Host Entry Update Audit (2026-09-27)
+
+[中文](VALIDATION.md) | English
 
 Distribution verification still limited control opcodes to 3–35, misreporting generic/buffer opcodes 36–42 as nonnumeric. It now accepts the current instructions and reports the file, node, and actual invalid value. Stale exec/snapshot versions in the manifest were corrected from 7 to 9. Regressions independently compare the compiler opcode registry, exec version, and JNI snapshot writer/reader versions. Native missing-field checks now include 40–42, and both hint guides describe the placement helper for default-constructible classes.
 

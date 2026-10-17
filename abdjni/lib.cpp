@@ -19,6 +19,7 @@
 #include <set>
 #include <sstream>
 #include <stdexcept>
+#include <string_view>
 #include <vector>
 
 using namespace azertian;
@@ -90,26 +91,29 @@ void require(JNIEnv* env, const void* value, const char* message) {
     checked(env);
     if (!value) throw std::invalid_argument(message);
 }
-void throwJava(JNIEnv* env, const char* kind, const char* message) noexcept {
-    if (env->ExceptionCheck()) return;
-    auto cls = env->FindClass(kind);
-    if (cls) { env->ThrowNew(cls, message); env->DeleteLocalRef(cls); }
+jstring toJava(JNIEnv* env, const std::string& value);
+void throwJava(JNIEnv* env, const char* kind, std::string_view message) noexcept;
+void reportError(JNIEnv* env, const char* kind, const std::exception& error) noexcept {
+    try { throwJava(env, kind, describe_error(error)); }
+    catch (...) { throwJava(env, kind, error.what()); }
 }
 void reportException(JNIEnv* env) noexcept {
     if (env->ExceptionCheck()) return;
     try { throw; }
     catch (const JavaException& error) { env->Throw(error.throwable->value); }
     catch (const std::bad_alloc&) { throwJava(env, "java/lang/OutOfMemoryError", "Native allocation failed"); }
-    catch (const std::out_of_range& e) { throwJava(env, "java/lang/IndexOutOfBoundsException", e.what()); }
-    catch (const std::invalid_argument& e) { throwJava(env, "java/lang/IllegalArgumentException", e.what()); }
-    catch (const std::exception& e) { throwJava(env, "java/lang/IllegalStateException", e.what()); }
+    catch (const std::out_of_range& e) { reportError(env, "java/lang/IndexOutOfBoundsException", e); }
+    catch (const std::invalid_argument& e) { reportError(env, "java/lang/IllegalArgumentException", e); }
+    catch (const std::exception& e) { reportError(env, "java/lang/IllegalStateException", e); }
     catch (...) { throwJava(env, "java/lang/IllegalStateException", "Unknown native runtime error"); }
 }
 template<class T, class F> T boundary(JNIEnv* env, T fallback, F&& action) noexcept {
+    clear_error_trace();
     try { std::lock_guard<std::recursive_mutex> lock(runtime_mutex()); return action(); }
     catch (...) { reportException(env); return fallback; }
 }
 template<class F> void boundary(JNIEnv* env, F&& action) noexcept {
+    clear_error_trace();
     try { std::lock_guard<std::recursive_mutex> lock(runtime_mutex()); action(); }
     catch (...) { reportException(env); }
 }
@@ -160,6 +164,31 @@ jstring toJava(JNIEnv* env, const std::string& value) {
         return static_cast<jstring>(env->PopLocalFrame(result));
     } catch (...) { env->PopLocalFrame(nullptr); throw; }
 }
+void throwJava(JNIEnv* env, const char* kind, std::string_view message) noexcept {
+    if (env->ExceptionCheck()) return;
+    bool frame = false;
+    try {
+        if (env->PushLocalFrame(8) < 0) throw JavaException(env);
+        frame = true;
+        auto cls = env->FindClass(kind); checked(env);
+        auto ctor = env->GetMethodID(cls, "<init>", "(Ljava/lang/String;)V"); checked(env);
+        auto text = toJava(env, std::string(message));
+        auto error = static_cast<jthrowable>(env->NewObject(cls, ctor, text)); checked(env);
+        if (!error) throw std::bad_alloc();
+        env->Throw(error);
+        env->PopLocalFrame(nullptr);
+    } catch (...) {
+        // Constructor/string failures may leave a pending exception. Clear it
+        // before the ASCII-only fallback so -Xcheck:jni sees valid JNI calls.
+        env->ExceptionClear();
+        if (frame) env->PopLocalFrame(nullptr);
+        auto cls = env->FindClass(kind);
+        if (cls) {
+            env->ThrowNew(cls, "Native runtime error (message conversion failed)");
+            env->DeleteLocalRef(cls);
+        }
+    }
+}
 std::shared_ptr<variable> fromJavaObject(JNIEnv* env, jobject object) {
     if (!object) return std::make_shared<variable>(nullptr);
     struct Kind { const char* name; const char* method; const char* signature; int type; };
@@ -197,6 +226,15 @@ std::vector<unsigned char> readFile(const std::string& name) {
     stream.seekg(0); stream.read(reinterpret_cast<char*>(bytes.data()), length);
     if (!stream) throw std::runtime_error("Cannot read complete file: " + name);
     return bytes;
+}
+void requireJavaRawMemory(address pointer) {
+    if (heap::is_object_storage(pointer))
+        throw std::invalid_argument("Java raw memory access cannot access object storage; use typed member access");
+}
+std::shared_ptr<variable> writableRawSlot(jlong pointer) {
+    const address nativePointer = fromJAddress(pointer);
+    requireJavaRawMemory(nativePointer);
+    return heap::getAt(nativePointer);
 }
 std::shared_ptr<variable> typedSlot(jlong pointer, int type) {
     auto value = heap::getAt(fromJAddress(pointer));
@@ -323,6 +361,40 @@ type_contexts decodeContexts(const std::shared_ptr<AbdMap>& entry) {
     validate_type_contexts(result, loadedScript);
     return result;
 }
+std::shared_ptr<AbdArray> encodeMethods(const std::shared_ptr<const method_table>& methods) {
+    auto result = std::make_shared<AbdArray>();
+    if (!methods) return result;
+    if (methods->size() > MAX_VARIABLE_SLOTS)
+        throw std::invalid_argument("Snapshot method table exceeds the slot limit");
+    validate_method_table(*methods, loadedScript);
+    for (const auto& method : *methods) {
+        auto entry = std::make_shared<AbdMap>();
+        entry->put("id", std::make_shared<IntAbdValue>(method.function_id));
+        entry->put("contexts", encodeContexts(method.contexts));
+        result->push_back(entry);
+    }
+    return result;
+}
+std::shared_ptr<const method_table> decodeMethods(const std::shared_ptr<AbdMap>& entry) {
+    auto entries = field<AbdArray>(entry, "methods");
+    if (entries->values.size() > MAX_VARIABLE_SLOTS)
+        throw std::invalid_argument("Snapshot method table exceeds the slot limit");
+    if (entries->values.empty()) return nullptr;
+    auto result = std::make_shared<method_table>();
+    result->reserve(entries->values.size());
+    std::size_t nodes = 0;
+    for (const auto& value : entries->values) {
+        auto method = std::dynamic_pointer_cast<AbdMap>(value);
+        if (!method) throw std::invalid_argument("Invalid snapshot method entry");
+        for (const auto& [key, item] : method->values)
+            if (key != "id" && key != "contexts")
+                throw std::invalid_argument("Unexpected snapshot method entry field: " + key);
+        result->push_back({field<IntAbdValue>(method, "id")->data,
+                          decodeContextTree(field<AbdArray>(method, "contexts"), 0, nodes)});
+    }
+    validate_method_table(*result, loadedScript);
+    return result;
+}
 void validateSnapshotDestructor(std::optional<int> destructor, const type_contexts& contexts) {
     validate_type_contexts(contexts, loadedScript);
     if (!destructor) {
@@ -375,6 +447,9 @@ std::shared_ptr<AbdMapValue> encodeValue(const std::shared_ptr<variable>& value,
             if (block->destructor) entry->put("destructor", std::make_shared<IntAbdValue>(*block->destructor));
             validateSnapshotDestructor(block->destructor, block->destructor_contexts);
             entry->put("destructor contexts", encodeContexts(block->destructor_contexts));
+            if (block->buffer && block->methods && !block->methods->empty())
+                throw std::invalid_argument("Snapshot buffer cannot have virtual methods");
+            entry->put("methods", encodeMethods(block->methods));
             if (block->buffer) {
                 blocks::validate_buffer(block);
                 validate_type_contexts({block->buffer->element}, loadedScript);
@@ -449,11 +524,12 @@ struct SnapshotDecoder {
             else if (entry->get("destructor")) throw std::invalid_argument("Unexpected snapshot object destructor");
             auto contexts = decodeContexts(entry);
             validateSnapshotDestructor(destructor, contexts);
+            auto methods = decodeMethods(entry);
             auto items = field<AbdArray>(entry, "slots");
             auto block = blocks::of(target);
             const bool view = block && block->is_view;
             if (entry->get("buffer")) {
-                if (!field<BoolAbdValue>(entry, "buffer")->data || view || destructor || !contexts.empty())
+                if (!field<BoolAbdValue>(entry, "buffer")->data || view || destructor || !contexts.empty() || methods)
                     throw std::invalid_argument("Invalid snapshot buffer record");
                 const int length = field<IntAbdValue>(entry, "length")->data;
                 const int capacity = field<IntAbdValue>(entry, "capacity")->data;
@@ -471,7 +547,7 @@ struct SnapshotDecoder {
                     if (block->slots.size() != items->values.size()) throw std::invalid_argument("Snapshot class view width differs from its element context");
                 } else block = blocks::create(items->values.size(), loadedScript);
             }
-            block->destructor = destructor; block->destructor_contexts = std::move(contexts); block->depth = depth;
+            block->destructor = destructor; block->destructor_contexts = std::move(contexts); block->methods = std::move(methods); block->depth = depth;
             objects.emplace(idOf(saved), block);
             for (std::size_t i = 0; i < items->values.size(); ++i) decodeInto(block->slots[i], items->values[i], depth + 1);
             if (!view) { target->setValue(block); block->owner = target.get(); }
@@ -502,6 +578,11 @@ std::vector<module_manifest_entry> stableManifest() {
 }
 std::shared_ptr<AbdMap> snapshot() {
     const auto modules = stableManifest();
+    const auto registered = heap::object_records();
+    const auto registeredTables = static_cast<std::size_t>(std::count_if(registered.begin(), registered.end(),
+        [](const auto& object) { return static_cast<bool>(object.methods); }));
+    if (registeredTables != heap::method_table_count())
+        throw std::invalid_argument("Cannot snapshot an unregistered object method table");
     std::size_t bufferSlots = 0;
     for (const auto& value : loadedScript->baseEnv->variables) checkSnapshotBufferBudget(value, bufferSlots);
     for (int i = 0; i < heap::lenHeap(); ++i) checkSnapshotBufferBudget(heap::getSlot(i), bufferSlots);
@@ -512,7 +593,7 @@ std::shared_ptr<AbdMap> snapshot() {
         moduleBytes += module.bytes.size();
     }
     auto result = std::make_shared<AbdMap>();
-    result->put("snapshot version", std::make_shared<IntAbdValue>(9));
+    result->put("snapshot version", std::make_shared<IntAbdValue>(10));
     auto manifest = std::make_shared<AbdArray>();
     for (const auto& module : modules) {
         auto entry = std::make_shared<AbdMap>();
@@ -545,7 +626,7 @@ std::shared_ptr<AbdMap> snapshot() {
     }
     result->put("heap allocation", allocations);
     auto objects = std::make_shared<AbdArray>();
-    for (const auto& object : heap::object_records()) {
+    for (const auto& object : registered) {
         if (object.script_owner.lock() != loadedScript) throw std::invalid_argument("Cannot snapshot an object belonging to another script");
         auto entry = std::make_shared<AbdMap>();
         entry->put("begin position", std::make_shared<AddressAbdValue>(object.startpos));
@@ -553,18 +634,36 @@ std::shared_ptr<AbdMap> snapshot() {
         if (object.destructor_id) entry->put("destructor", std::make_shared<IntAbdValue>(*object.destructor_id));
         validateSnapshotDestructor(object.destructor_id, object.destructor_contexts);
         entry->put("destructor contexts", encodeContexts(object.destructor_contexts));
+        entry->put("methods", encodeMethods(object.methods));
         entry->put("manual", std::make_shared<BoolAbdValue>(object.manual));
         objects->push_back(entry);
     }
     result->put("objects", objects);
     return result;
 }
+// The exec version in a snapshot module's bytes, read from the AZSCRIPT header, or -1.
+int snapshotModuleExecVersion(const ByteArrayValue& code) {
+    const unsigned char* data = code.data;
+    if (!data || code.length < 24 || azertian::b2i(data + 4) != 8 || std::memcmp(data + 8, "AZSCRIPT", 8) != 0 ||
+        azertian::b2i(data + 16) != 4) return -1;
+    return azertian::b2i(data + 20);
+}
 void restoreSnapshot(const std::vector<unsigned char>& bytes) {
     const auto modules = stableManifest();
     auto result = std::make_shared<AbdMap>(std::make_shared<AbdStack>(AbdValue::fromBytes(bytes.data(), bytes.size())));
-    if (field<IntAbdValue>(result, "snapshot version")->data != 9)
-        throw std::invalid_argument("Unsupported snapshot version; expected v9");
+    if (field<IntAbdValue>(result, "snapshot version")->data != 10)
+        throw std::invalid_argument("Unsupported snapshot version; expected v10");
     auto manifest = field<AbdArray>(result, "module manifest");
+    // Exec versions are checked first, so a snapshot of modules from another format names the real cause.
+    for (const auto& value : manifest->values) {
+        auto entry = std::dynamic_pointer_cast<AbdMap>(value);
+        if (!entry) throw std::invalid_argument("Invalid snapshot module manifest entry");
+        const int version = snapshotModuleExecVersion(*field<ByteArrayValue>(entry, "bytes"));
+        if (version < 0) throw std::invalid_argument("Snapshot module is not an exec module");
+        if (version != azertian::EXEC_FORMAT_VERSION)
+            throw std::invalid_argument("Snapshot modules use exec v" + std::to_string(version) + "; expected v" +
+                                        std::to_string(azertian::EXEC_FORMAT_VERSION));
+    }
     if (manifest->values.size() != modules.size()) throw std::invalid_argument("Snapshot module count differs from script");
     for (std::size_t i = 0; i < modules.size(); ++i) {
         auto entry = std::dynamic_pointer_cast<AbdMap>(manifest->values[i]);
@@ -633,9 +732,10 @@ void restoreSnapshot(const std::vector<unsigned char>& bytes) {
         else if (map->get("destructor")) throw std::invalid_argument("Unexpected snapshot destructor id");
         auto contexts = decodeContexts(map);
         validateSnapshotDestructor(destructor, contexts);
+        auto methods = decodeMethods(map);
         objects.push_back({field<AddressAbdValue>(map, "begin position")->data,
                            destructor,
-                           field<BoolAbdValue>(map, "manual")->data, loadedScript, std::move(contexts)});
+                           field<BoolAbdValue>(map, "manual")->data, loadedScript, std::move(contexts), std::move(methods)});
     }
     // The heap validates all ranges, objects, destructor signatures and owners
     // before atomically replacing state. The final globals swap cannot throw.
@@ -730,7 +830,8 @@ JNIEXPORT jlong JNICALL Java_azertia_jni_Caller_call(JNIEnv* env, jclass, jint i
         if (!result || result->type == VOID_VALUE) return jlong(0);
         if (result->type == OBJECT_VALUE) {
             // The value cannot reach Java, so it ends here; its destructor still runs.
-            try { blocks::finalize(blocks::of(result), loadedScript->baseEnv, true); } catch (...) {}
+            try { blocks::finalize(blocks::of(result), loadedScript->baseEnv, true); }
+            catch (...) { clear_error_trace(); }
             throw std::invalid_argument("The script function returned a literal object; return a pointer to cross the Java boundary");
         }
         HeapBlock storage(1);
@@ -767,6 +868,7 @@ JNIEXPORT void JNICALL Java_azertia_jni_Caller20_memFree(JNIEnv* env, jclass, jl
     boundary(env, [&] {
         if (!pointer) return;
         const address nativePointer = fromJAddress(pointer);
+        requireJavaRawMemory(nativePointer);
         // Java may release its own blocks and global (base scope) allocations. A block
         // that a running script scope will release itself must stay with that scope.
         const environment* owner = heap::owner_of(nativePointer);
@@ -790,25 +892,25 @@ JNIEXPORT void JNICALL Java_azertia_jni_Caller20_destroyScript(JNIEnv* env, jcla
     });
 }
 JNIEXPORT void JNICALL Java_azertia_jni_Caller220_ACputMem__JI(JNIEnv* env, jclass, jlong pointer, jint value) {
-    boundary(env, [&] { heap::getAt(fromJAddress(pointer))->setValue(static_cast<int>(value)); });
+    boundary(env, [&] { writableRawSlot(pointer)->setValue(static_cast<int>(value)); });
 }
 JNIEXPORT void JNICALL Java_azertia_jni_Caller220_ACputMem__JF(JNIEnv* env, jclass, jlong pointer, jfloat value) {
-    boundary(env, [&] { heap::getAt(fromJAddress(pointer))->setValue(static_cast<float>(value)); });
+    boundary(env, [&] { writableRawSlot(pointer)->setValue(static_cast<float>(value)); });
 }
 JNIEXPORT void JNICALL Java_azertia_jni_Caller220_ACputMem__JD(JNIEnv* env, jclass, jlong pointer, jdouble value) {
-    boundary(env, [&] { heap::getAt(fromJAddress(pointer))->setValue(static_cast<double>(value)); });
+    boundary(env, [&] { writableRawSlot(pointer)->setValue(static_cast<double>(value)); });
 }
 JNIEXPORT void JNICALL Java_azertia_jni_Caller220_ACputMem__JZ(JNIEnv* env, jclass, jlong pointer, jboolean value) {
-    boundary(env, [&] { heap::getAt(fromJAddress(pointer))->setValue(value == JNI_TRUE); });
+    boundary(env, [&] { writableRawSlot(pointer)->setValue(value == JNI_TRUE); });
 }
 JNIEXPORT void JNICALL Java_azertia_jni_Caller220_ACputMem__JLjava_lang_String_2(JNIEnv* env, jclass, jlong pointer, jstring value) {
-    boundary(env, [&] { heap::getAt(fromJAddress(pointer))->setValue(fromJava(env, value)); });
+    boundary(env, [&] { writableRawSlot(pointer)->setValue(fromJava(env, value)); });
 }
 JNIEXPORT void JNICALL Java_azertia_jni_Caller220_ACputMemAddress(JNIEnv* env, jclass, jlong pointer, jlong bits) {
-    boundary(env, [&] { heap::getAt(fromJAddress(pointer))->setValue(fromJAddress(bits)); });
+    boundary(env, [&] { writableRawSlot(pointer)->setValue(fromJAddress(bits)); });
 }
 JNIEXPORT void JNICALL Java_azertia_jni_Caller220_ACputMemNull(JNIEnv* env, jclass, jlong pointer) {
-    boundary(env, [&] { heap::getAt(fromJAddress(pointer))->setValue(nullptr); });
+    boundary(env, [&] { writableRawSlot(pointer)->setValue(nullptr); });
 }
 JNIEXPORT void JNICALL Java_azertia_jni_Caller2220_bindNamespace(JNIEnv* env, jclass, jint ns) {
     boundary(env, [&] { if (ns < 0 || ns > 65535) throw std::invalid_argument("Namespace must be an unsigned 16-bit integer"); registerExecutor(std::make_shared<JavaExecutor>(ns, env)); });

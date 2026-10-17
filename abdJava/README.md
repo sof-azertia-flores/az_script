@@ -12,6 +12,8 @@
 `fromAbd(bytes, offset, length)` 读取限定区间内的首帧，适合拼接帧。
 `getAsAss()` 逐帧检查边界，不再为每个条目复制整个剩余输入。
 `AbdValue` 构造函数和 `getData()` 都复制字节以避免隐式外部修改。
+`size()` 返回载荷字节数而不复制载荷。`AbdSimpleStack.toAbd()` 把每个成员的长度前缀和载荷
+直接写入结果，本包新建的载荷不再额外复制；线格式不变。
 
 `AcsObject` 保持插入顺序；对象和数组共享类型解码，未知标签和重复键
 不会静默消失。浮点使用 little-endian，与 C++ 一致，保留负零及 NaN

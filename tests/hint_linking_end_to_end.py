@@ -39,7 +39,7 @@ def main():
             run(compiler + ['compile-json', ast, '-o', roundtrip])
             assert abd.read_bytes() == roundtrip.read_bytes(), name
             tree = json.loads(executable.read_text())
-            assert tree['exec-version'] == 9
+            assert tree['exec-version'] == 10
             return abd, tree
 
         def execute(abd, libraries, expected):
@@ -120,15 +120,44 @@ def main():
         execute(cycle, [a, b], ['A', 'B', 'root', '4'])
         execute(cycle, [b, a], ['B', 'A', 'root', '4'])
 
-        equivalent, _ = compile_module('equivalent', '''
+        # Classes are nominal within a compilation unit: a renamed copy with the same layout does not convert.
+        renamed = work / 'renamed.azs'
+        renamed.write_text('''
             class A{int first; B* next;}
             class B{double value; A* link;}
             class C{int renamed; D* child;}
             class D{double renamed; C* ref;}
             int accept(C value){return value.renamed;}
-            C convert(A value){return value;}
-            int main(){A a;a.first=7;C c=a;return accept(a)+convert(a).renamed;}''')
-        execute(equivalent, [], ['14'])
+            int main(){A a;a.first=7;return accept(a);}''', encoding='utf-8')
+        rejected = run(compiler + ['compile', renamed, '-o', work / 'renamed.abd'], success=False)
+        assert 'accept argument 1 expected C, got A' in rejected.stderr, rejected.stderr
+        # Across modules, one shared declaration is the class contract; the runtime does not check it.
+        (work / 'chain.include.azs').write_text('''#ifndef CHAIN_INCLUDED
+            #define CHAIN_INCLUDED 1
+            #assume_hint CHAIN_LIB c4a1
+            class Link{int value; Link* next;}
+            extern int total(Link* head):c4a10002;
+            extern Link* prepend(Link* rest, int value):c4a10003;
+            extern int first(Link (*) link):c4a10004;
+            #fi''', encoding='utf-8')
+        chain, _ = compile_module('chain', '''#namespace_hint CHAIN_LIB
+            #include "chain.include.azs"
+            int total(Link* head):0002{if(head==null){return 0;}return head.value+total(head.next);}
+            Link* prepend(Link* rest, int value):0003{Link* link=new Link();link.value=value;link.next=rest;return link;}
+            int first(Link (*) link):0004{return link.value;}''')
+        shared, _ = compile_module('chain_client', '''#include "chain.include.azs"
+            int main(){Link* a=new Link();a.value=5;Link* b=prepend(a,9);Link literal;literal.value=4;literal.next=b;
+            print(total(b));print(first(literal));int result=total(b)+first(literal);delete b;delete a;return result;}''')
+        execute(shared, [chain], ['14', '4', '18'])
+        # Executables carry no class names, so renamed copies in two modules link unchecked.
+        copy_library, _ = compile_module('copy_library', '''#namespace_hint COPY_LIB
+            class X{int v;}
+            int get(X* x):0002{return x.v;}''')
+        copy_client, _ = compile_module('copy_client', '''#assume_hint COPY_LIB c4b1
+            class Y{int w;}
+            extern int get(Y* y):c4b10002;
+            int main(){Y* y=new Y();y.w=42;int result=get(y);delete y;return result;}''')
+        execute(copy_client, [copy_library], ['42'])
         initialization, _ = compile_module('init_scope', '''
             class C{int x=7;int y=x;C(int x){this.x=x;}}
             int main(){C c(100);return c.y;}''')
@@ -166,6 +195,29 @@ def main():
         result = run([args.host, reserved_missing, 'reject-flush'])
         assert result.stdout.splitlines() == ['rejected'], result.stdout
 
+        # Ordinary modules keep their compiled IDs, so two of them in the default
+        # namespace collide; the runner names the inserted file, the hex ID and the remedy.
+        assembly_main, _ = compile_module('assembly_main', 'int helper() { return 1; }\nint main() { return helper() + 1; }')
+        default_library, default_exec = compile_module('default_library', 'int other() { return 2; }')
+        assert [f['id'] for f in default_exec['f']] == [0x0fff0001], default_exec['f']
+        result = run([args.runner, assembly_main, '--insert', default_library], success=False)
+        assert result.stderr.startswith(f'AzScript error: Cannot insert {default_library}: Duplicate function id: 0x0fff0001 '
+                                        '(namespace 0x0fff, position 0x0001) is already defined by module #0 (ordinary); '), result.stderr
+        assert '#namespace' in result.stderr and '#namespace_hint' in result.stderr and not result.stdout, result
+        second_main, _ = compile_module('second_main', 'int main() { return 3; }')
+        result = run([args.runner, assembly_main, '--insert', second_main], success=False)
+        assert 'Duplicate function id: 0x0fff0000' in result.stderr, result.stderr
+        assert 'only one module may define main' in result.stderr, result.stderr
+        shifted, _ = compile_module('shifted_client', 'extern int other():0fff0002;\nint main() { return other(); }')
+        result = run([args.runner, shifted, '--insert', default_library], success=False)
+        assert result.stderr == 'AzScript error: Imported script function is missing: 0x0fff0002\n', result.stderr
+        spaced_library, spaced_exec = compile_module('spaced_library', '#namespace 5151\nint other() { return 2; }')
+        assert [f['id'] for f in spaced_exec['f']] == [0x51510001], spaced_exec['f']
+        execute(assembly_main, [spaced_library], ['2'])
+        spaced_client, _ = compile_module('spaced_client', 'extern int other():51510001;\n'
+                                          'int helper() { return 1; }\nint main() { return helper() + other(); }')
+        execute(spaced_client, [spaced_library], ['3'])
+
         bad_sources = {
             'old-extern': '#extern int a() 0x12340002\nvoid main(){}',
             'double-namespace': '#namespace 1234\n#namespace_hint A\nvoid main(){}',
@@ -176,11 +228,16 @@ def main():
             'reserved-local': '#namespace_hint A\nint f():0001{return 1;}',
             'signature-conflict': 'extern int f(int):12340002;int f(double n){return 1;}',
             'unequal-layout': 'class A{int x;}class B{double x;}void main(){A a;B b=a;}',
+            'namespace-zero': '#namespace 0\nvoid main(){}',
+            'namespace-runtime': '#namespace 0abd\nvoid main(){}',
         }
+        rejected = {}
         for name, source in bad_sources.items():
             path = work / (name + '.azs')
             path.write_text(source)
-            run(compiler + ['compile', path, '-o', work / (name + '.abd')], success=False)
+            rejected[name] = run(compiler + ['compile', path, '-o', work / (name + '.abd')], success=False).stderr
+        assert 'namespace-zero.azs:1:1: error: Namespace 0000 is reserved' in rejected['namespace-zero'], rejected['namespace-zero']
+        assert 'namespace-runtime.azs:1:1: error: Namespace 0abd is reserved' in rejected['namespace-runtime'], rejected['namespace-runtime']
 
         if args.bridge and args.library:
             snapshot_program, _ = compile_module('snapshot_client', '''#include "point.include.azs"
@@ -222,8 +279,8 @@ public class HintSourceSnapshot {
             assert result.stdout.splitlines() == ['library-load', 'point:42', 'point:42', 'point:41'], result.stdout
             assert 'WARNING in native method' not in result.stdout + result.stderr
         print('Hint linking: source/AST/ABD roundtrips, extern class factories, implementation-local '
-              'initializers, dependency cycles, alias isolation, atomic retry, readiness, structural '
-              'types, full-width IDs and grammar rejection passed.')
+              'initializers, dependency cycles, alias isolation, atomic retry, readiness, nominal '
+              'and shared-header class types, full-width IDs, module-assembly diagnostics and grammar rejection passed.')
 
 
 if __name__ == '__main__':

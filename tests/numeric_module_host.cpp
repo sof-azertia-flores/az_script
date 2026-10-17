@@ -97,8 +97,8 @@ int main(int argc, char** argv) {
                 if (limit == 0) throw std::runtime_error("Step limit must be positive");
                 script->max_steps = limit;
             } else if (command == "heap-empty") {
-                if (azertian::heap::lenAlloc() != 0 || !azertian::heap::object_records().empty())
-                    throw std::runtime_error("Expected every allocation and object registration to be released");
+                if (azertian::heap::lenAlloc() != 0 || !azertian::heap::object_records().empty() || azertian::heap::method_table_count() != 0)
+                    throw std::runtime_error("Expected every allocation, object registration and virtual method table to be released");
                 std::cout << "empty\n";
             } else throw std::runtime_error("Unknown host test command");
         }

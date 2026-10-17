@@ -42,8 +42,8 @@ def main():
             result = run(command + ['compile', source_path, '-o', binary,
                                     '--ast', ast, '--exec-json', instructions])
             if error:
-                assert result.returncode != 0 and error in result.stderr, (name, result.stderr)
-                assert 'Exception in thread' not in result.stderr, (name, result.stderr)
+                assert result.returncode == 1 and error in result.stderr, (name, result.stderr)
+                assert 'Exception in thread' not in result.stderr and 'internal compiler error' not in result.stderr, (name, result.stderr)
                 checks += 1
                 return
             assert result.returncode == 0, (name, result.stderr)
@@ -125,7 +125,7 @@ def main():
             void main(){Tracker value=make();print(value.value);}''', '0\n1\n1\n')
         execute('return-for-init-object', TRACKER + '''Tracker make(){for(Tracker t(8);;){return t;}}
             void main(){Tracker value=make();print(value.value);}''', '8\n8\n')
-        execute('for-condition-error', TRACKER + '''void main(){for(Tracker init(1);1/0;){print(99);}}''', '1\n', 'Division by zero')
+        execute('for-condition-error', TRACKER + '''void main(){for(Tracker init(1);1/0==0;){print(99);}}''', '1\n', 'Division by zero')
         execute('loop-example', (ROOT / 'compiler/examples/loops-regressions.azs').read_text(), '9\n')
 
         rejected = {
@@ -133,7 +133,7 @@ def main():
             'continue-function-boundary': ('void f(){continue;}void main(){while(true){f();break;}}', 'inside a loop'),
             'for-init-outside-scope': ('void main(){for(int i=0;i<1;i++){}print(i);}', 'Unknown variable: i'),
             'for-body-outside-step': ('void main(){for(int i=0;i<1;j++){int j=1;}}', 'Unknown variable: j'),
-            'for-string-condition': ('void main(){for(;"x";)break;}', 'boolean or numeric'),
+            'for-string-condition': ('void main(){for(;"x";)break;}', 'must be boolean'),
             'for-void-condition': ('void main(){for(;print(1);)break;}', 'void'),
             'for-partial-return': ('int main(){for(int i=0;i<1;i++){return 1;}}', 'reach the end'),
             'for-own-break': ('int main(){for(;;){if(true)break;}}', 'reach the end'),
@@ -165,7 +165,7 @@ def main():
             path = work / (name + '.json')
             path.write_text(json.dumps(forged))
             result = run(command + ['compile-json', path, '-o', work / (name + '.abd')])
-            assert result.returncode != 0 and error in result.stderr, (name, result.stderr)
+            assert result.returncode == 1 and error in result.stderr, (name, result.stderr)
             checks += 1
 
         malformed = work / 'continue-extra.abd'

@@ -5,6 +5,7 @@ class Point {
     int x;
     Point(int value) { x = value; }
     int get() { return x; }
+    int describe() { return x; }
     ~Point() { destroyed = destroyed * 10 + 1; }
 }
 
@@ -12,6 +13,8 @@ class TaggedPoint : public Point {
     int tag;
     TaggedPoint(int value, int label) : Point(value) { tag = label; }
     int total() { return get() + tag; }
+    // Shadows Point::describe; the qualified call selects the base method statically.
+    int describe() { return Point::describe() * 100 + tag; }
     ~TaggedPoint() { destroyed = destroyed * 10 + 2; }
 }
 
@@ -27,6 +30,7 @@ int main() {
         Point * base = point;
         base.x = 7;
         if (point.total() != 13 || base.get() != 7) { return 1; }
+        if (point.describe() != 706 || base.describe() != 7) { return 7; }
     }
     if (destroyed != 21) { return 2; }
     destroyed = 0;

@@ -61,7 +61,8 @@ public final class JniRegression {
         Address second = (Address) AbdInvoker.invoke(201, 22);
         Address manual = (Address) AbdInvoker.invoke(202, 33);
         equal(true, AbdInvoker.saveStatus(saved));
-        Caller220.ACputMem(first.bits(), 71);
+        rejectsObjectRaw(() -> Caller220.ACputMem(first.bits(), 71));
+        equal(11, AbdInvoker.invoke(204, first));
         Address extra = (Address) AbdInvoker.invoke(201, 44);
         AbdInvoker.invoke(202, 55);
         AbdInvoker.invoke(206, 99);
@@ -83,6 +84,10 @@ public final class JniRegression {
             equal(33, AbdInvoker.invoke(204, manual));
             equal(List.of(), destructed);
         }
+        try { AbdInvoker.loadStatus(new File(work, "objects.exec-v9.snapshot.abd")); throw new AssertionError("exec v9 snapshot module accepted"); }
+        catch (IllegalArgumentException expected) { equal("Snapshot modules use exec v9; expected v10", expected.getMessage()); }
+        try { AbdInvoker.loadStatus(new File(work, "objects.not-exec.snapshot.abd")); throw new AssertionError("non-exec snapshot module accepted"); }
+        catch (IllegalArgumentException expected) { equal("Snapshot module is not an exec module", expected.getMessage()); }
         fails(RuntimeException.class, () -> AbdInvoker.invoke(203, first));
         AbdInvoker.invoke(203, manual);
         equal(List.of(33), destructed);
@@ -100,8 +105,8 @@ public final class JniRegression {
         equal(66, AbdInvoker.invoke(207));
         equal(11, AbdInvoker.invoke(204, Address.of(1)));
         equal(22, AbdInvoker.invoke(204, Address.of(2)));
-        Caller20.memFree(3); // Raw Java release must remove registration without invoking user code.
-        fails(RuntimeException.class, () -> AbdInvoker.invoke(203, Address.of(3)));
+        rejectsObjectRaw(() -> Caller20.memFree(3));
+        equal(33, AbdInvoker.invoke(204, Address.of(3)));
         equal(List.of(), destructed);
         AbdInvoker.loadStatus(new File(work, "objects.valid.snapshot.abd"));
         AbdInvoker.invoke(203, Address.of(3));
@@ -124,21 +129,17 @@ public final class JniRegression {
         AbdInvoker.destroyScript();
         equal(List.of(11, 22), destructed);
 
-        // make_free may detach an automatic object without changing how it was
-        // created: snapshot that state, keep rejecting delete, and use raw free.
+        // Raw ownership operations cannot detach a registered object. The
+        // rejected operation still runs the object's normal error cleanup.
         destructed.clear();
         loadAndFlush(script);
-        Address detached = (Address) AbdInvoker.invoke(208, 77);
-        File detachedSnapshot = new File(work, "objects.detached.snapshot.abd");
-        equal(true, AbdInvoker.saveStatus(detachedSnapshot));
-        Caller20.memFree(detached.bits());
-        AbdInvoker.loadStatus(detachedSnapshot);
-        equal(77, AbdInvoker.invoke(204, detached));
-        fails(RuntimeException.class, () -> AbdInvoker.invoke(203, detached));
-        equal(List.of(), destructed);
-        Caller20.memFree(detached.bits());
+        fails(IllegalStateException.class, () -> AbdInvoker.invoke(208, 77));
+        equal(List.of(77), destructed);
+        equal(true, Caller22220.globalMemories2Str().endsWith("Allocations: 0\n"));
+        equal(true, AbdInvoker.saveStatus(new File(work, "objects.guarded.snapshot.abd")));
         AbdInvoker.destroyScript();
-        equal(List.of(), destructed);
+        equal(List.of(77), destructed);
+        destructed.clear();
 
         UnsupportedOperationException destructorFailure = new UnsupportedOperationException("second object's destructor");
         IllegalArgumentException laterFailure = new IllegalArgumentException("first object's destructor");
@@ -161,7 +162,7 @@ public final class JniRegression {
         equal(true, Caller22220.globalMemories2Str().endsWith("Allocations: 0\n"));
         destructed.clear();
         try { AbdInvoker.invoke(215); throw new AssertionError("Expected original native body failure"); }
-        catch (IllegalStateException error) { equal("Division by zero", error.getMessage()); }
+        catch (IllegalStateException error) { equal("Division by zero\n  at function 0x000000d7", error.getMessage()); }
         equal(List.of(2, 1), destructed);
         equal(true, Caller22220.globalMemories2Str().endsWith("Allocations: 0\n"));
         AbdInvoker.destroyScript();
@@ -173,6 +174,9 @@ public final class JniRegression {
         AbdInvoker.registerJfunction(0x34560004, values -> { destructed.add((Integer) values[0]); return null; });
         File saved = new File(work, "numeric.saved.snapshot.abd");
         loadAndFlush(new File(work, "numeric.exec.abd"));
+        // Construct through a host entry so ro transfers the automatic object
+        // directly to the base scope; raw mem_send_up is intentionally closed.
+        AbdInvoker.invoke(226, AbdInvoker.invoke(201, 11));
         equal(7, AbdInvoker.invoke(207));
         equal("numeric\0中文🐈", AbdInvoker.invoke(220));
         equal(true, AbdInvoker.invoke(222));
@@ -186,7 +190,8 @@ public final class JniRegression {
         AbdInvoker.invoke(206, 99);
         AbdInvoker.invoke(221, "changed");
         AbdInvoker.invoke(223, false);
-        Caller220.ACputMem(automatic.bits(), 77);
+        rejectsObjectRaw(() -> Caller220.ACputMem(automatic.bits(), 77));
+        equal(11, AbdInvoker.invoke(204, automatic));
         AbdInvoker.invoke(201, 44);
         AbdInvoker.loadStatus(saved);
         equal(List.of(), destructed);
@@ -195,7 +200,7 @@ public final class JniRegression {
         File[] malformed = work.listFiles((directory, name) -> name.startsWith("numeric.invalid-") && name.endsWith(".snapshot.abd"));
         if (malformed == null || malformed.length < 8) throw new AssertionError("Missing malformed numeric fixtures");
         List<File> rejected = new ArrayList<>(List.of(malformed));
-        for (int version : new int[]{0, 2, 3, 4, 5, 6}) rejected.add(new File(work, "numeric.named-v" + version + ".snapshot.abd"));
+        for (int version : new int[]{0, 2, 3, 4, 5, 6, 7, 8, 9}) rejected.add(new File(work, "numeric.named-v" + version + ".snapshot.abd"));
         for (File invalid : rejected) {
             fails(IllegalArgumentException.class, () -> AbdInvoker.loadStatus(invalid));
             equal(7, AbdInvoker.invoke(207));
@@ -220,6 +225,7 @@ public final class JniRegression {
 
         destructed.clear();
         loadAndFlush(new File(work, "numeric.other.exec.abd"));
+        AbdInvoker.invoke(226, AbdInvoker.invoke(201, 11));
         fails(IllegalArgumentException.class, () -> AbdInvoker.loadStatus(saved));
         equal(7, AbdInvoker.invoke(207));
         equal("numeric\0中文🐈", AbdInvoker.invoke(220));
@@ -227,10 +233,177 @@ public final class JniRegression {
         equal(List.of(11), destructed);
         AbdInvoker.unregisterJfunction(0x34560004);
     }
+    private static void rejectsObjectRaw(Runnable operation) {
+        checks++;
+        try { operation.run(); }
+        catch (IllegalArgumentException error) {
+            equal("Java raw memory access cannot access object storage; use typed member access", error.getMessage());
+            return;
+        }
+        throw new AssertionError("Java raw memory access accepted object storage");
+    }
+    private static void objectRawWrites(Address pointer) {
+        for (int offset = 0; offset < 2; offset++) {
+            final long slot = pointer.bits() + offset;
+            rejectsObjectRaw(() -> Caller220.ACputMem(slot, 99));
+            rejectsObjectRaw(() -> Caller220.ACputMem(slot, 1.5f));
+            rejectsObjectRaw(() -> Caller220.ACputMem(slot, 2.5));
+            rejectsObjectRaw(() -> Caller220.ACputMem(slot, true));
+            rejectsObjectRaw(() -> Caller220.ACputMem(slot, "overwrite"));
+            rejectsObjectRaw(() -> Caller220.ACputMemAddress(slot, 17));
+            rejectsObjectRaw(() -> Caller220.ACputMemNull(slot));
+            // Exact text distinguishes the object guard from the ordinary
+            // "not an allocation start" rejection at the interior address.
+            rejectsObjectRaw(() -> Caller20.memFree(slot));
+        }
+        equal(11, AbdInvoker.invoke(403, pointer));
+        equal(22, AbdInvoker.invoke(404, pointer));
+    }
+    private static void objectStorageGuards(File work) {
+        List<Address> construction = new ArrayList<>();
+        AbdInvoker.registerJfunction(0x34560011, values -> {
+            Address pointer = (Address) values[0];
+            construction.add(pointer);
+            // The callback runs before ob registers a destructor, and also
+            // runs once with a literal object's tagged block address.
+            objectRawWrites(pointer);
+            return null;
+        });
+        loadAndFlush(new File(work, "object-guards.exec.abd"));
+        long raw = Caller20.memAlloc(2);
+        Caller220.ACputMem(raw, 71);
+        Caller220.ACputMem(raw + 1, 72);
+        fails(RuntimeException.class, () -> AbdInvoker.invoke(403, Address.of(raw)));
+        Address automatic = (Address) AbdInvoker.invoke(401);
+        Address manual = (Address) AbdInvoker.invoke(402);
+        AbdInvoker.invoke(410);
+        equal(3, construction.size());
+        objectRawWrites(automatic);
+        objectRawWrites(manual);
+        File saved = new File(work, "object-guards.snapshot.abd");
+        equal(true, AbdInvoker.saveStatus(saved));
+        Caller220.ACputMem(raw, 99);
+        AbdInvoker.loadStatus(saved);
+        equal(3, construction.size()); // Restore never calls constructors.
+        equal(71, Caller.getMemInt(raw));
+        equal(72, Caller.getMemInt(raw + 1));
+        // Registered heap objects are re-tagged from existing v10 records.
+        objectRawWrites(automatic);
+        objectRawWrites(manual);
+        Caller220.ACputMem(raw, 73);
+        equal(73, Caller.getMemInt(raw));
+        AbdInvoker.invoke(405, manual);
+        long reused = Caller20.memAlloc(2);
+        equal(manual.bits(), reused);
+        Caller220.ACputMem(reused, 81);
+        Caller220.ACputMem(reused + 1, 82);
+        equal(81, Caller.getMemInt(reused));
+        equal(82, Caller.getMemInt(reused + 1));
+        Caller20.memFree(reused); // Deletion clears the old object-range tag.
+        Caller20.memFree(raw);
+        AbdInvoker.destroyScript();
+        AbdInvoker.unregisterJfunction(0x34560011);
+    }
+    private static void virtualSnapshotValues(Address heap, Address literal, Address buffer) {
+        equal(111, AbdInvoker.invoke(622, heap));
+        equal(24, AbdInvoker.invoke(623, heap));
+        equal(111, AbdInvoker.invoke(629, literal));
+        equal(24, AbdInvoker.invoke(630, literal));
+        equal(111, AbdInvoker.invoke(627, buffer));
+        equal(24, AbdInvoker.invoke(628, buffer));
+    }
+    private static void virtualSnapshots(File work) {
+        loadAndFlush(new File(work, "virtual.snapshot.exec.abd"));
+        Address heap = (Address) AbdInvoker.invoke(620);
+        Address literal = (Address) AbdInvoker.invoke(625);
+        Address buffer = (Address) AbdInvoker.invoke(626);
+        virtualSnapshotValues(heap, literal, buffer);
+        File saved = new File(work, "virtual.saved.snapshot.abd");
+        equal(true, AbdInvoker.saveStatus(saved));
+        AbdInvoker.invoke(621, heap);
+        AbdInvoker.invoke(631, literal);
+        equal(211, AbdInvoker.invoke(622, heap));
+        equal(211, AbdInvoker.invoke(629, literal));
+        Caller20.memFree(buffer.bits());
+        fails(RuntimeException.class, () -> AbdInvoker.invoke(627, buffer));
+        AbdInvoker.loadStatus(saved);
+        virtualSnapshotValues(heap, literal, buffer);
+        File[] invalid = work.listFiles((directory, name) -> name.startsWith("virtual.invalid-") && name.endsWith(".snapshot.abd"));
+        if (invalid == null || invalid.length < 34) throw new AssertionError("Missing malformed virtual method snapshots");
+        for (File corrupt : invalid) {
+            fails(IllegalArgumentException.class, () -> AbdInvoker.loadStatus(corrupt));
+            virtualSnapshotValues(heap, literal, buffer);
+            rejectsObjectRaw(() -> Caller220.ACputMem(heap.bits(), 99));
+        }
+        // Independently encoded method/context records restore all three
+        // object representations, including the class view inside a buffer.
+        AbdInvoker.loadStatus(new File(work, "virtual.valid.snapshot.abd"));
+        virtualSnapshotValues(Address.of(1), Address.of(2), Address.of(3));
+        AbdInvoker.invoke(624, Address.of(1));
+        Caller20.memFree(2);
+        Caller20.memFree(3);
+        AbdInvoker.destroyScript();
+        // The final script close must release the heap method-table registry;
+        // a fresh script and a plain allocation can reuse the old address.
+        loadAndFlush(new File(work, "fixture.exec.abd"));
+        long raw = Caller20.memAlloc(1);
+        Caller220.ACputMem(raw, 91);
+        equal(91, Caller.getMemInt(raw));
+        Caller20.memFree(raw);
+        equal(true, AbdInvoker.saveStatus(new File(work, "virtual.after-close.snapshot.abd")));
+        AbdInvoker.destroyScript();
+    }
+    private static void runtimeTraces(File work) {
+        loadAndFlush(new File(work, "traces.exec.abd"));
+        String divisionTrace = "Division by zero\n"
+                + "  at 除法 (脚本 🐈.azs:10:12)\n"
+                + "  at middle (脚本 🐈.azs:6:10)\n"
+                + "  at 入口🐈 (脚本 🐈.azs:2:10)";
+        try { AbdInvoker.invoke(301); throw new AssertionError("Expected traced division failure"); }
+        catch (IllegalStateException error) { equal(divisionTrace, error.getMessage()); }
+        String rangeTrace = "Invalid or freed heap pointer: 0\n  at range (脚本 🐈.azs:14:10)";
+        try { AbdInvoker.invoke(304); throw new AssertionError("Expected traced range failure"); }
+        catch (IndexOutOfBoundsException error) { equal(rangeTrace, error.getMessage()); }
+        try { AbdInvoker.invoke(305); throw new AssertionError("Expected traced allocation failure"); }
+        catch (IllegalArgumentException error) {
+            equal("Invalid allocation size\n  at allocate (脚本 🐈.azs:18:10)", error.getMessage());
+        }
+        // The same native type/message from a host-only operation must not pick
+        // up the preceding script's published trace.
+        try { Caller20.memAlloc(-1); throw new AssertionError("Expected host allocation failure"); }
+        catch (IllegalArgumentException error) { equal("Invalid allocation size", error.getMessage()); }
+        List<Throwable> reentered = new ArrayList<>();
+        AbdInvoker.registerJfunction(0x34560006, values -> {
+            try { AbdInvoker.invoke(301); throw new AssertionError("Expected swallowed script failure"); }
+            catch (IllegalStateException error) { equal(divisionTrace, error.getMessage()); }
+            try { AbdInvoker.invoke(304); throw new AssertionError("Expected second script failure"); }
+            catch (IndexOutOfBoundsException error) { reentered.add(error); throw error; }
+        });
+        try { AbdInvoker.invoke(306); throw new AssertionError("Expected reentrant callback failure"); }
+        catch (IndexOutOfBoundsException error) {
+            equal(1, reentered.size());
+            equal(true, reentered.get(0) == error);
+            equal(rangeTrace, error.getMessage());
+        }
+        AbdInvoker.registerJfunction(0x34560007, values -> {
+            try { AbdInvoker.invoke(301); throw new AssertionError("Expected swallowed script failure"); }
+            catch (IllegalStateException error) { equal(divisionTrace, error.getMessage()); }
+            return null;
+        });
+        try { AbdInvoker.invoke(307); throw new AssertionError("Expected failure after callback recovery"); }
+        catch (IllegalStateException error) {
+            equal("Division by zero\n  at recovered (脚本 🐈.azs:26:12)", error.getMessage());
+        }
+        AbdInvoker.destroyScript();
+        AbdInvoker.unregisterJfunction(0x34560006);
+        AbdInvoker.unregisterJfunction(0x34560007);
+    }
     private static final String STACK_EXHAUSTED = "Script native stack limit exceeded";
     private static void stackExhausted(Throwable failure) {
         checks++;
-        if (!(failure instanceof IllegalStateException) || !STACK_EXHAUSTED.equals(failure.getMessage()))
+        // Script frames follow the message; the first frame is the innermost call.
+        if (!(failure instanceof IllegalStateException)
+                || !failure.getMessage().startsWith(STACK_EXHAUSTED + "\n  at function 0x7a010001"))
             throw new AssertionError("Expected a native stack limit error, got " + failure, failure);
     }
     private static Throwable attempt(Runnable operation) {
@@ -247,7 +420,7 @@ public final class JniRegression {
     private static void limited(String message, Runnable operation) {
         checks++;
         Throwable failure = attempt(operation);
-        if (!(failure instanceof IllegalStateException) || !message.equals(failure.getMessage()))
+        if (!(failure instanceof IllegalStateException) || !failure.getMessage().startsWith(message + "\n  at function "))
             throw new AssertionError("Expected '" + message + "', got " + failure, failure);
     }
     /** Deep native recursion and host limits; leaves the default limits in place. */
@@ -367,6 +540,11 @@ public final class JniRegression {
             fails(IllegalStateException.class, () -> AbdInvoker.invoke(0x12340006));
             fails(IllegalArgumentException.class, () -> AbdInvoker.invoke(0x1234ffff));
             fails(IllegalStateException.class, () -> AbdInvoker.invoke(0x45670000));
+            // Runtime and Java host messages print function IDs as 0x plus the 32-bit pattern.
+            try { AbdInvoker.invoke(0xfedc0001); throw new AssertionError("Expected an unknown function id"); }
+            catch (IllegalStateException error) { equal("Unknown function id: 0xfedc0001", error.getMessage()); }
+            try { Caller.callbackValue(0x89ab0003, new long[0]); throw new AssertionError("Expected an unknown Java function id"); }
+            catch (IllegalArgumentException error) { equal("Unknown Java function id: 0x89ab0003", error.getMessage()); }
             fails(IllegalArgumentException.class, () -> AbdInvoker.invoke(101, 1L));
             fails(IllegalStateException.class, () -> AbdInvoker.invoke(101));
             fails(IllegalArgumentException.class, () -> Caller.call(1, null));
@@ -484,6 +662,9 @@ public final class JniRegression {
             AbdInvoker.destroyScript();
             objectSnapshots(work);
             numericSnapshots(work);
+            runtimeTraces(work);
+            objectStorageGuards(work);
+            virtualSnapshots(work);
             checks += JniHintRegression.run(work);
             nativeStack(work);
             loadAndFlush(script);

@@ -47,7 +47,7 @@ Java 桥可以编解码 `Integer`、`Float`、`Double`、`Boolean`、`String`、
 
 `AbdInvoker.addTrustedPublicKey(String)` 和 `addTrustedPublicKey(File)` 把 PEM 公钥交给 `load_extern_library`。`clearTrustedPublicKeys()` 清空这组公钥。Java 宿主不会自动读取 `AZSCRIPT_TRUSTED_KEY` 或 `trusted_key.pem`。动态库注册的是同一进程里的 C++ `registerExecutor`，与 `registerJfunction` 共用命名空间规则。
 
-普通函数可用显式 `:0003` 编号，否则 ID 会随源码变化。AST 的 `abstract` 保存 extern 优先的源码名称绑定，同名 extern 与本地定义共存时，它指向 extern；本地定义位置应读取 `body` 中的 namespace 和 `metadata.position/name`。hint 库的定义 namespace 是0000占位，宿主通过 `namespaceForHint` 查询该库实际 namespace，再与其公开低16位编号组合。不能把本模块 namespace 套到所有 abstract 项；跨库导入须使用其对应库的位置。AST 与 ABD 必须成对部署。
+需要稳定的普通函数 ID 时，在实现所 include 的共享头文件中以完整 ID 声明一次（`#namespace 1234` 的模块写 `extern int f():12340003;`），定义省略编号即可继承；也可用显式 `:0003` 编号，否则 ID 会随源码变化。`#namespace` 不能使用保留的 `0000` 和 `0abd`，编译器会拒绝。AST 的 `abstract` 保存 extern 优先的源码名称绑定，同名 extern 与本地定义共存时，它指向 extern；本地定义位置应读取 `body` 中的 namespace 和 `metadata.position/name`。hint 库的定义 namespace 是0000占位，宿主通过 `namespaceForHint` 查询该库实际 namespace，再与其公开低16位编号组合。不能把本模块 namespace 套到所有 abstract 项；跨库导入须使用其对应库的位置。AST 与 ABD 必须成对部署。
 
 泛型脚本函数只保留一份擦除后的实现，由编译后的脚本调用传入隐藏操作上下文。`AbdInvoker.invoke` 无法提供这些上下文，直接调用泛型入口会报错。应导出参数和返回类型明确的普通非泛型包装函数，再从 Java 调用其 ID：
 
@@ -60,23 +60,33 @@ int integer_identity(int value):0003 { return identity<int>(value); }
 
 原有 `JfuncExecutor` 的 `void run(Object[])` 继续支持，在脚本中返回 `null`。新的 `registerJfunction(int, Function<Object[],Object>)` 可以返回任一种支持的值。回调抛出的 Java 异常传回最初调用方；未知回调、类型错误、文件错误和非法地址均转换为 Java 异常，C++ 异常不会越过 JNI。
 
+原生错误保留现有 Java 异常类型，其多行消息由原错误和脚本调用帧组成：
+
+```text
+Division by zero
+  at divide (main.azs:2:14)
+  at main (main.azs:5:12)
+```
+
+编译时显式加 `-g` 才携带名称和源码位置，否则帧显示为 `  at function 0x0fff0002`。非内置的原生回调增加 `  at native function 0x12340001`。消息转换为 Java 字符串时保留 UTF-8 文本；行和 UTF-16 列从 1 开始。最多保留 64 帧，其余以 `  ... N more frames` 报告。Java 回调抛出的 throwable 仍以同一个对象传播，不包装，也不改写消息。记录是线程局部的，每次 JNI 入口（包括回调重入）都清空，因此被吞掉的异常不会污染后续错误。清理保留首个错误及其调用帧，详见[运行错误](../compiler/LANGUAGE.md#运行错误与调试信息)。公开 C++ ABI 已改变，C++ 宿主和原生插件须用配套头文件及运行库重新构建。
+
 每个进程使用一个共享脚本/堆。`AbdInvoker` 串行处理多线程调用，回调可在同一线程再次调用 `invoke`。回调不得等待另一个将调用该运行时的线程，否则会等待自己持有的运行时锁。纯宿主回调重入也有深度上限。多个相互独立的脚本实例尚未实现。
 
 `setMaxSteps(long)`、`setMaxCallDepth(int)` 和 `setMaxStackBytes(long)` 设置执行限制，`getMaxSteps()`、`getMaxCallDepth()` 和 `getMaxStackBytes()` 读取当前值。默认每次顶层调用最多执行 1,000,000 步，同时嵌套的脚本与宿主函数调用最多 256 层；栈预算默认为 `0`，只按调用线程的实际栈限制。限制是进程级设置：立即作用于已加载脚本，也作用于之后加载的脚本（含 `flush` 中的 onload），`destroyScript()` 和 `close()` 不会重置。脚本运行或回调期间修改限制抛出 `IllegalStateException`；步数或深度不为正、栈预算为负时抛出 `IllegalArgumentException`。
 
-解释器在原生栈上递归执行调用、代码块和表达式。每个线程记录最外层脚本调用开始的位置；执行接近线程栈底，或用量超过 `setMaxStackBytes` 设置的字节数时，抛出 `IllegalStateException("Script native stack limit exceeded")`，JVM 不会崩溃，已进入的调用正常展开并完成清理。栈底前保留线程栈大小的四分之一（至少 64 KiB、至多 1 MiB），供异常展开、清理、宿主调用和 JVM 保护页使用。栈较小的线程（例如 `new Thread(null, task, name, 256 * 1024)`）能执行的递归较浅，需要深递归时请为调用线程分配更大的栈。
+解释器在原生栈上递归执行调用、代码块和表达式。每个线程记录最外层脚本调用开始的位置；执行接近线程栈底，或用量超过 `setMaxStackBytes` 设置的字节数时，抛出 `IllegalStateException`，消息以 `Script native stack limit exceeded` 开头并附带脚本栈跟踪，JVM 不会崩溃，已进入的调用正常展开并完成清理。栈底前保留线程栈大小的四分之一（至少 64 KiB、至多 1 MiB），供异常展开、清理、宿主调用和 JVM 保护页使用。栈较小的线程（例如 `new Thread(null, task, name, 256 * 1024)`）能执行的递归较浅，需要深递归时请为调用线程分配更大的栈。
 
 `destroyScript()` 可重复调用，会释放脚本拥有的状态，保留调用者单独分配的宿主内存；保留回调注册以便重新加载。`close()` 还会释放回调的 JVM 全局引用；应在宿主退出或类加载器卸载前调用，即使卸载函数抛错也会清理。`unregisterJfunction(id)` 移除单个注册。脚本运行或回调期间不能销毁、insert、flush 或恢复快照；`saveStatus` 在回调中返回 `false`。`loadScript` 和 `insertScript(File)` 只装配，之后必须显式 `flush()`；通过 `namespaceForHint(String)` 查询库的实际 namespace。初始化回调可以 invoke 已链接函数。链接检查失败可补库重试；onload 失败则脚本进入故障态，只能关闭后重新加载。
 
-类对象和 `address` 使用独立的不可变 `azertia.Address` 传递，不能用 `Integer` 或 `Long` 代替。`Address.of(long bits)` 保留全部无符号 64 位地址位模式，`bits()` 返回原始位，`toString()` 使用无符号十进制；例如 `Address.of(-1L)` 表示 `18446744073709551615`。`Address.NULL` 是地址零，与表示 `void` 的 Java `null` 不同。高位地址可以作为地址值传递和保存；只有实际活动分配内的地址能够读写内存。脚本返回给宿主的自动对象由脚本全局作用域接管，在显式关闭脚本时析构；返回的 `new` 对象仍需在关闭前调用脚本中的 `delete`。成员引用不拥有其他对象，原始 `memFree` 只释放内存、不调用用户析构。
+类对象和 `address` 使用独立的不可变 `azertia.Address` 传递，不能用 `Integer` 或 `Long` 代替。`Address.of(long bits)` 保留全部无符号 64 位地址位模式，`bits()` 返回原始位，`toString()` 使用无符号十进制；例如 `Address.of(-1L)` 表示 `18446744073709551615`。`Address.NULL` 是地址零，与表示 `void` 的 Java `null` 不同。高位地址可以作为地址值传递和保存；只有实际活动分配内的地址能够读写内存。脚本返回给宿主的自动对象由脚本全局作用域接管，在显式关闭脚本时析构；返回的 `new` 对象仍需在关闭前调用脚本中的 `delete`。成员引用不拥有其他对象。原始 `memFree` 及全部 `ACputMem*` 重载拒绝对象起点/内部地址及字面量/视图地址，包括构造期间和快照恢复后，抛出 `IllegalArgumentException: Java raw memory access cannot access object storage; use typed member access`。读写字段或删除手动对象应调用带类型的脚本包装函数。类指针实参/结果仍受信任：address 标签及成员存储/边界检查不验证名义类身份或全部字段，旧堆别名和逃逸的自动对象仍不安全。
 
-`saveStatus` 写入 v9 快照，按运行时槽顺序将全局变量保存为数组，与 exec v9 的数字变量编号对应。快照同时保存每个堆槽（含字段中的字面量对象及其地址）、分配区间、对象地址、析构函数、创建方式、自动回收顺序及已绑定的析构操作上下文（递归保存默认工厂引用）；恢复时字面量对象获得新地址，指向它们的地址随之改写。`globalMemories2Str()` 显示 `-1`、`-2` 等全局槽编号。地址值使用独立标量标签 `0xce200b` 和固定 8 字节小端负载；全局值、堆槽、分配起点、对象起点和所有权列表均保留地址的全部 64 位。槽数量、长度、变量编号和函数 ID 仍为 32 位整数。旧 JAR、JNI 库和执行文件不能混用。
+`saveStatus` 写入 v10 快照，按运行时槽顺序将全局变量保存为数组，与 exec v10 的数字变量编号对应；快照版本独立于 exec 版本。快照同时保存每个堆槽（含字段中的字面量对象及其地址）、分配区间、对象地址、析构函数、创建方式、自动回收顺序及已绑定的析构操作上下文（递归保存默认工厂引用）；恢复时字面量对象获得新地址，指向它们的地址随之改写。`globalMemories2Str()` 显示 `-1`、`-2` 等全局槽编号。地址值使用独立标量标签 `0xce200b` 和固定 8 字节小端负载；全局值、堆槽、分配起点、对象起点和所有权列表均保留地址的全部 64 位。槽数量、长度、变量编号和函数 ID 仍为 32 位整数。旧 JAR、JNI 库和执行文件不能混用。 每个堆对象及字面量/视图记录必须带 `methods:[{id,contexts}]`，buffer 必须使用 `[]`，以保存虚方法绑定及已绑定泛型上下文。保存拒绝没有对应对象登记的堆方法表。
 
-`loadStatus` 检查有序模块原始字节、实际 namespace、hint、全局布局、全局数组数量及编码值、对象登记、分配起点、析构签名和隐藏数量、上下文 ABI/kind/深度及默认工厂的签名和隐藏数量，全部通过后原子替换状态；损坏文件不会留下部分恢复的全局变量或堆，替换本身不执行旧对象析构。上下文保存为数据，不保存原生指针或已退出调用帧。只接受 v9 快照，旧版本和无版本文件会被拒绝。
+`loadStatus` 检查有序模块原始字节、实际 namespace、hint、全局布局、全局数组数量及编码值、对象登记、分配起点、析构签名和隐藏数量、上下文 ABI/kind/深度及默认工厂的签名和隐藏数量，全部通过后原子替换状态；损坏文件不会留下部分恢复的全局变量或堆，替换本身不执行旧对象析构。上下文保存为数据，不保存原生指针或已退出调用帧。只接受 v10 快照，旧版本和无版本文件会被拒绝；模块不是 exec v10 的快照同样被拒绝（`Snapshot modules use exec v9; expected v10`）。模块字节须完全相同，因此 `-g` 构建的快照不能恢复到不加 `-g` 的构建中。 方法条目必须指向首参数为 address、隐藏上下文数量匹配的普通脚本函数；外部回调条目及缺少 methods 字段的记录被拒绝。
 
 保存先写同目录暂存文件，再通过重命名替换目标，写入失败保留原文件。脚本与快照上限均为 64 MiB。快照仅能保存和恢复已初始化的空闲状态；超限保存明确失败。恢复不重新链接或执行初始化。onload 失败时保留原错误并清理当前作用域；关闭会清理剩余脚本对象，保留宿主独立分配的内存。
 
-`azertia.jni.Caller*` 是低层 API。内存地址参数、`memAlloc`/`call` 的地址返回值以及回调槽地址数组现在分别是 Java `long`、`long` 和 `long[]`；它们承载无符号地址的原始位模式。`getMemAddress(long pointer)` 和 `ACputMemAddress(long pointer, long bits)` 专门读取和写入地址值，`getMemInt`/整数 `ACputMem` 仍只处理整数。调用方需先初始化、管理自身分配、确保低层多步操作不与其他线程的调用/销毁/恢复交错，并在恢复后重新核对持有的指针。地址 `0` 表示空结果，不能读写；`memAlloc(0)` 返回 `0`，`memFree(0)` 无操作。`memFree` 接受无自动回收所有者或由脚本全局作用域拥有的活动分配起点；其他正在运行的脚本作用域拥有的块会以 `IllegalArgumentException` 拒绝。它是原始释放接口，不调用对象析构。低层回调参数是临时借用，调用方不得主动释放。新集成优先使用 `AbdInvoker`。
+`azertia.jni.Caller*` 是低层 API。内存地址参数、`memAlloc`/`call` 的地址返回值以及回调槽地址数组现在分别是 Java `long`、`long` 和 `long[]`；它们承载无符号地址的原始位模式。`getMemAddress(long pointer)` 和 `ACputMemAddress(long pointer, long bits)` 专门读取和写入地址值，`getMemInt`/整数 `ACputMem` 仍只处理整数。调用方需先初始化、管理自身分配、确保低层多步操作不与其他线程的调用/销毁/恢复交错，并在恢复后重新核对持有的指针。地址 `0` 表示空结果，不能读写；`memAlloc(0)` 返回 `0`，`memFree(0)` 无操作。`memFree` 只接受非对象原始分配中无自动回收所有者或由脚本全局作用域拥有的活动分配起点；其他正在运行的脚本作用域拥有的块会以 `IllegalArgumentException` 拒绝。它是原始释放接口，不调用对象析构。低层回调参数是临时借用，调用方不得主动释放。新集成优先使用 `AbdInvoker`。
 
 单独执行 JNI 回归：
 

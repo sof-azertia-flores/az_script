@@ -8,8 +8,13 @@ import java.util.Objects;
 public class AbdValue {
     byte[] data;
     public byte[] getData() { return data.clone(); }
+    /** The payload length in bytes, without copying the payload. */
+    public int size() { return data.length; }
     public AbdValue() { this(new byte[0]); }
     public AbdValue(byte[] dat) { data = Objects.requireNonNull(dat, "ABD payload").clone(); }
+    private AbdValue(byte[] dat, boolean adopted) { data = dat; }
+    /** Adopts a payload this package has just built and shares with no one, without copying it. */
+    static AbdValue wrap(byte[] dat) { return new AbdValue(Objects.requireNonNull(dat, "ABD payload"), true); }
     public byte[] toAbdFormat() {
         if (data.length > Integer.MAX_VALUE - 4) throw new IllegalArgumentException("ABD frame too large");
         byte[] frame = new byte[data.length + 4];
@@ -31,7 +36,7 @@ public class AbdValue {
             throw new IllegalArgumentException("truncated ABD length prefix or invalid region");
         int size = Utils.b2i(dat, offset);
         if (size < 0 || size > length - 4) throw new IllegalArgumentException("negative or truncated ABD payload");
-        return new AbdValue(Arrays.copyOfRange(dat, offset + 4, offset + 4 + size));
+        return wrap(Arrays.copyOfRange(dat, offset + 4, offset + 4 + size));
     }
     public AbdSimpleStack getAsAss() {
         AbdSimpleStack stack = new AbdSimpleStack();

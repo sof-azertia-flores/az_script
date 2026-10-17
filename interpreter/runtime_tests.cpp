@@ -5,7 +5,10 @@
 #include "p256.h"
 #include "extern_library.h"
 #include <algorithm>
+#include <clocale>
+#include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -16,6 +19,8 @@
 #include <map>
 #include <stdexcept>
 #include <string>
+#include <thread>
+#include <typeinfo>
 #include <utility>
 #include <vector>
 #if !defined(_WIN32)
@@ -74,6 +79,7 @@ void rejects_containing(std::function<void()> f,const std::string& expected,cons
 }
 MV ptr(std::uint64_t v){return std::make_shared<AddressAbdValue>(address{v});}
 MV n(int v){return std::make_shared<IntAbdValue>(v);}
+MV boolean(bool v){return std::make_shared<BoolAbdValue>(v);}
 MV s(std::string v){return std::make_shared<StringAbdValue>(v);}
 A block(std::initializer_list<MV> nodes){auto a=std::make_shared<AbdArray>();for(auto x:nodes)a->push_back(x);return a;}
 A type_list(std::initializer_list<int> types){auto a=std::make_shared<AbdArray>();for(int type:types)a->push_back(n(type));return a;}
@@ -121,10 +127,10 @@ R rc(MV value){return rx(0,{block({value})->toAbdValue()});}
 R rblock(std::initializer_list<R> values){return rx(1,{raw(values)});}
 R rfn(int id,int type,R body,int locals=0,std::initializer_list<int> params={}){
     AbdStack types;for(int type:params)types.vs.push_back(ri(type));
-    return raw({ri(id),ri(type),ri(static_cast<int>(params.size())),ri(locals),types.toAbdValue(),body,ri(0),ri(0)});
+    return raw({ri(id),ri(type),ri(static_cast<int>(params.size())),ri(locals),types.toAbdValue(),body,ri(0),ri(0),rb(false)});
 }
 R rmodule(std::initializer_list<R> functions,int globals=0,R signatures=nullptr){
-    return raw({rs("AZSCRIPT"),ri(9),ri(1),rs("test"),ri(globals),std::make_shared<AbdMap>()->toAbdValue(),signatures?signatures:raw({}),raw(functions),rs(""),raw({})});
+    return raw({rs("AZSCRIPT"),ri(EXEC_FORMAT_VERSION),ri(1),rs("test"),ri(globals),std::make_shared<AbdMap>()->toAbdValue(),signatures?signatures:raw({}),raw(functions),rs(""),raw({}),raw({})});
 }
 R replace_raw(R value,std::size_t field,R replacement){AbdStack fields(value);fields.vs.at(field)=std::move(replacement);return fields.toAbdValue();}
 R append_raw(R value,R extra){AbdStack fields(value);fields.vs.push_back(std::move(extra));return fields.toAbdValue();}
@@ -169,7 +175,7 @@ std::shared_ptr<script> load_raw(R value,bool ready=true){
 }
 void insert_raw(const std::shared_ptr<script>& target,R value,bool ready=true){auto bytes=value->toBytes();target->insert_script(bytes.get(),value->size+4);if(ready)target->flush();}
 // Test fixture authoring retains readable names; only this test encoder resolves
-// them to slots. The interpreter is always given the public raw v9 format.
+// them to slots. The interpreter is always given the public raw exec format.
 int fixture_int(MV value){auto p=std::dynamic_pointer_cast<IntAbdValue>(value);if(!p)throw std::invalid_argument("fixture requires int");return p->data;}
 std::string fixture_string(MV value){auto p=std::dynamic_pointer_cast<StringAbdValue>(value);if(!p)throw std::invalid_argument("fixture requires string");return p->data;}
 A fixture_array(MV value){auto p=std::dynamic_pointer_cast<AbdArray>(value);if(!p)throw std::invalid_argument("fixture requires array");return p;}
@@ -211,7 +217,9 @@ struct fixture_encoder {
             return init?rx(4,{ri(index),ri(ANY_VALUE),rb(true),init}):rx(4,{ri(index),ri(ANY_VALUE),rb(false)});
         }
         if(code=="vs"){const int index=slot(map->get("v"));return rx(5,{ri(index),node(map->get("val"))});}
-        if(code=="r")return map->get("r")?rx(7,{rb(true),node(map->get("r"))}):rx(7,{rb(false)});
+        // Encode the value before building the list. Malformed fixtures throw here, and GCC 13
+        // ASan reports stack-use-after-scope while unwinding a partly built list inside ?:.
+        if(code=="r"){if(!map->get("r"))return rx(7,{rb(false)});auto value=node(map->get("r"));return rx(7,{rb(true),value});}
         if(code=="ro")return rx(8,{node(map->get("r"))});
         if(code=="oa")return rx(9,{node(map->get("v")),map->get("offset")->toAbdValue()});
         if(code=="ob") {
@@ -259,9 +267,9 @@ R encode_fixture(M source) {
         if(auto values=entry->get("param-types"))for(auto& type:fixture_array(values)->values)types.vs.push_back(type->toAbdValue());
         else for(int i=0;i<params;++i)types.vs.push_back(ri(ANY_VALUE));
         const int locals=numbered?fixture_int(entry->get("local-count")):encoder.next-params;
-        functions.vs.push_back(raw({entry->get("id")->toAbdValue(),entry->get("return-type")->toAbdValue(),ri(params),ri(locals),types.toAbdValue(),body,ri(0),ri(0)}));
+        functions.vs.push_back(raw({entry->get("id")->toAbdValue(),entry->get("return-type")->toAbdValue(),ri(params),ri(locals),types.toAbdValue(),body,ri(0),ri(0),rb(false)}));
     }
-    return raw({rs("AZSCRIPT"),ri(9),ri(1),rs("fixture"),ri(global_count),std::make_shared<AbdMap>()->toAbdValue(),signatures.toAbdValue(),functions.toAbdValue(),rs(""),raw({})});
+    return raw({rs("AZSCRIPT"),ri(EXEC_FORMAT_VERSION),ri(1),rs("fixture"),ri(global_count),std::make_shared<AbdMap>()->toAbdValue(),signatures.toAbdValue(),functions.toAbdValue(),rs(""),raw({}),raw({})});
 }
 void fixture_names(const std::shared_ptr<script>& target,M source,std::size_t offset=0) {
     if(source->get("exec-version"))return;
@@ -304,6 +312,38 @@ R class_context(int width,int placement,std::initializer_list<R> contexts={}) {
     return raw({ri(1),ri(OBJECT_VALUE),ri(3),ri(width),rb(false),raw({}),rb(true),ri(placement),raw(contexts),rb(false)});
 }
 R buffer_context(R element){return raw({ri(1),ri(OBJECT_VALUE),ri(4),ri(1),rb(false),raw({}),rb(false),raw({}),rb(true),element});}
+// The loader's hint rule must agree with the compiler's SourceRules.isHint: both
+// read the same cases from tests/hint_names.txt.
+void hint_name_tests() {
+    std::ifstream input(AZSCRIPT_HINT_CASES,std::ios::binary);
+    check(static_cast<bool>(input),"hint-name cases are readable");
+    std::string line;int cases=0;
+    auto hex=[](char c)->int{return c>='0'&&c<='9'?c-'0':c>='a'&&c<='f'?c-'a'+10:c>='A'&&c<='F'?c-'A'+10:-1;};
+    while(std::getline(input,line)) {
+        if(!line.empty()&&line.back()=='\r')line.pop_back();
+        if(line.empty()||line[0]=='#')continue;
+        const auto space=line.find(' ');const std::string verdict=line.substr(0,space);
+        if(space==std::string::npos||(verdict!="valid"&&verdict!="invalid"))throw std::runtime_error("malformed hint case: "+line);
+        const std::string text=line.substr(space+1);std::string name;
+        if(text!="(empty)")for(std::size_t i=0;i<text.size();++i) {
+            if(text[i]!='\\'){name.push_back(text[i]);continue;}
+            if(i+3>=text.size()||text[i+1]!='x'||hex(text[i+2])<0||hex(text[i+3])<0)throw std::runtime_error("malformed hint escape: "+line);
+            name.push_back(static_cast<char>(hex(text[i+2])*16+hex(text[i+3])));i+=3;
+        }
+        // An assumption takes any name; a module hint is only checked when it is not empty.
+        auto loads=[](R module,const char* error){
+            try{load_raw(module,false);return true;}
+            catch(const std::exception& e){if(std::string(e.what()).find(error)==std::string::npos)throw;return false;}
+        };
+        const bool expected=verdict=="valid";
+        if(loads(rhint("",{rfn(2,INT_VALUE,rreturn(rc(n(1))))},0,raw({assume(name,0x1234)})),"Invalid namespace assumption")!=expected)
+            throw std::runtime_error("loader and compiler disagree on assumed hint: "+line);
+        if(!name.empty()&&loads(rhint(name,{rfn(2,INT_VALUE,rreturn(rc(n(1))))}),"Invalid namespace hint")!=expected)
+            throw std::runtime_error("loader and compiler disagree on module hint: "+line);
+        assertions+=2;++cases;
+    }
+    check(cases>=250,"every hint-name case is checked");
+}
 void buffer_tests() {
     auto ci=cfixed(INT_VALUE,0);auto cb=buffer_context(ci);auto cc=class_context(2,500);
     auto slot_at=[](R base,int offset){return rcall(0x0abd0006,{rx(9,{base,ri(offset)})});};
@@ -332,7 +372,7 @@ void buffer_tests() {
     },2));
     check(integer(program->invoke(10))==9,"buffer operations borrow their receiver instead of copying it");
     check(integer(program->invoke(13))==42,"generic buffer parameters and return preserve deep value semantics");
-    check(integer(program->invoke(15))==-1&&integer(program->invoke(16))==-1,"value_compare executes via v9 wire");
+    check(integer(program->invoke(15))==-1&&integer(program->invoke(16))==-1,"value_compare executes via exec wire");
     rejects_containing([&]{program->invoke(18);},"requires a class value","block_address cannot expose a buffer address");
     program->invoke(17);check(integer(program->baseEnv->getVariable(-1))==2,
         "push relocates its materialized class argument without an extra copied temporary destructor");
@@ -472,7 +512,7 @@ void buffer_tests() {
             auto source=blocks::create_buffer(replacement_type,program);operation(2,source,{number(1)});operation(6,source,{number(1)});
             source_value=std::make_shared<variable>(source);
             if(mode>=4) {
-                heap_parent=heap::alloc(1);heap::set_owner(heap_parent,env.get());env->owned_pointer.push_back(heap_parent);
+                heap_parent=heap::object_alloc(1);heap::set_owner(heap_parent,env.get());env->owned_pointer.push_back(heap_parent);
                 heap::register_object(heap_parent,std::nullopt,true,env);destination=heap::getAt(heap_parent);destination->setValue(old);
             } else if(mode>=2) {
                 auto enclosing=blocks::create(1,program);destination=enclosing->slots[0];destination->setValue(old);
@@ -524,6 +564,1410 @@ void buffer_tests() {
     rejects([&]{load_raw(rmodule({rfn(10,OBJECT_VALUE,rreturn(bnew(cfixed(VOID_VALUE,0))))}))->invoke(10);},"void buffer elements rejected");
     rejects([&]{load_raw(rmodule({rfn(10,VOID_VALUE,bop(5,rc(n(0)),{}))}));},"buffer wire validates operation arity");
     rejects([&]{load_raw(rmodule({rfn(10,VOID_VALUE,bop(7,rc(n(0)),{}))}));},"buffer wire validates operation number");
+}
+void runtime_trace_tests() {
+    // These fixtures use the public exec format and host entry points. Locations
+    // name the failing operation and its callers rather than decoder internals.
+    auto debug=[](R function,const std::string& name,int line,int column,std::initializer_list<int> locations={}) {
+        AbdStack quads;for(int value:locations)quads.vs.push_back(ri(value));
+        return append_raw(replace_raw(function,8,rb(true)),raw({rs(name),ri(0),ri(line),ri(column),quads.toAbdValue()}));
+    };
+    auto files=[](R module){return replace_raw(module,10,raw({rs("trace.azs")}));};
+    auto divide=[](){return rx(15,{rc(n(1)),rc(n(0))});};
+    auto overflow=[](){return rx(12,{rc(n(std::numeric_limits<int>::max())),rc(n(1))});};
+    constexpr int host_ns=0x6ce0,host_range=0x6ce00001,host_reenter=0x6ce00002,
+                  host_swallow=0x6ce00003,host_cleanup=0x6ce00004,host_primary=0x6ce00005,
+                  host_nonstandard=0x6ce00006,host_swallow_null=0x6ce00007,
+                  host_swallow_wrong=0x6ce00008,host_swallow_fresh=0x6ce00009;
+    std::shared_ptr<script> traced;
+    auto host=std::make_shared<test_executor>(host_ns);
+    host->functions[host_range]=std::make_shared<test_function>(VOID_VALUE,[](const std::vector<V>&)->V {
+        throw std::out_of_range("host range");
+    });
+    host->functions[host_reenter]=std::make_shared<test_function>(VOID_VALUE,[&](const std::vector<V>&)->V {
+        try{traced->invoke(10);}catch(const std::exception& e) {
+            check(describe_error(e)=="Division by zero\n  at leaf (trace.azs:3:17)","a caught reentrant failure has its own trace");
+        }
+        traced->invoke(12);return std::make_shared<variable>(nullptr);
+    });
+    host->functions[host_swallow]=std::make_shared<test_function>(VOID_VALUE,[&](const std::vector<V>&)->V {
+        try{traced->invoke(10);}catch(const std::exception&){}
+        return std::make_shared<variable>(nullptr);
+    });
+    host->functions[host_cleanup]=std::make_shared<test_function>(VOID_VALUE,[](const std::vector<V>&)->V {
+        throw std::runtime_error("cleanup failure");
+    });
+    host->functions[host_primary]=std::make_shared<test_function>(VOID_VALUE,[](const std::vector<V>&)->V {
+        throw std::overflow_error("Integer overflow");
+    });
+    host->functions[host_nonstandard]=std::make_shared<test_function>(VOID_VALUE,[](const std::vector<V>&)->V {throw 73;});
+    auto swallow_leaf=[&]{try{traced->invoke(10);}catch(const std::runtime_error&){}};
+    host->functions[host_swallow_null]=std::make_shared<test_function>(VOID_VALUE,[&](const std::vector<V>&)->V {
+        swallow_leaf();return nullptr;
+    });
+    host->functions[host_swallow_wrong]=std::make_shared<test_function>(INT_VALUE,[&](const std::vector<V>&)->V {
+        swallow_leaf();return std::make_shared<variable>(std::string("wrong type"));
+    });
+    host->functions[host_swallow_fresh]=std::make_shared<test_function>(VOID_VALUE,[&](const std::vector<V>&)->V {
+        swallow_leaf();throw std::runtime_error("Division by zero");
+    });
+    registered_executor registered(host);
+    auto signatures=raw({rsignature(host_range,VOID_VALUE),rsignature(host_reenter,VOID_VALUE),
+        rsignature(host_swallow,VOID_VALUE),rsignature(host_cleanup,VOID_VALUE),rsignature(host_primary,VOID_VALUE,{OBJECT_VALUE}),
+        rsignature(host_nonstandard,VOID_VALUE),rsignature(host_swallow_null,VOID_VALUE),
+        rsignature(host_swallow_wrong,INT_VALUE),rsignature(host_swallow_fresh,VOID_VALUE)});
+    traced=load_raw(files(rmodule({
+        debug(rfn(10,INT_VALUE,rreturn(divide())),"leaf",3,1,{1,0,3,17}),
+        debug(rfn(11,INT_VALUE,rreturn(rcall(10))),"outer",7,1,{1,0,8,12}),
+        debug(rfn(12,INT_VALUE,rreturn(overflow())),"overflow",12,1,{1,0,12,19}),
+        debug(rfn(13,INT_VALUE,rreturn(rc(n(7)))),"success",15,1),
+        debug(rfn(14,VOID_VALUE,rcall(host_range)),"nativeCaller",20,1,{0,0,21,5}),
+        debug(rfn(15,VOID_VALUE,rcall(host_reenter)),"reenter",25,1,{0,0,26,5}),
+        debug(rfn(16,VOID_VALUE,rblock({rcall(host_swallow),divide()})),"afterSwallow",30,1,{2,0,32,9}),
+        debug(rfn(17,INT_VALUE,rreturn(rcall(17))),"recursive",35,1,{1,0,36,12}),
+        debug(rfn(18,VOID_VALUE,rcall(host_swallow_null)),"nullAfterSwallow",90,1),
+        debug(rfn(19,INT_VALUE,rreturn(rcall(host_swallow_wrong))),"wrongAfterSwallow",92,1),
+        debug(rfn(40,VOID_VALUE,rcall(host_swallow_fresh)),"freshAfterSwallow",94,1),
+    },0,signatures)));
+    clear_error_trace();
+    check(last_error_trace().frames.empty()&&format_error_trace(last_error_trace()).empty(),"clearing a trace removes published frames");
+    bool caught=false;
+    try{traced->invoke(11);}catch(const std::runtime_error& e) {
+        caught=true;
+        check(std::string(e.what())=="Division by zero","script traces do not change the original exception message");
+        check(describe_error(e)=="Division by zero\n  at leaf (trace.azs:3:17)\n  at outer (trace.azs:8:12)",
+              "script traces list the failing operation then the caller's call site");
+        const auto& trace=last_error_trace();
+        check(trace.frames.size()==2&&trace.omitted_frames==0&&trace.frames[0].function_id==10&&
+              !trace.frames[0].native&&trace.frames[0].name=="leaf"&&trace.frames[0].file=="trace.azs"&&
+              trace.frames[0].line==3&&trace.frames[0].column==17,"structured traces expose stable function and source information");
+    }
+    check(caught,"a traced arithmetic failure preserves its C++ exception type");
+    caught=false;
+    try{traced->invoke(12);}catch(const std::overflow_error& e) {
+        caught=true;
+        check(describe_error(e)=="Integer overflow\n  at overflow (trace.azs:12:19)","overflow retains its specific exception type and source");
+        check(describe_error(std::runtime_error(e.what()))==e.what(),"a different exception type cannot borrow a stale trace");
+        check(describe_error(std::overflow_error("another overflow"))=="another overflow","a different message cannot borrow a stale trace");
+    }
+    check(caught,"overflow is still catchable as std::overflow_error");
+    check(integer(traced->invoke(13))==7,"a successful entry remains usable after a traced failure");
+    check(describe_error(std::overflow_error("Integer overflow"))=="Integer overflow","a successful entry suppresses an earlier trace");
+    caught=false;
+    try{traced->invoke(14);}catch(const std::out_of_range& e) {
+        caught=true;
+        check(describe_error(e)=="host range\n  at native function 0x6ce00001\n  at nativeCaller (trace.azs:21:5)",
+              "native callback frames preserve the host exception type");
+    }
+    check(caught,"a native out_of_range exception keeps its dynamic type");
+    caught=false;
+    try{traced->invoke(15);}catch(const std::overflow_error& e) {
+        caught=true;
+        check(describe_error(e)=="Integer overflow\n  at overflow (trace.azs:12:19)\n  at native function 0x6ce00002\n  at reenter (trace.azs:26:5)",
+              "a second nested host failure excludes a swallowed reentrant failure");
+    }
+    check(caught,"nested host reentry propagates the second failure");
+    caught=false;
+    try{traced->invoke(16);}catch(const std::runtime_error& e) {
+        caught=true;
+        check(describe_error(e)=="Division by zero\n  at afterSwallow (trace.azs:32:9)",
+              "a successful host callback discards the failure it swallowed");
+    }
+    check(caught,"the caller can fail after a host callback swallowed a nested failure");
+    auto fresh_callback_error=[&](int id,const std::string& expected) {
+        bool failed=false;
+        try{traced->invoke(id);}catch(const std::runtime_error& e) {
+            failed=true;check(describe_error(e)==expected,"callback validation and fresh errors exclude swallowed script frames");
+        }
+        check(failed,"a callback failure remains visible after swallowing a script error");
+    };
+    fresh_callback_error(18,"External function 0x6ce00007 returned a null pointer\n  at native function 0x6ce00007\n  at nullAfterSwallow (trace.azs:90:1)");
+    fresh_callback_error(19,"External function 0x6ce00008 return type mismatch: expected int, got string\n  at native function 0x6ce00008\n  at wrongAfterSwallow (trace.azs:92:1)");
+    fresh_callback_error(40,"Division by zero\n  at native function 0x6ce00009\n  at freshAfterSwallow (trace.azs:94:1)");
+    traced->max_call_depth=80;caught=false;
+    try{traced->invoke(17);}catch(const std::runtime_error& e) {
+        caught=true;const auto& trace=last_error_trace();
+        check(std::string(e.what()).find("call depth limit")!=std::string::npos&&trace.frames.size()==64&&trace.omitted_frames>0,
+              "recursive traces retain 64 frames and count the remainder");
+        const auto suffix="\n  ... "+std::to_string(trace.omitted_frames)+" more frames";
+        const auto formatted=format_error_trace(trace);
+        check(formatted.ends_with(suffix)&&!formatted.ends_with('\n'),"truncated traces have a counted suffix and no trailing newline");
+    }
+    check(caught,"trace truncation preserves the recursion-limit failure");
+    try{traced->invoke(12);}catch(const std::overflow_error&){}
+    const auto main_trace=describe_error(std::overflow_error("Integer overflow"));
+    std::string worker_trace,worker_failure;
+    std::thread worker([&] {
+        try {
+            if(!last_error_trace().frames.empty())throw std::runtime_error("new thread inherited another thread's trace");
+            auto program=load_raw(rmodule({rfn(10,INT_VALUE,rreturn(divide()))}));
+            try{program->invoke(10);}catch(const std::runtime_error& e){worker_trace=describe_error(e);}
+            clear_error_trace();program->destroy();
+        }catch(const std::exception& e){worker_failure=e.what();}
+    });
+    worker.join();
+    check(worker_failure.empty()&&worker_trace=="Division by zero\n  at function 0x0000000a","another thread starts empty and can publish a stripped trace");
+    check(describe_error(std::overflow_error("Integer overflow"))==main_trace,"another thread cannot publish or clear the calling thread's trace");
+    clear_error_trace();
+    check(describe_error(std::overflow_error("Integer overflow"))=="Integer overflow","explicit clearing suppresses a matching published error");
+    traced->destroy();
+
+    auto bind=[](int destructor,R pointer){return rx(10,{pointer,rb(true),ri(destructor),rb(false),raw({})});};
+    auto cleanup=load_raw(files(rmodule({
+        debug(rfn(20,OBJECT_VALUE,rblock({rdef(0,rx(32,{ri(1)})),bind(30,rx(33,{rvar(0)})),rreturn(rvar(0))}),1),"temporary",40,1),
+        debug(rfn(21,OBJECT_VALUE,rblock({rdef(0,rx(32,{ri(1)})),bind(31,rx(33,{rvar(0)})),rreturn(rvar(0))}),1),"firstObject",42,1),
+        debug(rfn(22,VOID_VALUE,rcall(host_primary,{rcall(20)})),"temporaryFailure",45,1),
+        debug(rfn(23,VOID_VALUE,rblock({rdef(0,rcall(20)),overflow()}),1),"scopeFailure",47,1,{3,0,49,9}),
+        debug(rfn(24,VOID_VALUE,rx(11,{rvar(0)}),0,{ADDRESS_VALUE}),"deleteObject",51,1),
+        debug(rfn(25,VOID_VALUE,rblock({rdef(0,rcall(20)),rdef(1,rcall(21))}),2),"scopeDestructors",53,1),
+        debug(rfn(30,VOID_VALUE,rblock({rset(-2,rx(12,{rvar(-2),rc(n(1))})),rcall(host_cleanup)}),0,{ADDRESS_VALUE}),"cleanupDestructor",57,1),
+        debug(rfn(31,VOID_VALUE,rcall(host_range),0,{ADDRESS_VALUE}),"firstDestructor",60,1),
+        debug(rfn(32,VOID_VALUE,rcall(host_nonstandard),0,{ADDRESS_VALUE}),"nonStandardDestructor",61,1),
+        debug(gfn(35,VOID_VALUE,rblock({rset(-1,rx(12,{rvar(-1),rc(n(1))})),
+            rx(27,{rx(19,{rvar(-1),rc(n(2))}),overflow(),rb(false)}),bind(30,rvar(0))}),0,0,{ADDRESS_VALUE},1),"placement",63,1),
+        debug(rfn(36,VOID_VALUE,rblock({rdef(0,bnew(class_context(1,35))),bop(2,rvar(0),{rc(n(2))}),bop(6,rvar(0),{rc(n(2))})}),1),"resizeFailure",68,1),
+    },2,signatures)));
+    cleanup->baseEnv->getVariable(-1)->setValue(0);cleanup->baseEnv->getVariable(-2)->setValue(0);
+    auto primary_only=[&](const std::function<void()>& run,const std::string& expected) {
+        bool primary=false;
+        try{run();}catch(const std::overflow_error& e) {
+            primary=true;const auto message=describe_error(e);
+            check(std::string(e.what())=="Integer overflow"&&message.find(expected)!=std::string::npos&&
+                  message.find("cleanupDestructor")==std::string::npos&&message.find("0x6ce00004")==std::string::npos,
+                  "cleanup errors do not contaminate the first error's exception or frames");
+        }
+        check(primary,"cleanup preserves the first failure's dynamic type");
+    };
+    primary_only([&]{cleanup->invoke(22);},"temporaryFailure");
+    primary_only([&]{cleanup->invoke(23);},"scopeFailure (trace.azs:49:9)");
+    check(integer(cleanup->baseEnv->getVariable(-2))==2,"failing statement and scope cleanup both run their destructors");
+    auto first_destructor_only=[&](const std::function<void()>& run) {
+        bool primary=false;
+        try{run();}catch(const std::out_of_range& e) {
+            primary=true;const auto message=describe_error(e);
+            check(std::string(e.what())=="host range"&&message.find("firstDestructor")!=std::string::npos&&
+                  message.find("cleanupDestructor")==std::string::npos&&message.find("0x6ce00004")==std::string::npos,
+                  "later destructors cannot replace the first destructor's error trace");
+        }
+        check(primary,"a destructor failure preserves its original exception type");
+    };
+    first_destructor_only([&]{cleanup->invoke(25);});
+    auto nested=blocks::create(2,cleanup);
+    for(int i=0;i<2;++i) {
+        auto child=blocks::create(1,cleanup);child->destructor=i?31:30;
+        nested->slots[i]->setValue(child);child->owner=nested->slots[i].get();
+    }
+    auto storage=std::make_shared<variable>(nested);nested->owner=storage.get();
+    first_destructor_only([&]{blocks::drop(storage,cleanup->baseEnv);});
+    check(storage->type==VOID_VALUE&&nested->state==slot_block::status::dead,"drop finishes every nested value after the first destructor failure");
+    try{throw std::out_of_range("host range");}catch(...) {
+        auto unrelated=pending_error::capture();bool recaught=false;
+        try{unrelated.rethrow();}catch(const std::out_of_range& e) {
+            recaught=true;
+            check(describe_error(e)=="host range"&&last_error_trace().frames.empty(),
+                  "a fresh host exception with matching type and message cannot inherit a prior direct cleanup trace");
+        }
+        check(recaught,"capturing a fresh host exception preserves its type");
+    }
+    auto nonstandard=blocks::create(1,cleanup);nonstandard->destructor=32;
+    auto later=blocks::create(1,cleanup);later->destructor=30;
+    nonstandard->slots[0]->setValue(later);later->owner=nonstandard->slots[0].get();
+    auto nonstandard_storage=std::make_shared<variable>(nonstandard);nonstandard->owner=nonstandard_storage.get();
+    pending_error saved_nonstandard;
+    const std::string nonstandard_trace="  at native function 0x6ce00006\n  at nonStandardDestructor (trace.azs:61:1)";
+    try{blocks::drop(nonstandard_storage,cleanup->baseEnv);}catch(int value) {
+        check(value==73&&format_error_trace(last_error_trace())==nonstandard_trace,
+              "direct host cleanup preserves a non-standard exception and excludes later cleanup frames");
+        saved_nonstandard.capture_current();
+    }
+    check(static_cast<bool>(saved_nonstandard)&&nonstandard_storage->type==VOID_VALUE&&later->state==slot_block::status::dead,
+          "direct cleanup finishes nested values before a non-standard failure is recaptured");
+    for(int attempt=0;attempt<2;++attempt) {
+        bool recaught=false;
+        try{saved_nonstandard.rethrow();}catch(int value) {
+            recaught=true;check(value==73&&format_error_trace(last_error_trace())==nonstandard_trace,
+                  "rethrowing a recaptured non-standard failure retains its trace on every attempt");
+        }
+        check(recaught,"a recaptured non-standard exception keeps its original type");
+    }
+    auto pointer=heap::object_alloc(1);heap::set_owner(pointer,cleanup->baseEnv.get());
+    heap::register_object(pointer,31,true,cleanup->baseEnv);
+    auto member=blocks::create(1,cleanup);member->destructor=30;
+    auto heap_slot=heap::getAt(pointer);heap_slot->setValue(member);member->owner=heap_slot.get();
+    first_destructor_only([&]{cleanup->invoke(24,{std::make_shared<variable>(pointer)});});
+    check(member->state==slot_block::status::dead,"heap object cleanup completes its value members after a destructor failure");
+    rejects([&]{heap::getAt(pointer);},"a failing heap object destructor still releases storage");
+    const auto before_resize=integer(cleanup->baseEnv->getVariable(-2));
+    primary_only([&]{cleanup->invoke(36);},"placement");
+    check(integer(cleanup->baseEnv->getVariable(-1))==2&&integer(cleanup->baseEnv->getVariable(-2))==before_resize+1,
+          "buffer rollback cleans completed elements while preserving the construction failure");
+    cleanup->destroy();
+
+    auto shutdown=load_raw(files(rmodule({
+        debug(rfn(1,VOID_VALUE,overflow()),"shutdown",75,1),
+        debug(rfn(30,VOID_VALUE,rcall(host_cleanup),0,{ADDRESS_VALUE}),"cleanupDestructor",77,1),
+    },0,signatures)));
+    auto owned=blocks::create(1,shutdown);owned->destructor=30;
+    auto owned_storage=std::make_shared<variable>(owned);owned->owner=owned_storage.get();blocks::bind_local(owned_storage,shutdown->baseEnv);
+    primary_only([&]{shutdown->destroy();},"shutdown");
+    check(shutdown->closed&&owned->state==slot_block::status::dead,"shutdown finishes owned values after a pre-destroy failure");
+    clear_error_trace();
+}
+void virtual_tests() {
+    auto entry=[](int id,std::initializer_list<R> contexts={}) {return raw({ri(id),raw(contexts)});};
+    auto methods=[](R pointer,std::initializer_list<R> entries) {return rx(52,{std::move(pointer),raw(entries)});};
+    auto dispatch=[](int slot,int type,std::initializer_list<R> arguments) {return rx(53,{ri(slot),ri(type),raw(arguments)});};
+    auto field=[](R pointer){return rcall(0x0abd0006,{rx(9,{std::move(pointer),ri(0)})});};
+    auto bind=[](int destructor){return rx(10,{rvar(0),rb(true),ri(destructor),rb(true),raw({})});};
+    auto debug=[](R function,const std::string& name,int line) {
+        return append_raw(replace_raw(function,8,rb(true)),raw({rs(name),ri(0),ri(line),ri(1),raw({})}));
+    };
+    constexpr int record_id=0x6cc20001;
+    std::vector<int> phases;
+    auto callback=std::make_shared<test_executor>(0x6cc2);
+    callback->functions[record_id]=std::make_shared<test_function>(VOID_VALUE,[&](const std::vector<V>& args) {
+        phases.push_back(integer(args[0]));return std::make_shared<variable>(nullptr);
+    });
+    registered_executor registered(callback);
+    const auto emit=[&](R expression){return rcall(record_id,{std::move(expression)});};
+    const auto current=[&](){return dispatch(0,INT_VALUE,{rvar(0)});};
+    auto module=rmodule({
+        rfn(1000,INT_VALUE,rreturn(rx(12,{field(rvar(0)),rc(n(10))})),0,{ADDRESS_VALUE}),
+        rfn(1001,INT_VALUE,rreturn(rx(12,{field(rvar(0)),rc(n(100))})),0,{ADDRESS_VALUE}),
+        rfn(1002,INT_VALUE,rreturn(rx(12,{field(rvar(0)),rvar(1)})),0,{ADDRESS_VALUE,INT_VALUE}),
+        rfn(1003,STRING_VALUE,rreturn(rc(s("method"))),0,{ADDRESS_VALUE}),
+        gfn(1004,INT_VALUE,rreturn(rx(36,{cref(0)})),1,0,{ADDRESS_VALUE}),
+        gfn(1005,ANY_VALUE,greturn(rx(37,{cref(0)}),cref(0)),1,0,{ADDRESS_VALUE}),
+        rfn(1006,VOID_VALUE,rblock({methods(rvar(0),{entry(1001)}),emit(current()),
+            methods(rvar(0),{entry(1000)}),emit(current())}),0,{ADDRESS_VALUE}),
+        debug(rfn(1007,VOID_VALUE,rblock({methods(rvar(0),{entry(1008)}),
+            rx(31,{rx(12,{rc(n(std::numeric_limits<int>::max())),rc(n(1))}),current(),rb(false)})}),0,{ADDRESS_VALUE}),"virtualDestructor",30),
+        debug(rfn(1008,INT_VALUE,rreturn(rx(15,{rc(n(1)),rc(n(0))})),0,{ADDRESS_VALUE}),"cleanupVirtual",35),
+        rfn(1010,ADDRESS_VALUE,rblock({rdef(0,rcall(0x0abd0014,{rc(n(1))})),rx(6,{field(rvar(0)),rc(n(7))}),
+            methods(rvar(0),{entry(1000)}),emit(current()),methods(rvar(0),{entry(1001)}),emit(current()),bind(1006),rx(8,{rvar(0)})}),1),
+        rfn(1011,ADDRESS_VALUE,rblock({rdef(0,rcall(0x0abd0014,{rc(n(1))})),methods(rvar(0),{entry(1001)}),bind(1007),rx(8,{rvar(0)})}),1),
+        gfn(1012,VOID_VALUE,methods(rvar(0),{entry(1004,{cref(0)})}),1,0,{ADDRESS_VALUE}),
+        rfn(1013,INT_VALUE,rblock({rset(-1,rx(12,{rx(14,{rvar(-1),rc(n(10))}),rvar(1)})),rreturn(rvar(1))}),0,{ADDRESS_VALUE,INT_VALUE}),
+        rfn(1014,ADDRESS_VALUE,rblock({rset(-1,rc(n(1))),rreturn(rvar(0))}),0,{ADDRESS_VALUE}),
+        rfn(1015,OBJECT_VALUE,rreturn(rx(32,{ri(1)}))),
+        rfn(1016,INT_VALUE,rreturn(rc(n(1))),0,{INT_VALUE}),
+        gfn(1017,VOID_VALUE,rblock({}),0,0,{ADDRESS_VALUE},1),
+        rfn(1020,INT_VALUE,rreturn(dispatch(0,INT_VALUE,{rvar(0)})),0,{ADDRESS_VALUE}),
+        rfn(1021,VOID_VALUE,methods(rvar(0),{}),0,{ADDRESS_VALUE}),
+        rfn(1022,OBJECT_VALUE,rreturn(dispatch(0,ANY_VALUE,{rvar(0)})),0,{ADDRESS_VALUE}),
+        rfn(1023,INT_VALUE,rreturn(dispatch(1,INT_VALUE,{rvar(0)})),0,{ADDRESS_VALUE}),
+        rfn(1024,INT_VALUE,rreturn(dispatch(0,INT_VALUE,{rcall(1014,{rvar(0)}),rcall(1013,{rvar(0),rc(n(2))})})),0,{ADDRESS_VALUE}),
+        rfn(1025,INT_VALUE,rreturn(dispatch(0,INT_VALUE,{rc(n(0))}))),
+        rfn(1026,VOID_VALUE,methods(rc(n(0)),{})),
+        rfn(1027,VOID_VALUE,methods(rvar(0),{entry(1000),entry(1001),entry(1002),entry(1003)}),0,{ADDRESS_VALUE}),
+    },1,raw({rsignature(record_id,VOID_VALUE,{INT_VALUE})}));
+    auto program=load_raw(replace_raw(module,10,raw({rs("virtual.azs")})));
+    auto env=program->baseEnv;env->getVariable(-1)->setValue(0);
+    const auto at=[](address value){return std::make_shared<variable>(value);};
+    const auto table=[](std::initializer_list<bound_method> entries){return std::make_shared<const method_table>(entries);};
+    auto base=table({{1000,{}}}),derived=table({{1001,{}}});
+    const auto live=pointer(program->invoke(1010));
+    check(phases==std::vector<int>({17,107})&&heap::method_table_count()==1,"constructor phase changes dispatch before object registration");
+    check(integer(program->invoke(1020,{at(live)}))==107,"virtual calls resolve the current heap table");
+    heap::set_methods(live,base,program);check(integer(program->invoke(1020,{at(live)}))==17,"set_methods replaces the active table");
+    heap::set_methods(live,derived,program);
+    auto records=heap::object_records();
+    check(records.size()==1&&records[0].methods==derived&&heap::method_table_count()==1,"object_records reports table bindings without modifying them");
+    auto literal=blocks::create(1,program);literal->slots[0]->setValue(7);heap::set_methods(blocks::address_of(literal),derived,program);
+    auto literal_copy=blocks::copy(literal);
+    check(literal_copy->methods==derived&&integer(program->invoke(1020,{at(blocks::address_of(literal_copy))}))==107,"literal copies preserve immutable method bindings");
+    auto target=blocks::create(1,program);target->slots[0]->setValue(1);heap::set_methods(blocks::address_of(target),base,program);
+    auto target_storage=std::make_shared<variable>(target);target->owner=target_storage.get();
+    blocks::store(target_storage,std::make_shared<variable>(literal),env);
+    check(target->methods==base&&integer(target->slots[0])==7&&integer(program->invoke(1020,{at(blocks::address_of(target))}))==17,
+          "value assignment retains the target's table while copying fields");
+    rejects_message([&]{program->invoke(1020,{at(address{})});},"Virtual call requires a non-null object","null virtual receivers reject");
+    rejects_message([&]{program->invoke(1023,{at(live)});},"Virtual method slot is out of range","virtual slot bounds are checked");
+    rejects_message([&]{program->invoke(1025);},"Virtual method receiver must be address","virtual receiver ABI is checked");
+    rejects_message([&]{program->invoke(1026);},"Virtual method receiver must be address","set_methods receiver ABI is checked");
+    heap::set_methods(live,table({{1003,{}}}),program);
+    rejects_message([&]{program->invoke(1020,{at(live)});},"Virtual method return type mismatch: expected int, got string","virtual returns require the expected ABI");
+    program->invoke(1021,{at(live)});
+    check(heap::method_table_count()==0&&!heap::object_records()[0].methods,"empty set_methods clears table bindings and snapshot metadata");
+    rejects_message([&]{program->invoke(1020,{at(live)});},"Object has no virtual method table","cleared tables reject dispatch");
+    heap::set_methods(live,table({{1002,{}}}),program);
+    check(integer(program->invoke(1024,{at(live)}))==9&&integer(env->getVariable(-1))==12,
+          "virtual argument evaluation follows ordinary CALL left-to-right materialization");
+    auto string_type=std::make_shared<type_context>();string_type->abi=STRING_VALUE;
+    auto double_type=std::make_shared<type_context>();double_type->abi=DOUBLE_VALUE;
+    invoke_bound_function(program,1012,env,{at(live)},{string_type});
+    check(integer(program->invoke(1020,{at(live)}))==STRING_VALUE,"method tables retain bound hidden contexts after their installing call ends");
+    const auto first_bound_table=heap::methods_at(live,program);
+    invoke_bound_function(program,1012,env,{at(live)},{double_type});
+    check(integer(program->invoke(1020,{at(live)}))==DOUBLE_VALUE&&first_bound_table->at(0).contexts[0]->abi==STRING_VALUE,
+          "reference contexts are rebound instead of cached or mutated across calls");
+    auto class_type=std::make_shared<type_context>();class_type->abi=OBJECT_VALUE;class_type->kind=3;class_type->factory_id=1015;
+    heap::set_methods(live,table({{1005,{class_type}}}),program);
+    auto returned=program->invoke(1022,{at(live)});
+    check(returned->type==OBJECT_VALUE&&blocks::of(returned)->slots.size()==1,"ANY virtual return tags support runtime generic class results");
+    auto foreign=load_raw(rmodule({rfn(1030,VOID_VALUE,rblock({})),rfn(1000,INT_VALUE,rreturn(rc(n(0))),0,{ADDRESS_VALUE})}));
+    rejects_message([&]{heap::set_methods(live,base,foreign);},"Object belongs to another script","a foreign script cannot change heap methods");
+    rejects_message([&]{heap::methods_at(live,foreign);},"Object belongs to another script","a foreign script cannot dispatch heap methods");
+    rejects_message([&]{heap::methods_at(blocks::address_of(literal),foreign);},"Object belongs to another script","a foreign script cannot dispatch literal methods");
+    foreign->destroy();
+    const auto raw_pointer=heap::alloc(1);
+    rejects_message([&]{heap::methods_at(raw_pointer,program);},"Virtual call requires a live object start","raw memory is not a virtual receiver");heap::free(raw_pointer);
+    rejects_message([&]{heap::methods_at(address{live.value+1},program);},"Virtual call requires a live object start","heap interiors cannot dispatch");
+    auto expired=blocks::address_of(blocks::create(1,program));
+    rejects_message([&]{heap::methods_at(expired,program);},"Virtual call requires a live object start","expired literal virtual receivers reject");
+    for(auto malformed:std::vector<method_table>{{{99999,{}}},{{1016,{}}},{{1017,{}}},{{1004,{}}},{{1000,{string_type}}}}) {
+        bool caught=false;try {validate_method_table(malformed,program);}catch(const std::invalid_argument& error) {
+            caught=true;check(typeid(error)==typeid(std::invalid_argument),"snapshot method validation preserves invalid_argument mapping");
+        }
+        check(caught,"invalid method signatures and hidden-context counts reject");
+    }
+    heap::set_methods(live,derived,program);
+    heap::delete_object(live,env);
+    check(phases==std::vector<int>({17,107,107,17})&&heap::method_table_count()==0,
+          "destructor phase transitions dispatch while destroying and then release table bindings");
+    rejects_message([&]{program->invoke(1020,{at(live)});},"Virtual call requires a live object start","deleted heap virtual receivers reject");
+    const auto throwing=pointer(program->invoke(1011));
+    bool first_error=false;try {heap::delete_object(throwing,env);}catch(const std::overflow_error& error) {
+        first_error=true;check(describe_error(error)=="Integer overflow\n  at virtualDestructor (virtual.azs:30:1)",
+            "virtual cleanup preserves the first exception and its trace");
+    }
+    check(first_error&&heap::method_table_count()==0,"throwing virtual cleanup releases heap tables");
+    insert_raw(program,rmodule({gfn(1040,VOID_VALUE,rblock({rx(6,{field(rvar(0)),rc(n(7))}),
+        methods(rvar(0),{entry(1001)}),rx(10,{rvar(0),rb(false),rb(false),raw({})})}),0,0,{ADDRESS_VALUE},1)}));
+    auto element=std::make_shared<type_context>();element->abi=OBJECT_VALUE;element->kind=3;element->placement_id=1040;
+    auto buffer=blocks::create_buffer(element,program);
+    auto operate=[&](int operation,const std::shared_ptr<slot_block>& block,int size) {
+        return blocks::buffer_operation(operation,block,{std::make_shared<variable>(size)},env);
+    };
+    operate(2,buffer,1);operate(6,buffer,1);
+    auto view=blocks::of(buffer->slots[0]);const auto old_view=blocks::address_of(view);
+    check(view->methods&&integer(program->invoke(1020,{at(old_view)}))==107,"placement constructors install tables on buffer class views");
+    auto buffer_copy=blocks::copy(buffer);
+    check(blocks::of(buffer_copy->slots[0])->methods==view->methods&&
+          integer(program->invoke(1020,{at(blocks::address_of(blocks::of(buffer_copy->slots[0])))}))==107,
+          "buffer copies retain each class view's method table");
+    operate(2,buffer,4);auto moved_view=blocks::of(buffer->slots[0]);
+    check(moved_view->methods&&integer(program->invoke(1020,{at(blocks::address_of(moved_view))}))==107,
+          "buffer slab relocation transfers view method tables");
+    rejects_message([&]{heap::methods_at(old_view,program);},"Virtual call requires a live object start","buffer reallocation expires former view receivers");
+    blocks::validate_buffer(buffer);blocks::validate_buffer(buffer_copy);
+    const auto snapshot=heap::object_alloc(1);heap::set_owner(snapshot,env.get());env->owned_pointer.push_back(snapshot);
+    heap::getAt(snapshot)->setValue(7);heap::register_object(snapshot,std::nullopt,true,env);
+    heap::set_methods(snapshot,table({{1004,{string_type}}}),program);
+    std::vector<V> saved_slots;for(int i=0;i<heap::lenHeap();++i)saved_slots.push_back(heap::getSlot(i));
+    std::vector<heap::heap_allocation> saved_ranges;for(int i=0;i<heap::lenAlloc();++i)saved_ranges.push_back(heap::allocAt(i));
+    auto saved_objects=heap::object_records();auto saved_owned=env->owned_pointer;
+    auto malformed_objects=saved_objects;malformed_objects[0].methods=table({{1016,{}}});
+    rejects([&]{heap::restore(saved_slots,saved_ranges,malformed_objects,env,saved_owned);},"invalid restored method signatures reject before heap replacement");
+    check(heap::method_table_count()==1&&integer(program->invoke(1020,{at(snapshot)}))==STRING_VALUE,
+          "failed table restore leaves allocations and previous context bindings intact");
+    heap::restore(saved_slots,saved_ranges,saved_objects,env,saved_owned);
+    check(heap::method_table_count()==1&&integer(program->invoke(1020,{at(snapshot)}))==STRING_VALUE,
+          "registered snapshot records restore method IDs and bound contexts atomically");
+    heap::set_methods(snapshot,base,program);program->max_steps=5;
+    rejects_containing([&]{program->invoke(1027,{at(snapshot)});},"step limit","set_methods charges steps for every entry before binding");
+    program->max_steps=1000000;
+    check(heap::methods_at(snapshot,program)==base,"budget failure leaves the previous table installed");
+    program->invoke(1027,{at(snapshot)});const auto cached_table=heap::methods_at(snapshot,program);
+    program->invoke(1027,{at(snapshot)});
+    check(heap::methods_at(snapshot,program)==cached_table,"context-free set_methods nodes reuse immutable cached tables");
+    program->max_steps=5;
+    rejects_containing([&]{program->invoke(1027,{at(snapshot)});},"step limit","cached constant tables still charge every entry");
+    program->max_steps=1000000;
+    heap::restore(saved_slots,saved_ranges);
+    check(heap::method_table_count()==0&&heap::object_records().empty()&&!heap::is_object_storage(snapshot),
+          "the raw restore overload clears registrations, object tags and method tables");
+    heap::free(snapshot);
+    const auto orphan=heap::object_alloc(1);heap::set_owner(orphan,env.get());env->owned_pointer.push_back(orphan);
+    heap::set_methods(orphan,base,program);
+    check(heap::object_records().empty()&&heap::method_table_count()==1,
+          "object_records stays pure when a construction table has no registration yet");
+    heap::discard_script_objects(program.get());
+    check(heap::method_table_count()==0,"script disposal erases orphan construction method tables");heap::free(orphan);
+    program->destroy();check(heap::method_table_count()==0&&heap::lenAlloc()==0,"virtual tests release every heap method table");
+
+    // Base and derived phases share one script even when their definitions live
+    // in independently relocated hint modules loaded in either order.
+    for(bool base_first:{false,true}) {
+        phases.clear();
+        const auto base_module=rhint("VirtualBase",{
+            rfn(2,INT_VALUE,rreturn(rc(n(100))),0,{ADDRESS_VALUE}),
+            rfn(4,VOID_VALUE,rblock({methods(rvar(0),{entry(static_cast<int>(0xbeef0002u))}),emit(current())}),0,{ADDRESS_VALUE}),
+            rfn(5,VOID_VALUE,rblock({methods(rvar(0),{entry(static_cast<int>(0xbeef0002u))}),emit(current())}),0,{ADDRESS_VALUE}),
+        },0,raw({assume("VirtualBase",0xbeef)}),raw({rsignature(record_id,VOID_VALUE,{INT_VALUE})}));
+        const auto derived_module=rhint("VirtualDerived",{
+            rfn(2,ADDRESS_VALUE,rblock({rdef(0,rcall(0x0abd0014,{rc(n(1))})),
+                rcall(static_cast<int>(0xbeef0004u),{rvar(0)}),methods(rvar(0),{entry(static_cast<int>(0xcafe0003u))}),emit(current()),
+                rx(10,{rvar(0),rb(true),ri(static_cast<int>(0xcafe0006u)),rb(true),raw({})}),rx(8,{rvar(0)})}),1),
+            rfn(3,INT_VALUE,rreturn(rc(n(200))),0,{ADDRESS_VALUE}),
+            rfn(6,VOID_VALUE,rblock({emit(current()),rcall(static_cast<int>(0xbeef0005u),{rvar(0)})}),0,{ADDRESS_VALUE}),
+        },0,raw({assume("VirtualBase",0xbeef),assume("VirtualDerived",0xcafe)}),raw({rsignature(record_id,VOID_VALUE,{INT_VALUE})}));
+        auto cross=load_raw(base_first?base_module:derived_module,false);
+        insert_raw(cross,base_first?derived_module:base_module,false);cross->flush();
+        const int derived_namespace=cross->namespace_for_hint("VirtualDerived");
+        const auto object=pointer(cross->invoke((derived_namespace<<16)|2));
+        check(phases==std::vector<int>({100,200})&&heap::object_records()[0].methods->at(0).function_id==((derived_namespace<<16)|3),
+              "cross-hint construction changes phases and relocates method IDs in either insertion order");
+        heap::delete_object(object,cross->baseEnv);
+        check(phases==std::vector<int>({100,200,200,100})&&heap::method_table_count()==0,
+              "cross-hint destruction permits legitimate base phase transitions");
+        cross->destroy();
+    }
+    const auto valid_set=methods(rc(ptr(0)),{entry(1100)});
+    const auto valid_call=dispatch(0,INT_VALUE,{rc(ptr(0))});
+    for(const auto& expression:{valid_set,valid_call}) {
+        AbdStack fields(expression);
+        for(std::size_t count=1;count<fields.vs.size();++count) {
+            AbdStack truncated;truncated.vs.assign(fields.vs.begin(),fields.vs.begin()+static_cast<std::ptrdiff_t>(count));
+            rejects([&]{load_raw(rmodule({rfn(1100,INT_VALUE,rreturn(rc(n(1))),0,{ADDRESS_VALUE}),rfn(1101,VOID_VALUE,truncated.toAbdValue())}));},
+                    "virtual opcodes reject missing fields");
+        }
+    }
+    for(const auto& malformed:std::vector<R>{append_raw(valid_set,ri(0)),replace_raw(valid_set,2,raw({raw({ri(1100)})})),
+            replace_raw(valid_set,2,raw({append_raw(entry(1100),ri(0))})),append_raw(valid_call,ri(0)),
+            replace_raw(valid_call,1,ri(-1)),replace_raw(valid_call,1,ri(static_cast<int>(MAX_VARIABLE_SLOTS))),
+            replace_raw(valid_call,2,ri(-1)),replace_raw(valid_call,2,ri(9)),replace_raw(valid_call,3,raw({}))})
+        rejects([&]{load_raw(rmodule({rfn(1100,INT_VALUE,rreturn(rc(n(1))),0,{ADDRESS_VALUE}),rfn(1101,VOID_VALUE,malformed)}));},
+                "virtual opcode parser rejects malformed tables, slot, ABI and arity");
+    for(const auto& target:std::vector<R>{rfn(1100,INT_VALUE,rreturn(rc(n(1))),0,{INT_VALUE}),
+            gfn(1100,VOID_VALUE,rblock({}),0,0,{ADDRESS_VALUE},1),gfn(1100,INT_VALUE,rreturn(rc(n(1))),1,0,{ADDRESS_VALUE})})
+        rejects([&]{load_raw(rmodule({target,rfn(1101,VOID_VALUE,valid_set)}));},"flush rejects invalid virtual receiver, internal entry and context count");
+    rejects([&]{load_raw(rmodule({rfn(1101,VOID_VALUE,methods(rc(ptr(0)),{entry(99999)}))}));},"flush rejects missing virtual method entries");
+    check(heap::method_table_count()==0&&heap::lenAlloc()==0,"all virtual errors leave the heap and method registry empty");
+}
+void checked_object_tests() {
+    auto checked=[](R value,R context,std::initializer_list<int> types={}) {
+        AbdStack tags;for(int type:types)tags.vs.push_back(ri(type));
+        return rx(51,{std::move(value),std::move(context),tags.toAbdValue()});
+    };
+    const auto cp=cfixed(ADDRESS_VALUE,2),ci=cfixed(INT_VALUE,0);
+    const auto cv=replace_raw(cfixed(OBJECT_VALUE,3),3,ri(2));
+    constexpr int callback_id=0x6cc10001;
+    auto callback=std::make_shared<test_executor>(0x6cc1);bool checked_destroying=false;
+    callback->functions[callback_id]=std::make_shared<test_function>(VOID_VALUE,[&](const std::vector<V>& args) {
+        rejects_message([&]{heap::check_object(pointer(args[0]),{});},"Object check failed: object is being destroyed",
+                        "checked reflection rejects an object during its destructor");
+        checked_destroying=true;return std::make_shared<variable>(nullptr);
+    });
+    registered_executor registered(callback);
+    auto pointer_function=append_raw(replace_raw(rfn(900,ADDRESS_VALUE,rreturn(checked(rvar(0),cp,{INT_VALUE,STRING_VALUE})),0,{ANY_VALUE}),8,rb(true)),
+        raw({rs("checkedPointer"),ri(0),ri(10),ri(1),raw({ri(1),ri(0),ri(12),ri(7)})}));
+    auto module=rmodule({pointer_function,
+        rfn(901,OBJECT_VALUE,rreturn(checked(rvar(0),cv,{INT_VALUE,STRING_VALUE})),0,{ANY_VALUE}),
+        rfn(902,OBJECT_VALUE,rreturn(checked(rvar(0),buffer_context(ci))),0,{ANY_VALUE}),
+        gfn(903,ANY_VALUE,greturn(checked(rvar(0),cref(0)),cref(0)),1,0,{ANY_VALUE}),
+        rfn(904,ADDRESS_VALUE,rreturn(checked(rvar(0),cp,{ANY_VALUE,STRING_VALUE})),0,{ANY_VALUE}),
+        rfn(905,VOID_VALUE,rcall(callback_id,{rvar(0)}),0,{ADDRESS_VALUE}),
+        gfn(906,VOID_VALUE,rblock({}),0,0,{ADDRESS_VALUE},1),
+        rfn(907,ADDRESS_VALUE,rblock({rdef(0,rcall(0x0abd0014,{rc(n(2))})),rreturn(checked(rvar(0),cp))}),1),
+    },0,raw({rsignature(callback_id,VOID_VALUE,{ADDRESS_VALUE})}));
+    auto program=load_raw(replace_raw(module,10,raw({rs("checks.azs")})));
+    auto env=program->baseEnv;
+    const auto at=[](address value){return std::make_shared<variable>(value);};
+    const auto object=[&](int width,std::optional<int> destructor={}) {
+        const address pointer=heap::object_alloc(width);heap::set_owner(pointer,env.get());env->owned_pointer.push_back(pointer);
+        heap::register_object(pointer,destructor,true,env);return pointer;
+    };
+    const auto fails=[&](int id,V value,const std::string& message) {
+        bool caught=false;try {program->invoke(id,{std::move(value)});}catch(const std::runtime_error& error) {
+            caught=true;check(typeid(error)==typeid(std::runtime_error)&&error.what()==message,"checked reflection raises the stable runtime error");
+        }
+        check(caught,"malformed reflected values fail before use");
+    };
+    check(pointer(program->invoke(900,{at(address{})}))==address{},"checked pointer results admit null");
+    const auto live=object(3);heap::getAt(live)->setValue(7);heap::getAt(address{live.value+1})->setValue(std::string("field"));
+    check(pointer(program->invoke(900,{at(live)}))==live,"checked pointers admit a registered wider object with compatible prefix");
+    heap::getAt(live)->setValue(true);
+    check(pointer(program->invoke(904,{at(live)}))==live,"unchecked ABI6 fields do not impose a tag");
+    fails(900,at(live),"Object check failed: slot 0 has an incompatible type");heap::getAt(live)->setValue(7);
+    const auto raw_pointer=heap::alloc(3);
+    fails(900,at(raw_pointer),"Object check failed: address is not a live registered object start");heap::free(raw_pointer);
+    const auto incomplete=heap::object_alloc(2);
+    fails(900,at(incomplete),"Object check failed: address is not a live registered object start");heap::free(incomplete);
+    const auto small=object(1);heap::getAt(small)->setValue(7);
+    fails(900,at(small),"Object check failed: object has too few slots");
+    fails(900,at(address{live.value+1}),"Object check failed: address is not a live registered object start");
+    fails(900,std::make_shared<variable>(7),"Object check failed: value has an incompatible type");
+    auto literal=blocks::create(3,program);literal->slots[0]->setValue(7);literal->slots[1]->setValue(std::string("field"));
+    const auto literal_pointer=blocks::address_of(literal);
+    check(pointer(program->invoke(900,{at(literal_pointer)}))==literal_pointer,"checked pointers admit live literal object starts");
+    fails(900,at(address{literal_pointer.value+1}),"Object check failed: address is not a live class object start");
+    literal->state=slot_block::status::destroying;
+    fails(900,at(literal_pointer),"Object check failed: address is not a live class object start");literal->state=slot_block::status::live;
+    const auto expired=blocks::address_of(blocks::create(2,program));
+    fails(900,at(expired),"Object check failed: literal object has expired");
+    auto value=blocks::create(2,program);value->slots[0]->setValue(7);value->slots[1]->setValue(std::string("field"));
+    auto value_result=program->invoke(901,{std::make_shared<variable>(value)});
+    check(blocks::of(value_result)->slots.size()==2&&integer(blocks::of(value_result)->slots[0])==7,"checked class values retain compatible slots and ownership");
+    fails(901,std::make_shared<variable>(literal),"Object check failed: class value width mismatch");
+    value->slots[1]->setValue(false);fails(901,std::make_shared<variable>(value),"Object check failed: slot 1 has an incompatible type");value->slots[1]->setValue(std::string("field"));
+    auto int_type=std::make_shared<type_context>();int_type->abi=INT_VALUE;
+    auto string_type=std::make_shared<type_context>();string_type->abi=STRING_VALUE;
+    auto buffer=blocks::create_buffer(int_type,program);
+    check(static_cast<bool>(blocks::of(program->invoke(902,{std::make_shared<variable>(buffer)}))->buffer),"checked buffers accept equal element layouts");
+    fails(902,std::make_shared<variable>(blocks::create_buffer(string_type,program)),"Object check failed: buffer element context mismatch");
+    fails(902,std::make_shared<variable>(value),"Object check failed: buffer element context mismatch");
+    fails(900,at(blocks::address_of(buffer)),"Object check failed: address is not a live class object start");
+    auto class_type=std::make_shared<type_context>();class_type->abi=OBJECT_VALUE;class_type->kind=3;class_type->width=2;
+    const auto generic=[&](V input,const std::shared_ptr<const type_context>& type) {
+        return invoke_bound_function(program,903,env,{std::move(input)},{type});
+    };
+    check(blocks::of(generic(std::make_shared<variable>(value),class_type))->slots.size()==2,
+          "unknown generic class values use runtime context width even with an empty tag list");
+    rejects_message([&]{generic(std::make_shared<variable>(literal),class_type);},"Object check failed: class value width mismatch","generic class values reject incompatible runtime widths");
+    check(integer(generic(std::make_shared<variable>(19),int_type))==19,"generic primitive checks retain exact ABI identity");
+    rejects_message([&]{generic(std::make_shared<variable>(false),int_type);},"Object check failed: value has an incompatible type","generic primitive ABI mismatch is checked");
+    auto pointer_type=std::make_shared<type_context>();pointer_type->abi=ADDRESS_VALUE;pointer_type->kind=2;
+    check(pointer(generic(at(small),pointer_type))==small,"unknown generic pointers check liveness without an unknown static layout");
+    rejects_containing([&]{generic(at(address{live.value+1}),pointer_type);},"Object check failed:","generic pointer liveness rejects interior addresses");
+    auto different_class_type=std::make_shared<type_context>(*class_type);different_class_type->placement_id=906;
+    auto buffer_type=std::make_shared<type_context>();buffer_type->abi=OBJECT_VALUE;buffer_type->kind=4;buffer_type->element=class_type;
+    auto same_layout=blocks::create_buffer(different_class_type,program);
+    check(static_cast<bool>(blocks::of(generic(std::make_shared<variable>(same_layout),buffer_type))->buffer),
+          "buffer checks compare layout and intentionally ignore placement identity");
+    const auto destroying=object(2,905);heap::getAt(destroying)->setValue(7);heap::getAt(address{destroying.value+1})->setValue(std::string("field"));
+    heap::delete_object(destroying,env);check(checked_destroying,"registered destroying objects cannot pass reflection checks");
+    heap::delete_object(live,env);fails(900,at(live),"Object check failed: address is not a live registered object start");
+    bool located=false;try {program->invoke(900,{std::make_shared<variable>(1)});}catch(const std::runtime_error& error) {
+        located=true;check(describe_error(error)=="Object check failed: value has an incompatible type\n  at checkedPointer (checks.azs:12:7)","check_object errors use their own source position");
+    }
+    check(located,"checked pointer source error propagates");
+    rejects_containing([&]{program->invoke(907);},"Object check failed:","reflection rejects objects before construction completes");
+    program->destroy();check(heap::lenAlloc()==0,"rejected reflected results preserve cleanup and leave the heap empty");
+    const auto valid=checked(rc(ptr(0)),cp,{INT_VALUE});
+    AbdStack fields(valid);
+    for(std::size_t count=1;count<fields.vs.size();++count) {
+        AbdStack truncated;truncated.vs.assign(fields.vs.begin(),fields.vs.begin()+static_cast<std::ptrdiff_t>(count));
+        rejects([&]{load_raw(rmodule({rfn(950,VOID_VALUE,truncated.toAbdValue())}));},"check_object rejects missing fields");
+    }
+    for(auto malformed:{append_raw(valid,ri(0)),replace_raw(valid,3,raw({ri(-1)})),replace_raw(valid,3,raw({ri(5)})),replace_raw(valid,3,raw({ri(9)})),
+                        replace_raw(valid,3,raw({rb(true)})),replace_raw(valid,2,cref(0)),
+                        checked(rx(32,{ri(2)}),cv),checked(rx(32,{ri(2)}),cv,{INT_VALUE})})
+        rejects([&]{load_raw(rmodule({rfn(950,VOID_VALUE,malformed)}));},"check_object rejects malformed tags, contexts and extra fields");
+}
+void object_storage_tests() {
+    auto field=[](R base,int offset=0){return rcall(0x0abd0006,{rx(9,{std::move(base),ri(offset)})});};
+    auto program=load_raw(rmodule({
+        rfn(800,INT_VALUE,rreturn(field(rvar(0),1)),0,{ADDRESS_VALUE}),
+        rfn(801,VOID_VALUE,rx(6,{field(rvar(0),1),rvar(1)}),0,{ADDRESS_VALUE,INT_VALUE}),
+        rfn(802,INT_VALUE,rreturn(rcall(0x0abd0006,{rvar(0)})),0,{ADDRESS_VALUE}),
+        rfn(803,VOID_VALUE,rset(-1,rx(12,{rvar(-1),rc(n(1))})),0,{ADDRESS_VALUE}),
+        rfn(804,VOID_VALUE,rblock({rdef(0,rcall(0x0abd0014,{rc(n(2))})),rdef(1,rx(32,{ri(1)})),
+            rx(10,{rx(33,{rvar(1)}),rb(true),ri(803),rb(false),raw({})}),
+            rx(6,{field(rvar(0)),rvar(1)}),rx(35,{field(rvar(0))}),
+            rx(10,{rvar(0),rb(false),rb(false),raw({})})}),2),
+    },1));
+    auto env=program->baseEnv;env->getVariable(-1)->setValue(0);
+    const auto number=[](int value){return std::make_shared<variable>(value);};
+    const auto pointer_value=[](address value){return std::make_shared<variable>(value);};
+    check(getiFunction(0x0abd0014)->return_type()==ADDRESS_VALUE,"object_alloc reports address return type");
+    auto object_allocator=getiFunction(0x0abd0014);
+    check(pointer(object_allocator->invoke(env,{number(0)}))==address{},"zero object allocation is null and untagged");
+    for(const auto& args:std::vector<std::vector<V>>{{},{number(1),number(2)},{nullptr},{pointer_value(address{1})},{std::make_shared<variable>(1.0)}})
+        rejects_message([&]{object_allocator->invoke(env,args);},"object_alloc requires one int argument","object_alloc validates exact int arity");
+    rejects([&]{object_allocator->invoke(env,{number(-1)});},"object_alloc rejects negative sizes");
+    rejects([&]{object_allocator->invoke(env,{number(heap::max_slots)});},"object_alloc rejects excessive sizes");
+    const address object=pointer(object_allocator->invoke(env,{number(3)}));
+    heap::getAt(object)->setValue(11);heap::getAt(address{object.value+1})->setValue(22);
+    const address raw=pointer(getiFunction(0x0abd0003)->invoke(env,{number(3)}));
+    check(!heap::is_object_storage(address{})&&!heap::is_object_storage(raw),"ordinary raw allocations remain untagged");
+    auto raw_get=getiFunction(0x0abd0006);
+    raw_get->invoke(env,{pointer_value(raw)})->setValue(91);
+    check(integer(raw_get->invoke(env,{pointer_value(raw)}))==91,"raw mem_get retains mutable raw storage access");
+    rejects_message([&]{heap::object_address(raw,0);},"Object member access requires object storage","oa rejects raw allocation starts");
+    rejects([&]{heap::register_object(raw,std::nullopt,false,env);},"raw allocations cannot be registered as objects");
+    const std::vector<std::pair<int,std::string>> guards={{6,"mem_get"},{2,"mem_free"},{4,"make_free"},{5,"mem_send_up"}};
+    auto reject_raw=[&](address at) {
+        for(const auto& [id,name]:guards) {
+            bool caught=false;
+            try {getiFunction(0x0abd0000+id)->invoke(env,{pointer_value(at)});}
+            catch(const std::runtime_error& error) {
+                caught=true;check(typeid(error)==typeid(std::runtime_error)&&error.what()==name+" cannot access object storage; use typed member access",
+                                  "raw object guards have stable runtime_error diagnostics");
+            }
+            check(caught,"every raw memory entry rejects object storage");
+        }
+    };
+    for(int offset=0;offset<3;++offset) {
+        const address at{object.value+static_cast<unsigned>(offset)};
+        check(heap::is_object_storage(at),"the whole object range is tagged before registration");reject_raw(at);
+    }
+    check(heap::owner_of(object)==env.get()&&integer(heap::getAt(object))==11,"rejected construction-time raw access preserves owner and data");
+    check(integer(program->invoke(800,{pointer_value(object)}))==22,"decoder member access works during construction");
+    program->invoke(801,{pointer_value(object),number(42)});
+    check(integer(program->invoke(800,{pointer_value(object)}))==42,"decoder member access is a writable mov target");
+    rejects_message([&]{program->invoke(802,{pointer_value(object)});},"mem_get cannot access object storage; use typed member access","erasing a pointer retains the raw guard");
+    rejects([&]{heap::object_address(object,3);},"oa bounds checks tagged ranges");
+    rejects([&]{heap::object_address(address{object.value+1},0);},"oa requires an object start");
+    rejects([&]{heap::register_object(object,800,true,env);},"invalid destructor prevents registration");
+    check(heap::owner_of(object)==env.get()&&std::find(env->owned_pointer.begin(),env->owned_pointer.end(),object)!=env->owned_pointer.end(),
+          "failed manual registration preserves construction ownership");
+    heap::register_object(object,std::nullopt,true,env);
+    check(heap::owner_of(object)==nullptr&&std::find(env->owned_pointer.begin(),env->owned_pointer.end(),object)==env->owned_pointer.end(),
+          "successful manual registration detaches automatic ownership itself");
+    reject_raw(object);reject_raw(address{object.value+2});
+    std::vector<V> saved_slots;for(int i=0;i<heap::lenHeap();++i)saved_slots.push_back(heap::getSlot(i));
+    std::vector<heap::heap_allocation> saved_ranges;for(int i=0;i<heap::lenAlloc();++i)saved_ranges.push_back(heap::allocAt(i));
+    auto saved_objects=heap::object_records();auto saved_owned=env->owned_pointer;
+    heap::clearHeap();check(!heap::is_object_storage(object),"clearing the heap discards all object tags");
+    heap::restore(std::move(saved_slots),std::move(saved_ranges),std::move(saved_objects),env,std::move(saved_owned));
+    check(heap::is_object_storage(object)&&heap::is_object_storage(address{object.value+2})&&!heap::is_object_storage(raw),
+          "snapshot restore retags registered object ranges without tagging raw memory");
+    reject_raw(address{object.value+1});
+    heap::delete_object(object,env);check(!heap::is_object_storage(object),"delete clears an object's range tag");
+    const address reused=heap::alloc(3);
+    check(reused==object&&!heap::is_object_storage(reused),"same-address raw allocation does not inherit a deleted object's tag");
+    raw_get->invoke(env,{pointer_value(reused)})->setValue(7);
+    check(integer(raw_get->invoke(env,{pointer_value(reused)}))==7,"raw access works after tagged storage is released and reused");
+    heap::free(reused);
+    for(bool view:{false,true}) {
+        auto literal=blocks::create(3,program);literal->is_view=view;
+        const address start=blocks::address_of(literal);
+        for(int offset=0;offset<3;++offset) {
+            const address at{start.value+static_cast<unsigned>(offset)};
+            check(heap::is_object_storage(at),"literal and view interiors are object storage");reject_raw(at);
+        }
+        heap::getAt(heap::object_address(start,1))->setValue(13);
+        check(integer(program->invoke(800,{pointer_value(start)}))==13,"literal/view members use the same guarded decoder bypass");
+    }
+    program->invoke(804);
+    check(integer(env->getVariable(-1))==2,"member-access nodes support drop and preserve copied object ownership");
+    program->destroy();check(heap::lenAlloc()==0,"closed object-storage tests release all automatic and manual ranges");
+    const auto construction=heap::object_alloc(2);heap::free(construction);
+    const auto reused_construction=heap::alloc(2);
+    check(reused_construction==construction&&!heap::is_object_storage(reused_construction),"failed-construction release also clears tags");
+    heap::free(reused_construction);
+}
+void string_tests() {
+    constexpr int builtin_base=0x0abd0000;
+    auto function=rfn(700,STRING_VALUE,rreturn(rcall(builtin_base+0x0e,{rvar(0),rvar(1)})),0,{ANY_VALUE,ANY_VALUE});
+    auto record=raw({rs("stringCall"),ri(0),ri(5),ri(1),raw({ri(1),ri(0),ri(7),ri(9)})});
+    function=append_raw(replace_raw(function,8,rb(true)),record);
+    auto program=load_raw(replace_raw(rmodule({function}),10,raw({rs("strings.azs")})));
+    auto text=[](std::string value){return std::make_shared<variable>(std::move(value));};
+    auto number=[](int value){return std::make_shared<variable>(value);};
+    auto call=[&](int operation,std::vector<V> args){return program->invoke(builtin_base+operation,std::move(args));};
+    auto string_result=[&](int operation,std::vector<V> args) {
+        auto value=call(operation,std::move(args));check(value->type==STRING_VALUE,"string operations preserve their string result ABI");
+        return *static_cast<std::string*>(value->value);
+    };
+    auto boolean_result=[&](int operation,std::vector<V> args) {
+        auto value=call(operation,std::move(args));check(value->type==BOOLEAN_VALUE,"string predicates return boolean values");
+        return *static_cast<bool*>(value->value);
+    };
+    auto failure=[&](int operation,std::vector<V> args,const std::string& message,bool range=false) {
+        bool caught=false;
+        try {call(operation,std::move(args));}
+        catch(const std::exception& error) {
+            caught=true;const auto& expected=range?typeid(std::out_of_range):typeid(std::invalid_argument);
+            check(typeid(error)==expected&&error.what()==message,"string failures retain their exact bounds or argument exception type and message");
+        }
+        check(caught,"invalid string operations must throw");
+    };
+    const int result_types[]{INT_VALUE,INT_VALUE,STRING_VALUE,STRING_VALUE,INT_VALUE,STRING_VALUE,INT_VALUE,BOOLEAN_VALUE,BOOLEAN_VALUE};
+    for(int operation=0x0b;operation<=0x13;++operation) {
+        auto builtin=getiFunction(builtin_base+operation);
+        check(builtin&&builtin->return_type()==result_types[operation-0x0b],"the dense string builtin range advertises correct result types");
+    }
+    const std::string cjk="\xe4\xb8\xad",emoji="\xf0\x9f\x98\x80",nul(1,'\0');
+    const std::string sample="A"+cjk+emoji+nul+"B",repeated=sample+cjk+emoji;
+    for(const auto& item:std::initializer_list<std::pair<std::string,int>>{
+        {"",0},{"hello",5},{cjk+"\xe6\x96\x87",2},{emoji+emoji,2},{nul,1},{sample,5},{"e\xcc\x81",2},
+    }) {
+        check(integer(call(0x0b,{text(item.first)}))==item.second,"str_length counts Unicode scalars rather than bytes, graphemes or UTF16 units");
+        check(integer(call(0x0c,{text(item.first)}))==static_cast<int>(item.first.size()),"str_byte_length includes every UTF8 byte and embedded NUL");
+    }
+    const std::vector<std::string> characters{"A",cjk,emoji,nul,"B"};const int codes[]{0x41,0x4e2d,0x1f600,0,0x42};
+    for(int i=0;i<5;++i) {
+        check(string_result(0x0e,{text(sample),number(i)})==characters[static_cast<std::size_t>(i)],"char_at returns exactly one complete code point");
+        check(integer(call(0x0f,{text(sample),number(i)}))==codes[i],"code_at returns Unicode scalar values including NUL and non-BMP values");
+    }
+    for(const auto& item:std::initializer_list<std::pair<int,std::string>>{
+        {0,nul},{0x7f,"\x7f"},{0x80,"\xc2\x80"},{0x7ff,"\xdf\xbf"},{0x800,"\xe0\xa0\x80"},
+        {0xd7ff,"\xed\x9f\xbf"},{0xe000,"\xee\x80\x80"},{0xffff,"\xef\xbf\xbf"},
+        {0x10000,"\xf0\x90\x80\x80"},{0x10ffff,"\xf4\x8f\xbf\xbf"},
+    }) {
+        auto encoded=string_result(0x10,{number(item.first)});
+        check(encoded==item.second&&integer(call(0x0b,{text(encoded)}))==1&&integer(call(0x0f,{text(encoded),number(0)}))==item.first,
+              "from_code emits the canonical UTF8 encoding at every scalar-width boundary");
+    }
+    struct slice {int begin,end;std::string expected;};
+    for(const auto& item:std::initializer_list<slice>{{0,0,""},{0,5,sample},{1,3,cjk+emoji},{2,3,emoji},{3,4,nul},{4,5,"B"},{5,5,""}})
+        check(string_result(0x0d,{text(sample),number(item.begin),number(item.end)})==item.expected,"substring uses half-open code-point indexes");
+    check(integer(call(0x11,{text(repeated),text(cjk+emoji)}))==1&&
+          integer(call(0x11,{text(repeated),text(cjk+emoji),number(2)}))==5&&
+          integer(call(0x11,{text(repeated),text(cjk+emoji),number(6)}))==-1,"index_of returns code-point indexes and honors its optional start");
+    check(integer(call(0x11,{text(sample),text(nul)}))==3&&integer(call(0x11,{text(sample),text("B")}))==4,
+          "index_of handles NUL and does not count a non-BMP character as two positions");
+    for(int from:{0,3,7})check(integer(call(0x11,{text(repeated),text(""),number(from)}))==from,"an empty needle matches the requested boundary including the end");
+    check(integer(call(0x11,{text(""),text("")}))==0&&integer(call(0x11,{text(""),text("x")}))==-1&&
+          integer(call(0x11,{text(repeated),text(emoji),number(7)}))==-1,"index_of handles empty text and a nonempty needle at the end");
+    check(boolean_result(0x12,{text(sample),text("A"+cjk)})&&boolean_result(0x13,{text(sample),text(nul+"B")})&&
+          boolean_result(0x12,{text(""),text("")})&&boolean_result(0x13,{text(""),text("")}),"prefix/suffix predicates support Unicode, NUL and empty strings");
+    check(!boolean_result(0x12,{text(sample),text(emoji)})&&!boolean_result(0x13,{text(sample),text(cjk)})&&
+          !boolean_result(0x12,{text("e\xcc\x81"),text("\xc3\xa9")}),"prefix/suffix checks compare code points without normalization");
+
+    for(int operation:{0x0e,0x0f})for(int index:{-1,5})
+        failure(operation,{text(sample),number(index)},"String index "+std::to_string(index)+" is outside length 5",true);
+    failure(0x0e,{text(""),number(0)},"String index 0 is outside length 0",true);
+    failure(0x0d,{text(sample),number(-1),number(2)},"String index -1 is outside length 5",true);
+    failure(0x0d,{text(sample),number(0),number(6)},"String index 6 is outside length 5",true);
+    failure(0x0d,{text(sample),number(3),number(2)},"String substring start 3 is after end 2",true);
+    for(int from:{-1,8})failure(0x11,{text(repeated),text(""),number(from)},"String index "+std::to_string(from)+" is outside length 7",true);
+    for(int code:{std::numeric_limits<int>::min(),-1,0xd800,0xdbff,0xdfff,0x110000,std::numeric_limits<int>::max()})
+        failure(0x10,{number(code)},"Invalid Unicode code point: "+std::to_string(code));
+    struct arguments {int operation;const char* name;std::vector<V> values;std::vector<int> types;};
+    const std::vector<arguments> cases{
+        {0x0b,"str_length",{text(sample)},{STRING_VALUE}},{0x0c,"str_byte_length",{text(sample)},{STRING_VALUE}},
+        {0x0d,"str_substring",{text(sample),number(0),number(5)},{STRING_VALUE,INT_VALUE,INT_VALUE}},
+        {0x0e,"str_char_at",{text(sample),number(0)},{STRING_VALUE,INT_VALUE}},
+        {0x0f,"str_code_at",{text(sample),number(0)},{STRING_VALUE,INT_VALUE}},
+        {0x10,"str_from_code",{number(0x41)},{INT_VALUE}},
+        {0x11,"str_index_of",{text(sample),text(cjk)},{STRING_VALUE,STRING_VALUE}},
+        {0x12,"str_starts_with",{text(sample),text("A")},{STRING_VALUE,STRING_VALUE}},
+        {0x13,"str_ends_with",{text(sample),text("B")},{STRING_VALUE,STRING_VALUE}},
+    };
+    for(const auto& item:cases) {
+        std::string arity=std::string(item.name)+" requires "+(item.operation==0x11?std::string("2 or 3 arguments"):
+            std::to_string(item.values.size())+(item.values.size()==1?" argument":" arguments"));
+        auto missing=item.values;missing.pop_back();failure(item.operation,missing,arity);
+        auto extra=item.values;extra.push_back(number(0));if(item.operation==0x11)extra.push_back(number(0));failure(item.operation,extra,arity);
+        for(std::size_t i=0;i<item.values.size();++i) {
+            const std::string message=std::string(item.name)+" argument "+std::to_string(i+1)+" must be "+(item.types[i]==INT_VALUE?"int":"string");
+            auto wrong=item.values;wrong[i]=item.types[i]==INT_VALUE?text("1"):number(1);failure(item.operation,wrong,message);
+            wrong[i]=nullptr;failure(item.operation,wrong,message);
+        }
+    }
+    failure(0x11,{text(sample),text(""),text("0")},"str_index_of argument 3 must be int");
+    const std::vector<std::string> malformed{
+        "\x80","\xc0\x80","\xc1\xbf","\xc2","\xe0\x80\x80","\xed\xa0\x80", "\xf0\x80\x80\x80",
+        "\xf4\x90\x80\x80","\xf5\x80\x80\x80","\xff","\xe2\x28\xa1","ok\xc2",
+    };
+    for(const auto& invalid:malformed) {
+        for(const auto& item:cases)if(item.operation!=0x10) {
+            auto args=item.values;args[0]=text(invalid);failure(item.operation,args,"Invalid UTF-8 string");
+        }
+        for(int operation:{0x11,0x12,0x13})failure(operation,{text(""),text(invalid)},"Invalid UTF-8 string");
+    }
+    check(value_to_string(program->invoke(700,{text(sample),number(2)}))==emoji,"script builtin calls return intact non-BMP UTF8");
+    bool caught=false;
+    try {program->invoke(700,{text(sample),number(5)});}
+    catch(const std::out_of_range& error) {
+        caught=true;check(typeid(error)==typeid(std::out_of_range)&&
+            describe_error(error)=="String index 5 is outside length 5\n  at stringCall (strings.azs:7:9)",
+            "string index failures keep their JNI-compatible exception type and script trace");
+    }
+    check(caught,"script string index failures propagate");
+    program->destroy();
+}
+void select_tests() {
+    auto select=[](R condition,R when_true,R when_false){return rx(50,{std::move(condition),std::move(when_true),std::move(when_false)});};
+    auto divide=[](){return rx(15,{rc(n(1)),rc(n(0))});};
+    auto overflow=[](){return rx(12,{rc(n(std::numeric_limits<int>::max())),rc(n(1))});};
+    auto literal_address=[](R value){return rx(33,{std::move(value)});};
+    auto field=[](R value){return rcall(0x0abd0006,{rx(9,{std::move(value),ri(0)})});};
+    auto bind=[](R value,int destructor){return rx(10,{std::move(value),rb(true),ri(destructor),rb(false),raw({})});};
+    auto lifetime_body=[](std::initializer_list<R> body) {
+        AbdStack statements;statements.vs={rset(-2,rc(n(0))),rset(-3,rc(n(0)))};
+        statements.vs.insert(statements.vs.end(),body.begin(),body.end());return rx(1,{statements.toAbdValue()});
+    };
+    auto append_destructor=[&](){return rset(-2,rx(12,{rx(14,{rvar(-2),rc(n(10))}),field(rvar(0))}));};
+    auto factory=[&](int id,int destructor,bool pointer) {
+        R allocation=pointer?rcall(0x0abd0014,{rc(n(1))}):rx(32,{ri(1)});
+        R address=pointer?rvar(1):literal_address(rvar(1));
+        R returned=pointer?rx(8,{rvar(1)}):rreturn(rvar(1));
+        return rfn(id,pointer?ADDRESS_VALUE:OBJECT_VALUE,rblock({
+            rset(-3,rx(12,{rvar(-3),rc(n(1))})),rdef(1,allocation),rx(6,{field(address),rvar(0)}),bind(address,destructor),returned,
+        }),1,{INT_VALUE});
+    };
+    auto chosen_object=[&](int id){return select(rvar(0),rcall(id,{rc(n(7))}),rcall(id,{rc(n(9))}));};
+    auto debug=[](R function,const char* name,int line,std::initializer_list<int> positions={}) {
+        AbdStack locations;for(int field:positions)locations.vs.push_back(ri(field));
+        return append_raw(replace_raw(function,8,rb(true)),raw({rs(name),ri(0),ri(line),ri(1),locations.toAbdValue()}));
+    };
+    auto module=rmodule({
+        rfn(0,VOID_VALUE,rblock({rset(-1,rc(n(0))),rset(-2,rc(n(0))),rset(-3,rc(n(0)))})),
+        rfn(600,INT_VALUE,rreturn(select(rvar(0),rc(n(7)),divide())),0,{ANY_VALUE}),
+        rfn(601,INT_VALUE,rreturn(select(rvar(0),divide(),rc(n(9)))),0,{ANY_VALUE}),
+        rfn(602,INT_VALUE,rblock({rset(-1,rc(n(0))),rreturn(select(rcall(620,{rvar(0)}),
+            rcall(621,{rc(n(2))}),rcall(621,{rc(n(3))})))}),0,{BOOLEAN_VALUE}),
+        rfn(603,INT_VALUE,rblock({select(rvar(0),rdef(1,rc(n(7))),rdef(1,rc(n(9)))),rreturn(rvar(1))}),1,{BOOLEAN_VALUE}),
+        rfn(606,OBJECT_VALUE,lifetime_body({rreturn(chosen_object(630))}),0,{ANY_VALUE}),
+        rfn(610,INT_VALUE,lifetime_body({rdef(1,rx(12,{field(literal_address(chosen_object(630))),rvar(-2)})),
+            rreturn(rvar(1))}),1,{BOOLEAN_VALUE}),
+        rfn(611,INT_VALUE,lifetime_body({rdef(1,chosen_object(630)),rreturn(rx(12,{
+            field(literal_address(rvar(1))),rx(14,{rvar(-2),rc(n(100))})}))}),1,{BOOLEAN_VALUE}),
+        rfn(612,INT_VALUE,lifetime_body({rdef(1,chosen_object(640)),rreturn(rx(12,{
+            field(rvar(1)),rx(14,{rvar(-2),rc(n(100))})}))}),1,{BOOLEAN_VALUE}),
+        rfn(613,INT_VALUE,lifetime_body({rdef(0,rx(12,{select(rx(19,{
+            field(literal_address(rcall(630,{rc(n(1))}))),rc(n(1))}),rc(n(7)),rc(n(9))),rvar(-2)})),
+            rreturn(rvar(0))}),1),
+        debug(rfn(615,VOID_VALUE,lifetime_body({rx(12,{field(literal_address(chosen_object(660))),overflow()})}),0,{BOOLEAN_VALUE}),
+            "selectedCleanup",30),
+        rfn(620,BOOLEAN_VALUE,rblock({rset(-1,rx(12,{rx(14,{rvar(-1),rc(n(10))}),rc(n(1))})),rreturn(rvar(0))}),0,{BOOLEAN_VALUE}),
+        rfn(621,INT_VALUE,rblock({rset(-1,rx(12,{rx(14,{rvar(-1),rc(n(10))}),rvar(0)})),rreturn(rvar(0))}),0,{INT_VALUE}),
+        factory(630,631,false),rfn(631,VOID_VALUE,rblock({append_destructor()}),0,{ADDRESS_VALUE}),factory(640,631,true),
+        debug(rfn(650,INT_VALUE,rreturn(select(rvar(0),divide(),rc(n(9)))),0,{ANY_VALUE}),
+            "chosenThen",9,{1,0,9,5,2,0,9,7,3,0,9,11}),
+        debug(rfn(651,INT_VALUE,rreturn(select(rvar(0),rc(n(7)),divide())),0,{ANY_VALUE}),
+            "chosenElse",10,{1,0,10,5,2,0,10,7,4,0,10,25}),
+        factory(660,661,false),debug(rfn(661,VOID_VALUE,rblock({append_destructor(),divide()}),0,{ADDRESS_VALUE}),"cleanupDestructor",40),
+    },3);
+    auto program=load_raw(replace_raw(module,10,raw({rs("select.azs")})));
+    auto input=[](bool value){return std::make_shared<variable>(value);};
+    auto runtime_failure=[&](int id,V condition,const std::string& message) {
+        bool caught=false;
+        try {program->invoke(id,{std::move(condition)});}
+        catch(const std::runtime_error& error) {
+            caught=true;check(typeid(error)==typeid(std::runtime_error)&&error.what()==message,
+                "select preserves the chosen failure type and message");
+        }
+        check(caught,"a selected error or invalid condition must throw");
+    };
+    check(integer(program->invoke(600,{input(true)}))==7&&integer(program->invoke(601,{input(false)}))==9,
+          "either unchosen select arm may throw without being evaluated");
+    runtime_failure(600,input(false),"Division by zero");runtime_failure(601,input(true),"Division by zero");
+    for(bool chosen:{false,true}) {
+        const int value=chosen?7:9;
+        check(integer(program->invoke(602,{input(chosen)}))==(chosen?2:3)&&
+              integer(program->baseEnv->getVariable(-1))==(chosen?12:13),"select evaluates its condition once before exactly one arm");
+        check(integer(program->invoke(603,{input(chosen)}))==value,"selected declarations remain in the enclosing environment");
+        for(int id:{610,611,612}) {
+            const auto allocations=heap::lenAlloc();
+            check(integer(program->invoke(id,{input(chosen)}))==value,"chosen objects survive use in their enclosing statement or block");
+            check(integer(program->baseEnv->getVariable(-2))==value&&integer(program->baseEnv->getVariable(-3))==1,
+                  "only the chosen factory allocates and its value is destroyed once at the enclosing lifetime end");
+            check(heap::lenAlloc()==allocations,"select automatic-pointer ownership leaves no heap allocation behind");
+        }
+        bool caught=false;
+        try {program->invoke(615,{input(chosen)});}
+        catch(const std::overflow_error& error) {
+            caught=true;check(std::string(error.what())=="Integer overflow"&&
+                describe_error(error)=="Integer overflow\n  at selectedCleanup (select.azs:30:1)",
+                "an enclosing error retains its type and trace over a chosen temporary destructor failure");
+        }
+        check(caught&&integer(program->baseEnv->getVariable(-2))==value&&integer(program->baseEnv->getVariable(-3))==1,
+              "selected cleanup finishes once while preserving the first error");
+    }
+    check(integer(program->invoke(613))==7&&integer(program->baseEnv->getVariable(-2))==1&&
+          integer(program->baseEnv->getVariable(-3))==1,"condition temporaries survive until the enclosing expression statement ends");
+    struct invalid_condition {const char* type;V value;};
+    for(const auto& condition:std::vector<invalid_condition>{
+        {"int",std::make_shared<variable>(0)},{"int",std::make_shared<variable>(1)},
+        {"float",std::make_shared<variable>(0.0f)},{"double",std::make_shared<variable>(1.0)},
+        {"string",std::make_shared<variable>("x")},{"void",std::make_shared<variable>(nullptr)},
+        {"address",std::make_shared<variable>(address{})},{"object",std::make_shared<variable>(blocks::create(1,program))},
+    }) {
+        runtime_failure(606,condition.value,"Condition must be boolean, got "+std::string(condition.type));
+        check(integer(program->baseEnv->getVariable(-2))==0&&integer(program->baseEnv->getVariable(-3))==0,
+              "invalid select conditions do not execute or allocate either arm");
+    }
+    for(const auto& item:std::initializer_list<std::pair<int,std::pair<V,std::string>>>{
+        {650,{input(true),"Division by zero\n  at chosenThen (select.azs:9:11)"}},
+        {651,{input(false),"Division by zero\n  at chosenElse (select.azs:10:25)"}},
+        {650,{std::make_shared<variable>(1),"Condition must be boolean, got int\n  at chosenThen (select.azs:9:7)"}},
+    }) {
+        bool caught=false;
+        try {program->invoke(item.first,{item.second.first});}
+        catch(const std::runtime_error& error) {
+            caught=true;check(describe_error(error)==item.second.second,"select reports the chosen arm or condition source position");
+        }
+        check(caught,"select debug probes must throw");
+    }
+    for(auto malformed:{rx(50,{rc(boolean(true))}),rx(50,{rc(boolean(true)),rc(n(1))}),
+        rx(50,{rc(boolean(true)),rc(n(1)),rc(n(2)),rc(n(3))})})
+        rejects([&]{load_raw(rmodule({rfn(10,INT_VALUE,malformed)}));},"select records require a condition and exactly two arms");
+    program->destroy();
+}
+void checked_return_tests() {
+    AbdStack functions;
+    for(int target:{INT_VALUE,STRING_VALUE,FLOAT_VALUE,DOUBLE_VALUE,BOOLEAN_VALUE,VOID_VALUE,ADDRESS_VALUE,OBJECT_VALUE})
+        functions.vs.push_back(rfn(400+target,target,rreturn(rvar(0)),0,{ANY_VALUE}));
+    // ANY returns require a generic context even when the body only forwards a value.
+    functions.vs.push_back(gfn(400+ANY_VALUE,ANY_VALUE,rreturn(rvar(0)),1,0,{ANY_VALUE}));
+    functions.vs.push_back(rfn(410,INT_VALUE,rblock({})));
+    functions.vs.push_back(gfn(500,ANY_VALUE,greturn(rvar(0),cref(0)),1,0,{ANY_VALUE}));
+    for(int target:{INT_VALUE,FLOAT_VALUE,DOUBLE_VALUE})
+        functions.vs.push_back(rfn(510+target,target,rreturn(gcall(500,{rvar(0)},{cfixed(target,0)})),0,{ANY_VALUE}));
+    functions.vs.push_back(rfn(520,DOUBLE_VALUE,rreturn(gcall(500,{rvar(0)},{cfixed(INT_VALUE,0)})),0,{ANY_VALUE}));
+    auto debug=[](R function,const char* name,int line,std::initializer_list<int> positions) {
+        AbdStack locations;for(int field:positions)locations.vs.push_back(ri(field));
+        return append_raw(replace_raw(function,8,rb(true)),raw({rs(name),ri(0),ri(line),ri(1),locations.toAbdValue()}));
+    };
+    functions.vs.push_back(debug(rfn(530,INT_VALUE,rreturn(rc(std::make_shared<DoubleAbdValue>(1.0)))),
+        "ordinaryNarrow",3,{0,0,5,7,1,0,5,19}));
+    functions.vs.push_back(debug(gfn(531,INT_VALUE,greturn(rc(std::make_shared<DoubleAbdValue>(1.0)),cref(0)),1),
+        "genericNarrow",11,{0,0,13,7,1,0,13,19}));
+    functions.vs.push_back(debug(rfn(532,INT_VALUE,rreturn(gcall(531,{}, {cfixed(DOUBLE_VALUE,0)}))),
+        "genericCaller",20,{0,0,21,3,1,0,21,10}));
+    auto module=replace_raw(replace_raw(rmodule({}),7,functions.toAbdValue()),10,raw({rs("returns.azs")}));
+    auto program=load_raw(module);
+    auto dynamic_context=std::make_shared<type_context>();dynamic_context->abi=INT_VALUE;
+    auto dynamic_return=[&](V value) {
+        return invoke_bound_function(program,400+ANY_VALUE,program->baseEnv,{std::move(value)},{dynamic_context});
+    };
+    auto runtime_failure=[&](int id,std::vector<V> args,const std::string& message) {
+        bool caught=false;
+        try {program->invoke(id,std::move(args));}
+        catch(const std::runtime_error& error) {
+            caught=true;
+            check(typeid(error)==typeid(std::runtime_error)&&error.what()==message,
+                  "return type failures retain runtime_error and exact expected/actual tags");
+        }
+        check(caught,"a disallowed return conversion must fail");
+    };
+    struct numeric_value {const char* type;V value;};
+    const std::vector<numeric_value> numeric{
+        {"int",std::make_shared<variable>(std::numeric_limits<int>::min())},
+        {"int",std::make_shared<variable>(0)},{"int",std::make_shared<variable>(std::numeric_limits<int>::max())},
+        {"float",std::make_shared<variable>(1.0f)},{"float",std::make_shared<variable>(1.25f)},
+        {"float",std::make_shared<variable>(-0.0f)},{"float",std::make_shared<variable>(std::numeric_limits<float>::max())},
+        {"float",std::make_shared<variable>(std::numeric_limits<float>::denorm_min())},
+        {"double",std::make_shared<variable>(1.0)},{"double",std::make_shared<variable>(1.25)},
+        {"double",std::make_shared<variable>(-0.0)},{"double",std::make_shared<variable>(std::numeric_limits<double>::max())},
+        {"double",std::make_shared<variable>(std::numeric_limits<double>::denorm_min())},
+    };
+    auto numeric_result=[](const V& value) {
+        if(value->type==INT_VALUE)return static_cast<double>(*static_cast<int*>(value->value));
+        if(value->type==FLOAT_VALUE)return static_cast<double>(*static_cast<float*>(value->value));
+        return *static_cast<double*>(value->value);
+    };
+    for(const auto& item:numeric)for(const auto& target:std::initializer_list<std::pair<int,const char*>>{
+        {INT_VALUE,"int"},{FLOAT_VALUE,"float"},{DOUBLE_VALUE,"double"},
+    }) {
+        const bool widening=(item.value->type==INT_VALUE&&(target.first==FLOAT_VALUE||target.first==DOUBLE_VALUE))||
+                            (item.value->type==FLOAT_VALUE&&target.first==DOUBLE_VALUE);
+        if(item.value->type==target.first||widening) {
+            auto result=program->invoke(400+target.first,{item.value});
+            const double input=numeric_result(item.value);
+            const double expected=target.first==FLOAT_VALUE?static_cast<double>(static_cast<float>(input)):input;
+            check(result->type==target.first&&numeric_result(result)==expected,
+                  "numeric returns preserve exact types or apply only the approved widenings");
+            if(input==0.0)check(std::signbit(numeric_result(result))==std::signbit(input),"allowed numeric returns preserve signed zero");
+        } else runtime_failure(400+target.first,{item.value},
+            "Function return type mismatch: expected "+std::string(target.second)+", got "+item.type);
+        auto dynamic=dynamic_return(item.value);
+        check(dynamic->type==item.value->type&&numeric_result(dynamic)==numeric_result(item.value),"any returns preserve the actual numeric ABI");
+    }
+    runtime_failure(400+DOUBLE_VALUE,{std::make_shared<variable>(std::numeric_limits<float>::infinity())},"Non-finite return value");
+    runtime_failure(400+DOUBLE_VALUE,{std::make_shared<variable>(std::numeric_limits<float>::quiet_NaN())},"Non-finite return value");
+    auto nonfinite=std::make_shared<variable>(std::numeric_limits<double>::infinity());
+    check(std::isinf(numeric_result(program->invoke(400+DOUBLE_VALUE,{nonfinite})))&&
+          std::isinf(numeric_result(dynamic_return(nonfinite))),"same-type and any return handling remains unchanged for host nonfinite values");
+    for(const auto& value:std::vector<V>{std::make_shared<variable>("same"),std::make_shared<variable>(true),
+        std::make_shared<variable>(address{std::numeric_limits<std::uint64_t>::max()}),std::make_shared<variable>(nullptr)}) {
+        auto exact=program->invoke(400+value->type,{value}),dynamic=dynamic_return(value);
+        check(exact->type==value->type&&dynamic->type==value->type&&value_to_string(exact)==value_to_string(value)&&
+              value_to_string(dynamic)==value_to_string(value),"scalar identity, void and any return behavior is unchanged");
+    }
+    runtime_failure(400+VOID_VALUE,{std::make_shared<variable>(1)},"Void function returned a value");
+    runtime_failure(400+INT_VALUE,{std::make_shared<variable>("wrong")},"Function return type mismatch: expected int, got string");
+    runtime_failure(410,{},"Function return type mismatch: expected int, got void");
+    auto object=blocks::create(1,program);object->slots[0]->setValue(42);
+    for(int target:{OBJECT_VALUE,ANY_VALUE}) {
+        auto value=std::make_shared<variable>(object);
+        auto result=target==ANY_VALUE?dynamic_return(value):program->invoke(400+target,{value});auto returned=blocks::of(result);
+        check(returned&&returned!=object&&returned->state==slot_block::status::live&&integer(returned->slots[0])==42,
+              "object and any results retain their established value ownership semantics");
+        blocks::finalize(returned,program->baseEnv,true);
+    }
+    for(const auto& item:numeric) {
+        auto result=program->invoke(510+item.value->type,{item.value});
+        check(result->type==item.value->type&&numeric_result(result)==numeric_result(item.value),"generic return_typed retains exact context ABI values");
+    }
+    check(numeric_result(program->invoke(520,{std::make_shared<variable>(7)}))==7.0,"a caller may widen an exactly checked generic int result");
+    runtime_failure(510+INT_VALUE,{std::make_shared<variable>(1.0f)},"Generic value type mismatch");
+    runtime_failure(510+FLOAT_VALUE,{std::make_shared<variable>(1)},"Generic value type mismatch");
+    for(const auto& item:std::initializer_list<std::pair<int,std::string>>{
+        {530,"Function return type mismatch: expected int, got double\n  at ordinaryNarrow (returns.azs:5:7)"},
+        {532,"Function return type mismatch: expected int, got double\n  at genericNarrow (returns.azs:13:7)\n  at genericCaller (returns.azs:21:10)"},
+    }) {
+        bool caught=false;
+        try {program->invoke(item.first);}
+        catch(const std::runtime_error& error) {
+            caught=true;check(typeid(error)==typeid(std::runtime_error)&&describe_error(error)==item.second,
+                "ordinary and generic return conversions report the return statement location");
+        }
+        check(caught,"return-conversion debug probes must throw");
+    }
+    program->destroy();
+}
+void conversion_tests() {
+    auto convert=[](int target,R value){return rx(49,{ri(target),std::move(value)});};
+    AbdStack functions;
+    for(int target:{INT_VALUE,STRING_VALUE,FLOAT_VALUE,DOUBLE_VALUE,ADDRESS_VALUE})
+        functions.vs.push_back(rfn(300+target,target,rreturn(convert(target,rvar(0))),0,{ANY_VALUE}));
+    functions.vs.push_back(rfn(320,INT_VALUE,rblock({rset(-1,rc(n(0))),rreturn(convert(INT_VALUE,rcall(321)))})));
+    functions.vs.push_back(rfn(321,DOUBLE_VALUE,rblock({rset(-1,rx(12,{rvar(-1),rc(n(1))})),
+        rreturn(rc(std::make_shared<DoubleAbdValue>(1.75)))})));
+    auto debug=[](R function,const char* name,std::initializer_list<int> positions) {
+        AbdStack locations;for(int field:positions)locations.vs.push_back(ri(field));
+        return append_raw(replace_raw(function,8,rb(true)),
+            raw({rs(name),ri(0),ri(9),ri(1),locations.toAbdValue()}));
+    };
+    functions.vs.push_back(debug(rfn(323,INT_VALUE,rreturn(convert(INT_VALUE,rc(s("bad"))))),
+        "conversionError",{1,0,9,5}));
+    functions.vs.push_back(debug(rfn(324,INT_VALUE,rreturn(convert(INT_VALUE,rx(15,{rc(n(1)),rc(n(0))})))),
+        "conversionOperand",{1,0,9,5,2,0,9,17}));
+    auto module=replace_raw(replace_raw(rmodule({},1),7,functions.toAbdValue()),10,raw({rs("conversion.azs")}));
+    auto program=load_raw(module);
+    auto evaluate=[&](int target,V value){return program->invoke(300+target,{std::move(value)});};
+    auto real=[&](int target,V value) {
+        auto result=evaluate(target,std::move(value));
+        check(result->type==target,"explicit numeric conversions return the requested tag");
+        return target==FLOAT_VALUE?static_cast<double>(*static_cast<float*>(result->value)):*static_cast<double*>(result->value);
+    };
+    auto text=[](std::string value){return std::make_shared<variable>(std::move(value));};
+    auto runtime_failure=[&](int target,V value,const std::string& message) {
+        bool caught=false;
+        try {evaluate(target,std::move(value));}
+        catch(const std::runtime_error& error) {
+            caught=true;
+            check(typeid(error)==typeid(std::runtime_error)&&error.what()==message,
+                  "conversion errors retain runtime_error and their complete diagnostic");
+        }
+        check(caught,"an invalid explicit conversion must fail");
+    };
+    const std::vector<V> identities{
+        std::make_shared<variable>(std::numeric_limits<int>::min()),text(std::string("x\0\xf0\x9f\x98\x80",6)),
+        std::make_shared<variable>(-0.0f),std::make_shared<variable>(-0.0),
+        std::make_shared<variable>(address{std::numeric_limits<std::uint64_t>::max()}),
+    };
+    for(const auto& input:identities) {
+        auto result=evaluate(input->type,input);
+        check(result!=input&&result->type==input->type&&value_to_string(result)==value_to_string(input),
+              "same-tag conversions through any preserve a copied value");
+        if(input->type==FLOAT_VALUE)check(std::signbit(*static_cast<float*>(result->value)),"float identity preserves negative zero");
+        if(input->type==DOUBLE_VALUE)check(std::signbit(*static_cast<double*>(result->value)),"double identity preserves negative zero");
+    }
+    check(real(FLOAT_VALUE,std::make_shared<variable>(16777217))==16777216.0,"int to float uses float precision");
+    check(real(DOUBLE_VALUE,std::make_shared<variable>(std::numeric_limits<int>::max()))==2147483647.0,"int to double widens without loss");
+    check(real(DOUBLE_VALUE,std::make_shared<variable>(1.25f))==1.25,"float to double widens without loss");
+    check(real(FLOAT_VALUE,std::make_shared<variable>(1.25))==1.25,"double to float supports narrowing");
+    for(const auto& item:std::initializer_list<std::pair<double,int>>{
+        {1.75,1},{-1.75,-1},{0.9,0},{-0.9,0},{2147483647.9,std::numeric_limits<int>::max()},
+        {-2147483648.9,std::numeric_limits<int>::min()},
+    })check(integer(evaluate(INT_VALUE,std::make_shared<variable>(item.first)))==item.second,
+             "numeric to int truncates before checking the resulting range");
+    check(integer(evaluate(INT_VALUE,std::make_shared<variable>(-1.75f)))==-1,"float to int truncates toward zero");
+    check(real(FLOAT_VALUE,std::make_shared<variable>(std::numeric_limits<double>::denorm_min()))==0.0,
+          "numeric underflow to float zero is allowed");
+    check(std::signbit(real(FLOAT_VALUE,std::make_shared<variable>(-std::numeric_limits<double>::denorm_min()))),
+          "numeric underflow preserves the sign of zero");
+    check(real(FLOAT_VALUE,std::make_shared<variable>(static_cast<double>(std::numeric_limits<float>::denorm_min())))==
+          static_cast<double>(std::numeric_limits<float>::denorm_min()),"numeric subnormal float results are allowed");
+
+    for(const auto& item:std::initializer_list<std::pair<std::string,int>>{
+        {"0",0},{"+7",7},{"-7",-7},{"0007",7},{"2147483647",std::numeric_limits<int>::max()},
+        {"-2147483648",std::numeric_limits<int>::min()},
+    })check(integer(evaluate(INT_VALUE,text(item.first)))==item.second,"decimal integer strings parse with optional signs");
+    for(const auto& item:std::initializer_list<std::pair<std::string,double>>{
+        {"+7",7.0},{"-7",-7.0},{".5",0.5},{"1.",1.0},{"1e2",100.0},{"-2.5e-1",-0.25},{"001.5",1.5},
+    })for(int target:{FLOAT_VALUE,DOUBLE_VALUE})check(real(target,text(item.first))==item.second,
+        "decimal real strings accept optional dots, signs and exponents");
+    check(real(FLOAT_VALUE,text("16777217"))==16777216.0,"string to float rounds directly to float precision");
+    check(real(FLOAT_VALUE,text("1.0000000596046447753906250000000000000001"))==
+          static_cast<double>(std::nextafter(1.0f,2.0f)),"string to float avoids a double-rounding intermediate");
+    for(int target:{FLOAT_VALUE,DOUBLE_VALUE}) {
+        check(real(target,text("1e-9999"))==0.0,"decimal underflow to zero is allowed");
+        check(std::signbit(real(target,text("-1e-9999"))),"decimal underflow preserves negative zero");
+    }
+    auto float_subnormal=evaluate(FLOAT_VALUE,text("1e-40"));
+    check(std::fpclassify(*static_cast<float*>(float_subnormal->value))==FP_SUBNORMAL,"parsed float subnormals are accepted");
+    check(std::fpclassify(real(DOUBLE_VALUE,text("1e-310")))==FP_SUBNORMAL,"parsed double subnormals are accepted");
+    check(real(FLOAT_VALUE,text("1.401298464324817070923729583289916131280e-45"))==
+          static_cast<double>(std::numeric_limits<float>::denorm_min()),"the smallest float subnormal parses");
+    check(real(DOUBLE_VALUE,text("4.9406564584124654e-324"))==std::numeric_limits<double>::denorm_min(),
+          "the smallest double subnormal parses");
+    for(const auto& item:std::initializer_list<std::pair<V,std::string>>{
+        {std::make_shared<variable>(-7),"-7"},{std::make_shared<variable>(1.25f),"1.25"},
+        {std::make_shared<variable>(1.25),"1.25"},{std::make_shared<variable>(address{}),"0"},
+        {std::make_shared<variable>(address{std::numeric_limits<std::uint64_t>::max()}),"18446744073709551615"},
+    })check(value_to_string(evaluate(STRING_VALUE,item.first))==item.second,
+        "numeric and address string conversion uses the existing shortest formatter");
+    check(integer(program->invoke(320))==1&&integer(program->baseEnv->getVariable(-1))==1,
+          "a conversion evaluates its operand exactly once");
+
+    const std::vector<std::string> invalid_integers{"","+","-","1.0","1e2"," 1","1 ","0x10","nan","inf","1f","1abc","1_0"};
+    for(const auto& input:invalid_integers)runtime_failure(INT_VALUE,text(input),
+        "Cannot convert string \""+input+"\" to int: invalid decimal integer");
+    const std::vector<std::string> invalid_reals{"","+","-",".","+.","1e","1e+"," 1","1 ","0x1p2","nan","NaN","inf","Infinity","1f","1abc","1,5","--1"};
+    for(const auto& input:invalid_reals)for(int target:{FLOAT_VALUE,DOUBLE_VALUE})runtime_failure(target,text(input),
+        "Cannot convert string \""+input+"\" to "+(target==FLOAT_VALUE?"float":"double")+": invalid decimal number");
+    for(const auto& input:{"2147483648","-2147483649"})runtime_failure(INT_VALUE,text(input),
+        "Cannot convert string \""+std::string(input)+"\" to int: value is out of range");
+    for(const auto& input:{"1e400","-1e400"})for(int target:{FLOAT_VALUE,DOUBLE_VALUE})runtime_failure(target,text(input),
+        "Cannot convert string \""+std::string(input)+"\" to "+(target==FLOAT_VALUE?"float":"double")+": value is out of range");
+    runtime_failure(FLOAT_VALUE,text("1e40"),"Cannot convert string \"1e40\" to float: value is out of range");
+    for(double value:{2147483648.0,-2147483649.0,std::numeric_limits<double>::infinity(),std::numeric_limits<double>::quiet_NaN()})
+        runtime_failure(INT_VALUE,std::make_shared<variable>(value),"Cannot convert double to int: value is out of range");
+    runtime_failure(INT_VALUE,std::make_shared<variable>(2147483648.0f),"Cannot convert float to int: value is out of range");
+    runtime_failure(FLOAT_VALUE,std::make_shared<variable>(std::numeric_limits<double>::max()),"Cannot convert double to float: value is out of range");
+    runtime_failure(DOUBLE_VALUE,std::make_shared<variable>(std::numeric_limits<float>::infinity()),"Cannot convert float to double: value is out of range");
+    struct unsupported_value {const char* type;V value;};
+    const std::vector<unsupported_value> unsupported{
+        {"boolean",std::make_shared<variable>(false)},{"boolean",std::make_shared<variable>(true)},
+        {"void",std::make_shared<variable>(nullptr)},{"object",std::make_shared<variable>(blocks::create(1,program))},
+    };
+    for(const auto& source:unsupported)for(const auto& target:std::initializer_list<std::pair<int,const char*>>{
+        {INT_VALUE,"int"},{STRING_VALUE,"string"},{FLOAT_VALUE,"float"},{DOUBLE_VALUE,"double"},{ADDRESS_VALUE,"address"},
+    })runtime_failure(target.first,source.value,"Cannot convert "+std::string(source.type)+" to "+target.second);
+    for(const auto& target:std::initializer_list<std::pair<int,const char*>>{{INT_VALUE,"int"},{FLOAT_VALUE,"float"},{DOUBLE_VALUE,"double"}})
+        runtime_failure(target.first,std::make_shared<variable>(address{1}),"Cannot convert address to "+std::string(target.second));
+    for(const auto& source:std::initializer_list<unsupported_value>{
+        {"int",std::make_shared<variable>(1)},{"float",std::make_shared<variable>(1.0f)},
+        {"double",std::make_shared<variable>(1.0)},{"string",text("1")},
+    })runtime_failure(ADDRESS_VALUE,source.value,"Cannot convert "+std::string(source.type)+" to address");
+
+    runtime_failure(INT_VALUE,text(std::string("\"\\\n\0",4)+"\xf0\x9f\x98\x80"),
+        R"(Cannot convert string "\"\\\u000a\u0000\ud83d\ude00" to int: invalid decimal integer)");
+    runtime_failure(DOUBLE_VALUE,text(std::string(63,'a')+"\xf0\x9f\x98\x80tail"),
+        "Cannot convert string \""+std::string(63,'a')+"\\ud83d\\ude00...\" to double: invalid decimal number");
+    runtime_failure(INT_VALUE,text(std::string(100,'9')),
+        "Cannot convert string \""+std::string(64,'9')+"...\" to int: value is out of range");
+    runtime_failure(FLOAT_VALUE,text(std::string(1,static_cast<char>(0xff))),
+        "Cannot convert string \"\\xff\" to float: invalid decimal number");
+    {
+        struct numeric_locale_restore {
+            std::string original;
+            ~numeric_locale_restore(){std::setlocale(LC_NUMERIC,original.c_str());}
+        } restore{std::setlocale(LC_NUMERIC,nullptr)};
+        for(const char* locale:{"de_DE.UTF-8","fr_FR.UTF-8","de_DE","French_France.1252"})
+            if(std::setlocale(LC_NUMERIC,locale))break;
+        check(real(FLOAT_VALUE,text("1.5"))==1.5&&real(DOUBLE_VALUE,text("1.5"))==1.5,
+              "numeric conversion uses the C locale even when a host locale is available");
+        runtime_failure(DOUBLE_VALUE,text("1,5"),"Cannot convert string \"1,5\" to double: invalid decimal number");
+    }
+    for(int target:{-1,BOOLEAN_VALUE,VOID_VALUE,ANY_VALUE,OBJECT_VALUE,std::numeric_limits<int>::max()})
+        rejects_message([&]{load_raw(rmodule({rfn(10,INT_VALUE,convert(target,rc(n(1))))}));},
+                        "Invalid conversion target type: "+std::to_string(target),"exec conversions reject unsupported target tags");
+    for(auto malformed:{rx(49,{ri(INT_VALUE)}),rx(49,{rs("int"),rc(n(1))}),rx(49,{ri(INT_VALUE),rc(n(1)),rc(n(2))})})
+        rejects([&]{load_raw(rmodule({rfn(10,INT_VALUE,malformed)}));},"convert records require an integer target and one expression");
+    for(const auto& item:std::initializer_list<std::pair<int,std::string>>{
+        {323,"Cannot convert string \"bad\" to int: invalid decimal integer\n  at conversionError (conversion.azs:9:5)"},
+        {324,"Division by zero\n  at conversionOperand (conversion.azs:9:17)"},
+    }) {
+        bool caught=false;
+        try {program->invoke(item.first);}
+        catch(const std::runtime_error& error) {
+            caught=true;check(describe_error(error)==item.second,"conversion failures preserve their expression and operand locations");
+        }
+        check(caught,"conversion debug-position probes must throw");
+    }
+    program->destroy();
+}
+void bitwise_tests() {
+    AbdStack functions;
+    functions.vs.push_back(rfn(90,INT_VALUE,rblock({
+        rset(-1,rx(12,{rx(14,{rvar(-1),rc(n(10))}),rvar(0)})),rreturn(rvar(0))}),0,{INT_VALUE}));
+    for(int opcode=43;opcode<=48;++opcode) {
+        functions.vs.push_back(rfn(opcode,INT_VALUE,rreturn(rx(opcode,{rvar(0),rvar(1)})),0,{ANY_VALUE,ANY_VALUE}));
+        functions.vs.push_back(rfn(opcode+100,INT_VALUE,rblock({rset(-1,rc(n(0))),
+            rreturn(rx(opcode,{rcall(90,{rc(n(2))}),rcall(90,{rc(n(1))})}))})));
+        functions.vs.push_back(rfn(opcode+200,INT_VALUE,
+            rreturn(rx(opcode,{rvar(0),rset(0,rc(n(opcode<46?3:1)))})),0,{ANY_VALUE}));
+    }
+    auto debug=[](R function,const char* name,std::initializer_list<int> positions) {
+        AbdStack locations;for(int field:positions)locations.vs.push_back(ri(field));
+        return append_raw(replace_raw(function,8,rb(true)),
+            raw({rs(name),ri(0),ri(9),ri(1),locations.toAbdValue()}));
+    };
+    functions.vs.push_back(debug(rfn(98,INT_VALUE,rreturn(rx(46,{rc(n(1)),rc(n(32))}))),
+        "shiftCount",{1,0,9,5}));
+    functions.vs.push_back(debug(rfn(99,INT_VALUE,rreturn(rx(46,{rc(n(1)),rx(15,{rc(n(1)),rc(n(0))})}))),
+        "shiftOperand",{1,0,9,5,3,0,9,21}));
+    auto module=replace_raw(replace_raw(rmodule({},1),7,functions.toAbdValue()),10,raw({rs("bitwise.azs")}));
+    auto program=load_raw(module);
+    auto evaluate=[&](int opcode,int left,int right) {
+        return integer(program->invoke(opcode,{std::make_shared<variable>(left),std::make_shared<variable>(right)}));
+    };
+    auto runtime_failure=[&](int opcode,std::vector<V> args,const std::string& message) {
+        bool caught=false;
+        try {program->invoke(opcode,std::move(args));}
+        catch(const std::runtime_error& error) {
+            caught=true;
+            check(typeid(error)==typeid(std::runtime_error)&&error.what()==message,
+                  "bitwise failures preserve runtime_error and its exact diagnostic");
+        }
+        check(caught,"invalid bitwise operations must not return a value");
+    };
+    constexpr int minimum=std::numeric_limits<int>::min(),maximum=std::numeric_limits<int>::max();
+    struct bit_case {int left,right,and_value,or_value,xor_value;};
+    for(const auto& item:std::initializer_list<bit_case>{
+        {0,0,0,0,0},{0,-1,0,-1,-1},{-1,-1,-1,-1,0},{5,3,1,7,6},
+        {-2,1,0,-1,-1},{-2,2,2,-2,-4},{minimum,maximum,0,-1,-1},
+        {-1,minimum,minimum,-1,maximum},{minimum,1,0,minimum+1,minimum+1},
+        {maximum,1,1,maximum,maximum-1},{1431655765,-1431655766,0,-1,-1},
+    }) {
+        const int expected[]{item.and_value,item.or_value,item.xor_value};
+        for(int opcode=43;opcode<=45;++opcode) {
+            check(evaluate(opcode,item.left,item.right)==expected[opcode-43],"bitwise operators preserve all signed bit patterns");
+            check(evaluate(opcode,item.right,item.left)==expected[opcode-43],"bitwise operators accept either operand order");
+        }
+    }
+    auto signed_pattern=[](std::uint32_t value) {
+        const auto widened=static_cast<std::int64_t>(value);
+        return static_cast<int>(value<=0x7fffffffu?widened:widened-0x100000000ll);
+    };
+    for(int value:{minimum,minimum+1,-1431655766,-2,-1,0,1,2,1431655765,maximum}) {
+        check(evaluate(45,value,-1)==static_cast<int>(-static_cast<std::int64_t>(value)-1),
+              "xor with minus one implements unary complement without signed overflow");
+        for(int count=0;count<=31;++count) {
+            // Mathematical references use multiplication/division, rather than
+            // relying on host signed-shift behavior or repeating sign filling.
+            const auto divisor=std::int64_t{1}<<count;
+            const auto product=static_cast<std::int64_t>(value)*divisor;
+            auto quotient=static_cast<std::int64_t>(value)/divisor;
+            if(value<0&&static_cast<std::int64_t>(value)%divisor)--quotient;
+            const auto unsigned_quotient=static_cast<std::uint64_t>(static_cast<std::uint32_t>(value))/static_cast<std::uint64_t>(divisor);
+            check(evaluate(46,value,count)==signed_pattern(static_cast<std::uint32_t>(product)),"left shift truncates to the low 32 bits");
+            check(evaluate(47,value,count)==static_cast<int>(quotient),"arithmetic right shift rounds negative values toward minus infinity");
+            check(evaluate(48,value,count)==signed_pattern(static_cast<std::uint32_t>(unsigned_quotient)),"unsigned right shift fills with zeroes");
+        }
+    }
+    const int ordered[]{0,3,3,4,1,1},snapshotted[]{1,7,6,10,2,2};
+    for(int opcode=43;opcode<=48;++opcode) {
+        check(integer(program->invoke(opcode+100))==ordered[opcode-43]&&integer(program->baseEnv->getVariable(-1))==21,
+              "bitwise operands execute once from left to right");
+        check(integer(program->invoke(opcode+200,{std::make_shared<variable>(5)}))==snapshotted[opcode-43],
+              "bitwise left values are snapshotted before the right operand mutates their storage");
+    }
+    static constexpr const char* names[]{"bit_and","bit_or","bit_xor","shl","shr","ushr"};
+    struct invalid_value {const char* type;V value;};
+    const std::vector<invalid_value> invalid{
+        {"boolean",std::make_shared<variable>(false)},{"boolean",std::make_shared<variable>(true)},
+        {"float",std::make_shared<variable>(1.0f)},{"double",std::make_shared<variable>(1.0)},
+        {"string",std::make_shared<variable>("1")},{"void",std::make_shared<variable>(nullptr)},
+        {"address",std::make_shared<variable>(address{})},{"object",std::make_shared<variable>(blocks::create(1,program))},
+    };
+    auto integer_value=std::make_shared<variable>(1);
+    for(int opcode=43;opcode<=48;++opcode) {
+        for(const auto& item:invalid)for(bool reverse:{false,true}) {
+            const std::string types=reverse?std::string("int and ")+item.type:std::string(item.type)+" and int";
+            runtime_failure(opcode,reverse?std::vector<V>{integer_value,item.value}:std::vector<V>{item.value,integer_value},
+                std::string(names[opcode-43])+" operands must be int, got "+types);
+        }
+        runtime_failure(opcode,{invalid[0].value,invalid[4].value},
+            std::string(names[opcode-43])+" operands must be int, got boolean and string");
+        if(opcode>=46)for(int value:{minimum,-1,0,maximum})for(int count:{minimum,-1,32,33,maximum})
+            runtime_failure(opcode,{std::make_shared<variable>(value),std::make_shared<variable>(count)},
+                "Shift count must be between 0 and 31, got "+std::to_string(count));
+        for(auto malformed:{rx(opcode,{rc(n(1))}),rx(opcode,{rc(n(1)),rc(n(2)),rc(n(3))})})
+            rejects([&]{load_raw(rmodule({rfn(10,INT_VALUE,malformed)}));},"bitwise opcodes require exactly two operands");
+    }
+    for(const auto& item:std::initializer_list<std::pair<int,std::string>>{
+        {98,"Shift count must be between 0 and 31, got 32\n  at shiftCount (bitwise.azs:9:5)"},
+        {99,"Division by zero\n  at shiftOperand (bitwise.azs:9:21)"},
+    }) {
+        bool caught=false;
+        try {program->invoke(item.first);}
+        catch(const std::runtime_error& error) {
+            caught=true;check(describe_error(error)==item.second,"bitwise nodes and operands retain their debug source positions");
+        }
+        check(caught,"debug-position probes must throw");
+    }
+    program->destroy();
+}
+void boolean_condition_equality_tests() {
+    // These hand-authored functions use any parameters so their checks cannot
+    // be supplied by the compiler or by a declared parameter's ABI validation.
+    auto program=load_raw(rmodule({
+        rfn(10,INT_VALUE,rblock({rx(27,{rvar(0),rreturn(rc(n(1))),rb(false)}),rreturn(rc(n(0)))}),0,{ANY_VALUE}),
+        rfn(11,INT_VALUE,rblock({rx(28,{rvar(0),rreturn(rc(n(1)))}),rreturn(rc(n(0)))}),0,{ANY_VALUE}),
+        rfn(12,BOOLEAN_VALUE,rreturn(rx(25,{rvar(0)})),0,{ANY_VALUE}),
+        rfn(13,BOOLEAN_VALUE,rreturn(rx(23,{rvar(0),rc(boolean(true))})),0,{ANY_VALUE}),
+        rfn(14,BOOLEAN_VALUE,rreturn(rx(24,{rvar(0),rc(boolean(false))})),0,{ANY_VALUE}),
+        rfn(15,BOOLEAN_VALUE,rreturn(rx(23,{rc(boolean(true)),rvar(0)})),0,{ANY_VALUE}),
+        rfn(16,BOOLEAN_VALUE,rreturn(rx(24,{rc(boolean(false)),rvar(0)})),0,{ANY_VALUE}),
+        rfn(17,BOOLEAN_VALUE,rreturn(rx(23,{rc(boolean(false)),rx(15,{rc(n(1)),rc(n(0))})}))),
+        rfn(18,BOOLEAN_VALUE,rreturn(rx(24,{rc(boolean(true)),rx(15,{rc(n(1)),rc(n(0))})}))),
+        rfn(19,BOOLEAN_VALUE,rreturn(rx(19,{rvar(0),rvar(1)})),0,{ANY_VALUE,ANY_VALUE}),
+        rfn(20,BOOLEAN_VALUE,rreturn(rx(20,{rvar(0),rvar(1)})),0,{ANY_VALUE,ANY_VALUE}),
+    }));
+    auto truth_result=[&](int id,std::vector<V> args) {
+        auto result=program->invoke(id,std::move(args));
+        check(result->type==BOOLEAN_VALUE,"boolean operations return boolean values");
+        return *static_cast<bool*>(result->value);
+    };
+    auto runtime_failure=[&](int id,std::vector<V> args,const std::string& message) {
+        bool caught=false;
+        try {program->invoke(id,std::move(args));}
+        catch(const std::runtime_error& error) {
+            caught=true;
+            check(typeid(error)==typeid(std::runtime_error)&&error.what()==message,
+                  "dynamic type violations retain their runtime_error type and exact diagnostic");
+        }
+        check(caught,"a dynamic type violation must fail before producing a value");
+    };
+    for(bool value:{false,true}) {
+        auto input=std::make_shared<variable>(value);
+        check(integer(program->invoke(10,{input}))==(value?1:0),"if accepts both boolean values");
+        check(integer(program->invoke(11,{input}))==(value?1:0),"while accepts both boolean values");
+        check(truth_result(12,{input})==!value,"logical not accepts boolean values");
+        for(int id:{13,14,15,16})
+            check(truth_result(id,{input})==value,"both evaluated logical operands accept boolean values");
+    }
+    check(!truth_result(17,{})&&truth_result(18,{}),"boolean short-circuiting leaves a failing right operand unevaluated");
+
+    struct value_case {const char* type;V value;};
+    const std::vector<value_case> non_boolean{
+        {"int",std::make_shared<variable>(0)},{"int",std::make_shared<variable>(1)},
+        {"float",std::make_shared<variable>(0.0f)},{"float",std::make_shared<variable>(1.5f)},
+        {"double",std::make_shared<variable>(0.0)},{"double",std::make_shared<variable>(1.5)},
+        {"string",std::make_shared<variable>("")},{"string",std::make_shared<variable>("x")},
+        {"void",std::make_shared<variable>(nullptr)},
+        {"address",std::make_shared<variable>(address{})},{"address",std::make_shared<variable>(address{1})},
+        {"object",std::make_shared<variable>(blocks::create(1,program))},
+    };
+    for(const auto& item:non_boolean)for(int id:{10,11,12,13,14,15,16})
+        runtime_failure(id,{item.value},"Condition must be boolean, got "+std::string(item.type));
+
+    auto equality=[&](const V& left,const V& right,bool equal) {
+        check(truth_result(19,{left,right})==equal,"compatible dynamic values compare for equality");
+        check(truth_result(20,{left,right})==!equal,"inequality is the complement of compatible equality");
+    };
+    struct numeric_case {V value;int number;};
+    const std::vector<numeric_case> numbers{
+        {std::make_shared<variable>(2),2},{std::make_shared<variable>(2.0f),2},{std::make_shared<variable>(2.0),2},
+        {std::make_shared<variable>(3),3},{std::make_shared<variable>(3.0f),3},{std::make_shared<variable>(3.0),3},
+    };
+    for(const auto& left:numbers)for(const auto& right:numbers)equality(left.value,right.value,left.number==right.number);
+    for(bool left:{false,true})for(bool right:{false,true})
+        equality(std::make_shared<variable>(left),std::make_shared<variable>(right),left==right);
+    for(const std::string left:{"","same","\xe4\xb8\xad"})for(const std::string right:{"","same","\xe4\xb8\xad"})
+        equality(std::make_shared<variable>(left),std::make_shared<variable>(right),left==right);
+    equality(std::make_shared<variable>(nullptr),std::make_shared<variable>(nullptr),true);
+    for(std::uint64_t left:{std::uint64_t{0},std::uint64_t{1},std::numeric_limits<std::uint64_t>::max()})
+        for(std::uint64_t right:{std::uint64_t{0},std::uint64_t{1},std::numeric_limits<std::uint64_t>::max()})
+            equality(std::make_shared<variable>(address{left}),std::make_shared<variable>(address{right}),left==right);
+
+    const std::vector<value_case> scalar_types{
+        {"int",std::make_shared<variable>(1)},{"float",std::make_shared<variable>(1.0f)},
+        {"double",std::make_shared<variable>(1.0)},{"string",std::make_shared<variable>("1")},
+        {"boolean",std::make_shared<variable>(true)},{"void",std::make_shared<variable>(nullptr)},
+    };
+    for(std::size_t i=0;i<scalar_types.size();++i)for(std::size_t j=i+1;j<scalar_types.size();++j) {
+        if(i<3&&j<3)continue; // Mixed numeric types are compatible; every other unequal tag is not.
+        for(bool reverse:{false,true}) {
+            const auto& left=scalar_types[reverse?j:i];const auto& right=scalar_types[reverse?i:j];
+            for(int id:{19,20})runtime_failure(id,{left.value,right.value},
+                "Equality requires compatible operand types, got "+std::string(left.type)+" and "+right.type);
+        }
+    }
+    auto address_value=std::make_shared<variable>(address{}),object_value=non_boolean.back().value;
+    for(const auto& scalar:scalar_types)for(bool reverse:{false,true})for(int id:{19,20}) {
+        runtime_failure(id,reverse?std::vector<V>{scalar.value,address_value}:std::vector<V>{address_value,scalar.value},
+                        "Unsupported address operands for "+std::string(id==19?"eq":"ne"));
+        runtime_failure(id,reverse?std::vector<V>{scalar.value,object_value}:std::vector<V>{object_value,scalar.value},
+                        "Unsupported object value operands for "+std::string(id==19?"eq":"ne"));
+    }
+    for(int id:{19,20}) {
+        const std::string message="Unsupported object value operands for "+std::string(id==19?"eq":"ne");
+        runtime_failure(id,{object_value,object_value},message);
+        runtime_failure(id,{object_value,address_value},message);
+        runtime_failure(id,{address_value,object_value},message);
+    }
+    program->destroy();
 }
 #if !defined(_WIN32)
 // std::thread cannot choose its stack size; POSIX threads can.
@@ -595,7 +2039,18 @@ void native_stack_tests() {
 }
 int main(){try{
     native_stack_tests();
+    virtual_tests();
+    checked_object_tests();
+    object_storage_tests();
+    string_tests();
+    select_tests();
+    checked_return_tests();
+    conversion_tests();
+    bitwise_tests();
+    boolean_condition_equality_tests();
+    runtime_trace_tests();
     buffer_tests();
+    hint_name_tests();
     check(getiFunction(0x0abd0006)->return_type()==ANY_VALUE,"mem_get reports its dynamic return type");
     {
         constexpr int host_id=0x6abc0002;
@@ -631,7 +2086,7 @@ int main(){try{
             rfn(37,INT_VALUE,rreturn(reflect(INT_VALUE,30,{rc(s("wrong"))}))),
             rfn(38,VOID_VALUE,gcall(101,{}, {cfixed(OBJECT_VALUE,3)})),
             gfn(200,OBJECT_VALUE,rblock({rdef(0,rx(32,{ri(1)})),
-                rx(6,{rcall(0x0abd0006,{rx(33,{rvar(0)})}),rx(37,{cref(0)})}),
+                rx(6,{rcall(0x0abd0006,{rx(9,{rx(33,{rvar(0)}),ri(0)})}),rx(37,{cref(0)})}),
                 rx(10,{rx(33,{rvar(0)}),rb(true),ri(201),rb(false),raw({cref(0)})}),rreturn(rvar(0))}),1,1,{},1),
             gfn(201,VOID_VALUE,rblock({rset(-1,rx(12,{rvar(-1),rc(n(1))})),rset(-2,rx(36,{cref(0)}))}),1,0,{ADDRESS_VALUE},1),
             rfn(202,OBJECT_VALUE,rreturn(gcall(200,{}, {ci}))),
@@ -640,11 +2095,11 @@ int main(){try{
             rfn(212,INT_VALUE,rreturn(reflect(INT_VALUE,200))),
             rfn(213,VOID_VALUE,rblock({rdef(0,gcall(101,{}, {co})),rx(15,{rc(n(1)),rc(n(0))})}),1),
             rfn(214,INT_VALUE,rreturn(reflect(INT_VALUE,202))),
-            gfn(400,ANY_VALUE,rblock({rdef(0,rcall(0x0abd0003,{rc(n(1))})),
-                rx(6,{rcall(0x0abd0006,{rvar(0)}),rc(n(42))}),
+            gfn(400,ANY_VALUE,rblock({rdef(0,rcall(0x0abd0014,{rc(n(1))})),
+                rx(6,{rcall(0x0abd0006,{rx(9,{rvar(0),ri(0)})}),rc(n(42))}),
                 rx(10,{rvar(0),rb(true),ri(201),rb(false),raw({cref(0)})}),greturn(rvar(0),cref(0))}),1,1),
-            rfn(500,INT_VALUE,rreturn(rcall(0x0abd0006,{gcall(400,{}, {cfixed(ADDRESS_VALUE,2)})}))),
-            rfn(501,INT_VALUE,rreturn(rcall(0x0abd0006,{gcall(400,{}, {ca})}))),
+            rfn(500,INT_VALUE,rreturn(rcall(0x0abd0006,{rx(9,{gcall(400,{}, {cfixed(ADDRESS_VALUE,2)}),ri(0)})}))),
+            rfn(501,INT_VALUE,rreturn(rcall(0x0abd0006,{rx(9,{gcall(400,{}, {ca}),ri(0)})}))),
             gfn(600,ANY_VALUE,greturn(gcall(600,{}, {cref(0)}),cref(0)),1),
             rfn(601,INT_VALUE,rreturn(gcall(600,{}, {ci})))
         },2));
@@ -715,7 +2170,7 @@ int main(){try{
         auto provider=rhint("GenericFactory",{
             rfn(0,VOID_VALUE,rset(-1,rc(n(0)))),
             gfn(2,OBJECT_VALUE,rblock({rdef(0,rx(32,{ri(1)})),
-                rx(6,{rcall(0x0abd0006,{rx(33,{rvar(0)})}),rx(37,{cref(0)})}),
+                rx(6,{rcall(0x0abd0006,{rx(9,{rx(33,{rvar(0)}),ri(0)})}),rx(37,{cref(0)})}),
                 rx(10,{rx(33,{rvar(0)}),rb(true),ri(alias+1),rb(false),raw({cref(0)})}),rreturn(rvar(0))}),1,1,{},1),
             gfn(3,VOID_VALUE,rset(-1,rx(12,{rx(36,{cref(0)}),rc(n(1))})),1,0,{ADDRESS_VALUE},1),
             rfn(4,INT_VALUE,rreturn(rvar(-1)))
@@ -851,14 +2306,17 @@ int main(){try{
               value_to_string(linked->invoke(linked->namespace_for_hint("Delta")<<16|2))=="beta",
               "same placeholder address in different modules links independently with different signatures");
         const int beta_ns=linked->namespace_for_hint("Beta");
-        rejects([&]{insert_raw(linked,rmodule({rfn(beta_ns<<16|9,VOID_VALUE,rblock({}))}),false);},"fixed module cannot occupy mounted hint namespace");
+        rejects_containing([&]{insert_raw(linked,rmodule({rfn(beta_ns<<16|9,VOID_VALUE,rblock({}))}),false);},
+            "conflicts with hint Beta, which module #2 mounted there","fixed module cannot occupy mounted hint namespace");
         check(linked->setup&&linked->module_manifest().size()==5,"namespace collision does not invalidate setup");
         linked->destroy();
 
         auto bad_signature=load_raw(rhint("",{rfn(0,VOID_VALUE,rset(-1,rc(n(1)))),rfn(0x0fff0000,DOUBLE_VALUE,rreturn(rcall(alias)))},
             1,raw({assume("Alpha",0x1234)}),raw({rsignature(alias,DOUBLE_VALUE)})),false);
         insert_raw(bad_signature,alpha,false);
-        rejects_containing([&]{bad_signature->flush();},"signature","imported script signatures must match exactly");
+        char mismatch[80];std::snprintf(mismatch,sizeof mismatch,"External signature does not match script function: 0x%08x",
+            static_cast<unsigned>(bad_signature->namespace_for_hint("Alpha")<<16|2));
+        rejects_message([&]{bad_signature->flush();},mismatch,"imported script signatures must match exactly");
         check(!bad_signature->setup&&!bad_signature->faulted&&bad_signature->baseEnv->getVariable(-1)->type==VOID_VALUE&&
               bad_signature->baseEnv->getVariable(-2)->type==VOID_VALUE,"signature failure executes no onload and is not a runtime fault");
         bad_signature->destroy();
@@ -873,7 +2331,7 @@ int main(){try{
             rhint("",{},0,raw({assume("A",1),assume("B",1)})),
             rhint("",{},0,raw({assume("A",1),assume("A",2)})),
             rhint("",{rfn(0x00010002,VOID_VALUE,rblock({}))},0,raw({assume("A",1)}))})
-            rejects([&]{load_raw(malformed,false);},"v9 malformed hint module rejected before mounting");
+            rejects([&]{load_raw(malformed,false);},"exec malformed hint module rejected before mounting");
         rejects([&]{load_raw(rmodule({rfn(10,VOID_VALUE,rx(10,{rc(n(0)),rb(true),ri(0x0fff0000),rb(false)}))}),false);},
                 "main entry is not a valid object destructor");
     }
@@ -905,11 +2363,11 @@ int main(){try{
 
         initializing_script=load_raw(rhint("Future",{rfn(0,VOID_VALUE,log(30)),rfn(1,VOID_VALUE,log(-30))},
             0,raw({assume("Bad",0x4001)}),signatures),false);
-        insert_raw(initializing_script,rhint("Bad",{rfn(0,VOID_VALUE,rblock({log(20),rdef(0,rcall(0x0abd0003,{rc(n(1))})),
+        insert_raw(initializing_script,rhint("Bad",{rfn(0,VOID_VALUE,rblock({log(20),rdef(0,rcall(0x0abd0014,{rc(n(1))})),
             rx(10,{rvar(0),rb(false),rb(false),raw({})}),rx(15,{rc(n(1)),rc(n(0))})}),1),rfn(1,VOID_VALUE,log(-20))},
             0,raw({assume("Good",0x4001)}),signatures),false);
         insert_raw(initializing_script,rhint("Good",{rfn(0,VOID_VALUE,rblock({log(10),rcall(reentry_id),
-            rdef(0,rcall(0x0abd0003,{rc(n(1))})),rx(10,{rvar(0),rb(false),rb(false),raw({})}),rcall(0x0abd0005,{rvar(0)})}),1),
+            rdef(0,rcall(0x0abd0003,{rc(n(1))})),rcall(0x0abd0005,{rvar(0)})}),1),
             rfn(1,VOID_VALUE,log(-10)),rfn(2,INT_VALUE,rreturn(rc(n(8))))},0,nullptr,signatures),false);
         rejects_containing([&]{initializing_script->flush();},"Division by zero","onload preserves its runtime failure");
         check(initializing_script->faulted&&!initializing_script->setup&&events==std::vector<int>({10,20})&&heap::lenAlloc()==1,
@@ -949,18 +2407,67 @@ int main(){try{
         const int maker=static_cast<int>(0xffff0002u);
         auto high=load_raw(rmodule({rfn(0,VOID_VALUE,rset(-1,rc(n(0)))),
             rfn(-1,VOID_VALUE,rset(-1,rx(12,{rvar(-1),rc(n(1))})),0,{ADDRESS_VALUE}),
-            rfn(maker,VOID_VALUE,rblock({rdef(0,rcall(0x0abd0003,{rc(n(1))})),
-                rx(10,{rvar(0),rb(true),ri(-1),rb(true),raw({})}),rcall(0x0abd0004,{rvar(0)}),rx(11,{rvar(0)})}),1)
+            rfn(maker,VOID_VALUE,rblock({rdef(0,rcall(0x0abd0014,{rc(n(1))})),
+                rx(10,{rvar(0),rb(true),ri(-1),rb(true),raw({})}),rx(11,{rvar(0)})}),1)
         },1));
         high->invoke(maker);check(integer(high->baseEnv->getVariable(-1))==1&&heap::lenAlloc()==0,
               "optional destructor supports the full 0xffffffff function address");high->destroy();
     }
     {
+        // Assembly errors print IDs in hex and name the module that already owns them.
+        auto hex4=[](int ns){char text[8];std::snprintf(text,sizeof text,"0x%04x",ns);return std::string(text);};
+        auto value=[](int id,int result){return rfn(id,INT_VALUE,rreturn(rc(n(result))));};
+        auto assembly=load_raw(rmodule({value(0x0fff0000,1),value(0x0fff0001,2)}));
+        rejects_message([&]{insert_raw(assembly,rmodule({value(0x0fff0001,3)}),false);},
+            "Duplicate function id: 0x0fff0001 (namespace 0x0fff, position 0x0001) is already defined by module #0 (ordinary); "
+            "modules without #namespace share the default namespace 0x0fff, so give each module its own #namespace away from "
+            "the low range hint libraries take, insert fixed-namespace modules before hint libraries, or use #namespace_hint",
+            "default-namespace collisions name the owner and the remedy");
+        check(assembly->setup&&assembly->module_manifest().size()==1&&integer(assembly->invoke(0x0fff0001))==2,
+              "a rejected collision leaves the assembled script unchanged");
+        insert_raw(assembly,rmodule({value(0x51510001,4)}));
+        rejects_containing([&]{insert_raw(assembly,rmodule({value(0x0fff0000,5)}),false);},
+            "Duplicate function id: 0x0fff0000 (namespace 0x0fff, position 0x0000) is already defined by module #0 (ordinary); "
+            "only one module may define main","main collisions say that only one module may define main");
+        rejects_containing([&]{insert_raw(assembly,rmodule({value(0x51510001,6)}),false);},
+            "Duplicate function id: 0x51510001 (namespace 0x5151, position 0x0001) is already defined by module #1 (ordinary); "
+            "give each module a distinct #namespace","explicit-namespace collisions name the inserted owner");
+        rejects_message([&]{assembly->getFunction(static_cast<int>(0xfedc0001u));},"Unknown function id: 0xfedc0001",
+            "unknown IDs print the full 32-bit pattern");
+        rejects_message([&]{assembly->getFunction(0x51510009);},"Unknown function id: 0x51510009 (script namespace)",
+            "unknown script-namespace IDs print hex");
+        // Hint libraries take the lowest free namespace, so insertion order decides fixed-namespace conflicts.
+        insert_raw(assembly,rhint("Alpha",{value(2,7)}),false);
+        const int alpha=assembly->namespace_for_hint("Alpha");
+        rejects_message([&]{insert_raw(assembly,rmodule({value(alpha<<16|5,8)}),false);},
+            "Fixed namespace "+hex4(alpha)+" conflicts with hint Alpha, which module #2 mounted there; hint libraries take "
+            "the lowest free namespace, so insert fixed-namespace modules before hint libraries or choose another #namespace",
+            "fixed-vs-hint conflicts name the hint and its namespace");
+        rejects_message([&]{insert_raw(assembly,rmodule({},0,raw({rsignature(alpha<<16|9,INT_VALUE)})),false);},
+            "Fixed external namespace "+hex4(alpha)+" conflicts with hint Alpha, which module #2 mounted there; hint libraries "
+            "take the lowest free namespace, so insert this module before hint libraries or import script libraries through #assume_hint",
+            "fixed external namespaces name the mounted hint");
+        assembly->flush();
+        check(assembly->module_manifest().size()==3&&integer(assembly->invoke(alpha<<16|2))==7&&integer(assembly->invoke(0x51510001))==4,
+              "rejected inserts keep the earlier assembly linkable");
+        assembly->destroy();
+        auto ordered=load_raw(rmodule({value(0x0fff0000,1)}),false);
+        insert_raw(ordered,rmodule({value(alpha<<16|5,8)}),false);
+        insert_raw(ordered,rhint("Alpha",{value(2,7)}),false);
+        ordered->flush();const int moved=ordered->namespace_for_hint("Alpha");
+        check(moved!=alpha&&integer(ordered->invoke(alpha<<16|5))==8&&integer(ordered->invoke(moved<<16|2))==7,
+              "a fixed-namespace module inserted first moves later hint libraries past its namespace");
+        ordered->destroy();
+        auto missing=load_raw(rmodule({},0,raw({rsignature(0x0fff0010,INT_VALUE)})),false);
+        rejects_message([&]{missing->flush();},"Imported script function is missing: 0x0fff0010","link errors print hex IDs");
+        missing->destroy();
+    }
+    {
         auto twenty=rc(n(20));auto zero=rc(n(0));
         auto compact=load_raw(rmodule({rfn(10,INT_VALUE,rx(7,{rb(true),rx(12,{twenty,rc(n(22))})}))}));
-        check(integer(compact->invoke(10))==42,"raw v9 directly executes native arithmetic expressions");
-        for(int opcode=0;opcode<=42;++opcode)if(opcode!=29&&opcode!=30)
-            rejects([&]{load_raw(rmodule({rfn(10,VOID_VALUE,rx(opcode))}));},"v9 opcode rejects missing fields");
+        check(integer(compact->invoke(10))==42,"raw exec directly executes native arithmetic expressions");
+        for(int opcode=0;opcode<=53;++opcode)if(opcode!=29&&opcode!=30)
+            rejects([&]{load_raw(rmodule({rfn(10,VOID_VALUE,rx(opcode))}));},"exec opcode rejects missing fields");
         auto byte=[](unsigned char value){return std::make_shared<AbdValue>(&value,1);};
         const unsigned char bad_text[]={0xed,0xa0,0x80};
         const auto invalid_utf8=std::make_shared<AbdValue>(bad_text,3);
@@ -975,9 +2482,9 @@ int main(){try{
             rc(std::make_shared<DoubleAbdValue>(std::numeric_limits<double>::infinity())),
             rc(std::make_shared<FloatAbdValue>(std::numeric_limits<float>::quiet_NaN())),
             rx(0,{raw({ri(0xce2009),byte(sentinel)})}),rx(0,{raw({ri(0xce200a),byte(0)})})})
-            rejects([&]{load_raw(rmodule({rfn(10,VOID_VALUE,expression,1)},1));},"v9 malformed expression is rejected");
+            rejects([&]{load_raw(rmodule({rfn(10,VOID_VALUE,expression,1)},1));},"exec malformed expression is rejected");
         auto good_function=rfn(10,VOID_VALUE,rblock({}));auto good_module=rmodule({good_function});
-        for(auto malformed:{replace_raw(good_module,1,ri(3)),replace_raw(good_module,1,ri(4)),replace_raw(good_module,1,ri(5)),replace_raw(good_module,1,byte(4)),
+        for(auto malformed:{replace_raw(good_module,1,ri(3)),replace_raw(good_module,1,ri(4)),replace_raw(good_module,1,ri(5)),replace_raw(good_module,1,ri(9)),replace_raw(good_module,1,byte(4)),
             replace_raw(good_module,2,byte(1)),replace_raw(good_module,3,invalid_utf8),replace_raw(good_module,4,ri(-1)),
             replace_raw(good_module,4,ri(1048577)),append_raw(good_module,ri(0)),
             rmodule({append_raw(good_function,ri(0))}),rmodule({replace_raw(good_function,0,byte(1))}),
@@ -985,41 +2492,111 @@ int main(){try{
             rmodule({replace_raw(good_function,3,ri(1048577))}),rmodule({replace_raw(good_function,4,raw({ri(INT_VALUE)}))}),
             rmodule({rfn(10,VOID_VALUE,rx(4,{ri(0),ri(0),rb(false)}),0,{INT_VALUE})}),
             rmodule({good_function,good_function}),rmodule({},0,raw({raw({ri(0x01230001),ri(0),raw({}),ri(9)})}))})
-            rejects([&]{load_raw(malformed);},"v9 malformed module or function record rejected");
+            rejects([&]{load_raw(malformed);},"exec malformed module or function record rejected");
         // The new interpreter intentionally rejects the retired Map formats.
         rejects([&]{load_raw(module({fn(10,VOID_VALUE,block({}))})->toAbdValue());},"named Map executable is unsupported");
         rejects([&]{load_raw(slot_module({slot_fn(10,VOID_VALUE,block({}))})->toAbdValue());},"v3 Map executable is unsupported");
         auto constant_null=rx(0,{raw({ri(0xce200a),byte(sentinel)})});
         auto scalar_program=load_raw(rmodule({rfn(10,VOID_VALUE,rx(7,{rb(true),constant_null})),
             rfn(11,STRING_VALUE,rx(7,{rb(true),rc(s(std::string("中文\0",7)))}))}));
-        check(scalar_program->invoke(10)->type==VOID_VALUE,"v9 current void sentinel round-trips");
-        check(value_to_string(scalar_program->invoke(11))==std::string("中文\0",7),"v9 UTF-8 string preserves embedded zero");
+        check(scalar_program->invoke(10)->type==VOID_VALUE,"exec current void sentinel round-trips");
+        check(value_to_string(scalar_program->invoke(11))==std::string("中文\0",7),"exec UTF-8 string preserves embedded zero");
         auto metadata=std::make_shared<AbdMap>();auto child=std::make_shared<AbdMap>();
         child->put("flag",std::make_shared<BoolAbdValue>(true));metadata->put("nested",block({n(3),child}));
         auto metadata_program=load_raw(replace_raw(good_module,5,metadata->toAbdValue()));
-        check(metadata_program->meta->get("nested")!=nullptr,"v9 extensions preserve generic typed nested metadata");
+        check(metadata_program->meta->get("nested")!=nullptr,"exec extensions preserve generic typed nested metadata");
         for(auto extension:{raw({rs("x"),ri(1),invalid_utf8}),raw({rs("x"),ri(3),byte(1)}),
             raw({rs("x"),ri(0x0d00),byte(2)}),raw({rs("x"),ri(0xce2009),raw({})}),
             raw({rs("x"),ri(999),raw({})}),raw({rs("x"),ri(3),ri(1),rs("x"),ri(3),ri(2)})})
-            rejects([&]{load_raw(replace_raw(good_module,5,extension));},"v9 extension metadata validates types and fields");
+            rejects([&]{load_raw(replace_raw(good_module,5,extension));},"exec extension metadata validates types and fields");
         auto chain=rc(n(0));for(int i=0;i<100;++i)chain=rx(12,{chain,rc(n(1))});
         check(integer(load_raw(rmodule({rfn(10,INT_VALUE,rx(7,{rb(true),chain}))}))->invoke(10))==100,
-              "v9 keeps 100-level arithmetic chains executable");
+              "exec keeps 100-level arithmetic chains executable");
         for(int i=0;i<35;++i)chain=rx(12,{chain,rc(n(1))});
-        rejects([&]{load_raw(rmodule({rfn(10,INT_VALUE,rx(7,{rb(true),chain}))}));},"v9 raw stack nesting is bounded");
+        rejects([&]{load_raw(rmodule({rfn(10,INT_VALUE,rx(7,{rb(true),chain}))}));},"exec raw stack nesting is bounded");
         auto deep_metadata=raw({});for(int i=0;i<128;++i)deep_metadata=raw({rs("nested"),ri(2),deep_metadata});
         rejects([&]{load_raw(replace_raw(good_module,5,deep_metadata));},"metadata cannot bypass enclosing module depth");
         auto data=good_module->toBytes();const auto length=static_cast<std::size_t>(good_module->size)+4;
-        rejects([&]{load_script(data.get(),length-1);},"v9 truncated outer frame rejected");
+        rejects([&]{load_script(data.get(),length-1);},"exec truncated outer frame rejected");
         std::vector<unsigned char> trailing(data.get(),data.get()+length);trailing.push_back(0);
-        rejects([&]{load_script(trailing.data(),trailing.size());},"v9 trailing bytes rejected");
-        rejects([&]{load_script(data.get(),64*1024*1024+1);},"v9 file size checked before reading payload");
+        rejects([&]{load_script(trailing.data(),trailing.size());},"exec trailing bytes rejected");
+        rejects([&]{load_script(data.get(),64*1024*1024+1);},"exec file size checked before reading payload");
         auto truncated=std::make_shared<AbdValue>(good_module->data,good_module->size-1);
-        rejects([&]{load_raw(truncated);},"v9 truncated child frame rejected");
+        rejects([&]{load_raw(truncated);},"exec truncated child frame rejected");
         const auto function_count=compact->functions.size();
-        rejects([&]{insert_raw(compact,replace_raw(rmodule({},2),1,ri(99)));},"v9 invalid inserted header rejected");
+        rejects([&]{insert_raw(compact,replace_raw(rmodule({},2),1,ri(99)));},"exec invalid inserted header rejected");
         check(compact->baseEnv->variables.empty()&&compact->functions.size()==function_count&&integer(compact->invoke(10))==42,
-              "invalid v9 insertion preserves the old state");
+              "invalid exec insertion preserves the old state");
+    }
+    {
+        // Debug records follow has_debug: [name, file, line, column, (node, file, line, column) quads];
+        // root field 10 lists the debug files. Nodes are numbered in pre-order: here
+        // 0 return, 1 divide, 2 and 3 the constants.
+        auto with_debug=[](R function,R record){AbdStack fields(function);fields.vs.at(8)=rb(true);fields.vs.push_back(std::move(record));return fields.toAbdValue();};
+        auto quads=[](std::initializer_list<int> values){AbdStack result;for(int value:values)result.vs.push_back(ri(value));return result.toAbdValue();};
+        auto files=[](R module,std::initializer_list<R> names){return replace_raw(module,10,raw(names));};
+        auto record=[&](R name,int file,int line,int column,R locations){return raw({name,ri(file),ri(line),ri(column),locations});};
+        auto byte=[](unsigned char value){return std::make_shared<AbdValue>(&value,1);};
+        auto text=[](const char* value){return std::make_shared<AbdValue>(reinterpret_cast<const unsigned char*>(value),static_cast<int>(std::strlen(value)));};
+        auto body=rx(7,{rb(true),rx(15,{rc(n(10)),rc(n(0))})});
+        auto plain=rfn(10,INT_VALUE,body);
+        auto good=with_debug(plain,record(rs("deep"),0,1,5,quads({1,0,1,24})));
+        auto debug_program=load_raw(files(rmodule({good}),{rs("t.azs")}));
+        auto fn=std::dynamic_pointer_cast<ofunction>(debug_program->getFunction(10));
+        auto returned=fn?std::dynamic_pointer_cast<returnExpression>(fn->code):nullptr;
+        check(fn&&fn->debug&&fn->debug->name=="deep"&&fn->debug->files&&fn->debug->files->size()==1&&fn->debug->files->at(0)=="t.azs"&&
+              fn->debug->header.line==1&&fn->debug->header.column==5&&fn->debug->locations.size()==1&&
+              fn->debug->locations[0].line==1&&fn->debug->locations[0].column==24,"exec debug records are decoded");
+        check(returned&&returned->location==0&&returned->returnType&&returned->returnType->location==1,
+              "debug locations attach to their pre-order body nodes");
+        rejects_message([&]{debug_program->invoke(10);},"Division by zero","debug info does not change execution");
+        auto plain_program=load_raw(rmodule({plain}));
+        check(!std::dynamic_pointer_cast<ofunction>(plain_program->getFunction(10))->debug,"functions without debug records have none");
+        auto unknown=with_debug(plain,record(rs("deep"),0,0,0,quads({})));
+        auto unknown_program=load_raw(files(rmodule({unknown}),{rs("t.azs")}));
+        check(std::dynamic_pointer_cast<ofunction>(unknown_program->getFunction(10))->debug->header.line==0,
+              "an unknown 0:0 header position is accepted");
+        unknown_program->destroy();
+        const unsigned char bad_text[]={0xed,0xa0,0x80};
+        const auto invalid_utf8=std::make_shared<AbdValue>(bad_text,3);
+        auto good_files={rs("t.azs")};
+        for(auto malformed:{
+            files(rmodule({good}),{}),files(rmodule({plain}),{rs("")}),files(rmodule({plain}),{text("a\nb")}),
+            files(rmodule({plain}),{rs("a"),rs("a")}),files(rmodule({plain}),{invalid_utf8}),files(rmodule({plain}),{text("a\xc2\x85")}),
+            files(rmodule({plain}),{text("a\xe2\x80\xae")}),files(rmodule({plain}),{text("a\xe2\x80\xa8")}),files(rmodule({plain}),{text("\x7f")}),
+            files(rmodule({plain}),{ri(1)}),
+            files(rmodule({replace_raw(plain,8,rb(true))}),good_files),files(rmodule({replace_raw(plain,8,byte(2))}),good_files),
+            files(rmodule({append_raw(plain,record(rs("deep"),0,1,5,quads({})))}),good_files),
+            files(rmodule({append_raw(good,ri(0))}),good_files),
+            files(rmodule({with_debug(plain,raw({rs("deep"),ri(0),ri(1),ri(5)}))}),good_files),
+            files(rmodule({with_debug(plain,raw({rs("deep"),ri(0),ri(1),ri(5),quads({}),ri(0)}))}),good_files),
+            files(rmodule({with_debug(plain,record(rs("deep"),0,1,5,quads({1,0,1})))}),good_files),
+            files(rmodule({with_debug(plain,record(rs("deep"),0,1,5,quads({1,0,1,24,2})))}),good_files),
+            files(rmodule({with_debug(plain,record(rs("deep"),0,1,5,quads({4,0,1,1})))}),good_files),
+            files(rmodule({with_debug(plain,record(rs("deep"),0,1,5,quads({2,0,1,1,1,0,1,1})))}),good_files),
+            files(rmodule({with_debug(plain,record(rs("deep"),0,1,5,quads({1,0,1,1,1,0,1,2})))}),good_files),
+            files(rmodule({with_debug(plain,record(rs("deep"),0,1,5,quads({-1,0,1,1})))}),good_files),
+            files(rmodule({with_debug(plain,record(rs("deep"),0,1,5,quads({1,1,1,1})))}),good_files),
+            files(rmodule({with_debug(plain,record(rs("deep"),0,1,5,quads({1,0,0,1})))}),good_files),
+            files(rmodule({with_debug(plain,record(rs("deep"),0,1,5,quads({1,0,1,0})))}),good_files),
+            files(rmodule({with_debug(plain,record(rs("deep"),1,1,5,quads({})))}),good_files),
+            files(rmodule({with_debug(plain,record(rs("deep"),-1,1,5,quads({})))}),good_files),
+            files(rmodule({with_debug(plain,record(rs("deep"),0,0,1,quads({})))}),good_files),
+            files(rmodule({with_debug(plain,record(rs("deep"),0,1,0,quads({})))}),good_files),
+            files(rmodule({with_debug(plain,record(rs("deep"),0,-1,-1,quads({})))}),good_files),
+            files(rmodule({with_debug(plain,record(rs(""),0,1,5,quads({})))}),good_files),
+            files(rmodule({with_debug(plain,record(text("a\x1b"),0,1,5,quads({})))}),good_files),
+            files(rmodule({with_debug(plain,record(invalid_utf8,0,1,5,quads({})))}),good_files),
+            files(rmodule({with_debug(plain,record(rs("deep"),0,1,5,raw({ri(1),ri(0),ri(1),byte(1)})))}),good_files),
+            rmodule({good})})
+            rejects([&]{load_raw(malformed);},"malformed exec debug records and files are rejected");
+        const auto function_count=plain_program->functions.size();
+        rejects([&]{insert_raw(plain_program,files(rmodule({with_debug(rfn(11,INT_VALUE,body),record(rs("deep"),0,1,5,quads({9,0,1,1})))}),{rs("t.azs")}));},
+                "an insert with a debug location past the body is rejected");
+        check(plain_program->functions.size()==function_count&&!plain_program->hasFunction(11),"a rejected debug insert leaves the script unchanged");
+        rejects_message([&]{load_raw(replace_raw(rmodule({plain}),1,ri(9)));},"Unsupported exec version 9; expected exec v10",
+                        "older exec versions are rejected with the expected version");
+        debug_program->destroy();plain_program->destroy();
     }
     {
         auto numeric=load_module(slot_module({
@@ -1035,7 +2612,7 @@ int main(){try{
             slot_fn(113,INT_VALUE,block({ret(var(0)),def(0,n(9))}),1),
             slot_fn(114,VOID_VALUE,block({def(0,n(1)),block({def(0,n(2))})}),1),
             slot_fn(115,INT_VALUE,block({block({def(0,n(1))}),block({def(0,n(2))}),ret(n(3))}),1),
-            slot_fn(116,INT_VALUE,block({loop(n(1),block({def(0,n(1)),brk()})),ret(var(0))}),1),
+            slot_fn(116,INT_VALUE,block({loop(boolean(true),block({def(0,n(1)),brk()})),ret(var(0))}),1),
             slot_fn(117,INT_VALUE,block({def(0,n(8)),ret(var(0))}),1),
             slot_fn(120,INT_VALUE,block({ret(binary("add",var(-1),call(200)))}))
         },2));
@@ -1056,7 +2633,7 @@ int main(){try{
             slot_fn(200,INT_VALUE,block({ret(var(-1))})),
             slot_fn(201,INT_VALUE,block({ret(binary("add",call(100),var(-1)))})),
             slot_fn(203,VOID_VALUE,block({set(-1,binary("add",var(-1),n(1)))}),0,{ADDRESS_VALUE}),
-            slot_fn(204,ADDRESS_VALUE,block({def(0,call(0x0abd0003,{n(1)})),object_bind(var(0),203,false),object_return(var(0))}),1)
+            slot_fn(204,ADDRESS_VALUE,block({def(0,call(0x0abd0014,{n(1)})),object_bind(var(0),203,false),object_return(var(0))}),1)
         },1));
         auto second=numeric->baseEnv->getVariable(-3);
         auto inserted=std::dynamic_pointer_cast<ofunction>(numeric->functions.at(200));
@@ -1066,7 +2643,9 @@ int main(){try{
         insert_module(numeric,slot_module({slot_fn(0,VOID_VALUE,block({set(-1,n(40))})),
             slot_fn(300,INT_VALUE,block({ret(binary("add",call(200),var(-1)))}))},1));
         check(integer(numeric->invoke(300))==60&&numeric->baseEnv->variables.size()==4,"successive inserts all use module-local minus one independently");
-        rejects([&]{insert_module(numeric,slot_module({slot_fn(200,VOID_VALUE,block({}))},2));},"duplicate numeric function insert rejected");
+        rejects_message([&]{insert_module(numeric,slot_module({slot_fn(200,VOID_VALUE,block({}))},2));},
+            "Duplicate function id: 0x000000c8 (namespace 0x0000, position 0x00c8) is already defined by module #1 (ordinary); "
+            "give each module a distinct #namespace, or use #namespace_hint","duplicate numeric function insert names its owner");
         rejects([&]{insert_module(numeric,slot_module({slot_fn(400,INT_VALUE,block({ret(var(-2))}))},1));},"module cannot escape global bounds after relocation");
         check(numeric->baseEnv->variables.size()==4&&!numeric->functions.count(400)&&integer(numeric->invoke(300))==60,
               "failed insert does not change global layout or existing functions");
@@ -1099,8 +2678,7 @@ int main(){try{
         auto field=[](MV pointer){return call(0x0abd0006,{object_address(pointer)});};
         auto append=[&]{return set("log",binary("add",binary("multiply",var("log"),n(10)),field(var("__func_param0"))));};
         auto factory=[&](int id,int destructor,bool manual) {
-            auto body=block({def("p",call(0x0abd0003,{n(1)})),binary("m",field(var("p")),var("__func_param0")),object_bind(var("p"),destructor,manual)});
-            if(manual)body->push_back(call(0x0abd0004,{var("p")}));
+            auto body=block({def("p",call(0x0abd0014,{n(1)})),binary("m",field(var("p")),var("__func_param0")),object_bind(var("p"),destructor,manual)});
             body->push_back(object_return(var("p")));
             return typed_fn(id,ADDRESS_VALUE,body,{id==29?ADDRESS_VALUE:INT_VALUE});
         };
@@ -1115,19 +2693,19 @@ int main(){try{
             fn(17,VOID_VALUE,block({set("log",n(0)),def("a",call(20,{n(5)})),block({call(16,{var("a")})}),set("observed",field(var("a")))})),
             typed_fn(18,BOOLEAN_VALUE,block({ret(call(0x0abd0002,{var("__func_param0")}))}),{ADDRESS_VALUE}),
             factory(20,30,false),factory(21,30,true),factory(22,31,false),factory(23,33,true),factory(28,34,true),factory(29,35,true),factory(36,37,true),
-            fn(24,ADDRESS_VALUE,block({def("p",call(0x0abd0003,{n(1)})),binary("m",field(var("p")),n(9)),binary("divide",n(1),n(0)),object_bind(var("p"),30,false),object_return(var("p"))})),
+            fn(24,ADDRESS_VALUE,block({def("p",call(0x0abd0014,{n(1)})),binary("m",field(var("p")),n(9)),binary("divide",n(1),n(0)),object_bind(var("p"),30,false),object_return(var("p"))})),
             fn(25,VOID_VALUE,block({set("log",n(0)),call(24)})),
-            fn(26,VOID_VALUE,block({set("log",n(0)),loop(n(1),block({def("a",call(20,{n(6)})),brk()}))})),
-            fn(27,VOID_VALUE,block({set("log",n(0)),def("a",call(20,{n(7)})),loop(n(1),block({}))})),
+            fn(26,VOID_VALUE,block({set("log",n(0)),loop(boolean(true),block({def("a",call(20,{n(6)})),brk()}))})),
+            fn(27,VOID_VALUE,block({set("log",n(0)),def("a",call(20,{n(7)})),loop(boolean(true),block({}))})),
             typed_fn(30,VOID_VALUE,block({append()}),{ADDRESS_VALUE}),
             typed_fn(31,VOID_VALUE,block({append(),binary("divide",n(1),n(0))}),{ADDRESS_VALUE}),
             typed_fn(33,VOID_VALUE,block({object_delete(var("__func_param0"))}),{ADDRESS_VALUE}),
             typed_fn(34,VOID_VALUE,block({call(0x0abd0002,{var("__func_param0")})}),{ADDRESS_VALUE}),
             typed_fn(35,VOID_VALUE,block({object_delete(field(var("__func_param0")))}),{ADDRESS_VALUE}),
             typed_fn(37,VOID_VALUE,block({set("observed",field(call(41,{var("__func_param0")})))}),{ADDRESS_VALUE}),
-            fn(40,ADDRESS_VALUE,block({def("p",call(0x0abd0003,{n(1)})),binary("m",field(call(41,{var("p")})),n(9)),object_bind(var("p"),-1,false),object_return(var("p"))})),
+            fn(40,ADDRESS_VALUE,block({def("p",call(0x0abd0014,{n(1)})),binary("m",field(call(41,{var("p")})),n(9)),object_bind(var("p"),-1,false),object_return(var("p"))})),
             typed_fn(41,ADDRESS_VALUE,block({object_return(var("__func_param0"))}),{ADDRESS_VALUE}),
-            fn(42,ADDRESS_VALUE,block({def("p",call(0x0abd0003,{n(1)})),object_return(var("p"))}))
+            fn(42,ADDRESS_VALUE,block({def("p",call(0x0abd0014,{n(1)})),object_return(var("p"))}))
         },block({s("log"),s("observed")}));
         auto log=objects->baseEnv->getVariable("log");
         objects->invoke(10);check(integer(log)==21&&heap::lenAlloc()==0,"automatic objects destruct in reverse construction order");
@@ -1155,13 +2733,15 @@ int main(){try{
         objects->invoke(15,{std::make_shared<variable>(address{})});
         rejects([&]{objects->invoke(15,{std::make_shared<variable>(manual)});},"second delete rejects freed object");
         manual=pointer(objects->invoke(14));
-        objects->invoke(18,{std::make_shared<variable>(manual)});
-        check(integer(log)==4&&heap::object_records().size()==1,"raw free bypasses destructor and removes object registration");
+        rejects_message([&]{objects->invoke(18,{std::make_shared<variable>(manual)});},
+                        "mem_free cannot access object storage; use typed member access","raw free preserves a manual object");
+        check(integer(log)==4&&heap::object_records().size()==2,"rejected raw free preserves registration and destructor state");
+        objects->invoke(15,{std::make_shared<variable>(manual)});log->setValue(4);
         address reentrant=pointer(objects->invoke(23,{std::make_shared<variable>(8)}));
         rejects_containing([&]{objects->invoke(15,{std::make_shared<variable>(reentrant)});},"being destroyed","recursive self-delete rejected");
         check(heap::lenAlloc()==1,"failed recursive destructor still frees object once");
         reentrant=pointer(objects->invoke(28,{std::make_shared<variable>(8)}));
-        rejects_containing([&]{objects->invoke(15,{std::make_shared<variable>(reentrant)});},"being destroyed","raw free cannot invalidate a running destructor");
+        rejects_containing([&]{objects->invoke(15,{std::make_shared<variable>(reentrant)});},"cannot access object storage","raw free cannot invalidate a running destructor");
         check(heap::lenAlloc()==1,"raw-free reentry still releases the object once");
         manual=pointer(objects->invoke(14));
         address parent=pointer(objects->invoke(29,{std::make_shared<variable>(manual)}));
@@ -1176,14 +2756,14 @@ int main(){try{
         objects->destroy();check(integer(log)==443&&heap::lenAlloc()==0,"base owned returned objects destruct before script unload");
         objects->destroy();
 
-        auto limited=program({fn(10,VOID_VALUE,block({def("p",call(0x0abd0003,{n(1)})),object_bind(var("p"),11,false),loop(n(1),block({}))})),
-            typed_fn(11,VOID_VALUE,block({loop(n(1),block({}))}),{ADDRESS_VALUE})});
+        auto limited=program({fn(10,VOID_VALUE,block({def("p",call(0x0abd0014,{n(1)})),object_bind(var("p"),11,false),loop(boolean(true),block({}))})),
+            typed_fn(11,VOID_VALUE,block({loop(boolean(true),block({}))}),{ADDRESS_VALUE})});
         limited->max_steps=40;
         rejects_containing([&]{limited->invoke(10);},"step limit","cleanup never resets an exhausted execution budget");
         check(heap::lenAlloc()==0,"budget failure still releases object storage");limited->destroy();
 
         auto shutdown=program({
-            fn(10,ADDRESS_VALUE,block({set("log",n(0)),def("p",call(0x0abd0003,{n(1)})),object_bind(var("p"),30,false),object_return(var("p"))})),
+            fn(10,ADDRESS_VALUE,block({set("log",n(0)),def("p",call(0x0abd0014,{n(1)})),object_bind(var("p"),30,false),object_return(var("p"))})),
             typed_fn(30,VOID_VALUE,block({set("log",binary("add",var("log"),n(1)))}),{ADDRESS_VALUE}),
             fn(1,VOID_VALUE,block({binary("divide",n(1),n(0))}))
         },block({s("log")}));
@@ -1192,14 +2772,14 @@ int main(){try{
         check(integer(shutdown_log)==1&&heap::lenAlloc()==0&&shutdown->closed,"pre-destroy error cannot skip object destructors");
         shutdown->destroy();
 
-        auto shutdown_budget=program({fn(10,ADDRESS_VALUE,block({def("p",call(0x0abd0003,{n(1)})),object_bind(var("p"),11,false),object_return(var("p"))})),
-            typed_fn(11,VOID_VALUE,block({loop(n(1),block({}))}),{ADDRESS_VALUE})});
+        auto shutdown_budget=program({fn(10,ADDRESS_VALUE,block({def("p",call(0x0abd0014,{n(1)})),object_bind(var("p"),11,false),object_return(var("p"))})),
+            typed_fn(11,VOID_VALUE,block({loop(boolean(true),block({}))}),{ADDRESS_VALUE})});
         shutdown_budget->invoke(10);shutdown_budget->max_steps=40;
         rejects_containing([&]{shutdown_budget->destroy();},"step limit","base destructor respects shutdown execution budget");
         check(heap::lenAlloc()==0&&shutdown_budget->closed,"shutdown budget exhaustion releases all storage");
 
         auto undeleted=program({
-            fn(10,VOID_VALUE,block({def("p",call(0x0abd0003,{n(1)})),object_bind(var("p"),30,true),call(0x0abd0004,{var("p")})})),
+            fn(10,VOID_VALUE,block({def("p",call(0x0abd0014,{n(1)})),object_bind(var("p"),30,true)})),
             typed_fn(30,VOID_VALUE,block({set("log",n(7))}),{ADDRESS_VALUE})
         },block({s("log")}));
         auto undeleted_log=undeleted->baseEnv->getVariable("log");undeleted_log->setValue(0);
@@ -1211,7 +2791,7 @@ int main(){try{
 
         auto host_block=heap::alloc(1);heap::getAt(host_block)->setValue(99);
         rejects_containing([&]{program({
-            fn(0,VOID_VALUE,block({def("p",call(0x0abd0003,{n(1)})),object_bind(var("p"),-1,true),call(0x0abd0004,{var("p")}),binary("divide",n(1),n(0))}))
+            fn(0,VOID_VALUE,block({def("p",call(0x0abd0014,{n(1)})),object_bind(var("p"),-1,true),binary("divide",n(1),n(0))}))
         });},"Division by zero","onload failure propagates");
         check(heap::object_records().empty()&&heap::lenAlloc()==1&&integer(heap::getAt(host_block))==99,
               "failed initial load discards its manual objects without touching host memory");
@@ -1221,7 +2801,7 @@ int main(){try{
     check(integer(p->invoke(10))==23,"arithmetic");
     rejects([&]{p->invoke(11);},"unknown function throws");check(!p->functions.count(11),"lookup must not insert");
     rejects([&]{p->invoke(10,{std::make_shared<variable>(1)});},"argument count");
-    auto returned=program({fn(10,INT_VALUE,block({loop(n(1),block({ret(n(7))})),ret(n(99))}))});
+    auto returned=program({fn(10,INT_VALUE,block({loop(boolean(true),block({ret(n(7))})),ret(n(99))}))});
     check(integer(returned->invoke(10))==7,"return escapes while");
     auto scope=program({fn(10,INT_VALUE,block({def("x",n(2)),block({def("x",n(9))}),ret(var("x"))}))});
     check(integer(scope->invoke(10))==2,"block shadows without replacing outer variable");
@@ -1245,7 +2825,7 @@ int main(){try{
         typed_fn(21,INT_VALUE,block({ret(n(7))}),{ANY_VALUE})
     });
     check(integer(typed->invoke(20,{std::make_shared<variable>(9)}))==9,"typed script parameter accepts exact dynamic type");
-    rejects_containing([&]{typed->invoke(20,{std::make_shared<variable>(std::string("9"))});},"argument 1 type mismatch","typed script parameter rejects wrong dynamic type");
+    rejects_containing([&]{typed->invoke(20,{std::make_shared<variable>(std::string("9"))});},"Script function 0x00000014 argument 1 type mismatch","typed script parameter rejects wrong dynamic type");
     check(integer(typed->invoke(21,{std::make_shared<variable>(std::string("anything"))}))==7,"script any parameter accepts arbitrary dynamic type");
     rejects([]{program({typed_fn(22,VOID_VALUE,block({}),{VOID_VALUE})});},"script void parameter metadata rejected");
     rejects([]{auto malformed=fn(23,VOID_VALUE,block({}),2);malformed->put("param-types",type_list({INT_VALUE}));program({malformed});},"script parameter count metadata disagreement rejected");
@@ -1289,12 +2869,12 @@ int main(){try{
     check(integer(external->invoke(30))==5,"script internal external call accepts matching signature");
     check(integer(external->getFunction(host_add)->invoke(external->baseEnv,{std::make_shared<variable>(1),std::make_shared<variable>(2)}))==3,"getFunction also returns a signature-checked callback");
     check(add_calls==3,"matching external callbacks invoked");
-    rejects_containing([&]{external->invoke(host_add,{std::make_shared<variable>(1)});},"argument count mismatch","direct external arity checked before callback");
+    rejects_message([&]{external->invoke(host_add,{std::make_shared<variable>(1)});},"External function 0xf2340001 argument count mismatch: expected 2, got 1","direct external arity checked before callback");
     rejects_containing([&]{external->invoke(host_add,{std::make_shared<variable>(std::string("1")),std::make_shared<variable>(2)});},"argument 1 type mismatch","direct external argument type checked before callback");
     rejects_containing([&]{external->invoke(31);},"argument count mismatch","internal external arity checked before callback");
     rejects_containing([&]{external->invoke(32);},"argument 1 type mismatch","internal external argument type checked before callback");
     check(add_calls==3,"invalid arguments never reach external callback");
-    rejects_containing([&]{external->invoke(host_wrong_return);},"return type mismatch: expected int, got float","direct external return type checked");
+    rejects_message([&]{external->invoke(host_wrong_return);},"External function 0xf2340002 return type mismatch: expected int, got float","direct external return type checked");
     rejects_containing([&]{external->invoke(33);},"return type mismatch: expected int, got float","internal external return type checked");
     check(wrong_return_calls==2,"return mismatch is checked after callback");
     check(external->invoke(host_void)->type==VOID_VALUE,"direct external void return accepts actual void");
@@ -1334,11 +2914,11 @@ int main(){try{
     rejects_message([&]{zeroDivision->invoke(42);},"Division by zero","float negative zero division error");
     rejects_message([&]{zeroDivision->invoke(43);},"Division by zero","double positive zero division error");
     rejects_message([&]{zeroDivision->invoke(44);},"Division by zero","double negative zero division error");
-    auto bad=program({fn(10,INT_VALUE,block({ret(binary("divide",n(1),n(0)))})),fn(11,INT_VALUE,block({ret(binary("add",n(std::numeric_limits<int>::max()),n(1)))})),fn(12,INT_VALUE,block({ret(s("wrong"))})),fn(13,VOID_VALUE,block({loop(n(1),block({}))})),fn(14,INT_VALUE,block({ret(call(14))}))});
+    auto bad=program({fn(10,INT_VALUE,block({ret(binary("divide",n(1),n(0)))})),fn(11,INT_VALUE,block({ret(binary("add",n(std::numeric_limits<int>::max()),n(1)))})),fn(12,INT_VALUE,block({ret(s("wrong"))})),fn(13,VOID_VALUE,block({loop(boolean(true),block({}))})),fn(14,INT_VALUE,block({ret(call(14))}))});
     rejects([&]{bad->invoke(10);},"division zero");rejects([&]{bad->invoke(11);},"integer overflow");rejects([&]{bad->invoke(12);},"return type mismatch");
     bad->max_steps=100;rejects([&]{bad->invoke(13);},"execution budget");
     bad->max_call_depth=8;rejects([&]{bad->invoke(14);},"recursion budget");check(bad->active_calls==0,"call depth unwound after failure");
-    auto lazy=program({fn(10,BOOLEAN_VALUE,block({ret(binary("and",n(0),binary("divide",n(1),n(0))))})),fn(11,BOOLEAN_VALUE,block({ret(binary("or",n(1),binary("divide",n(1),n(0))))}))});
+    auto lazy=program({fn(10,BOOLEAN_VALUE,block({ret(binary("and",boolean(false),binary("divide",n(1),n(0))))})),fn(11,BOOLEAN_VALUE,block({ret(binary("or",boolean(true),binary("divide",n(1),n(0))))}))});
     check(!*static_cast<bool*>(lazy->invoke(10)->value),"and short circuits");check(*static_cast<bool*>(lazy->invoke(11)->value),"or short circuits");
     heap::clearHeap();check(heap::alloc(0)==address{},"zero allocation");rejects([]{heap::alloc(-1);},"negative allocation");
     auto a=heap::alloc(2),b=heap::alloc(2);check(a==address{1}&&b==address{3},"zero address reserved");
@@ -1379,7 +2959,7 @@ int main(){try{
                 const int pointer=static_cast<int>(next(static_cast<unsigned>(heap::lenHeap())+3));
                 bool found=true;try{heap::getAt(address{static_cast<std::uint64_t>(pointer)});}catch(const std::out_of_range&){found=false;}
                 same=found==model_contains(pointer);
-                if(same&&model.count(pointer))same=heap::object_address(address{static_cast<std::uint64_t>(pointer)},model[pointer]-1).value==static_cast<std::uint64_t>(pointer+model[pointer]-1);
+                if(same&&model.count(pointer))same=static_cast<bool>(heap::getAt(address{static_cast<std::uint64_t>(pointer+model[pointer]-1)}));
             }
             same=same&&heap::lenAlloc()==static_cast<int>(model.size());
         }
@@ -1467,26 +3047,26 @@ int main(){try{
 
         // log = log*10 + field for each destructor run.
         auto value_log=[](int destructor){return typed_fn(destructor,VOID_VALUE,block({set("log",binary("add",binary("multiply",var("log"),n(10)),
-            call(0x0abd0006,{var("__func_param0")})))}),{ADDRESS_VALUE});};
+            call(0x0abd0006,{object_address(var("__func_param0"))})))}),{ADDRESS_VALUE});};
         auto literal=program({
-            typed_fn(20,OBJECT_VALUE,block({def("o",new_block(1)),binary("m",call(0x0abd0006,{block_address(var("o"))}),var("__func_param0")),
+            typed_fn(20,OBJECT_VALUE,block({def("o",new_block(1)),binary("m",call(0x0abd0006,{object_address(block_address(var("o")))}),var("__func_param0")),
                 object_bind(block_address(var("o")),30,false),object_return(var("o"))}),{INT_VALUE}),
             value_log(30),
             typed_fn(31,VOID_VALUE,block({set("log",binary("add",binary("multiply",var("log"),n(10)),n(9)))}),{ADDRESS_VALUE}),
             fn(10,INT_VALUE,block({def("a",call(20,{n(1)})),def("b",call(20,{n(2)})),ret(n(0))})),
-            fn(11,INT_VALUE,block({def("a",call(20,{n(1)})),def("b",var("a")),binary("m",call(0x0abd0006,{block_address(var("b"))}),n(5)),
-                ret(call(0x0abd0006,{block_address(var("a"))}))})),
+            fn(11,INT_VALUE,block({def("a",call(20,{n(1)})),def("b",var("a")),binary("m",call(0x0abd0006,{object_address(block_address(var("b")))}),n(5)),
+                ret(call(0x0abd0006,{object_address(block_address(var("a")))}))})),
             fn(12,INT_VALUE,block({def("a",call(20,{n(1)})),def("p",block_address(var("a"))),def("b",call(20,{n(7)})),set("a",var("b")),
-                ret(call(0x0abd0006,{var("p")}))})),
+                ret(call(0x0abd0006,{object_address(var("p"))}))})),
             typed_fn(13,OBJECT_VALUE,block({def("x",call(20,{n(4)})),object_return(var("x"))}),{}),
-            fn(14,INT_VALUE,block({def("y",call(13)),ret(call(0x0abd0006,{block_address(var("y"))}))})),
+            fn(14,INT_VALUE,block({def("y",call(13)),ret(call(0x0abd0006,{object_address(block_address(var("y")))}))})),
             typed_fn(15,ADDRESS_VALUE,block({def("x",call(20,{n(4)})),ret(block_address(var("x")))}),{}),
-            fn(16,INT_VALUE,block({ret(call(0x0abd0006,{call(15)}))})),
+            fn(16,INT_VALUE,block({ret(call(0x0abd0006,{object_address(call(15))}))})),
             fn(17,INT_VALUE,block({set("log",n(0)),call(20,{n(3)}),ret(var("log"))})),
             fn(18,INT_VALUE,block({def("i",n(0)),def("seen",n(0)),
-                loop(binary("lt",binary("add",var("i"),call(0x0abd0006,{block_address(call(33))})),n(100)),
+                loop(binary("lt",binary("add",var("i"),call(0x0abd0006,{object_address(block_address(call(33)))})),n(100)),
                      block({set("seen",var("log")),set("i",binary("add",var("i"),n(1)))})),ret(var("seen"))})),
-            fn(19,INT_VALUE,block({def("p",call(0x0abd0003,{n(1)})),binary("m",call(0x0abd0006,{var("p")}),call(20,{n(5)})),
+            fn(19,INT_VALUE,block({def("p",call(0x0abd0014,{n(1)})),binary("m",call(0x0abd0006,{object_address(var("p"))}),call(20,{n(5)})),
                 object_bind(var("p"),31,false),ret(n(0))})),
             fn(21,INT_VALUE,block({def("p",call(0x0abd0003,{n(1)})),binary("m",call(0x0abd0006,{var("p")}),call(20,{n(5)})),
                 call(0x0abd0002,{var("p")}),ret(var("log"))})),
@@ -1495,14 +3075,14 @@ int main(){try{
             fn(34,VOID_VALUE,block({def("a",call(20,{n(1)})),call(0x0abd0004,{block_address(var("a"))})})),
             fn(23,INT_VALUE,block({def("a",call(20,{n(1)})),object_delete(block_address(var("a"))),ret(n(0))})),
             fn(24,INT_VALUE,block({def("a",call(20,{n(1)})),def("b",call(20,{n(2)})),drop(var("a")),set("log",binary("multiply",var("log"),n(10))),ret(n(0))})),
-            fn(25,VOID_VALUE,block({def("o",new_block(1)),binary("m",call(0x0abd0006,{block_address(var("o"))}),call(20,{n(6)})),
+            fn(25,VOID_VALUE,block({def("o",new_block(1)),binary("m",call(0x0abd0006,{object_address(block_address(var("o")))}),call(20,{n(6)})),
                 binary("divide",n(1),n(0))})),
-            typed_fn(26,INT_VALUE,block({ret(call(0x0abd0006,{block_address(var("__func_param0"))}))}),{OBJECT_VALUE}),
+            typed_fn(26,INT_VALUE,block({ret(call(0x0abd0006,{object_address(block_address(var("__func_param0")))}))}),{OBJECT_VALUE}),
             fn(27,INT_VALUE,block({def("a",call(20,{n(8)})),def("r",call(26,{var("a")})),ret(var("r"))})),
             typed_fn(32,VOID_VALUE,block({set("log",binary("add",var("log"),n(1)))}),{ADDRESS_VALUE}),
-            typed_fn(33,OBJECT_VALUE,block({def("o",new_block(1)),binary("m",call(0x0abd0006,{block_address(var("o"))}),n(0)),
+            typed_fn(33,OBJECT_VALUE,block({def("o",new_block(1)),binary("m",call(0x0abd0006,{object_address(block_address(var("o")))}),n(0)),
                 object_bind(block_address(var("o")),32,false),object_return(var("o"))}),{}),
-            typed_fn(28,INT_VALUE,block({def("t",move_out("__func_param0")),ret(call(0x0abd0006,{block_address(var("t"))}))}),{OBJECT_VALUE}),
+            typed_fn(28,INT_VALUE,block({def("t",move_out("__func_param0")),ret(call(0x0abd0006,{object_address(block_address(var("t")))}))}),{OBJECT_VALUE}),
             fn(29,INT_VALUE,block({ret(call(28,{call(20,{n(3)})}))}))
         },block({s("log")}));
         auto log=literal->baseEnv->getVariable("log");
@@ -1516,8 +3096,9 @@ int main(){try{
         check(run(18)==100,"loop-condition temporaries end after each evaluation");
         run(19);check(integer(log)==95,"value fields end after the containing heap object's destructor");
         check(run(21)==0&&heap::lenAlloc()==0,"raw free releases value fields without destructors");
-        check(run(22)==0&&integer(log)==1,"mem_free does not release literal-object storage");
-        rejects_containing([&]{literal->invoke(34);},"literal object address","make_free rejects literal objects");
+        rejects_message([&]{run(22);},"mem_free cannot access object storage; use typed member access","mem_free rejects literal storage");
+        check(integer(log)==1,"rejected raw free still destroys the literal at scope exit");
+        rejects_containing([&]{literal->invoke(34);},"make_free cannot access object storage","make_free rejects literal objects");
         rejects_containing([&]{run(23);},"literal object","delete rejects literal objects");
         run(24);check(integer(log)==102,"drop ends a value immediately and scope cleanup skips it");
         log->setValue(0);rejects_containing([&]{literal->invoke(25);},"Division by zero","construction failure propagates");
@@ -1536,7 +3117,8 @@ int main(){try{
         auto shadow=std::make_shared<test_executor>(0x123);
         shadow->functions[0x01230009]=std::make_shared<test_function>(INT_VALUE,[](const std::vector<V>&){return std::make_shared<variable>(1);});
         registered_executor keep(shadow);
-        rejects([&]{program({fn(0x01230001,INT_VALUE,block({ret(n(7))}))});},"mount rejects a namespace already registered by the host");
+        rejects_message([&]{program({fn(0x01230001,INT_VALUE,block({ret(n(7))}))});},
+            "Script namespace 0x0123 conflicts with registered host executor","mount rejects a namespace already registered by the host");
         unregisterExecutor(0x123);
         auto namespaced=program({fn(0x01230001,INT_VALUE,block({ret(n(7))}))});
         rejects([&]{registerExecutor(shadow);},"host registration rejects a mounted script namespace");

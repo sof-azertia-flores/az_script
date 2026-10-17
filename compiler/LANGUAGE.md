@@ -17,19 +17,27 @@ python3 tools/build_and_test.py --offline
 
 离线构建使用本机已有依赖缓存；首次缺少依赖时去掉 `--offline`。
 
-CLI 的 `compile-json` 接受原有的可读代码树；`pack` 和 `unpack` 打包、解包文件。所有路径由参数传入。源码中的 include 总是相对于当前被包含文件的目录解析。编译输出不会覆盖输入源码。
+CLI 的 `compile-json` 接受原有的可读代码树；`pack` 和 `unpack` 打包、解包文件。所有路径由参数传入，选项可以写在输入路径之前或之后；`--` 结束选项，其后的路径可以以 `-` 开头。include 先在所在文件的目录中查找，再依次查找每个 `-I dir` / `--include-dir dir`；`./azscript` 包装脚本和发行包的 `compile.sh` / `compile.cmd` 最后查找标准库目录，所以任意位置的调用方都可以写 `#include "math.include.azs"`。该目录由单一路径的系统属性 `azscript.stdlib` 指定，包装脚本会设置它；未设置时发行包的启动器使用包内的 `stdlib/`，不是目录的属性值会被忽略。`-I` 目录不存在、为空或不是目录属于用法错误，输出 `Error: ...` 并以退出码 1 结束。除非指定 `--unrestricted-includes`，include 必须位于主文件目录或上述目录之内，见[预处理](#字符串注释与预处理)。`compile-json` 不接受 include 选项。编译输出不会覆盖输入源码，包括被包含的文件。编译错误和警告的格式见[诊断](#诊断)。
+
+`-g`（适用于 `compile` 和 `compile-json`）在执行文件中加入可选调试记录：源文件名、每个函数的显示名及声明位置，以及运算符、调用和语句的源码位置。调试信息默认关闭，因此默认执行文件不含函数名、类名或文件名。`-g` 不改变指令和行为，可读 AST 在有无 `-g` 时相同；格式见 [Exec 格式的调试记录一节](../docs/EXEC_FORMAT.md)。Java 中使用 `Compiler.compile(tree, diagnostics, true)` 或 `Compiler.compile(tree, true)` 生成调试记录。
 
 ```java
 var script = new azertia.script.GeneraterJson.AzScript();
-script.execute(java.nio.file.Path.of("example.azs"));
-var jsonTree = script.toObj();
-var instructions = azertia.script.Compiler.compile(jsonTree);
-byte[] executable = instructions.toValue().toAbdFormat();
+var diagnostics = new azertia.script.Diagnostics();
+try {
+    script.execute(java.nio.file.Path.of("example.azs"), diagnostics);
+    var jsonTree = script.toObj();
+    var instructions = azertia.script.Compiler.compile(jsonTree, diagnostics);
+    diagnostics.warnings().forEach(warning -> System.err.println(warning.format()));
+    byte[] executable = instructions.toValue().toAbdFormat();
+} catch (azertia.script.CompileException error) {
+    error.diagnostics().forEach(diagnostic -> System.err.println(diagnostic.format()));
+}
 ```
 
-`execute(String)` 也可使用，其 include 基目录是进程工作目录。每次 execute 清空上一次程序的函数、预处理属性和元数据。编译器实例不应由多个线程同时使用。
+`execute(String)` 也可使用，其 include 基目录和 include 根目录是进程工作目录；`execute(String, Path)` 改用给定目录，编译不可信文本的嵌入方应传入专用目录。`AzScript.includeDirectories` 和 `AzScript.unrestrictedIncludes` 对应 `-I` 和 `--unrestricted-includes`，在多次 execute 之间保留；`includedFiles()` 列出上一次 execute 所 include 文件的真实路径。`includeDirectories` 中的条目不存在、为空或不是目录，或 `execute(String, Path)` 的基目录不存在或不是目录时，在记录任何诊断之前抛出普通的 `IllegalArgumentException`，而不是 `CompileException`。每次 execute 清空上一次程序的函数、预处理属性和元数据。编译器实例不应由多个线程同时使用。
 
-纯脚本基础数学库 [`stdlib/math.azs`](stdlib/math.azs) 使用 `#namespace_hint AZSCRIPT_MATH` 独立编译。调用方只通过相对路径 include [`stdlib/math.include.azs`](stdlib/math.include.azs) 中的类型声明；运行时插入库 ABD 并 `flush()`，独立解释器可用 `--insert math.exec.abd` 自动完成链接。头文件的 `4d41` 为假定 namespace，实际位置由运行时分配。浮点 API 接收 `double`，整数 API 接收 `int`，`math_pow` 为 `(double, int)`；extern 参数类型须精确匹配。编译和接入步骤、API、int32 输入域、取整边界及精度约定见 [`stdlib/MATH.md`](stdlib/MATH.md)。
+纯脚本基础数学库 [`stdlib/math.azs`](stdlib/math.azs) 使用 `#namespace_hint AZSCRIPT_MATH` 独立编译。调用方只 include [`stdlib/math.include.azs`](stdlib/math.include.azs) 中的类型声明（使用相对路径，或借助 `-I` 及包装脚本的默认标准库目录按文件名 include）；运行时插入库 ABD 并 `flush()`，独立解释器可用 `--insert math.exec.abd` 自动完成链接。头文件的 `4d41` 为假定 namespace，实际位置由运行时分配。浮点 API 接收 `double`，整数 API 接收 `int`，`math_pow` 为 `(double, int)`；extern 参数类型须精确匹配。编译和接入步骤、API、int32 输入域、取整边界及精度约定见 [`stdlib/MATH.md`](stdlib/MATH.md)。
 
 容器库 [`stdlib/containers.azs`](stdlib/containers.azs) 同样独立编译，hint 为 `AZSCRIPT_CONTAINERS`。调用方 include [`stdlib/containers.include.azs`](stdlib/containers.include.azs)。`List<T>`、`Stack<T>` 和 `Queue<T>` 仍把元素放在链表节点字段中，两端保持 O(1)。`Vector<T>`、`Set<T>` 和 `Map<K, V>` 使用连续 `buffer`；`Set` 和 `Map` 默认用 `value_compare`，类值键要另设普通比较函数。假定 namespace 是 `c071`。操作、所有权和编号见 [`stdlib/CONTAINERS.md`](stdlib/CONTAINERS.md)。
 
@@ -53,15 +61,33 @@ int main() {
 void __script_pre_destroy() { print("done"); }
 ```
 
-函数返回类型支持 `void/int/string/float/double/boolean/address` 和已声明的类名，`bool` 是 `boolean` 的别名。支持前向引用、递归与任意嵌套函数调用；普通函数位于顶层，成员方法可在类体或使用 `ClassName::method` 在类外定义。参数可以写 `a,b` 或 `int a,int b`，对象参数须显式写类名（`C p` 按值复制，`C * p` 传指针）。局部变量也可写 `int x = 2`；带显式基础类型的局部变量必须同时给出初始化值。显式参数和局部类型参与编译期检查；无类型参数、`var`、`def` 和全局变量保持动态类型。函数返回类型还会由解释器验证。
+函数返回类型支持 `void/int/string/float/double/boolean/address` 和已声明的类名，`bool` 是 `boolean` 的别名。支持前向引用、递归与任意嵌套函数调用；普通函数位于顶层，成员方法可在类体或使用 `ClassName::method` 在类外定义。参数可以写 `a,b` 或 `int a,int b`，对象参数须显式写类名（`C p` 按值复制，`C * p` 传指针）。局部变量也可写 `int x = 2`；带显式基础类型的局部变量必须同时给出初始化值。显式参数和局部类型参与编译期检查；无类型参数、`var`、`def` 和 `#gvar` 全局保持动态类型，带类型的全局与带类型的局部变量一样检查。函数返回类型还会由解释器验证。
 
-块 `{}` 创建词法作用域，允许内层同名变量遮蔽外层；同一作用域重复声明报错。局部编号在整个函数内唯一，避免先前子块和兄弟块编号冲突。变量必须先声明，访问已结束作用域内的变量会编译失败。全局变量用 `#gvar` 声明，通常在 `__script_onload` 中初始化。函数参数按值传递，脚本函数调用会检查参数数量。
+脚本返回值必须符合原有的声明类型可赋值规则；数值返回另外只允许以下隐式扩宽：
 
-非 hint 程序保持 `__script_onload = 0`、`main = 0x0fff0000`、`__script_pre_destroy = 1`；钩子必须是无参数 `void` 函数。普通函数默认位于 `0xfff`，`#namespace 1234` 支持 1～4 位十六进制。函数定义可写 `int add(int a,int b):0003 {return a+b;}` 固定低16位编号；先预留显式编号再分配自动编号，固定入口不能用后缀改变编号。自动编号可能随源码改变，宿主应使用同次编译的 AST 映射。
+| 声明的返回类型 | 接受的数值结果类型 |
+| --- | --- |
+| `int` | `int` |
+| `float` | `int`、`float` |
+| `double` | `int`、`float`、`double` |
+
+int 转 float 可能舍入，与 `float(x)` 一致；例如 float 函数返回 int 值 16777217 时得到 16777216。float/double 转 int、double 转 float 均不隐式收窄，即使当前值恰好能表示也不例外。需要时写 `return int(value);` 或 `return float(value);`，明确请求受检查的[显式转换](#显式转换)，例如：
+
+```c
+float widen(int value) { return value; }
+int truncate(double value) { return int(value); }
+float narrow(double value) { return float(value); }
+```
+
+已知的收窄返回在编译时报错，例如 `return expected int, got double; narrowing requires an explicit cast such as int(x)`。动态 `any` 结果按真实运行时类型检查：int 函数返回 double 时报告 `Function return type mismatch: expected int, got double`。运行时同样只允许精确匹配或数值扩宽，不会静默截断动态返回值。类指针仍遵守原有的可赋值和所有权规则；带类型 extern 回调签名仍须精确匹配，不因此增加数值转换。
+
+块 `{}` 创建词法作用域，允许内层同名变量遮蔽外层；同一作用域重复声明报错。局部编号在整个函数内唯一，避免先前子块和兄弟块编号冲突。变量必须先声明，访问已结束作用域内的变量会编译失败。全局变量见[下文](#全局变量)。函数参数按值传递，脚本函数调用会检查参数数量。
+
+非 hint 程序保持 `__script_onload = 0`、`main = 0x0fff0000`、`__script_pre_destroy = 1`；钩子必须是无参数 `void` 函数。普通函数默认位于 `0xfff`，`#namespace 1234` 支持 1～4 位十六进制（源码中的 namespace 和函数 ID 可带 `0x` 前缀及任意个前导零，如 `#namespace 0x0005151`、`:00000000abcd`；AST 始终写成不带前缀的十六进制，`compile-json` 只接受不超过字段宽度的纯十六进制数字，namespace 为 4 位，完整 ID 为 8 位），`#namespace fff` 显式写出默认 namespace，生成的编号与省略时相同，但仍计入唯一的 namespace 指令。namespace `0000` 保留给生命周期钩子和 hint 库占位，`0abd` 保留给运行时内置函数，`#namespace` 使用这两个值时编译报错；`compile-json` 同样拒绝 `function-namespace` 为 0 的非 hint AST，以及 0000 中除生命周期函数 0/1 以外的普通定义。函数定义可写 `int add(int a,int b):0003 {return a+b;}` 固定低16位编号；先预留显式编号再分配自动编号，固定入口不能用后缀改变编号。自动编号可能随源码改变，宿主应使用同次编译的 AST 映射。需要稳定的公开 ID 时，只在共享头文件的 extern 声明中写一次完整 ID；本模块（hint 库为其自身假定的 namespace）中的实现省略编号即可继承该编号，见 [hint 链接](../docs/HINT_LINKING.md)。
 
 `#namespace_hint NAME` 声明独立库；库内普通函数（包括 `main`）以0000占位，0/1保留给生命周期，自动编号从2开始。`#assume_hint NAME abcd` 为调用声明假定 namespace，运行时在 `flush()` 中重定位。一个编译单元及其有效 include 最多包含一个 namespace 或 namespace_hint 指令。完整规则及可运行类库示例见 [多文件库与 hint 链接](../docs/HINT_LINKING.md)。
 
-十一个内置函数无需声明即可直接调用：
+二十个内置函数无需声明即可直接调用：
 
 | 名称 | 签名 | ID |
 | --- | --- | --- |
@@ -76,6 +102,15 @@ void __script_pre_destroy() { print("done"); }
 | `reflect_invoke_function<R>` | `R(int, ...)` | `0x0abd0008` |
 | `reflect_get_hint_namespace` | `int(string)` | `0x0abd0009` |
 | `reflect_hint_loaded` | `boolean(string)` | `0x0abd000a` |
+| `str_length` | `int(string)` | `0x0abd000b` |
+| `str_byte_length` | `int(string)` | `0x0abd000c` |
+| `str_substring` | `string(string, int, int)` | `0x0abd000d` |
+| `str_char_at` | `string(string, int)` | `0x0abd000e` |
+| `str_code_at` | `int(string, int)` | `0x0abd000f` |
+| `str_from_code` | `string(int)` | `0x0abd0010` |
+| `str_index_of` | `int(string, string[, int])` | `0x0abd0011` |
+| `str_starts_with` | `boolean(string, string)` | `0x0abd0012` |
+| `str_ends_with` | `boolean(string, string)` | `0x0abd0013` |
 
 这些名称和 `0xabd` ID 是保留的，不能声明为脚本函数或外部函数；内置函数不会写入 AST 的 `abstract` 或 `extern-signatures`。
 
@@ -84,6 +119,22 @@ void __script_pre_destroy() { print("done"); }
 外部函数统一写作 `extern int custom_call(string, double):12340001;`，参数名可省略，类型必须明确；零参数写 `extern void notify():12340002;`，`void` 不能作为参数类型。ID 支持完整32位十六进制位模式，也支持 `0x` 前缀。旧 `#extern` 不再接受。声明可绑定宿主函数或 hint 库；同名 extern 与定义签名一致时可共存，调用优先绑定 extern。宿主必须用相同 ID 注册；保留 namespace 0000、0abd、0fff 及活动脚本 namespace 不能被宿主占用。
 
 外部函数调用采用精确类型契约，不进行数值隐式转换：声明为 `double` 的参数不能接收 `int` 或 `float`。编译器会检查参数数量和能确定的表达式类型，并把外部函数返回类型继续用于嵌套调用检查；无法确定类型的动态值用于带签名参数时也会拒绝，需先通过显式类型声明让契约清楚。ABD 携带同一签名，解释器会在调用回调前再次检查真实参数，并在回调返回后立即检查真实返回类型，因此错误的宿主实现不会把不匹配值带入后续脚本。内置函数由编译器预声明，不能由脚本函数、`extern` 或手写 AST 覆盖；直接调用宿主函数须使用带签名的 `extern`；按 ID 反射调用的规则见下文。
+
+### 全局变量
+
+```text
+class Node { int value; Node(int v) { value = v; } }
+int total;                      // 初始为 0
+string label = "items";
+Node * head = new Node(total + 1);
+#gvar legacy                    // 无类型（any）
+```
+
+顶层的 `T name;` 或 `T name = expression;` 声明带类型的全局变量。T 可以是标量类型、`address` 或类指针（如 `Node *`、`Box<int> *`）。带类型全局在每次使用时都像带类型的局部变量一样检查，因此 `head.value` 可以使用，`head = 3` 编译失败。类的值和 buffer 不能作为全局（`Global g cannot hold a class value or buffer; declare a pointer`），`void`、`extern` 以及带类型参数的声明也不行。`Node * g(1);` 报告 `Global objects cannot be automatic; use = new Node(...)`；返回指针的函数（如 `Node * make(int v) { ... }`）照常解析。带类型全局不能与函数、内置函数、类或其他全局同名，也不能使用生命周期钩子的名称（`__script_onload`、`__script_pre_destroy`）。
+
+带类型全局在模块 flush 时于 onload（函数 0，即 `__script_onload`；模块没有时由编译器添加）中初始化：先把每个带类型全局设为其类型的默认值（`0`、`0.0f`、`0.0`、`false`、`""`，address 和指针为 `null`），再按声明顺序执行显式初始化表达式，最后执行 onload 正文。初始化表达式可以调用函数、读取任何全局；在它之后声明的全局仍是默认值。初始化表达式的错误会指明所属全局，如 `in global total: Initializer for global total expected int, got string`。初始化表达式在 onload 内执行，归这次调用所有的存储不会比它活得更久：`alloc()` 得到的块或返回给初始化表达式的自动对象在 onload 返回时释放，全局随之悬空；需要比 onload 活得更久的对象请用 `new`；`make_free` 和 `mem_send_up` 只可保留原始分配，不能处理对象存储。模块的带类型全局在其自身 onload 开始前为 void；其他模块可以通过循环依赖观察到这一点，也可以在更早初始化的模块动态调用本模块时观察到（例如在其 onload 中使用 `reflect_invoke_function`）。此时读取它，在运行时检查类型之处（例如由函数返回）会报错，但 `print`、字符串拼接以及复制到无类型变量会静默接受 void（打印为 `null`）。
+
+`#gvar name` 仍是无类型写法：这类全局是动态的 `any`：不能保存类指针、类值、buffer 或类型参数值，不能访问成员，在赋值前为 void，通常在 onload 中赋值。AST 先列出 `#gvar` 名称（compile-json 拒绝出现在带类型条目之后的名称），它们占用最前面的全局槽，带类型全局按声明顺序随后。
 
 ## 类、字面量对象与指针
 
@@ -113,7 +164,7 @@ void main() {
 }                                   // 依次输出 5、4、3
 ```
 
-`class` 只能在顶层声明。字段必须标注基础类型、类名（字面量对象）、`类名 *`（指针）或 `buffer<T>`，按声明顺序各占一个 slot；没有隐藏对象头。包含继承字段在内仍然零字段的类被拒绝。构造方法与类同名且没有返回类型；不声明构造时合成无参构造，声明带参构造后不会额外合成无参构造。析构为可选的 `~ClassName()`，无参数且不能返回值或直接调用。所有成员公开，支持单继承；不支持多继承、虚函数、动态派发、普通函数重载、静态成员或嵌套类。
+`class` 只能在顶层声明。字段必须标注基础类型、类名（字面量对象）、`类名 *`（指针）或 `buffer<T>`，按声明顺序各占一个 slot；没有隐藏对象头。包含继承字段在内仍然零字段的类被拒绝。构造方法与类同名且没有返回类型；不声明构造时合成无参构造，声明带参构造后不会额外合成无参构造。析构为可选的 `~ClassName()`，无参数且不能返回值或直接调用。所有成员公开，支持单继承和虚方法；不支持多继承、普通函数重载、静态成员或嵌套类。
 
 对象有三种写法：
 
@@ -126,7 +177,7 @@ void main() {
 
 字面量对象按值使用：初始化、赋值、传参和返回都会复制全部 slots，字段中的字面量对象递归复制，指针字段只复制地址。每个副本都是独立对象，到期时各自运行析构。赋值 `a = b` 原地逐字段复制，`a` 的地址不变。指针 `C * y = x;`、指针赋值和传参只复制地址，对象变量重赋值不改变先前创建对象的清理责任。单写 `C * p;` 与 `C * p = null;` 完全相同，声明一个空指针，不构造对象，也不负责清理之后赋给它的对象。
 
-值类型 `C` 与指针类型 `C *` 是不同的类型，不做隐式转换；`null` 只能赋给指针或 address。字面量对象不能直接比较，算术需声明运算符，也不能放进无类型位置：`var`、`def`、`#gvar` 全局、无类型参数、`print` 以及 `mem_get(p) = …` 都会编译失败；需要长期保存的对象请使用指针。结构等价的字面量对象之间可以赋值，但两者的清理析构必须相同；派生类的值不能赋给父类的值（不做切片），上转型只用于指针。两种对象都用 `.` 访问成员。只有带显式类类型的变量、参数、字段及返回值能访问成员：`var p = new C(); p.method();` 会因 `p` 是动态 `any` 而失败，需写 `C * p = new C();`。
+值类型 `C` 与指针类型 `C *` 是不同的类型，不做隐式转换；`null` 只能赋给指针或 address。字面量对象不能直接比较，算术需声明运算符，也不能放进无类型位置：`var`、`def`、`#gvar` 全局、无类型参数、`print` 以及 `mem_get(p) = …` 都会编译失败；需要长期保存的对象请使用指针。类按名称区分：字面量对象只能赋给同一个类，字段布局相同的其他类也不行；派生类的值不能赋给父类的值（不做切片），上转型只用于指针。两种对象都用 `.` 访问成员。只有带显式类类型的变量、参数、字段及返回值能访问成员：`var p = new C();` 声明本身就会被拒绝，需写 `C * p = new C();`。类指针（包括 `C (*)` 借用）不能进入 `var`、`def`、`#gvar`、无类型参数或原始 `mem_get` 存储；诊断例如 `cannot hold a class pointer (P *); declare it as P * or convert explicitly with address(p)`。仍允许把类指针传给 `print` 或反射可变参数，但 print 原有的类值、buffer 和类型参数值限制不变；反射可变参数继续按原规则接受非 void 值。
 
 参数可以写成 `C (*) p`（`C(*) p` 亦可），表示这个函数同时接受 `C *` 指针和 `C` 字面量对象：
 
@@ -140,13 +191,13 @@ read(a); read(b); read(null);   // 三种调用都合法
 bump(a);                        // a.x 变为 101：字面量对象按地址借给函数，不复制
 ```
 
-在函数内部 `p` 的类型就是 `C *`，可以为 `null`，也可以重新赋值。传入字面量对象时，编译器取它的地址传入，不复制，函数对它的修改调用方可见；临时对象（如 `read(make(4))`）在所在语句结束时销毁，调用期间始终有效。实参的类型规则与 `C *` 参数相同：可以传派生类的指针或字面量对象，以及结构等价的类；基类字面量对象不能传给派生类的 `(*)` 参数。`(*)` 只能用于类类型的函数参数（包括构造方法、成员方法和 `extern` 声明），不能用于局部变量、字段、返回类型或 `C * (*)` 这样的组合。它与 `C *` 参数有相同的 ABI（address），`extern` 声明与定义的签名须写法一致。函数若保存了这个指针，字面量对象到期后再使用它会报 `Invalid or expired object address`；对借来的字面量对象执行 `delete` 也会在运行时报错。
+在函数内部 `p` 的类型就是 `C *`，可以为 `null`，也可以重新赋值。传入字面量对象时，编译器取它的地址传入，不复制，函数对它的修改调用方可见；临时对象（如 `read(make(4))`）在所在语句结束时销毁，调用期间始终有效。实参的类型规则与 `C *` 参数相同：可以传同一个类或派生类的指针或字面量对象；字段布局相同的其他类不行，基类字面量对象也不能传给派生类的 `(*)` 参数。`(*)` 只能用于类类型的函数参数（包括构造方法、成员方法和 `extern` 声明），不能用于局部变量、字段、返回类型或 `C * (*)` 这样的组合。它与 `C *` 参数有相同的 ABI（address），`extern` 声明与定义的签名须写法一致。函数若保存了这个指针，字面量对象到期后再使用它会报 `Invalid or expired object address`；对借来的字面量对象执行 `delete` 也会在运行时报错。
 
 脚本拿不到字面量对象的存储地址，例外只有两个：类方法中的 `this`，以及 `C (*)` 参数借到的地址，二者的类型都是 `C *`。方法或函数可以返回或保存这个地址，但字面量对象到期后，再经它访问会报 `Invalid or expired object address`。字面量对象的地址也是普通 address：它的最高位标记内部存储，同样参与比较和偏移运算；存储编号永不复用，过期地址不会指向后来创建的对象。
 
-每层类先为标量、address 和指针字段设置默认值：`int` 为 `0`、`float` 为 `0.0f`、`double` 为 `0.0`、布尔为 `false`、字符串为空串、address 和指针为 `null`。然后按本层声明顺序：字面量对象字段用 `C f(args);` 或 `C f = expr;` 构造，没有初始化时调用零参构造（其类没有零参构造则编译报错）；其他字段执行显式初始化表达式。最后执行本层构造正文；继承时父类先完成这些步骤。全部初始化代码位于实际构造实现的前缀，使用实现模块的全局和调用绑定；字段初始化中的名称按 `this`、成员、全局解析，不受构造参数遮蔽。类不能直接或间接以字面量对象包含自身（请改用指针字段），字面量对象嵌套最多 64 层。指针字段不拥有目标对象，销毁外层对象时不会处理它们，需要时在析构内显式 `delete`。
+每层类先为标量、address 和指针字段设置默认值：`int` 为 `0`、`float` 为 `0.0f`、`double` 为 `0.0`、布尔为 `false`、字符串为空串、address 和指针为 `null`。然后按本层声明顺序：字面量对象字段用 `C f(args);` 或 `C f = expr;` 构造，没有初始化时调用零参构造（其类没有零参构造则编译报错）；其他字段执行显式初始化表达式。最后执行本层构造正文；继承时父类先完成这些步骤。全部初始化代码位于实际构造实现的前缀，使用实现模块的全局和调用绑定；字段初始化中的名称按 `this`、成员、全局解析，不受构造参数遮蔽。类不能直接或间接以字面量对象包含自身（请改用指针字段），经泛型字面量字段（如 `class A<T>{B<T> b;}` 与 `class B<T>{A<T> a;}`）形成的包含环同样拒绝，字面量对象嵌套最多 64 层。指针字段不拥有目标对象，销毁外层对象时不会处理它们，需要时在析构内显式 `delete`。
 
-成员通过 `obj.field`、`obj.method(args)` 或 `this.member` 访问，支持连续访问和调用。类内优先查找局部变量和参数，然后查找成员，最后查找全局。接收对象及实参从左到右各求值一次。成员赋值支持 `=`，成员 `+=` 等复合赋值暂不支持。指针可与结构等价、具有父子继承关系的指针或 `null` 做相等比较，不参与地址算术，整数 `0` 不能隐式作为对象。`null` 运行时编码为独立 address 类型的零值；成员访问先验证对象基地址，再计算字段偏移，空指针即使访问非零偏移字段也会报错。
+成员通过 `obj.field`、`obj.method(args)` 或 `this.member` 访问，支持连续访问和调用。类内优先查找局部变量和参数，然后查找成员，最后查找全局。接收对象及实参从左到右各求值一次。成员赋值支持 `=`，成员 `+=` 等复合赋值暂不支持。指针可与同一个类或具有父子继承关系的指针以及 `null` 做相等比较，不参与地址算术，整数 `0` 不能隐式作为对象。`null` 运行时编码为独立 address 类型的零值；成员访问先验证对象基地址，再计算字段偏移，空指针即使访问非零偏移字段也会报错。
 
 生命周期规则：
 
@@ -156,7 +207,7 @@ bump(a);                        // a.x 变为 101：字面量对象按地址借�
 - 按值参数是调用方对象的副本，随调用结束销毁。
 - 返回本函数拥有的局部或参数时直接移交给调用方，不复制，局部也不会先析构；返回字段、全局或借来的对象时先复制一份再交出。
 - 返回当前函数拥有的自动指针对象时，仅将直接返回对象的所有权移交给实际调用代码块；返回调用者的对象或 `this` 不改变原所有权。`return new C();` 的结果仍需手动删除。
-- 构造失败时不运行该对象自身的析构，已经构造完成的字面量字段会被销毁；如果直接父类已经构造成功，则先执行该父类及其祖先的析构，清理错误不覆盖原构造错误。
+- 构造失败时不运行失败类自身的析构正文；先逆序销毁该类已经完成构造的拥有型字段，再清理已完成的父类及其祖先。某个字段清理抛错也不会跳过其他字段或父类，原构造错误及其调用栈优先保留。
 
 `delete expression;` 只接受指针或 `null`，只能销毁由 `new` 创建的对象；通过别名删除同样有效。`delete null;` 无操作，删除自动指针对象、已失效地址或正在析构的对象报运行错误，删除字面量对象在编译时即被拒绝。删除后其他别名不会自动置空。公共堆的地址会被复用且不提供世代识别，程序必须避免使用悬空的堆指针。
 
@@ -164,11 +215,11 @@ bump(a);                        // a.x 变为 101：字面量对象按地址借�
 
 字面量对象不跨越 JNI 边界：Java 调用返回字面量对象的函数会报错（该值先被销毁），也不能把它作为参数传入或从 Java 读取；请改用指针。C++ 宿主调用得到的字面量对象由宿主持有，不再运行析构，最后一个句柄释放时其地址报废。C++ 宿主还可以用 `blocks::create`、`blocks::resize`、`blocks::length` 和 `blocks::address_of` 直接使用 slot 块：延伸后已有地址仍然有效，缩短后超出长度的地址报错。
 
-`alloc/mem_free/make_free/mem_send_up` 仍是底层内存接口，指针参数及分配结果均为 address，分配数量仍为 int。原始释放会注销对象登记，但不调用用户析构；对象语法应使用 `delete`。这些函数不管理字面量对象的存储：`mem_free` 对它返回 `false`，`make_free`、`mem_send_up` 报错。构造、析构和成员方法均是普通脚本函数，第一个隐式参数为 `C *`（运行时是 address），类结构类型只供编译器使用。完整结构的等价规则适用于赋值、传参、返回和声明签名：按包含继承字段在内的字段类型及顺序比较，忽略类名、字段名和方法；字面量对象与指针分别比较，指针字段递归比较，循环结构通过已比较类型对终止。运行时不保存或检查类结构。跨模块使用共享类声明及 extern 成员，示例见 [多文件类库](../docs/HINT_LINKING.md)。可执行示例 [`examples/classes-regressions.azs`](examples/classes-regressions.azs) 成功返回 `0`。
+`alloc/mem_get/mem_free/make_free/mem_send_up` 只操作原始分配存储。不能通过这些接口读取、写入、释放对象存储或改变其所有权来绕过生命周期规则：`mem_get`、`mem_free`、`make_free`、`mem_send_up` 拒绝对象起点、内部地址及字面量/视图地址，构造期间也不例外。对象应使用带类型的成员访问和 `delete`。构造、析构及方法仍是普通函数，首个隐式参数为 C *（运行时是 address）。编译期按类的名义类型检查；运行时成员访问检查对象存储与边界，不检查类身份。跨模块使用共享类声明及 extern 成员，见[多文件类库](../docs/HINT_LINKING.md)。[类回归示例](examples/classes-regressions.azs) 返回 0。
 
 ## 地址与底层内存
 
-`address` 是独立的无符号 64 位类型，范围为 0 到 `18446744073709551615`。它可用于局部变量、字段、参数和返回类型，空地址为 `null`。显式 address 局部变量须初始化；address 字段默认是 null。`int` 仍是有符号 32 位，普通整数字面量、分配数量、字段偏移、变量槽编号和函数 ID 不会因此变成地址。地址与整数、浮点及布尔值之间没有隐式转换，整数 `0` 不能代替 null。
+`address` 是独立的无符号 64 位类型，范围为 0 到 `18446744073709551615`。它可用于局部变量、字段、参数和返回类型，空地址为 `null`。显式 address 局部变量须初始化；address 字段默认是 null。`int` 仍是有符号 32 位，普通整数字面量、分配数量、字段偏移、变量槽编号和函数 ID 不会因此变成地址。地址与整数、浮点及布尔值之间没有隐式转换，整数 `0` 不能代替 null。显式转换同样拒绝 address 与数值互转：`address(a)` 保留已有 address，`string(a)` 将它格式化为无符号十进制；`address(p)` 也可显式擦除类指针、`C (*)` 借用或具有类指针上界的类型参数，不改变地址位模式或所有权。不能转换裸 null 表达式，详见[显式转换](#显式转换)。
 
 ```cpp
 void main() {
@@ -185,9 +236,17 @@ void main() {
 
 运算只计算地址值，实际读写还会验证当前分配的活跃范围；64 位地址不扩大当前 1,048,576 slots 的堆上限，也不会自动建立或延长对象生命周期。原始分配、提升所有权和手动释放仍按既有规则执行。`mem_get`、`mem_free`、`make_free`、`mem_send_up` 只接收 address，传入 int 会被拒绝。普通 address 返回沿用 `r`，不隐式提升自动分配的所有权；底层跨层传递继续使用 `mem_send_up`。
 
-类指针在编译期仍有自己的结构类型，不可与原始 address 直接互相赋值，也不能用原始 address 访问成员或执行 delete。只有生成执行文件时，类指针和隐式 this 才统一擦除为运行时 address，字面量对象则以运行时对象值传递；对象返回仍通过 `ro` 转移实际拥有的对象。每个 address 字段只占一个 slot，继承的字段前缀布局不变。
+类指针在编译期仍有自己的类类型，不可与原始 address 直接互相赋值，也不能用原始 address 访问成员或执行 delete。需要原始地址数据时可显式用 `address(p)` 擦除指针，字面量仍是 object 值。这是单向擦除，不能把 address/any 强转回类指针，也不会开放通过原始内存接口访问对象槽。对象返回仍通过 `ro` 转移实际拥有的对象。每个 address 字段只占一个 slot，继承的字段前缀布局不变。
 
 完整示例见 [`examples/address-regressions.azs`](examples/address-regressions.azs)，展示按地址遍历 slots、存储地址值及显式移交原始分配，成功返回 `0`。
+
+### 对象存储与已知限制
+
+`address(p)` 可以作为原始地址数据保存，但不会开放其背后的对象。`mem_get(address(p))`（包括通过它赋值）报告 `mem_get cannot access object storage; use typed member access`；`mem_free`、`make_free`、`mem_send_up` 使用相同格式及各自函数名。类分配在构造代码执行前就已标记，因此构造期间擦除 `this` 也无法绕过检查。带类型的成员访问要求对象存储；普通 `alloc()` 区间会报告 `Object member access requires object storage`。
+
+extern 返回的类指针及 C++/Java 宿主传入的类指针仍是受信任的声明。边界检查 address 标签，成员访问要求活动对象存储并检查偏移，但不会证明名义类身份或验证全部字段。宿主应通过类型匹配的脚本包装函数取得指针，不应通过原始内存接口拼装类对象。JNI 原始写入及 `memFree` 同样拒绝对象存储。
+
+这些检查不构成完整的堆内存安全。堆地址不记录它属于哪一次分配：地址被另一个对象复用后，旧别名可能指向新对象，因此不能普遍防止 delete 后使用或重复 delete。删除不会清空别名。自动对象仍可能通过保留的别名或字段逃逸，应限制在其拥有者的生命周期内；正常的直接返回所有权转移不意味着所有逃逸都安全。这些检查不能用作沙箱或指针生命周期证明。
 
 ## 单继承
 
@@ -217,17 +276,46 @@ void main() {
 } // literal 与 item 都按 tagged、point 的顺序析构
 ```
 
-写作 `class Child : Base` 或 `class Child : public Base`。父类可以在源码后面声明，继承环、未知父类和多个父类会报编译错误。布局递归保留父类全部 slots 作为前缀，再按声明顺序追加子类自己的字段；继承至少一个字段的子类可以不声明新字段，不增加对象头或隐藏 slots。父类方法接收同一个对象起始地址，因此无需调整地址。
+写作 `class Child : Base` 或 `class Child : public Base`。父类可以在源码后面声明，继承环、未知父类和多个父类会报编译错误。继承环、没有字段的类和以字面量对象包含自身等布局错误由编译器在类声明处报告（如 `main.azs:1:7: error: in class A: Inheritance cycle involving A`），源码编译与 `compile-json` 的报告相同。布局递归保留父类全部 slots 作为前缀，再按声明顺序追加子类自己的字段；继承至少一个字段的子类可以不声明新字段，不增加对象头或隐藏 slots。父类方法接收同一个对象起始地址，因此无需调整地址。
 
-子类可直接使用继承的字段和方法；同名成员由子类遮蔽。成员绑定取决于表达式的静态类类型：子类对象或指针调用子类同名方法，父类指针调用父类方法；父类方法正文中的名称继续按父类解析。当前没有虚函数或运行时方法选择，也没有用于显式选择被遮蔽成员的 `Base::method()` 表达式；可以先绑定父类指针再访问。
+子类可直接使用继承的字段和方法；同名成员可由子类遮蔽。非虚方法按表达式的静态类类型绑定，父类正文中的名称仍按父类解析。声明为虚方法时，指针调用按下节规则派发。
 
-子类指针可用于父类指针变量、参数和返回值，地址与所有权不变；相等比较也允许这种继承关系。父类指针不能隐式变成有额外字段的子类指针。子类的字面量对象不能赋给父类的字面量对象（不做切片）。没有继承关系的类仍必须完整结构等价，只有相同前缀不足以赋值；继承后的完整结构也可与相同字段布局的平铺声明等价。
+在类函数（方法、构造、析构或字段初始化）中，限定调用 `Base::method(args)` 对 `this` 调用 `Base` 中可见的同名方法；即使当前类用同名方法或字段遮蔽了它，也按静态绑定选择该方法，例如 `int describe() { return Point::describe() * 100 + tag; }`。`Base` 必须是当前类或其父类，书写时不带类型实参，类型实参来自继承链（如 `class IntBox : Box<int>` 中写 `Box::get()`）；泛型方法可显式给出类型实参，如 `Box::echo<string>("e")`。语句也可以以这种调用开头。编译器拒绝以下情况：在类函数之外使用（`A::f() calls are only available inside class functions`）、所写的类既不是当前类也不是其父类（`A is not B or one of its base classes`）、未知方法或字段（`Unknown method: A.h`、`A.x is a field, not a method`）、构造与析构函数、运算符方法、带接收对象的写法（如 `this.A::f()`）、类名带类型实参（`Name a base class without type arguments in A::method(...)`），以及不是类名的名称。
+
+子类指针可用于父类指针变量、参数和返回值，地址与所有权不变；相等比较也允许这种继承关系。父类指针不能隐式变成有额外字段的子类指针。子类的字面量对象不能赋给父类的字面量对象（不做切片）。没有继承关系的类不能互相转换，字段布局完全相同也不行；没有自身字段的子类同样是另一个类，父类指针不能隐式转为它。
 
 构造先执行父类构造，再为本层全部字段设置默认值、按本层声明顺序执行字段初始化表达式，最后执行本层构造正文。不写父类初始化列表时隐式调用 `Base()`；若父类没有无参构造，会在编译时报错。可用 `Child(int n) : Base(n + 1) { ... }` 显式传参，实参使用子类构造参数并从左到右各求值一次。本层字段初始化仍按成员、实现模块全局解析，不被同名构造参数遮蔽。构造函数编号先于父类初始化列表，例如 `Child::Child(int n):0002 : Base(n) { ... }`。
 
-完成对象的析构从最派生类逐级执行到根父类，每层析构正文之后销毁该层的字面量字段；子类未声明析构时仍会调用父类析构，提前 `return` 或析构错误也不会跳过父类。自动回收、字面量对象到期及通过父类指针 `delete` 都使用创建时登记的完整析构链，这项对象清理规则不引入虚方法派发。构造失败只销毁已经成功完成构造的父类部分，不调用失败层级的析构；保留原始错误并释放对象内存。执行预算耗尽时仍保证底层释放，用户析构是否能完整运行受原有预算限制。
+完成对象的析构从最派生类逐级执行到根父类，每层析构正文之后销毁该层的字面量字段；子类未声明析构时仍会调用父类析构，提前 `return` 或析构错误也不会跳过父类。自动回收、字面量对象到期及通过父类指针 `delete` 都使用创建时登记的完整析构链，这条清理链不依赖是否声明虚方法。构造失败先逆序清理失败类已完成构造的拥有型字段，再清理成功构造的父类链，不调用失败类自身的析构正文。字段清理错误不会跳过后续清理，也不替换原错误及其调用栈；对象内存仍会释放。执行预算耗尽时仍保证底层释放，用户析构是否能完整运行受原有预算限制。
 
-跨 hint 库继承采用相同共享声明：父类和子类分别声明 extern 构造、方法、析构，类外实现可以在不同模块中。继承关系和字段顺序保留在可读 AST，执行文件只包含原有地址、字段偏移和普通函数引用；`flush()` 将跨库构造及析构调用一并链接。可运行回归示例见 [`examples/inheritance-regressions.azs`](examples/inheritance-regressions.azs)。
+跨 hint 库继承采用相同共享声明：父类和子类分别声明 extern 构造、方法、析构，类外实现可以在不同模块中。继承关系和字段顺序保留在可读 AST，执行文件包含地址、字段偏移、函数引用和方法绑定，不携带名义类名；`flush()` 一并链接跨库构造、析构及虚方法绑定。可运行回归示例见 [`examples/inheritance-regressions.azs`](examples/inheritance-regressions.azs)。
+
+### 虚方法
+
+```cpp
+class Base {
+    int value;
+    Base(int n) { value = n; }
+    virtual int score() { return value; }
+}
+class Child : Base {
+    Child(int n) : Base(n) {}
+    override int score() { return Base::score() + 100; }
+}
+void main() {
+    Base * p = new Child(7);
+    print(p.score()); // 107
+    delete p;
+}
+```
+
+`virtual` 声明虚方法槽。覆盖继承的虚方法必须写 `override`；也可写 `virtual override`，仍复用原槽。`virtual final` 或 `override final` 禁止进一步覆盖；`final` 不能单独把普通方法变成虚方法，也不能绕过必需的 `override`。参数类型必须完全一致；具体类指针返回类型可以协变为子类指针，泛型返回类型参数则须完全一致。覆盖非虚方法或不存在的方法会被拒绝。
+
+这些修饰符只适用于没有方法类型参数的普通成员方法，不能用于构造、析构、运算符、顶层函数或类外定义。不支持抽象方法，非 extern 声明必须有正文。共享头文件可在普通 `class` 内写 `extern virtual int score():12340002;`，类外实现写普通的 `int Base::score() { ... }`，不重复修饰符。各模块必须使用一致的共享声明及槽顺序，见 [hint 链接](../docs/HINT_LINKING.md)。
+
+通过类指针、`C (*)` 借用、`this` 或具有类指针上界的类型参数调用时，使用当前对象的方法绑定。字面量值接收对象、值上界类型参数、静态已知的 final 槽及 `Base::method(...)` 按静态绑定调用；非虚方法保留原有行为。接收对象和实参从左到右各求值一次。null、失效、其他脚本所属或没有方法表的接收对象会报错；同一个脚本装配的多个模块共享所有权边界。
+
+构造和析构使用当前类的方法表：父类构造中的虚调用选择父类实现，进入子类构造时安装子类表；析构向父类推进时相应切换。方法表位于用户 slots 之外，不改变字段偏移或 buffer 步长。复制（包括 buffer 元素视图）保留方法绑定及已绑定的泛型上下文，逐字段赋值保留目标对象的方法表。这不增加名义类检查，也不消除前述堆生命周期限制。示例见 [虚方法回归](examples/virtual-regressions.azs)。
 
 ## 表达式与流程
 
@@ -235,17 +323,37 @@ void main() {
 
 | 运算符 | 结合性 |
 | --- | --- |
-| `= += -= *= /= %=` | 右结合 |
-| `||` | 左结合，短路 |
+| `= += -= *= /= %= &= \|= ^= <<= >>= >>>=` | 右结合 |
+| `?:` | 右结合，只计算选中的分支 |
+| `\|\|` | 左结合，短路 |
 | `&&` | 左结合，短路 |
+| `\|` | 左结合 |
+| `^` | 左结合 |
+| `&` | 左结合 |
 | `== !=` | 左结合 |
 | `< <= > >=` | 左结合 |
+| `<< >> >>>` | 左结合 |
 | `+ -` | 左结合 |
 | `* / %` | 左结合 |
-| 一元 `+ - !` | 右结合 |
+| 一元 `+ - ! ~` | 右结合 |
 | 括号、字面量、变量、函数调用 | 最高 |
 
 例如 `20-3-2` 得到 `15`，`100/5/2` 得到 `10`，`2+3*(4+1)` 得到 `17`。赋值 `a=b=3` 从右边执行；`&&` 和 `||` 不计算被短路的右侧表达式。
+
+`if`、`while`、`for` 的条件（包括函数式写法）、`?:` 的条件，以及 `!`、`&&`、`||` 的操作数必须是 boolean。数字、字符串、address 和 void 都不自动转为真假，应显式写 `n != 0` 或 `p != null`。已知的非布尔操作数在编译时拒绝，例如 `if condition must be boolean, got int`。动态 `var`、`def` 或无类型参数在实际求值时检查，真实类型为 int 时报告 `Condition must be boolean, got int`。短路规则不变：左侧布尔值已决定结果时，不计算右侧。
+
+相等运算 `==` / `!=` 接受以下操作数配对，结果为 boolean：
+
+| 操作数配对 | 比较规则 |
+| --- | --- |
+| `int`、`float`、`double` 的任意组合 | 数值相等，允许混合数值类型。 |
+| `boolean` 与 `boolean`；`string` 与 `string` | 同类型的值相等。 |
+| `address` 与 `address` 或 `null` | 比较无符号地址值，null 是地址零。 |
+| 同类或具有继承关系的类指针；类指针与 `null` | 比较指针身份；无关类指针、原始 address 与类指针的配对被拒绝。 |
+| `null` 与 `null` | 相等。 |
+| 动态 `any` 与另一个动态值或非类标量 | 延迟到运行时检查，真实值必须符合上面的兼容配对。 |
+
+其他已知配对在编译时拒绝，例如 `Equality requires compatible operand types, got string and int`。动态的不兼容配对在运行时报错，不再返回 false/true。布尔不是数字，整数零不是 null。类值和 buffer 没有通用相等运算，应显式比较字段或元素；无界类型参数也不会获得相等运算。静态类型为 void 的操作数不能比较。运行时的两个 void 值相等（`eq` 为 true，`ne` 为 false）；尚未赋值的动态变量也适用这一规则。
 
 ```text
 // 原有函数式控制语法
@@ -259,7 +367,7 @@ if (i == 0) { return 1; } else { return 2; }
 
 原有内存写入语法 `mem_get(pointer) = value`得到支持；指针表达式只计算一次。为避免复杂指针表达式中的副作用重复执行，`mem_get(pointer) += value` 等复合赋值会明确拒绝。可以先把指针存进变量，再写 `mem_get(p) = mem_get(p) + value`。其他函数调用不能作为赋值左侧。
 
-`return` 可以从多层 if/while/for 中立即退出函数。`break` 退出最内层循环，`continue` 跳过最内层循环当前迭代的剩余语句，两者只能写在循环体内，不能跨函数。退出经过的块仍正常清理其中的对象。`while` 的 continue 重新检查条件，`for` 的 continue 先执行步进表达式，再检查条件；break、return 和运行错误都不执行步进。
+`return` 可以从多层 if/while/for/switch 中立即退出函数。`break` 退出最内层循环或 switch；`continue` 跳过最近外围循环当前迭代的剩余语句，即使位于 switch 内也如此。break 要求处于循环或 switch 中，continue 要求外围有循环，两者都不能跨函数。退出经过的块仍正常清理其中的对象。`while` 的 continue 重新检查条件，`for` 的 continue 先执行步进表达式，再检查条件；break、return 和运行错误都不执行步进。
 
 ```c
 int total = 0;
@@ -274,18 +382,145 @@ print(total); // 9
 
 `i++`、`++i`、`i--`、`--i` 可用作独立语句或 for 步进，只对简单数字或 address 变量进行加减一，不能嵌入返回值、实参或其他表达式，因此不区分前缀/后缀的取值结果。成员或 mem_get 左值仍不支持这种复合修改。整型溢出、地址越界，以及动态变量的非数字且非 address 值会报运行错误。
 
-非 void 函数的每条正常退出路径都必须返回值：if 需要两个分支都返回；while/for 只有条件为字面量 true（或非零数值，for 也可以省略条件）且循环体内没有属于它的 break 时才视为不会正常结束，否则编译器报告 `non-void function can reach the end of its body without returning a value`。语句以分号结束；紧邻块结尾的最后一条语句可以省略分号。函数定义尾部的分号可选。没有数组下标、对象字面量、闭包或异常处理语法；遇到这些语法会拒绝编译。
+非 void 函数的每条正常退出路径都必须返回值：if 需要两个分支都返回；while/for 只有条件为字面量 true（for 也可以省略条件）且循环体内没有属于它的 break 时才视为不会正常结束，否则编译器报告 `non-void function can reach the end of its body without returning a value`。语句以分号结束；紧邻块结尾的最后一条语句可以省略分号。函数定义尾部的分号可选。没有对象字面量、闭包或异常处理语法；遇到这些语法会拒绝编译。字符串、buffer 和提供下标运算符的类支持下标访问。
 
-整数是有符号 32 位，编译期拒绝超范围整数字面量。小数与科学记数法字面量默认生成 double；加 `f`/`F` 后缀生成 float，例如 `1.5f`、`5f`、`2e3f`。两种浮点字面量都会拒绝溢出及下溢为零。数值参与 `print` 或字符串 `+` 拼接时使用最短可往返表示（同 Java/JavaScript 的思路）：`0.1+0.2` 得到 `0.30000000000000004`，`123456789.0` 得到 `123456789`，`1e20` 得到 `1e+20`，float 按 float 精度输出（`0.1f` 得到 `0.1`），负零得到 `-0`。`n / 0` 在除数只能运行时确定时会正常编译；执行时，int、float、double 以及浮点正零或负零都统一抛出 `Division by zero`，不会产生 Infinity 或 NaN。整数溢出同样在运行时报告。
+整数是有符号 32 位，编译期拒绝超范围整数字面量。小数与科学记数法字面量默认生成 double；加 `f`/`F` 后缀生成 float，例如 `1.5f`、`5f`、`2e3f`。两种浮点字面量都会拒绝溢出及下溢为零。数值参与 `print` 或字符串 `+` 拼接时使用最短可往返表示（同 Java/JavaScript 的思路）：`0.1+0.2` 得到 `0.30000000000000004`，`123456789.0` 得到 `123456789`，`1e20` 得到 `1e+20`，float 按 float 精度输出（`0.1f` 得到 `0.1`），负零得到 `-0`。`n / 0` 在除数只能运行时确定时会正常编译；执行时，int、float、double 以及浮点正零或负零都统一抛出 `Division by zero`，不会产生 Infinity 或 NaN。整数算术溢出同样在运行时报告；位移遵循下述位模式规则。
+
+### switch
+
+`switch (值) { ... }` 是语句，不是表达式。它对 int 或 string 值求值一次，再选择匹配的字面量标签。其他类型（包括动态 `any`）被拒绝；应显式转换动态值，例如 `switch (int(value))` 或 `switch (string(value))`。
+
+```c
+string action = "save";
+switch (action) {
+    case "save":
+    case "write":
+        print("saved");
+        break;
+    default:
+        print("unknown");
+        break;
+    case "quit":
+        print("bye"); // 最后一个分段隐式 break
+}
+```
+
+int switch 的 case 标签必须是 int 字面量（包括负整数），string switch 则必须是 string 字面量；表达式、变量、类型不匹配、重复标签及多个 default 均被拒绝。连续标签共享一个分段。`default` 可放在任意位置，只在所有 case 都不匹配时执行。没有匹配的 case 或 default 时，继续执行 switch 后面的语句。首个标签之前不能有语句，switch 之外也不能使用 `case`/`default`。
+
+不允许贯穿执行。每个非末尾分段都必须通过 `break`、`return`、适用的 `continue` 或其他不能正常结束的路径离开；存在到达下一个分段的路径就会报错。最后一个分段允许正常结束，并隐式补上 break。每个分段都有独立的局部变量/对象作用域，连续标签共享该作用域，离开时照常执行清理。
+
+`break` 退出最内层循环或 switch。switch 中的 `continue` 继续最近的外围循环，并执行对应的 for 步进；没有外围循环的 switch 不能使用 `continue`。嵌套 switch 也保持这个目标规则。带 default 且所有分段都返回的 switch 可满足非 void 函数的返回要求；没有 default 时仍有未匹配路径。
+
+选择通过比较完成，不使用跳转表；消耗的执行步数与匹配前检查的标签数量成正比，没有匹配时检查所有标签。不新增运行时 opcode。
+
+### 位运算与移位
+
+`&`、`|`、`^` 和一元 `~` 分别是按位与、或、异或及取反。`<<` 左移，`>>` 带符号扩展地右移，`>>>` 右移并补零。操作数（包括移位量）必须是 int；已知的 float、double、boolean、string 和 address 操作数在编译时拒绝，动态操作数在运行时也必须实际为 int。这些运算从左到右各求值一次，不短路。
+
+运算作用于 32 位位模式，结果仍为 signed int32。左移丢弃移出的高位、低位补零；这种回绕不报告算术溢出。例如 `1 << 31` 为 -2147483648，`-8 >> 1` 为 -4，`-1 >>> 1` 为 2147483647，`~0` 为 -1。每次移位的数量必须为 0…31（含端点）：非法字面量在编译时拒绝，非法动态值在运行时抛错，例如数量为 32 时报告 `Shift count must be between 0 and 31, got 32`。移位量不会按 32 取模。
+
+移位优先级低于加减、高于比较。相等比较优先于按位 `&`，随后依次是 `^`、`|`；三者均优先于 `&&`、`||`。位测试应加括号写成 `(flags & mask) == 0`；`flags & mask == 0` 会尝试对 boolean 做 `&`，因此被拒绝并提示为比较添加括号。
+
+移位符号必须在预处理后的文本中相邻：`a >> b` 是移位，`a > > b` 不是，会被拒绝。类型语法中的泛型结束符仍单独解释，因此 `buffer<buffer<int>>` 及泛型调用后接移位仍然有效。简单变量还支持 `&=`、`|=`、`^=`、`<<=`、`>>=`、`>>>=`；成员、下标和 `mem_get` 不是复合赋值目标。一元 `~x` 降为 `bit_xor(x, -1)`，没有单独的一元 opcode。
+
+### 条件表达式
+
+`条件 ? 真值 : 假值` 对 boolean 条件求值一次，再只对选中的分支求值一次。跳过的分支没有副作用，但两个分支都要通过类型检查。`?:` 的优先级高于赋值、低于 `||`，并且右结合：`a ? b : c ? d : e` 等同于 `a ? b : (c ? d : e)`。
+
+```c
+boolean ready = true;
+double value = ready ? 1 : 2.5; // double 1
+int divisor = 0;
+int safe = ready ? 7 : 10 / divisor; // 7，未选中的除法不运行
+```
+
+两个分支必须有共同类型：
+
+| 分支类型 | 结果类型 |
+| --- | --- |
+| 数值类型 | 按 double、float、int 取最宽类型；选中的较窄分支转换到该类型。 |
+| 相同的非 void 类型 | 保持该类型，包括同类的类值或相同 buffer 类型。 |
+| 父类和子类指针 | 父类指针类型。 |
+| 指针或 address 与 `null` | 对应的指针或 address 类型；具有指针上界的类型参数 `T` 与 `null` 配对时保持 `T`。 |
+
+数值提升遵循显式转换的舍入规则，因此 int 转 float 可能舍入。void 分支、无关类指针、不同类值类型，以及 string/int 等不兼容标量配对均被拒绝。即使类有继承关系，类值也不会隐式切片为父类值。两个动态 `any` 分支保持 `any`；`any` 与其他已知类型的配对被拒绝，必要时应显式转换动态操作数。
+
+选中的分支在当前外围作用域中执行；条件选择不会像函数式 `if` 一样为分支建立新作用域。拥有的字面量临时值按原规则存活到语句边界，自动指针对象保持外围块的生命周期，原有所有权与清理规则继续适用。写入检查递归检查两个分支：如果 `items[0]` 是 getter 返回的类值副本，`(ready ? items[0] : local).field = 1` 会被拒绝，即使该分支运行时不会选中。应先读到明确类型的局部变量，修改后再写回。
+
+`:` 两侧可不加空格：`ready?1:2`、`ready?true:false` 和 `ready?1:1e5` 均有效；表达式中的字面量仍遵守正常数值检查。这不改变 `:0002`、`:1e5` 等十六进制函数编号后缀、构造函数的父类初始化列表或 `Base::method()` 限定调用。
+
+### 显式转换
+
+`int(x)`、`float(x)`、`double(x)`、`string(x)` 和 `address(x)` 恰好接受一个表达式，只求值一次。它们是保留的编译器内置形式，不能由用户函数覆盖。支持的源类型/目标类型配对如下：
+
+| 源类型 | `int` | `float` | `double` | `string` | `address` |
+| --- | --- | --- | --- | --- | --- |
+| `int`、`float` 或 `double` | 向零截断，再检查 int32 范围 | 舍入为 float 并检查溢出 | 转为 double | 现有的最短可往返数值文本 | 拒绝 |
+| `string` | 解析十进制整数 | 按 float 解析十进制数 | 按 double 解析十进制数 | 恒等 | 拒绝 |
+| `address` | 拒绝 | 拒绝 | 拒绝 | 无符号十进制文本 | 恒等 |
+| 类指针、`C (*)` 借用或指针上界 `T` | 拒绝 | 拒绝 | 拒绝 | 拒绝 | 显式擦除，不改变所有权 |
+
+已知的 boolean、void、类值、buffer、null，以及没有类指针上界的类型参数来源被拒绝。类指针及指针上界类型参数只允许上表中的显式 address 擦除，不生成 opcode 49；值上界和无界 T 仍被拒绝。没有 boolean、void、类、buffer 或类型参数转换目标。`int(addressValue)`、`address(7)`、`address("7")` 仍不支持。`bool(x)` / `boolean(x)` 报告 `Boolean conversions are not supported; write a comparison`；C 风格 `(int)x` 报告 `C-style casts are not supported; write int(x)`。
+
+数值转 int 先向零截断，再检查范围：`int(2147483647.9)` 为 2147483647，`int(-2.9)` 为 -2。浮点转换可能损失精度（`float(16777217)` 为 16777216），允许次正规数和下溢为零，但拒绝溢出或非有限结果。这种下溢规则适用于数值及字符串转换；上文的源码字面量范围检查仍是另一套规则。
+
+整数字符串必须符合 `[+-]?[0-9]+`，不能含小数点或指数。float/double 字符串允许可选正负号、可带小数点的十进制数字（至少一位），以及可选的 `e`/`E` 指数（可带正负号，至少一位数字）。解析与区域设置无关，小数点固定为 `.`。空白、十六进制、`f` 后缀、NaN/Infinity、嵌入 NUL 和尾部多余文字都会被拒绝。例如 `int("+7")`、`double("2.5e-3")` 成功，`int("1e2")`、`float(" 1")` 失败。即使参数是字符串字面量，内容和范围也在运行时检查。
+
+静态已知的不支持配对在编译时报告 `Cannot convert X to Y`；动态 `any` 参数按真实运行时标签检查。静态已知的同类型转换是恒等操作，不生成转换 opcode；`any` 总是生成 opcode 49，即使真实类型已与目标相同。运行时错误消息例如：
+
+```text
+Cannot convert double to int: value is out of range
+Cannot convert string " 1" to int: invalid decimal integer
+Cannot convert string "1f" to float: invalid decimal number
+Cannot convert string "1e400" to double: value is out of range
+```
+
+错误中引用的字符串最多显示前 64 个 Unicode 标量字符，截断时在引号内追加 `...`。引号和反斜杠会转义；非 ASCII 字符及 NUL 使用 ASCII 形式的 UTF-16 转义，例如 `\ud83d\ude00` 和 `\u0000`，保证消息可以安全地经过 JNI。
 
 ## 字符串、注释与预处理
 
 字符串可用单双引号。支持 `\\`、`\"`、`\'`、`\n`、`\r`、`\t`、`\b`、`\f`、`\0`、`\uXXXX`；`\uXXXX` 产生的 UTF-16 代理项必须成对书写（如 `\uD83D\uDE00`），孤立代理项在编译时报错；字符串中的空格、逗号、括号、分号和花括号完整保留。字符串不能跨越实际换行。支持 `//` 行注释和 `/* ... */` 块注释，括号、字符串、转义或注释未闭合时给出错误位置。
 
+### 字符串函数
+
+字符串下标、长度、搜索位置和子串端点按从零开始的 Unicode 码点计数，不按 UTF-8 字节、UTF-16 代码单元或字素簇计数：BMP 之外的 emoji 算一个码点，基础字母加组合附加符号算两个。只有 `byte_length` 统计 UTF-8 字节数。匹配精确且区分大小写，不进行 Unicode 规范化。嵌入 NUL 是普通码点，不会终止字符串。
+
+| 字符串形式 | 等价内置函数 | 结果 |
+| --- | --- | --- |
+| `s.length()` | `str_length(s)` | 码点数量。 |
+| `s.byte_length()` | `str_byte_length(s)` | UTF-8 字节数。 |
+| `s.substring(begin, end)` | `str_substring(s, begin, end)` | 半开区间 `[begin, end)` 的字符串。 |
+| `s.char_at(i)` 或 `s[i]` | `str_char_at(s, i)` | 含一个码点的字符串。 |
+| `s.code_at(i)` | `str_code_at(s, i)` | int 表示的 Unicode 标量值。 |
+| `s.index_of(needle[, from])` | `str_index_of(s, needle[, from])` | from 及之后首个匹配的码点下标，未找到为 -1；from 默认是 0。 |
+| `s.contains(needle)` | `str_index_of(s, needle, 0) >= 0` | 是否包含 needle。 |
+| `s.starts_with(prefix)` | `str_starts_with(s, prefix)` | 是否匹配前缀。 |
+| `s.ends_with(suffix)` | `str_ends_with(s, suffix)` | 是否匹配后缀。 |
+| `str_from_code(code)` | 同名函数；没有接收对象形式 | 含一个 Unicode 标量值的字符串。 |
+
+```c
+string text = "A😀中";
+print(text.length());         // 3
+print(text.byte_length());    // 8
+print(text[1]);               // 😀
+print(text.substring(1, 3));  // 😀中
+print(text.index_of("中"));    // 2
+print(str_from_code(128512) == text[1]); // true
+```
+
+`char_at`、`code_at` 及下标访问要求 `0 <= i < length`。子串要求 `0 <= begin <= end <= length`，空区间产生空串。搜索起点要求 `0 <= from <= length`。空 needle 在 from 处匹配，包括 length 处；空前缀、后缀总是匹配。`str_from_code` 接受 0…0x10ffff，但排除代理项 0xd800…0xdfff；码值 0 产生 NUL。
+
+下标和码值必须为 int，字符串参数必须为 string，void 实参被拒绝。接收对象和实参从左到右各求值一次。方法名只提供表中的 snake_case 形式；`contains` 只有方法形式，不占用独立内置 ID。双参数 `str_index_of(s, needle)` 和单参数 `s.index_of(needle)` 都在编译时补上显式的零起点。字符串方法和下标直接绑定保留的字符串内置函数，不受同名类方法影响。
+
+字符串不可变。`s[i] = value` 报告 `Strings are immutable; cannot assign through an index`；应构造新字符串，再给变量赋值。所有字符串函数都拒绝宿主传入的非法 UTF-8，包括 `byte_length` 和 needle 为空的搜索。下标/范围错误使用 `std::out_of_range`（JNI 为 `IndexOutOfBoundsException`），例如 `String index 5 is outside length 3` 或 `String substring start 2 is after end 1`。非法 UTF-8 或标量值使用 `std::invalid_argument`（JNI 为 `IllegalArgumentException`），消息为 `Invalid UTF-8 string` 或 `Invalid Unicode code point: 55296`。运行时调用栈保留这些异常类型。
+
+### 预处理
+
 支持以下预处理指令，可在行前缩进：
 
 ```text
 #include "relative/path.azs"
+#pragma once
 extern int host_add(int, int):0xccf0001;
 #namespace 123
 #gvar variable_name
@@ -306,13 +541,121 @@ extern int host_add(int, int):0xccf0001;
 #undef LIMIT
 ```
 
-`#setattr` 用于条件，不替换代码；`#define` 是标识符级文本替换，不替换字符串、注释、数值字面量内部或其他标识符的子串；紧贴数字的标识符字符（如 `5N`、`0x10`、`2e`）属于该数值字面量，不会展开，而由词法分析报告非法后缀。不支持带参数的宏。include 循环、宏循环、超出 64 层展开、单行宏展开超过 1,048,576 个字符、不匹配条件等会报错。未识别的预处理指令会立即报错，包括未启用的条件分支；普通说明文字应使用 `//` 或 `/* ... */`。宏展开采用文本语义，复杂表达式请写 `#define VALUE (1 + 2)`。
+`#include "path"` 先查找所在文件的目录，再依次查找每个 include 目录（`-I` 或 `AzScript.includeDirectories`），使用找到的第一个普通文件；同名目录不会中止查找。包装脚本的标准库目录排在所有 `-I` 目录之后。include 根目录是主文件所在目录（字符串源码为其基目录）和各 include 目录，include 必须位于其中之一。绝对路径（`Absolute include path "/etc/passwd" is not allowed`）以及离开所有根目录的路径（`Include "../x.azs" escapes the allowed include roots (...)`）不经文件系统即被拒绝。根目录内的符号链接会被跟随；目标位于所有根目录之外的 include 被拒绝且不会被读取，但错误信息仍可能反映该目标是否存在。`..` 按词法解析，先于符号链接；经符号链接给出的 include 目录也包含按该链接写法拼出的路径。根目录下整个子树中的文件都可以被 include，其内容也可能出现在诊断中，所以编译不可信源码时，根目录中不应有私密内容。`--unrestricted-includes`（`AzScript.unrestrictedIncludes`）允许绝对路径和根目录之外的路径。找不到 include 时列出全部查找过的路径，例如 `Include not found: "x.azs" (searched /work/app/x.azs, /work/lib/x.azs)`，并说明有几个位于根目录之外的候选路径未被查找。路径写在双引号中，以 `/` 分隔；旧的无引号写法 `#include lib/x.azs` 以该行其余部分为路径，不支持 `#include <x.azs>`。
 
-源文件开头的 UTF-8 BOM 会被忽略，不影响首行指令。`return`、`if`、`else`、`while`、`for`、`break`、`continue`、`def`、`var`、`class`、`new`、`this`、`null`、`delete`、`extern`、`public/private/protected/virtual`、所有类型名以及 `true/false` 是保留字，不能声明为函数、参数、变量、`#gvar`、`#define` 或 `extern` 的名字。
+`#setattr` 用于条件，不替换代码；`#define` 是标识符级文本替换，不替换字符串、注释、数值字面量内部或其他标识符的子串；紧贴数字的标识符字符（如 `5N`、`0x10`、`2e`）属于该数值字面量，不会展开，而由词法分析报告非法后缀。不支持带参数的宏：`#define F(x) ...` 报告 `Function-like macros are not supported: F; write a function, or put a space before '(' for an object-like macro`，`(` 前有空格的 `#define F (x)` 则是值为 `(x)` 的普通宏。include 循环、宏循环、超出 64 层展开、单行（含注释）在宏展开前或展开后超过 1,048,576 个字符（`Source line exceeds 1048576 characters` / `Macro expansion exceeds 1048576 characters on one line`）、不匹配条件等会报错。未识别的预处理指令会立即报错，包括未启用的条件分支；普通说明文字应使用 `//` 或 `/* ... */`。宏展开采用文本语义，复杂表达式请写 `#define VALUE (1 + 2)`。
 
-嵌套上限以 ABD 的 128 层容器嵌套为准：函数体从第 4 层开始，每个二元/一元运算、每个调用参数、每条语句和每个块各占一层，所以一个表达式大约可以串联 120 个运算符，或嵌套约 60 层块。超限时编译器报告所在函数和行列，例如 `In function main:2:8: Expression nesting exceeds the ABD limit of 128 levels`。泛型类型及指针的类型表达式嵌套最多 64 层，手写 AST 中的类型字符串也遵守此限制。语法递归和 JSON 容器另有 320 层防护上限，用于保护宿主；循环引用的 AST 会提前拒绝。错误后同一进程可以继续编译其他程序。
+`#pragma once` 使所在文件在一次编译中只展开一次：之后再 include 同一文件时不产生任何内容，也不计入 include 次数。同一文件按解析符号链接后的真实路径判断，与 include 的写法无关。该检查先于 include 循环检查，所以带 `#pragma once` 的文件经其他文件再 include 自身时直接跳过；文件在执行到 `#pragma once` 之前 include 自身仍是循环。未启用条件分支中的 `#pragma once` 不生效。只支持 `once`，在启用的分支中其他名称或其后多余的文字会报错；与 C 相同，未启用的分支不检查 pragma；字符串源码不能被 include，其中的 `#pragma once` 没有效果。`#ifndef` include guard 照常可用。
 
-语法错误包含行列，符号错误包含函数名及行列。经过 include 或宏展开后，语法诊断的行列目前对应合并后的源码，并非精确映射回每个 include 文件；预处理本身的错误另包含处理目录与行号。
+源文件（主文件和被包含文件）必须是普通文件：目录、FIFO 和设备文件不会被打开。源文件须为合法 UTF-8，非法字节报告其所在的行列。同一文件在一次编译中只读取一次，再次 include 时复用已读取的文本。预处理有以下上限：
+
+- 单个源文件最多 16 MiB（16,777,216 字节），一次编译读取的不同源文件合计最多 64 MiB；
+- include 最多嵌套 64 层，一次编译最多展开 4096 次 include，被 `#pragma once` 跳过的不计；重复 include 的头文件应使用 `#pragma once`，因为 include guard 既不减少展开次数，也不能避免每次 include 时重新扫描头文件；
+- 预处理后的文本（含全部 include 和宏展开）最多 16,777,216 个字符，不计最后一行的换行符，所以不含 include 和宏的最大源文件不会超出此上限；
+- 整个程序最多 4,194,304 个词法记号。
+
+源文件开头的 UTF-8 BOM 会被忽略，不影响首行指令。`return`、`if`、`else`、`while`、`for`、`switch`、`case`、`default`、`break`、`continue`、`def`、`var`、`class`、`new`、`this`、`null`、`delete`、`extern`、`public/private/protected/virtual`、`override`、`final`、`any`、所有类型名以及 `true/false` 是保留字，不能声明为类、字段、方法、类型参数、函数、参数、变量、`#gvar`、`#define` 或 `extern` 的名字，报告为 `'any' is a reserved word and cannot be used as a name`。标识符的字符沿用 Java 标识符规则中基本多文种平面（BMP）的字符（字母、数字、`_`、`$` 等，不能以数字开头），但控制字符和格式字符（如零宽空格 U+200B、双向覆盖 U+202E）不能出现在标识符中，以免两个名字看起来相同，源码中报告为 `Unexpected character: U+202E`；不在文件开头的 U+FEFF 同样如此报告。诊断信息把这类字符打印为转义形式，如 `Invalid field name: x\u202e`。`compile-json` 对手写 AST 中的类、字段、方法、类型参数、函数、参数、局部变量和全局变量名应用同一套规则，例如 `in class P: 'any' is a reserved word and cannot be used as a field name`；以 `#` 开头的局部变量名留给编译器生成的变量。
+
+### 表达式大小与嵌套
+
+执行文件仍限制为 128 层物理 ABD 容器。编译器按实际编码结构计数，包括表达式记录、实参/语句列表、常量封装、操作上下文及其子列表；函数体从第 4 层开始。因此源码运算符数量本身不是深度上限：安全时，编译器把中间结果存入隐藏局部变量，生成较浅的语句。
+
+拆分适用于初始化、返回、表达式语句、if 条件及 for 每轮条件/步进中符合条件的立即求值部分；每次切分都必须保持求值、复制和生命周期规则。拥有型捕获在原语句后释放，返回时先保留结果再清理捕获。if 条件在进入任一分支前完成检查并释放其拥有型临时值；`?:` 和布尔表达式的临时值保留通常的表达式/语句生命周期。
+
+借用的拥有型值或动态 any 值只能在原操作已经产生实参/值副本的位置捕获：普通或虚调用的参数、buffer 实参或比较操作数。借用的 buffer 接收对象不能捕获，因为复制会改变别名身份。标量前缀不能把原生/extern 调用的拥有型实参或比较/buffer 的拥有型快照移入更早的语句。若要让新产生的拥有型接收对象跨越后续脚本调用保留，必须传递检查这些函数及其被调用者，证明其不改变作用域和生命周期；仅有标量返回类型并不足够。`mem_send_up`、反射/加载库、未知宿主或虚调用、未证明安全的类/成员/buffer/泛型操作及类型未知的 any 值都会阻止此证明，后续可能返回自动指针的调用也会使切分不安全。这些情况报告 `Expression nesting exceeds the ABD limit of 128 levels; this cut would change object lifetime or copying; store this operand in a local variable first`。
+
+原始内存或带类型成员赋值的 RHS 若需拆分，就不能含调用或修改。否则诊断以 `; store RHS in a local variable first` 结尾，因为现有指令无法在任意 RHS 副作用期间保留原存储引用。纯 RHS 可在捕获并验证目标后拆分；带类型成员访问保留对象基址及原字段偏移，不会变成原始内存访问。
+
+惰性操作数（`&&`/`||` 右侧、任一 `?:` 分支或函数式 if 分支）内部及 while 条件内部的切分不能移到外围语句之前。需要这种切分时，编译器在源码位置报告原因，并提示先存入局部变量。诊断以 `Expression nesting exceeds the ABD limit of 128 levels` 开头，并附加 `; store this operand in a local variable first` 或 `; store this condition in a local variable first`。惰性分支的计算应放在实际选中的分支内；while 条件可在循环体内计算，再显式检查并 break，确保每轮重新计算。较深的后缀/成员/调用链及真正嵌套的语法仍消耗深度，自动拆分不保证无限嵌套。
+
+泛型及指针类型表达式仍有独立的 64 层上限。语法递归和 JSON 容器有 320 层防护，编译表达式递归有 640 层防护；循环 AST 会被拒绝。错误仍有位置，同一进程之后可以继续编译。Java `Compiler.compileExpression` API 同样校验代码树和编码深度，可以降级语句数组；独立表达式若需要兄弟语句，则报告 `Expression requires statement-level spilling; store this operand in a local variable first`，应把相关计算放进语句数组或函数。
+
+`getDepth()` 返回实现定义的运行时作用域深度，不等同于源码花括号层数，编译器生成的作用域也可能影响它。
+
+### 长运算符链
+
+同一优先级上的二元运算链超过 128 个操作数时，使用扁平的可读 `chain` 节点；128 个及以下仍保留既有嵌套 AST。括号、优先级变化和后缀/成员/调用嵌套仍形成独立表达式，遵守相应嵌套限制。
+
+全 `&&` 或全 `||` 链会平衡化，仍从左到右短路求值；每个操作数在原检查运算符的位置验证为 boolean，再执行后续副作用，因此保留错误位置且不引入语句作用域。字符串 `+` 链只有在每个操作数都是字符串字面量、字符串局部变量/参数或返回类型已检查为 string 的调用时才平衡化。其他链按有界分段保持左折叠，数值舍入、中间溢出、数值/字符串混合相加、调用及副作用均保持原顺序。例如 `1 + 2 + "x"` 的数值前缀仍生成 `"3x"`，不能因平衡化变成 `"12x"`；操作数和运算均不会重复执行。
+
+扁平 AST 减少编译嵌套，不增加执行 opcode 或格式版本；降级后的结果仍须符合物理 ABD 上限及前述全部语句拆分限制。左折叠分段通过同一套安全检查；重载运算符的拥有型结果若需要不安全的分段捕获，会收到生命周期/复制诊断。原本符合限制的普通表达式保持既有 AST 和 ABD 结构。
+
+### 长 else-if 链
+
+语句 `if (...) { ... } else if (...) { ... } ... else { ... }` 从左到右检查条件，到首次匹配时只执行该正文，跳过后续条件及正文；末尾 else 可省略。每个条件须为 boolean，分支作用域和正常清理规则不变。分支内的 return、break、continue 保留原源码目标，包括处于外围循环和 switch 中的情况。
+
+解析器迭代收集 else-if 链；超过 128 个条件时使用扁平可读 `if-chain`，128 个及以下保留既有嵌套 AST。编译先按实际剩余 ABD 深度尝试普通嵌套 if 及其支持的切分；仍无法容纳时，才对整条链尝试扁平降级，并遵守下述作用域检查。较短的链位于循环或其他嵌套语句内时同样适用，因此 128 是 AST 表示的阈值，不保证 128 层执行 if 一定符合限制。
+
+扁平降级能在链旁生成兄弟语句时，会让首个条件的求值和布尔检查保留在原外围作用域；字面量临时值在进入选定分支前结束，返回的自动指针保留原所有者。后续条件和被移动的正文必须传递检查其操作及调用的辅助函数，证明作用域和生命周期不变。仅有标量返回类型不足以证明安全：`mem_send_up`、间接调用的不安全辅助函数、反射/加载库、未知宿主/虚调用、未证明安全的类/成员/buffer/泛型操作及未知 any 值都会阻止此证明。后续条件中的调用不能引入 address、any 或 object 结果；无花括号的首个条件若无法通过兄弟语句保留其精确作用域，也须通过证明。
+
+检查失败时报告 `Flattening this if ladder would change object lifetime or scope; store this operand in a local variable first`，因此超过 128 个分支不保证一定能编译。可用作用域明确的局部变量表达生命周期，或调整条件链结构；属于被跳过分支的计算仍须有条件地执行。
+
+扁平降级只适用于语句。产生值的函数式 if 在符合限制时保留表达式语义和嵌套表示；无法安全编码时报告带位置的限制错误，不会静默变成 void 语句。每个条件和正文仍遵守拆分限制，扁平链不允许不安全的拥有型捕获或惰性操作数内部切分。真正嵌套的块和表达式保留既有上限，不增加 opcode、exec 版本或快照版本。
+
+### 诊断
+
+编译错误采用 gcc/clang 格式 `文件:行:列: error: [in 上下文: ]消息`，输出到标准错误。经过 `#include` 和宏展开后，位置仍指向原始文件、行和列：
+
+```text
+inc/lib.azs:6:3: error: in function broken: Initializer for s expected string, got int
+main.azs:2:1: note: in file included from here
+Error: compilation failed: 1 error
+```
+
+- 被包含文件中的错误之后，每层外围 `#include` 各有一行 `note: in file included from here`，由内向外排列。
+- 宏展开产生的记号上的词法或语法错误报告在宏的使用位置，随后一行 `note: in expansion of macro 'NAME' defined here` 指向其 `#define`；`#define` 位于另一文件时，还附上该文件的 include 链。展开代码中的语义错误报告在宏的使用位置，不附此注释。展开之后的记号保持各自的列号。
+- 预处理错误指向指令的 `#`；未闭合的条件报告在其起始指令，未结束的注释报告在注释开始处。找不到主文件时提示 `Cannot open source file "x.azs": file not found`，找不到 include 文件时提示 `Include not found: "x.azs" (searched /work/x.azs)`，其中查找过的路径为绝对路径，存在但无法打开的 include（例如符号链接循环）提示 `Cannot open include file "x.azs": <原因>`，非普通文件提示 `Source file "x.azs" is not a regular file`，非法 UTF-8 提示 `Source file "x.azs" is not valid UTF-8 (line 3, column 7)`；include 循环会列出相关文件。源文件和被包含文件的名称不能含有控制字符或双向格式字符，因为诊断会输出这些名称（`Invalid source file name` / `Invalid include file name`）。
+- 上下文指出外围声明：`function main`、`function C::m`、构造与析构函数的 `function C::C` 和 `function C::~C`、`function C::operator[]`、`initializer of class P`、`class P` 或 `global g`。没有源码位置的错误（例如手写 AST 的格式错误）只给出输入文件名：`compile` 为源文件，`compile-json` 为 JSON 文件。
+- 从源码编译时，重复的函数、类、函数 ID 以及冲突的 extern 声明附带 `previous definition is here` 或 `previous declaration is here` 注释；同一头文件被读取两次造成的重复定义还会提示添加 `#pragma once` 或 include guard。函数 ID 按 8 位十六进制显示，例如 `0x0fff0005`。
+- 非 void 函数可能不经 `return` 走到末尾时，错误报告在其结束的右花括号处。
+
+文件名对主文件使用其文件名，对被包含文件使用相对于包含它的第一个 include 根目录（先主文件目录，再依次为各 include 目录）、以 `/` 分隔的路径，所以与项目或发行包所在的位置无关。若更靠前的根目录中有同名的另一个文件，或该名称已属于另一个文件，则改用相对主文件目录的路径（例如 `../lib/util.azs`），因此名称不随 include 顺序变化；位于所有根目录之外的文件（仅 `--unrestricted-includes` 允许）同样如此命名。这个名称也被占用或不存在相对路径时，最后才使用绝对路径。`execute(String)` 使用 `<source>`，单独编译的表达式使用 `<expression>`。这些名称保存在 AST 的 `sources` 表中，所以同一程序的 `compile` 与 `compile-json` 输出完全相同的带位置诊断。`compile-json` 将格式错误的 JSON 报告在其行列，没有 `sources` 表的 AST 以 JSON 文件名命名。
+
+#### 多个错误与退出码
+
+一次编译会一并报告彼此独立的错误。编译分阶段进行：预处理、词法分析、语法分析、语法分析后的基类初始化、extern 声明与函数 ID 检查、AST 结构检查、全局声明（类布局、extern、abstract 映射和全局变量）以及函数体。在一个阶段内，编译器出错后会恢复：预处理器从下一条指令或下一行继续，语法分析从下一个声明、类成员或语句继续，检查器从下一个类、全局项或函数继续。某一阶段报告了错误时编译随即结束，后续阶段不会处理有误的输入；例如存在语法错误时，程序其他位置的类型错误不会报告。每个阶段内的错误按源码顺序列出，被包含文件的错误位于其 `#include` 处。语法、AST、include 与宏的嵌套及长度上限，include 次数、源文件读取总量、预处理文本长度和记号数量上限，以及内部编译器错误，会立即停止编译。
+
+默认最多报告 20 个错误；`--max-errors N` 修改上限，`0` 表示不限，`1` 表示在第一个错误处停止。若之后还有错误，列表以 `note: too many errors emitted (limit 20); stopping` 结尾。CLI 随后输出汇总行，例如 `Error: compilation failed: 2 errors`，不写出任何输出文件。退出码：成功为 0，程序或命令行有错误为 1，内部编译器错误为 2；未知选项等用法错误输出 `Error: 消息`。
+
+内部编译器错误指编译器自身而非程序的故障，例如编译从源码解析的程序时出现意外的 Java 异常。其文本为 `internal compiler error: StackOverflowError`（异常及其消息），随后是 `note: this is a compiler bug; rerun with --debug-compiler for a stack trace`，最后的汇总行为 `Error: compilation failed: internal compiler error`。`--debug-compiler` 还会输出 Java 堆栈。
+
+`compile-json` 先检查 AST 的结构：必需字段、编译器读取的 JSON 类型、位置、`sources` 表以及数值范围。每处违例都针对 JSON 文件报告并给出 JSON 指针，例如 `tree.json: error: Malformed script JSON at /body/fff/_funcfff0000/metadata/position: expected an integer, got "abc"`。此类 AST 引起的意外故障报告为最近带位置节点处的 `Malformed script JSON near main.azs:3:10`，退出码为 1；`--debug-compiler` 输出底层异常。
+
+Java 调用方得到同样诊断的 `azertia.script.CompileException`，它是 `IllegalArgumentException`，`diagnostics()` 列出各条诊断，消息即其文本，`internal()` 表示是否为内部编译器错误。`AzScript.execute(...)` 与 `Compiler.compile(...)` 默认最多报告 20 个错误。请像本文开头的示例那样向两个步骤传入同一个 `azertia.script.Diagnostics`：只有这样，已解析程序上的意外故障才归为内部编译器错误；以其他实例编译的 AST 按外部提供的 JSON 处理。修改上限或[警告](#警告)时配置该实例，例如 `new Diagnostics().maxErrors(0)`。一个实例只服务一次编译；`Diagnostics.failFast()` 在第一个错误处停止。通过 `Compiler.compileExpression` 单独编译的表达式在第一个错误处停止。
+
+#### 警告
+
+警告指出能够编译、但很可能有误的代码。其格式与错误相同，严重级别为 `warning:`，末尾给出控制它的选项；警告从不改变编译产物：
+
+```text
+main.azs:4:9: warning: in function main: assignment used as a condition; use '==' to compare, or wrap the assignment in parentheses [-Wassign-in-condition]
+```
+
+| 警告 | 默认 | 报告对象 |
+|---|---|---|
+| `assign-in-condition` | 开启 | 直接写作 `if`、`while` 或 `for` 条件的普通 `=` 赋值，例如 `if (done = check())`，位置为其 `=`。确需赋值时加括号表明意图：`if ((done = check()))`。 |
+| `unreachable-code` | 开启 | `return`、`break`、`continue`、各分支都会离开的 `if`/`else`、带 default 且各分段都返回的 switch，或不含 `break` 的 `while (true)`/`for (;;)` 循环之后的第一条语句；每个块只报告一次。与错误相同，赋值或 `++`/`--` 语句的位置为其运算符。 |
+| `unused-variable` | 关闭 | 声明后从未使用的局部变量；读取或赋值都算使用。参数、以 `_` 开头的名字，以及为构造和析构而声明的对象（`C c;`、`C * p(args);`、buffer 和类型参数的值）不在此列。 |
+
+`-Wall` 开启全部警告，`-W<名称>` 开启、`-Wno-<名称>` 关闭单个警告；指名某个警告的选项无论写在 `-Wall` 之前还是之后都优先，同一警告以最后一个选项为准。`-w` 关闭全部警告。`-Werror` 把已开启的警告作为错误报告，例如 `main.azs:4:9: error: in function main: ... [-Werror=assign-in-condition]`，编译随之失败。未知的警告名称属于用法错误（`Error: Unknown warning option: -Wxyz`）。
+
+编译成功时警告写到标准错误，退出码为 0。编译失败时警告与错误按源码顺序一并列出，并计入汇总行，例如 `Error: compilation failed: 1 error, 1 warning`。这些检查在 AST 上进行，所以 `compile` 与 `compile-json` 报告相同的警告；没有源码位置的 AST 节点（例如手写 AST 中的节点）和编译器生成的代码从不产生警告。Java 调用方配置 `Diagnostics` 实例，例如 `new Diagnostics().allWarnings().warning("unreachable-code", false).warningsAsErrors(true)`，并在编译后读取 `diagnostics.warnings()`；`Diagnostics.WARNINGS` 列出全部警告。
+
+## 运行错误与调试信息
+
+编译时加 `-g` 可让运行错误包含函数名和源码位置；`compile` 和 `compile-json` 均默认不携带调试信息。独立解释器把消息和调用帧写到标准错误，退出码为 1：
+
+```text
+AzScript error: Division by zero
+  at divide (main.azs:2:14)
+  at main (main.azs:5:12)
+```
+
+调用帧从出错函数向外排列到调用方。没有调试信息时，脚本帧显示为 `  at function 0x0fff0002`。原生回调显示为 `  at native function 0x12340001`；`0x0abd` namespace 的内置函数不增加原生帧。最多保留 64 帧，其余以 `  ... N more frames` 报告。行列从 1 开始，列按 UTF-16 代码单元计数，因此补充平面的 Unicode 字符占两列。被包含文件保留自己的源码位置。
+
+C++ 异常保留原类型和 `what()` 消息。`azertian::describe_error(error)` 返回 `what()` 加上匹配的调用帧，不含 CLI 的 `AzScript error: ` 前缀和末尾换行；必须在 `destroy()` 或再次进入运行时之前调用。`last_error_trace()` 返回含 `frames` 和 `omitted_frames` 的 `error_trace`；`format_error_trace(trace)` 只格式化调用帧，`clear_error_trace()` 清空正在收集及已发布的记录。记录是线程局部的，每次进入运行时（包括回调重入）都重新开始收集。清理保留原错误及其调用帧，后续析构错误不会替换它或向它追加调用帧；若清理是最先失败的操作，则保留其中的首个错误。
+
+JNI 将原生错误消息和调用帧按 UTF-8 转为 Java 字符串，不改变异常映射。Java 回调抛出的 throwable 仍以同一个对象返回，不改写其消息。调用栈支持改变了公开 C++ ABI，C++ 宿主和原生插件须用配套头文件及库重新构建。
 
 ## 泛型
 
@@ -333,7 +676,7 @@ void main() {
 }
 ```
 
-函数类型参数写在返回类型前面；调用既可显式指定 `identity<int>(3)`，也可根据实参推断。推断递归匹配参数化类型，不依据接收返回值的变量类型，不从 `null` 单独推断类型，也不为不一致的实参寻找共同父类；不能唯一确定时须显式指定。类必须写出实参，不支持 raw type 或菱形 `<>`。参数化类型具有不变性：必须是同一个泛型声明及相同类型实参，未用于字段的参数也不能忽略。原有非泛型类的结构等价和指针上转型继续有效。
+函数类型参数写在返回类型前面；调用既可显式指定 `identity<int>(3)`，也可根据实参推断。推断递归匹配参数化类型，不依据接收返回值的变量类型，不从 `null` 单独推断类型，也不为不一致的实参寻找共同父类；不能唯一确定时须显式指定。类必须写出实参，不支持 raw type 或菱形 `<>`。参数化类型具有不变性：必须是同一个泛型声明及相同类型实参，未用于字段的参数也不能忽略。非泛型类同样按名称区分，指针上转型继续有效。
 
 上界写作 `<T extends Base>`（类值）或 `<T extends Base*>`（类指针），按声明的继承关系检查。上界可以使用更早声明的类型参数，如 `<A, B extends Box<A>*>`；首版不支持通配符、多上界、循环上界或以类型参数自身作为上界。无界 T 仅能存储、赋值、传参和返回；上界允许访问其保证存在的字段和方法，但不能把任意 Base 赋给 T，也不能把未知派生类值切片为 Base 值。未知 T 不支持算术、比较、delete、`T()`、`new T()`，也不能追加 `*` 或 `(*)`；需要指针时用 `C*` 作为实参。
 
@@ -388,7 +731,7 @@ class Number {
 
 算术只查找左侧类值的入口；下标和调用也接受类指针。遵守现有继承及静态成员查找，无右侧反向查找、隐式转换或普通函数重载。getter 恰好一个键参数，键类型不限；setter 可省略，否则须与 getter 使用相同键类型、第二个参数与 getter 返回类型相同且返回 void。`x[key] = value` 依次求值接收者、键、右值，各一次；下标复合赋值不支持。
 
-getter 返回类值或 buffer 时得到副本，不能通过该副本继续写入，例如 `matrix[i][j] = x`、`items[i].field = x` 或 `items.get(i).field = x`。应先读到明确类型的局部变量，修改后通过 setter/set 写回；getter 返回指针时继续按正常指针规则访问。无界 T 仍不开放任意算术或调用，只有已知参数化类或上界提供对应入口时才能解析。
+getter 返回类值或 buffer 时得到副本，不能通过该副本继续写入，例如 `matrix[i][j] = x`、`items[i].field = x` 或 `items.get(i).field = x`。条件接收对象的两个分支也都要通过这一检查。应先读到明确类型的局部变量，修改后通过 setter/set 写回；getter 返回指针时继续按正常指针规则访问。无界 T 仍不开放任意算术或调用，只有已知参数化类或上界提供对应入口时才能解析。
 
 ## 按函数 ID 反射与 hint 查询
 
@@ -402,9 +745,13 @@ void main() {
 }
 ```
 
-`reflect_invoke_function<R>(int funcid, ...params)` 的 R 可为明确基础类型、address、类指针、类值或 void，也可以是在当前泛型正文中已绑定的 T。函数 ID 使用实际挂载 namespace 的完整 int32 位模式，负数也有效，不对普通整数应用 assume 重定位。接收对象和实参从左到右各求值一次，动态调用沿用当前调用环境、预算及错误清理。非泛型普通成员方法可调用，调用方显式传入 this 指针。
+`reflect_invoke_function<R>(int funcid, ...params)` 的 R 可为明确基础类型、address、类指针、类值、buffer 或 void，也可以是在当前泛型正文中已绑定的 T。函数 ID 使用实际挂载 namespace 的完整 int32 位模式，负数也有效，不对普通整数应用 assume 重定位。接收对象和实参从左到右各求值一次，动态调用沿用当前调用环境、预算及错误清理。非泛型普通成员方法可调用，调用方显式传入 this 指针。
 
-有签名的目标按现有契约校验实参；没有 extern 的宿主回调也允许反射，但须由宿主检查参数。始终校验实际返回标签，包含 void，不额外做数值转换。类指针只能检查 address 标签，类值只能检查 object 标签，不能据此验证类布局或泛型身份；错误的类返回声明不会获得运行时结构检查。
+有签名的目标按现有契约校验实参；没有 extern 的宿主回调也允许反射，但须由宿主检查参数。始终校验实际返回标签，包括 void，不额外做数值转换。对于类指针、类值、buffer 和类型参数返回注解，编译器还会在调用之后生成 `check_object`，失败消息以 `Object check failed:` 开头。
+
+具体类指针结果必须为 null，或尚未进入销毁的活动登记对象起点，或活动的非 buffer 字面量/视图。其直接槽数量必须足够容纳注解类，且对应前缀的标签匹配。具体类值结果必须活动、直接槽数量精确等于声明数量，并匹配这些标签。标签 6 表示不检查，例如泛型直接字段。buffer 结果比较元素 ABI、类别、宽度及递归嵌套的元素上下文，并限制深度；不比较工厂/原地构造 ID。
+
+`R=T` 使用当前引用上下文，不带直接槽标签向量，因为 T 的字段未知。运行时检查解析后的类别和存活状态，类值须匹配绑定上下文的宽度。对于指针，只检查 null/对象起点/存活状态：指针上下文宽度是 address ABI 宽度（1），不是未知的目标对象布局，也没有可检查的直接字段标签。这些检查都不证明名义类身份，也不检查指针字段所指向的对象。检查结构相同的另一个类仍可能通过，泛型工厂身份也不验证。普通 extern 结果及宿主传入的类指针继续遵守上面的受信任契约；这些反射结果检查不用于构造或方法派发。
 
 反射拒绝直接调用带隐藏上下文的泛型函数/泛型类方法，以及构造、析构、生命周期钩子、内部工厂和辅助函数。需要动态调用泛型实现时，定义普通包装函数，在正文中固定类型实参后调用；包装函数可以接收或返回 `Box<int>` 等已具体化类型。C++/JNI 普通 invoke 也不接受未绑定泛型入口。构造或删除对象的包装函数须使用对象语法或 delete，不能直接调用生命周期正文。
 
@@ -419,11 +766,23 @@ int functionId(int ns, int position) {
 
 ## AST 与 ABD 契约
 
-可读 AST 保持 `metadata/ext/abstract/global-variable/body` 结构，并为带签名的宿主函数增加 `extern-signatures`。类程序额外保存类定义、字段顺序和成员表达式等编译信息；`compile-json` 会重新执行类型检查与降级。AST 还保存模块 hint、assume、外部声明、定义名称与实际定义编号；调用绑定与定义位置分开，支持完全相同的 ABD 往返。`abstract` 是 extern 优先的源码名称绑定：有 extern 时保存声明 ID，否则保存定义 ID；hint 库的本地定义仍使用 0000 占位，实际调用的 self-assume 地址在降级时生成。函数定义的独立位置由 `body` 的 namespace 和 `metadata.position/name` 保存；每个签名另保存 `return-type` 与 `param-types`。表达式对象有 `t: "ctrl" | "call"`、`call`、`param`，块是数组；`_line/_column` 仅用于诊断，不写入 ABD 指令。
+可读 AST 保持 `metadata/ext/abstract/global-variable/body` 结构，并为带签名的宿主函数增加 `extern-signatures`。`global-variable` 先以字符串列出 `#gvar` 名称，再以带位置的 `{"name", "type", "initializer"?}` 对象列出每个带类型全局；`compile-json` 按与源码相同的规则检查并初始化它们。类程序额外保存类定义、字段顺序和成员表达式等编译信息；`compile-json` 会重新执行类型检查与降级。限定的父类调用写作 `{"t":"ctrl","call":"base-call","param":["Base","method",args...]}`，可附带 `type-args`。AST 还保存模块 hint、assume、外部声明、定义名称与实际定义编号；调用绑定与定义位置分开，支持完全相同的 ABD 往返。`abstract` 是 extern 优先的源码名称绑定：有 extern 时保存声明 ID，否则保存定义 ID；hint 库的本地定义仍使用 0000 占位，实际调用的 self-assume 地址在降级时生成。函数定义的独立位置由 `body` 的 namespace 和 `metadata.position/name` 保存；每个签名另保存 `return-type` 与 `param-types`。表达式对象有 `t: "ctrl" | "call"`、`call`、`param`，块是数组。
+
+可读运算链使用 `{"t":"ctrl","call":"chain","param":[operand,...],"operators":[{"call":"add","_line":1,"_column":3},...]}`。`param` 按源码顺序保存操作数，`operators` 恰好少一项，各项用规范二元操作名（如 `add`、`minus`、`multiply`、`cmp`、`and`）及通常的 `_file/_line/_column` 元数据记录对应运算符和位置。此结构要求同一优先级超过 128 个操作数。`chain` 是 AST 操作名，不是源码保留字，普通函数仍可使用该名称。所有运算符须属于同一规范优先级组；手写 AST 可省略运算符位置，提供时会校验。`compile-json` 检查节点、运算符名称/数量及位置，再重新进行类型检查和降级；内部的分段占位和序列记录不会写入源 AST 或执行 wire 格式。
+
+可读 else-if 链使用 `{"t":"ctrl","call":"if-chain","param":[{"t":"ctrl","call":"if","param":[condition,body]},...],"else":body}`。每个带位置的分支是仅有条件和正文的普通 `if` 节点，可选的最终 `else` 属于外围 `if-chain`。此扁平结构要求超过 128 个条件；较短源码链保留嵌套 AST，即使执行降级采用扁平形式。`compile-json` 检查结构及布尔条件，再进行分支作用域、跳转、缺失返回和按剩余深度选择降级的检查；手写嵌套链也可获得同样的扁平执行降级，而不改变其源 AST。
+
+可读 switch AST 使用 `{"t":"ctrl","call":"switch","param":[value,sections]}`，sections 是数组。每个分段为 `{"t":"ctrl","call":"case","labels":[literal,...],"param":[body]}`，body 是语句数组，可附带 `default: true`；只有 default 的分段不带 case 标签。解析器保留各个标签，编译时把相邻的空分段与后续正文合并。`compile-json` 重新检查标签、作用域、跳转及贯穿路径。降级先对值求值一次，再使用一次性循环、同级 if 分段和平衡的短路标签比较；无论 default 在源码何处，都最后处理。隐藏局部变量保持源码 break/continue 的目标不变。
+
+条件表达式写作 `{"t":"ctrl","call":"select","param":[condition,thenValue,elseValue]}`，恰好包含三个表达式参数。`compile-json` 重新检查布尔条件和分支共同类型，在降为 opcode 50 前插入所需的数值转换。
+
+根节点的 `sources` 表对文件的每次实际展开的包含各有一项，例如 `{"name": "inc/lib.azs", "included-from": {"source": 0, "line": 2, "column": 1}}`；第 0 项是主文件，include 总是指向更早的项，被 `#pragma once` 跳过的 include 没有对应项。表达式对象、函数元数据、类、字段和 extern 签名带有原始文件中的 `_line/_column`，以及所在 `sources` 项的下标 `_file`（为 0 时省略）。函数元数据还以 `_end_line/_end_column` 记录结束的右花括号，加括号的赋值带有 `_parenthesized: true`。字面值和块不带位置，诊断使用最近的带位置祖先。这些字段用于诊断，以及在 `-g` 时生成 exec 调试记录，不写入 ABD 指令。compile-json 输入中的 `sources` 可以省略，此时所有位置都属于以输入文件命名的同一文件。位置均为正整数，`_file` 必须是表中的有效下标；该表最多 4097 项，即主文件加 4096 次 include 展开；`sources` 的每项命名一个非空、不超过 4096 个字符且不含控制字符或双向格式字符的文件，include 链最多 64 层。compile-json 在编译前检查这些结构，见[多个错误与退出码](#多个错误与退出码)。
+
+可读类 AST 可含 `virtual-methods`、`override-methods`、`final-methods` 数组，元素为与 `methods` 键对应的普通方法名，如 `"virtual-methods":["score"]`。空数组省略，重复元素和非方法名被拒绝。调用节点无需额外标记，非虚方法程序保留既有 AST 结构。
 
 可读类 AST 保存 `operators` 映射及方法的 `operator-kind`，下标读写和后缀调用使用 `index`、`index-set`、`invoke` 节点，空 buffer 使用 `buffer-new`。compile-json 重新检查类型和降级，保持 ABD 字节一致。
 
-新生成的 exec/ABD 使用 `exec-version: 9`，与源码元数据的 `version` 分开。所有控制指令的 `c` 都为数字；可读 AST 仍保留源码名称、类型和操作名。下表是 exec JSON 检查视图，实际 ABD 的字段顺序及类型见 [Exec v9 二进制格式](../docs/EXEC_FORMAT.md)。
+新生成的 exec/ABD 使用 `exec-version: 10`，与源码元数据的 `version` 分开。所有控制指令的 `c` 都为数字；可读 AST 仍保留源码名称、类型和操作名。下表是 exec JSON 检查视图，实际 ABD 的字段顺序及类型见 [Exec v10 二进制格式](../docs/EXEC_FORMAT.md)。
 
 | exec JSON 指令 | 字段 |
 | --- | --- |
@@ -455,24 +814,30 @@ int functionId(int ns, int position) {
 | 空 buffer `c=40`（buffer_new） | `context` 元素操作上下文 |
 | buffer 操作 `c=41`（buffer_op） | `op`, `v`, `args`；操作 0…6 为 length/capacity/reserve/get/set/push/resize |
 | 默认比较 `c=42`（value_compare） | `context`, `v1`, `v2` |
+| 位运算/移位 `c=43…48` | `v1`, `v2`；依次为 bit_and/bit_or/bit_xor/shl/shr/ushr，操作数和结果均为 int |
+| 显式转换 `c=49`（convert） | `type` 为目标 0/1/2/3/7，`v` 为源表达式 |
+| 条件选择 `c=50`（select） | `v` 为条件，`then` 为真分支，`else` 为假分支 |
+| 引用检查 `c=51`（check_object） | `v` 为结果表达式、`context`、`slot-types` 直接 ABI 标签；6 表示不检查 |
+| 方法绑定 `c=52`（set_methods） | `v` 接收对象地址、`entries: [{id, contexts}]` |
+| 虚调用 `c=53`（call_virtual） | `slot` 方法槽、`type` 结果 ABI、`param` 接收对象及实参 |
 
 根、函数、签名和表达式记录都使用裸 `AbdStack`；每个字段本身有长度边界，固定记录不保存键名和已知的类型标签。函数列表、参数类型列表、参数表达式和块内语句也都是裸 stack。常量的实际类型不固定，使用单元素 `AbdArray` 保留 int/float/double/bool/string/void/address 标签；扩展元数据仍使用 `AbdMap`。JSON 中的裸常量和块数组在二进制中分别使用 opcode 0 和 1。Java 调用 `Compiler.compile()` 得到的 `ExecProgram` 可继续作为 `AcsObject` 检查，`toValue()` 输出新 wire 格式；从执行文件恢复检查视图使用 `ExecCodec.decode()`，不再直接把根当作 `AcsObject` 解码。
 
 数字变量的编号规则：`gvs` 为全局变量数量；`-1` 指向模块的第一个全局变量，`-2` 指向第二个，以此类推。函数参数占 `0…param-count-1`，局部变量与编译器临时变量随后连续编号；每个函数单独编号，类方法的隐式 `this` 位于参数槽 `0`。变量编号不是 `alloc` 返回的堆地址，裸整数表达式仍为常量；例如 `{"t":0,"c":3,"v":0}` 才表示读取第一个参数/局部槽。
 
-函数检查视图包含 `id/return-type/script/param-count/param-types/local-count/hidden-count/entry-kind`；`local-count` 只计局部和临时槽，不包含参数。每次调用创建独立槽数组，递归和宿主重入不共享局部值。块退出仍按原规则清理对象，并清空该块声明的局部槽，循环下次进入时重新初始化。全局槽总数及单次调用的参数加局部槽数量均不能超过 1,048,576；无效编号、跨越所属模块全局范围及未声明/已退出作用域的访问会被拒绝。
+函数检查视图包含 `id/return-type/script/param-count/param-types/local-count/hidden-count/entry-kind`，使用 `-g` 时另含 `debug` 记录；根的 `debug-files` 列出调试文件，无 `-g` 时为空。`local-count` 只计局部和临时槽，不包含参数。每次调用创建独立槽数组，递归和宿主重入不共享局部值。块退出仍按原规则清理对象，并清空该块声明的局部槽，循环下次进入时重新初始化。全局槽总数及单次调用的参数加局部槽数量均不能超过 1,048,576；无效编号、跨越所属模块全局范围及未声明/已退出作用域的访问会被拒绝。
 
-未声明类型的脚本参数在元数据中使用内部 `any` 类型；无界类型参数也擦除为 any，但只有泛型隐藏上下文非空时才允许 any 返回和 extern any 参数。`entry-kind` 为 0 表示普通入口，1 表示内部入口；上下文不占变量槽。AST 额外保存 `type-parameters`、上界、参数化类型字符串和显式 `type-args`。`param-types` 和 `return-type` 保留供直接 C++/JNI 调用的类型检查；根的 `extern-signatures` 保存宿主边界签名。解释器仅接受 exec v9 裸 stack 文件，不再读取 v8 等旧版本或旧 Map 文件；源码或可读 AST 应重新编译。不识别的版本、opcode、额外/缺失字段、错误字段宽度或超过 128 层的结构在加载时拒绝。JNI 快照版本与 exec 版本独立，本次为 v9。
+未声明类型的脚本参数在元数据中使用内部 `any` 类型；无界类型参数也擦除为 any，但只有泛型隐藏上下文非空时才允许 any 返回和 extern any 参数。`entry-kind` 为 0 表示普通入口，1 表示内部入口；上下文不占变量槽。AST 额外保存 `type-parameters`、上界、参数化类型字符串和显式 `type-args`。`param-types` 和 `return-type` 保留供直接 C++/JNI 调用的类型检查；根的 `extern-signatures` 保存宿主边界签名。解释器仅接受 exec v10 裸 stack 文件，不再读取 v9、v8 等旧版本或旧 Map 文件；源码或可读 AST 应重新编译。不识别的版本、opcode、额外/缺失字段、错误字段宽度或超过 128 层的结构在加载时拒绝。JNI 快照版本与 exec 版本独立，本次为 v10。
 
 ### insert 与模块全局偏移
 
 `script::insert_script(bytes, length)` 追加数字格式模块时，将追加前的全局槽数量保存到该模块每个 `ofunction::global_offset`，并记录模块自己的 `global_count`。访问负数变量 `v` 时，实际全局下标为 `global_offset + (-int64(v) - 1)`。例如已有两个全局槽，插入模块的 `-1` 就访问下标 `2`；原模块的 `-1` 仍访问下标 `0`。offset 由加载器决定，不由编译产物预设。
 
-执行时使用被调用函数保存的 offset，普通函数、构造、析构、内部创建函数和生命周期钩子都遵守这一规则。后续插入模块不会改变已有 offset。局部变量不应用全局偏移；块级对象所有权及返回转移不受影响。固定模块的普通函数 ID 冲突拒绝插入；hint 模块由加载器选择未占用的实际 namespace，生命周期钩子按模块单独保存。
+执行时使用被调用函数保存的 offset，普通函数、构造、析构、内部创建函数和生命周期钩子都遵守这一规则。后续插入模块不会改变已有 offset。局部变量不应用全局偏移；块级对象所有权及返回转移不受影响。固定模块的普通函数 ID 冲突拒绝插入，错误写出十六进制 ID、已定义它的模块及解决办法（见 [hint 链接](../docs/HINT_LINKING.md)中的“独立编译的普通模块”）；hint 模块由加载器选择未占用的实际 namespace，生命周期钩子按模块单独保存。
 
 装载及 insert 只装配，不执行 onload。宿主必须在调用之前显式 `flush()`；成功 insert 会使 `setup=false`，需要再次 flush。链接先完整验证再原子修正调用和析构引用，失败可补库重试；依赖先初始化，循环依赖内按装载顺序。onload 失败后只能关闭重建。关闭按已成功初始化顺序的逆序执行 pre-destroy，再清理全局对象。
 
-类指针在 ABD 中擦除为 address，类型编号为 7；字面量对象的类型编号为 8；int32 仍为 0，动态 any 仍为 6。地址常量使用 `0xce200b` 标签、8 字节无符号小端值，exec JSON 视图为 `{"address":"无符号十进制"}`；例如 null 是 `{"address":"0"}`。只有对象返回指令按实际所有权转移对象，普通 address 或整数返回不转移。JNI v9 快照保存有序模块身份（原始字节、实际 namespace、hint、全局布局）、全局槽、堆（含字段中的字面量对象）和对象清理责任，仅可在已完成初始化且无执行中的状态保存和恢复。恢复先完整校验再原子替换，不重链接或调用旧对象析构；旧 exec 和快照不兼容，须重新编译全部模块；旧源码中用 int 保存的堆地址须改为 address。
+类指针在 ABD 中擦除为 address，类型编号为 7；字面量对象的类型编号为 8；int32 仍为 0，动态 any 仍为 6。地址常量使用 `0xce200b` 标签、8 字节无符号小端值，exec JSON 视图为 `{"address":"无符号十进制"}`；例如 null 是 `{"address":"0"}`。只有对象返回指令按实际所有权转移对象，普通 address 或整数返回不转移。JNI v10 快照保存有序模块身份（原始字节、实际 namespace、hint、全局布局）、全局槽、堆（含字段中的字面量对象）和对象清理责任，仅可在已完成初始化且无执行中的状态保存和恢复。恢复先完整校验再原子替换，不重链接或调用旧对象析构；旧 exec 和快照不兼容，须重新编译全部模块；旧源码中用 int 保存的堆地址须改为 address。
 
 ## 修复验证与打包
 

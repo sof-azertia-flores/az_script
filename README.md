@@ -6,7 +6,7 @@
 
 本目录使用 Git 统一管理各模块，默认分支为 `main`。跟踪范围、分支与提交流程、发行标签和远程备份说明见 [版本管理文档](docs/VERSION_CONTROL.md)。
 
-泛型类、函数和方法共享编译后的正文，支持类型推断、单个 extends 上界和参数化继承；类型检查保留在编译器，隐藏操作上下文处理默认值及对象清理。`reflect_invoke_function<R>` 可按实际函数 ID 调用普通入口，两个 hint 查询内置可获取挂载状态和 namespace。泛型入口通过固定类型的普通包装函数供反射或宿主调用，详见 [语言说明](compiler/LANGUAGE.md) 和 [跨模块示例](docs/HINT_LINKING.md)。
+泛型类、函数和方法共享编译后的正文，支持类型推断、单个 extends 上界和参数化继承；类型检查保留在编译器，隐藏操作上下文处理默认值及对象清理。`reflect_invoke_function<R>` 可按实际函数 ID 调用普通入口，并检查对象结果的存活状态/形状，但不证明名义类身份；两个 hint 查询内置可获取挂载状态和 namespace。泛型入口通过固定类型的普通包装函数供反射或宿主调用，详见 [语言说明](compiler/LANGUAGE.md) 和 [跨模块示例](docs/HINT_LINKING.md)。
 
 ## 构建与运行
 
@@ -21,7 +21,7 @@ python3 tools/build_and_test.py
 ./build/native/interpreter/azscript-run build/demo.exec.abd
 ```
 
-测试脚本最终返回 `146`，随后执行销毁钩子输出 `done`。`--ast` 保存可读代码树，`--exec-json` 保存降级后的指令树，方便核对拆解结果；二者是可选的调试输出。
+测试脚本最终返回 `146`，随后执行销毁钩子输出 `done`。`--ast` 保存可读代码树，`--exec-json` 保存降级后的指令树，方便核对拆解结果；二者是可选的检查输出。`-g` 在执行文件中加入调试记录（函数名、文件名和源码位置），默认不加入。
 
 构建会复用现有 Gradle/Maven 缓存，缺少依赖时从 Maven Central 下载并校验固定 SHA-256。所有构建产物、下载和临时测试文件都放在本目录的 `build/` 内。已有缓存时可完全离线构建：
 
@@ -31,6 +31,8 @@ python3 tools/build_and_test.py --offline --sanitize
 ```
 
 `--sanitize` 对原生数据层、解释器和编译执行链启用 AddressSanitizer/UndefinedBehaviorSanitizer；JNI 使用普通构建配合 JVM 的 `-Xcheck:jni` 验证。只构建可使用 `--skip-tests`；不需要 JNI 可使用 `--skip-jni`。
+
+`CompilerScalingTest` 检查编译工作量随程序规模线性增长：它比较生成程序与其八倍规模版本的确定性操作计数，覆盖大量局部变量、语句、函数、全局变量、类、字段、extern 或参数。构建后可运行 `python3 tools/bench_compiler.py`，在这类程序上测量编译耗时，最大到单个作用域 32,000 个局部变量或 20,000 个函数；它是可选基准，不属于验证流程。
 
 三个 Java 模块也配置为根 Gradle 多模块工程，可以执行 `gradle build`；完整跨语言验证以以上 Python 入口为准。原始模块的旧 Gradle wrapper 保留作历史文件，建议使用根工程或统一入口。
 
@@ -55,12 +57,12 @@ cd /path/to/azscript
 
 ## 编译器现在怎样工作
 
-1. 预处理相对于当前源文件的 `#include`、宏和条件指令。
+1. 预处理 `#include`、宏和条件指令，并记录每行的原始文件和行号；诊断因此按 `文件:行:列: error: ...` 指向被包含文件和宏的使用位置。include 先在所在源文件的目录中查找，再查找 `-I` 目录，且不得离开这些根目录。
 2. 词法分析将标识符、数值、字符串、运算符和注释分离，字符串内部的逗号、括号、分号不会被当成语法分隔符。
 3. 递归下降解析明确处理优先级、左右结合性、嵌套调用、代码块和控制流。
 4. 校验变量和函数、作用域、函数签名、参数类型与数量、重复定义和返回形式，再生成 JSON/ABD 指令树。
 
-完整语法见 [compiler/LANGUAGE.md](compiler/LANGUAGE.md)。保留了原来的 `def(x)`、`return(x)`、`while(condition,{...})`、`if(condition,{...})` 和 `mem_get(pointer)=value` 写法；支持普通 `if/else/while`、变量初始化、一元运算、比较、短路逻辑和变量复合赋值。
+完整语法见 [compiler/LANGUAGE.md](compiler/LANGUAGE.md)。保留了原来的 `def(x)`、`return(x)`、`while(condition,{...})`、`if(condition,{...})` 和 `mem_get(pointer)=value` 写法；支持普通 `if/else/while`、int/string switch、变量初始化、一元运算、比较、短路逻辑、int32 位运算/移位、条件表达式 `?:` 和变量复合赋值。
 
 ```c
 #namespace 123
@@ -78,13 +80,13 @@ int main() {
 }
 ```
 
-内置函数 `print`、`getDepth`、`mem_free`、`alloc`、`make_free`、`mem_send_up`、`mem_get` 和 `load_extern_library` 由编译器直接提供，不需要 include 或声明。`load_extern_library("xxx")` 按当前系统加载已签名的 `xxx.so` / `xxx.dylib` / `xxx.dll`，库内用现有的 C++ 宿主注册接口挂上外部函数。独立运行时从 `AZSCRIPT_TRUSTED_KEY` 或 `trusted_key.pem` 读取公钥；嵌入式宿主通过 C++ / Java API 提供公钥。完整约定见 [外部动态库](docs/EXTERN_LIBRARY.md)。include 仍按源文件所在目录解析。
+内置函数 `print`、`getDepth`、`mem_free`、`alloc`、`make_free`、`mem_send_up`、`mem_get` 和 `load_extern_library` 由编译器直接提供，不需要 include 或声明。`str_*` [字符串函数](compiler/LANGUAGE.md#字符串函数) 同样无需声明，并提供按码点计算的方法和下标访问。`load_extern_library("xxx")` 按当前系统加载已签名的 `xxx.so` / `xxx.dylib` / `xxx.dll`，库内用现有的 C++ 宿主注册接口挂上外部函数。独立运行时从 `AZSCRIPT_TRUSTED_KEY` 或 `trusted_key.pem` 读取公钥；嵌入式宿主通过 C++ / Java API 提供公钥。完整约定见 [外部动态库](docs/EXTERN_LIBRARY.md)。include 先按所在源文件的目录解析，再依次查找各 `-I` 目录和包装脚本的标准库目录；绝对路径和离开这些根目录的路径需要 `--unrestricted-includes`（见[预处理](compiler/LANGUAGE.md#字符串注释与预处理)）。
 
 `address` 是独立的无符号 64 位地址类型，表示 slot 位置，空地址写作 `null`。例如 `address p = alloc(2); mem_get(p + 1) = 42; mem_free(p);`。地址支持与 int32 偏移加减并检查越界；对象引用也使用该运行时类型，类成员的静态类型检查和继承规则保持不变。地址值、变量槽编号、分配数量和函数 ID 是不同概念，后面三者仍使用既有 32 位表示。
 
 支持 `class`、成员变量、构造方法、成员方法和 `~ClassName()` 析构。对象有三种写法：`Point p(3);` 是字面量对象，按值复制（赋值、传参、返回都复制全部 slots，每个副本各自析构），地址随变量到期而失效；`Point * p(3);` 是离块自动析构的指针对象（无参也要写 `()`）；`Point * p = new Point(3);` 是需要 `delete p;` 的手动对象；单写 `Point * q;` 声明空指针，等同 `= null`。参数写成 `Point (*) p` 时，函数同时接受指针和字面量对象，字面量对象按地址借入、不复制。脚本只能通过方法中的 `this` 或 `Point (*)` 参数（函数内类型均为 `Point *`）拿到字面量对象的地址。每个字段占一个 slot，字面量字段内嵌完整对象；方法均编译成带隐式对象地址参数的普通函数。完整语义见 [类、字面量对象与指针](compiler/LANGUAGE.md#类字面量对象与指针)，[类回归示例](compiler/examples/classes-regressions.azs) 成功返回 `0`。
 
-`for (int i=0; i<10; i++)` 在编译层降为块和 `while`；`continue` 清理当前轮局部对象后进入下一轮，在 `for` 中会先执行步进。`class Child : Base` 支持公开单继承：父类字段占前面的 slots，子类字段追加，父类方法直接接收同一个对象地址。方法按静态类型绑定，构造从父到子，析构从子到父；子类构造失败会清理已完成的父类部分。示例见 [循环](compiler/examples/loops-regressions.azs) 和 [继承](compiler/examples/inheritance-regressions.azs)。
+`for (int i=0; i<10; i++)` 在编译层降为块和 `while`；`continue` 清理当前轮局部对象后进入下一轮，在 `for` 中会先执行步进。`class Child : Base` 支持公开单继承：父类字段占前面的 slots，子类字段追加，父类方法直接接收同一个对象地址。非虚方法按静态类型绑定，`virtual`/`override` 支持指针派发，`final` 禁止进一步覆盖；`Base::method(args)` 始终对 `this` 静态调用父类方法；构造从父到子，析构从子到父；子类构造失败先逆序清理已完成的拥有型字段，再清理已完成的父类部分；清理失败时仍保留原错误。示例见 [循环](compiler/examples/loops-regressions.azs) 和 [继承](compiler/examples/inheritance-regressions.azs)。
 
 已有可读代码树也可以直接编译：
 
@@ -103,6 +105,8 @@ int main() {
     return math_round(math_hypot(3.0, 4.0)); // 5
 }
 ```
+
+在其他位置，调用方可写 `#include "math.include.azs"`，其他标准库头文件同理：`./azscript` 包装脚本和发行包的 `compile.sh` / `compile.cmd` 在所有 `-I` 目录之后查找标准库目录。不经包装脚本时传入 `-I compiler/stdlib`；`examples/` 中的 `../stdlib/` 路径离开了示例目录，同样需要它。
 
 分别编译库与调用方后装配执行：
 
@@ -140,7 +144,7 @@ int main() {
 ./build/native/interpreter/azscript-run build/containers-regressions.exec.abd --insert build/containers.exec.abd
 ```
 
-回归示例成功返回 `0`。链表元素放在节点字段里，按下标访问要沿链表行走，类值需要无参构造。`Vector` 和 `Set` 可以写入已有的类值；按下标得到的是副本。说明见 [`compiler/stdlib/CONTAINERS.md`](compiler/stdlib/CONTAINERS.md)。
+回归示例成功返回 `0`。链表元素放在节点字段里，按下标访问要沿链表行走，类值需要无参构造。`Vector` 和 `Set` 可以写入已有的类值；按下标得到的是副本。与数学库头文件相同，`examples/` 之外的调用方写 `#include "containers.include.azs"`，直接调用编译器时需要 `-I compiler/stdlib`。说明见 [`compiler/stdlib/CONTAINERS.md`](compiler/stdlib/CONTAINERS.md)。
 
 ## 主要修复
 
@@ -177,9 +181,11 @@ script->destroy();
 
 完整示例在 [examples/embedded.cpp](examples/embedded.cpp)，构建目标 `azscript-embed`。外部数据应始终调用带长度的入口。`load_script` 只装载；设置预算、登记宿主及插入库后调用 `flush()`，该过程链接函数并初始化模块。onload 期间宿主回调可以调用已链接函数。
 
-`script->insert_script(bytes.data(), bytes.size())` 可追加模块，成功后须再次 flush。新 exec 将全局变量编码为 `-1、-2…`，参数和局部变量编码为连续非负槽号；全局声明仅保存数量。每个加载的函数记录自己的 `global_offset`，负数引用按 `global_offset + (-v - 1)` 定位，因此多个独立编译的模块可以拥有同名、同编号全局变量。局部帧按调用独立分配，块级析构不变。固定 namespace 的函数 ID 须互不冲突，hint 库由运行时分配实际 namespace；详细格式见 [执行格式与 insert 偏移](compiler/LANGUAGE.md#insert-与模块全局偏移)。
+`script->insert_script(bytes.data(), bytes.size())` 可追加模块，成功后须再次 flush。新 exec 将全局变量编码为 `-1、-2…`，参数和局部变量编码为连续非负槽号；全局声明仅保存数量。每个加载的函数记录自己的 `global_offset`，负数引用按 `global_offset + (-v - 1)` 定位，因此多个独立编译的模块可以拥有同名、同编号全局变量。局部帧按调用独立分配，块级析构不变。固定 namespace 的函数 ID 须互不冲突（独立编译的普通模块在默认 namespace 冲突时见 [hint 链接](docs/HINT_LINKING.md)），hint 库由运行时分配实际 namespace；详细格式见 [执行格式与 insert 偏移](compiler/LANGUAGE.md#insert-与模块全局偏移)。
 
 执行失败抛出标准 C++ 异常，调用者可以捕获；`destroy()` 幂等，执行销毁钩子后释放全局状态。析构时释放拥有的内存，但不自动运行用户钩子。
+
+捕获异常后，在 `destroy()` 或再次进入运行时之前调用 `azertian::describe_error(error)`。异常类型和 `what()` 保持不变，该函数返回原消息加脚本调用帧，不含 CLI 的 `AzScript error: ` 前缀和末尾换行。`last_error_trace()` 返回含 `frames` 和 `omitted_frames` 的 `error_trace`；`format_error_trace(trace)` 格式化其调用帧，`clear_error_trace()` 清空记录。记录是线程局部的，每次进入（包括回调重入）都重新开始收集，清理只保留首个错误的调用帧。编译时加 `-g` 可显示名称及从 1 开始的文件、行、UTF-16 列位置，否则显示十六进制函数 ID。原生帧及 64 帧上限见[运行错误](compiler/LANGUAGE.md#运行错误与调试信息)。公开 C++ ABI 已改变，宿主和插件须用配套头文件及库重新构建。
 
 ## 嵌入 Java
 
@@ -196,27 +202,34 @@ try {
 }
 ```
 
-非库程序的 `main` 固定为 `0x0fff0000`；普通定义可通过 `:0003` 固定低16位编号。独立库用 `#namespace_hint`，调用方用 `#assume_hint` 和 `extern` 声明。宿主先加载全部模块，再显式 `flush()` 链接与初始化；成功 insert 后须再次 flush。完整示例与类外实现见 [多文件库文档](docs/HINT_LINKING.md)。
+非库程序的 `main` 固定为 `0x0fff0000`；普通定义可通过 `:0003` 固定低16位编号，也可省略编号，从共享头文件中本模块 namespace 的 extern 声明继承完整 ID。独立库用 `#namespace_hint`，调用方用 `#assume_hint` 和 `extern` 声明。宿主先加载全部模块，再显式 `flush()` 链接与初始化；成功 insert 后须再次 flush。完整示例与类外实现见 [多文件库文档](docs/HINT_LINKING.md)。
 
 宿主函数注册、带返回值的回调和快照示例见 [abdJavaInvoker/README.md](abdJavaInvoker/README.md)。
 
 ## 明确的语义与边界
 
-- 整数是有符号 32 位；整数除法向零截断，溢出和除零报错。数值提升按 `double > float > int`；布尔值不隐式参与数值运算。
+- 条件（包括 `?:`）及 `!`/`&&`/`||` 必须使用布尔值，动态值也在运行时检查。相等比较允许混合数值类型、同类型布尔/字符串、address/null 和兼容类指针；不兼容配对报错，不再直接判为不等。详见[相等规则](compiler/LANGUAGE.md#表达式与流程)。
+- 整数是有符号 32 位；整数除法向零截断，算术溢出和除零报错。数值提升按 `double > float > int`；布尔值不隐式参与数值运算。
+- 仅适用于 int 的 `& | ^ ~ << >> >>>` 操作 32 位位模式：左移回绕，`>>` 扩展符号，`>>>` 补零；数量必须为 0…31，简单变量支持复合形式。位测试应写为 `(flags & mask) != 0`。详见[位运算](compiler/LANGUAGE.md#位运算与移位)。
+- 显式 `int/float/double/string/address(x)` 按受检查的配对表执行数值转换、严格十进制字符串解析、数值/address 转字符串及 address 恒等；类指针及指针上界 T 可用 `address(p)` 显式擦除，不改变所有权；其他类转换、int/address 互转、布尔转换及 C 风格强转仍不支持。int 先截断再检查范围，浮点转换允许下溢但拒绝溢出。详见[显式转换](compiler/LANGUAGE.md#显式转换)。
+- `条件 ? a : b` 在外围作用域中只计算一个分支，结果取共同类型并进行数值提升。它在赋值和 `||` 之间右结合；两个分支都须通过类型检查。详见[条件表达式](compiler/LANGUAGE.md#条件表达式)。
+- `switch` 对 int/string 值求值一次，匹配字面量标签，不允许贯穿。连续标签共享分段，default 可在任意位置，每个分段有独立作用域。详见 [switch](compiler/LANGUAGE.md#switch)。
+- 字符串是不可变 UTF-8 值。`s.length()`、`s[i]`、半开区间 `substring(begin, end)` 和搜索按 Unicode 码点计算，`byte_length()` 统计字节。NUL 合法，非法 UTF-8 被拒绝，越界映射为 Java IndexOutOfBoundsException。
 - 小数默认是 double；`1.5f`、`5f`、`2e3f` 是 float 字面量。
-- `extern int host_add(int, int):0xccf0001;` 以完整签名绑定宿主函数；类型必填，旧 `#extern` 指令已删除。参数和回调返回值按实际类型精确匹配，`int`、`float`、`double` 之间不隐式转换。`#namespace 1234` 支持1～4位；独立库用 `#namespace_hint` 声明，`#assume_hint` 绑定调用。
+- `extern int host_add(int, int):0xccf0001;` 以完整签名绑定宿主函数；类型必填，旧 `#extern` 指令已删除。参数和回调返回值按实际类型精确匹配，`int`、`float`、`double` 之间不隐式转换。`#namespace 1234` 支持1～4位，拒绝保留的 `0000` 和 `0abd`；独立库用 `#namespace_hint` 声明，`#assume_hint` 绑定调用。
 - 函数按值传参，参数从左到右求值；函数只能访问自己的局部变量和全局变量。块有独立作用域，循环每次创建新的块作用域。`for` 初始化变量的作用域包含整个循环，循环结束后不可见。
-- `return` 穿透当前函数内的循环和条件块；`break` 退出最内层循环，`continue` 结束最内层循环的本轮执行，均执行必要的块清理。返回值按声明类型检查；有限且可表示的数值转换允许，无法表示的转换报错。
-- 编译器按 ABD 的 128 层容器嵌套限制检查函数体：同时检查逻辑表达式和实际 wire 容器深度，函数体从第 4 层开始；调用实参列表、块内语句列表和常量封装各另占一层，超限时报告函数名和行列（大约 120 个串联运算符或 60 层嵌套块）。语法递归和 JSON 容器另有 320 层防护上限，循环代码树会报错。默认每次顶层脚本调用最多执行 1,000,000 步、嵌套 256 层；脚本文件最多 64 MiB，堆最多 1,048,576 个槽（含保留槽 0）。宿主回调本身的执行时间不受指令预算控制。
+- `return` 穿透当前函数内的循环和条件块；`break` 退出最内层循环/switch，`continue` 结束最近循环的本轮执行，均执行必要的块清理。数值返回必须精确匹配，或从 int 扩宽到 float/double、从 float 扩宽到 double；int 转 float 可能舍入。收窄须显式使用受检查的 `int(x)` 或 `float(x)` 转换，动态返回类型在运行时检查。
+- ABD 仍限制为 128 层物理容器；编译器精确计量记录和上下文列表，把符合条件的立即求值语句表达式拆成隐藏局部变量。惰性操作数/while 条件内部切分、影响所有权的捕获及有副作用的内存赋值 RHS 拆分若会改变求值、复制或生命周期，则被拒绝，需显式调整源码。被保留的拥有值之后若有调用，须传递证明作用域安全，不能只看标量返回类型。较深的后缀及真正嵌套表达式仍受限制：语法/JSON 防护为 320 层，编译表达式递归为 640 层，类型表达式为 64 层；循环代码树会被拒绝。`getDepth()` 是实现定义的作用域深度。默认每次顶层脚本调用最多 1,000,000 步、调用嵌套 256 层，脚本文件最多 64 MiB，堆最多 1,048,576 槽（含保留槽 0）；宿主回调本身的耗时不受指令预算控制。 长二元运算链和语句 else-if 链超过 128 个操作数/条件时使用扁平 AST；剩余深度不足且作用域检查通过时，较短的 else-if 链也可扁平降级；移动的条件/正文若无法证明生命周期安全，会收到带位置的局部变量提示。求值顺序、短路、源码跳转目标和清理规则保持不变；产生值的函数式 if 保留表达式语义，仍可能报告嵌套超限。
 - 解释器在原生栈上递归执行调用、代码块和表达式，因此原生栈另有限制。每个线程记录最外层脚本调用开始的位置；执行接近线程实际栈底，或用量超过 `script->max_stack_bytes` 时，抛出 `std::runtime_error("Script native stack limit exceeded")`，已进入的调用正常展开并完成清理。Linux、macOS 和 Windows 8+ 自动检测线程栈范围，栈底前保留栈大小的四分之一（至少 64 KiB、至多 1 MiB）供异常展开、清理、宿主调用和 JVM 等宿主的保护页使用；无法检测时使用 256 KiB 预算。`max_stack_bytes` 默认为 `0`，只按检测结果限制；设为正数可进一步收紧，但不能越过检测到的栈底。栈较小的线程能执行的递归较浅。Java 宿主使用 `AbdInvoker.setMaxSteps`、`setMaxCallDepth` 和 `setMaxStackBytes`。
-- `return`、`if`、`else`、`while`、`for`、`break`、`continue`、`def`、`var`、`class`、`new`、`this`、`null`、`delete`、`extern`、`public/private/protected/virtual`、类型名和 `true/false` 是保留字，不能作为函数、参数、变量、全局变量或宏的名字。非 void 函数的正常退出路径都必须 `return`；条件恒真的 while/for 且体内没有属于它的 `break` 时，视为不会正常结束。
+- `return`、`if`、`else`、`while`、`for`、`switch`、`case`、`default`、`break`、`continue`、`def`、`var`、`class`、`new`、`this`、`null`、`delete`、`extern`、`public/private/protected/virtual`、`override`、`final`、`any`、类型名和 `true/false` 是保留字，不能作为类、字段、方法、函数、参数、变量、全局变量或宏的名字；标识符不能含控制字符或格式字符（如 U+200B、U+202E）。源码与 `compile-json` 共用这些命名规则。非 void 函数的正常退出路径都必须 `return`；条件恒真的 while/for 且体内没有属于它的 `break` 时，视为不会正常结束。
 - 数值转字符串（`print` 和 `+` 拼接）使用最短可往返表示：`0.1+0.2` 得到 `0.30000000000000004`，`123456789.0` 得到 `123456789`，`1e20` 得到 `1e+20`，负零保留为 `-0`。
 - `address` 与 int32 不隐式转换，`alloc(int)` 返回 address，内存接口接收 address。支持 `address + int`、`int + address`、`address - int`，以及地址间的无符号相等和大小比较；超出 uint64 范围报错。类指针不参与原始地址算术。堆地址仍是进程内逻辑下标，64 位表示不扩大当前堆上限；越界和已经释放的地址会拒绝，地址复用后无法识别旧引用，仍须避免悬空引用。
-- 由作用域自动回收的分配只能从拥有它的作用域链（词法父级和调用者）释放：`mem_free` 从其他活动作用域（例如宿主回调重入的脚本函数）释放它会报错，Java `memFree` 只允许无自动回收所有者或已提升到全局的块。`make_free` 之后的分配不再受此限制。
-- 命名空间 `0`、`0xfff` 和 `0xabd` 是保留空间，宿主注册也不能占用活动脚本 namespace。hint 库自动分配可用位置，函数 ID 按完整32位位模式处理。
+- 原始分配与对象存储分离：脚本原始内存接口及 JNI 原始写入/释放拒绝对象起点、内部地址和字面量/视图地址。类指针须保留明确类型；`address(p)` 只擦除类型，不开放原始字段访问。对象使用带类型成员及 delete。受信任宿主指针、旧别名、重复 delete 和自动对象逃逸见[对象存储与已知限制](compiler/LANGUAGE.md#对象存储与已知限制)。
+- 由作用域自动回收的原始分配只能从拥有它的作用域链（词法父级和调用者）释放：`mem_free` 从其他活动作用域（例如宿主回调重入的脚本函数）释放它会报错，Java `memFree` 只允许无自动回收所有者或已提升到全局的块。`make_free` 之后的分配不再受此限制。
+- 命名空间 `0`、`0xfff` 和 `0xabd` 是保留空间：`0` 存放生命周期钩子和 hint 库占位，`0xabd` 存放运行时内置函数，`#namespace` 在编译期拒绝这两个值，`compile-json` 拒绝普通模块使用它们作为 namespace（hint 库保留其 0000 占位）；`0xfff` 是普通程序的默认 namespace，可以显式写出。宿主注册不能占用这三个 namespace 及活动脚本 namespace。hint 库自动分配可用位置，函数 ID 按完整32位位模式处理。
 - 当前堆和外部函数注册表仍是进程共享资源。Java 提供一个活动脚本并串行执行调用；支持同线程回调重入。回调不应等待另一个会再次调用同一运行时的线程。C++ 使用多个脚本时也须管理共享堆和注册表，不能视作独立安全沙箱。
-- 不实现集合字面量、闭包或完整静态类型系统。类型注解的具体作用和 include 后诊断行号的限制见语法文档。
-- **ABD 是可还原的二进制指令树，并不是加密，也不能保证防反编译。** 变量使用数字槽号，源码名称留在 AST 中；发布时可省略源码和调试 JSON，但核心秘密仍不应只依赖脚本格式隐藏。
+- 不实现集合字面量、闭包或完整静态类型系统。类型注解的具体作用和诊断格式见语法文档。
+- **ABD 是可还原的二进制指令树，并不是加密，也不能保证防反编译。** 变量使用数字槽号，源码名称留在 AST 中；默认执行文件不含函数名、类名和文件名，`-g` 会加入带这些名称和源码位置的调试记录，不希望发行包携带它们时不要使用 `-g`。发布时可省略源码、可读 AST 和 exec 检查视图 JSON，但核心秘密仍不应只依赖脚本格式隐藏。
 
 ## 数据兼容
 
@@ -224,7 +237,7 @@ ABD 地址标量新增标签 `0xce200b`，payload 恰为 8 字节 uint64 小端�
 
 新增运算指令、else、变量初始化、参数类型及外部函数签名字段需要配套新版解释器，建议源码重新编译。历史编译器若已把表达式拆错，新运行时无法从错误指令树还原原意。
 
-类指针、隐式 `this` 和底层内存指针统一使用 address（运行时类型编号 7），字面量对象以运行时对象值传递（类型编号 8），普通整数仍为 int32。已有 `oa/ob/od/ro` 对象指令保持生命周期语义，新增 `new_block/block_address/mv/drop` 实现字面量对象。exec v9 使用数字变量与数字 opcode，固定结构直接使用裸 `AbdStack`，仅动态常量和扩展元数据保留带类型的容器。exec JSON 是带字段名的检查视图；完整布局见 [Exec v9 格式](docs/EXEC_FORMAT.md)。解释器只接受 exec v9；包括 v8 在内的旧执行文件均须从源码或可读 AST 重新编译，旧源码中的类对象须按新写法迁移：原来的 `C x(...)` 若依赖引用语义应改为 `C * x(...)`，`C y = new C()` 改为 `C * y = new C()`，类类型的引用参数、字段和返回值改为 `C *`。JNI 快照只接受 v9，使用独立地址值保存堆分配、对象登记和自动清理顺序，同时保留全局槽、模块身份和字段中的字面量对象；旧快照不再受支持。
+类指针、隐式 `this` 和底层内存指针统一使用 address（运行时类型编号 7），字面量对象以运行时对象值传递（类型编号 8），普通整数仍为 int32。已有 `oa/ob/od/ro` 对象指令保持生命周期语义，新增 `new_block/block_address/mv/drop` 实现字面量对象。exec v10 使用数字变量与数字 opcode，固定结构直接使用裸 `AbdStack`，仅动态常量和扩展元数据保留带类型的容器，并可携带 `-g` 生成的调试记录。exec JSON 是带字段名的检查视图；完整布局见 [Exec v10 格式](docs/EXEC_FORMAT.md)。解释器只接受 exec v10；包括 v9、v8 在内的旧执行文件均须从源码或可读 AST 重新编译，旧源码中的类对象须按新写法迁移：原来的 `C x(...)` 若依赖引用语义应改为 `C * x(...)`，`C y = new C()` 改为 `C * y = new C()`，类类型的引用参数、字段和返回值改为 `C *`。JNI 快照只接受 v10，使用独立地址值保存堆分配、对象登记和自动清理顺序，同时保留全局槽、模块身份、字段中的字面量对象及必需的方法表和已绑定泛型上下文；旧快照不再受支持。
 
 编译器提供拥有型 `buffer<T>`：元素直接 slots 连续，支持深复制、自动清理及带检查的 reserve/get/set/push/resize。`value_compare<T>` 提供基础值顺序，类的 `+ - * / [] []= ()` 声明降为普通方法调用，详见[语言说明](compiler/LANGUAGE.md)。`List`、`Stack`、`Queue` 仍是链表。`Vector`、`Set`、`Map` 用这些原语做连续存储和默认比较。
 

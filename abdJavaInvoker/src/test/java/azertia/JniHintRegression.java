@@ -68,6 +68,9 @@ final class JniHintRegression {
         AbdInvoker.flush();
         equal(List.of(10, 100), events);
         equal(42, AbdInvoker.invoke(0x12000002));
+        // A host-created automatic object returns into the base scope; raw
+        // mem_send_up is unavailable for object storage.
+        AbdInvoker.invoke(0x12000007, AbdInvoker.invoke(0x00010003, 11));
         Address automatic = (Address) AbdInvoker.invoke(0x12000003);
         Address manual = (Address) AbdInvoker.invoke(0x12000004);
         equal(11, AbdInvoker.invoke(0x12000005, automatic));
@@ -76,7 +79,8 @@ final class JniHintRegression {
         equal(List.of(10, 100), events);
         equal(true, AbdInvoker.saveStatus(saved));
         AbdInvoker.invoke(0x00010006, 99);
-        Caller220.ACputMem(automatic.bits(), 77);
+        fails(IllegalArgumentException.class, () -> Caller220.ACputMem(automatic.bits(), 77));
+        equal(11, AbdInvoker.invoke(0x12000005, automatic));
         AbdInvoker.loadStatus(saved);
         equal(42, AbdInvoker.invoke(0x00010002));
         equal(11, AbdInvoker.invoke(0x12000005, automatic));
@@ -153,7 +157,8 @@ final class JniHintRegression {
         Address high = (Address) AbdInvoker.invoke(0x7FFF0002);
         File highSaved = new File(work, "high-destructor.snapshot.abd");
         equal(true, AbdInvoker.saveStatus(highSaved));
-        Caller220.ACputMem(high.bits(), 99);
+        fails(IllegalArgumentException.class, () -> Caller220.ACputMem(high.bits(), 99));
+        equal(55, Caller.getMemInt(high.bits()));
         AbdInvoker.loadStatus(highSaved);
         equal(55, Caller.getMemInt(high.bits()));
         equal(List.of(), destructed);

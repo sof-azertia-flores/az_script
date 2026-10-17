@@ -18,6 +18,8 @@ int main() {
 }
 ```
 
+该路径相对于 `examples/` 中的调用方。在其他位置写 `#include "containers.include.azs"`：`./azscript` 包装脚本和发行包的 `compile.sh` / `compile.cmd` 在所有 `-I` 目录之后查找本目录，直接调用编译器时传入 `-I compiler/stdlib`，`../stdlib/` 路径同样需要它。
+
 头文件带有 `AZSCRIPT_CONTAINERS_INCLUDED` include guard。实现文件不要被调用方 include。可执行示例是 [`../examples/containers-regressions.azs`](../examples/containers-regressions.azs)，成功时返回 `0`。
 
 ## 编译与装配

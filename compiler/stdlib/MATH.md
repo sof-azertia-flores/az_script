@@ -18,6 +18,8 @@ int main() {
 }
 ```
 
+在其他位置按文件名写 `#include "math.include.azs"`。仓库的 `./azscript` 包装脚本和发行包的 `compile.sh` / `compile.cmd` 在所有 `-I` 目录之后查找本目录；直接调用编译器时传入 `-I compiler/stdlib`。上面的 `../stdlib/` 路径离开了调用方所在目录，同样依赖本目录作为 include 根目录。
+
 头文件带有 `AZSCRIPT_MATH_INCLUDED` include guard，同一次编译中可重复包含。实现文件只作为库独立编译，不应被调用方 include。完整可执行示例是 [`../examples/math-regressions.azs`](../examples/math-regressions.azs)，成功时返回 `0`。
 
 ## 编译与装配

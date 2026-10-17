@@ -1,0 +1,85 @@
+# Compiler improvement: status and remaining work
+
+[中文](STATUS.md) | English
+
+This branch (`claude/confident-galileo-fic3s1`) carries a planned series of 28 commits. They fix the compiler problems found in a repository review, add new language features, and add runtime line numbers. All C01–C28 items are complete. C14–C28 were completed in this continuation; the follow-ups below remain outside the completed plan.
+
+- [DESIGN.md](DESIGN.md): the detailed per-commit design, with file:line citations.
+- [COMPLETENESS.md](COMPLETENESS.md): the review of that design.
+
+**This file wins wherever they disagree.**
+
+## Decisions made by the user
+
+- **Scope:** fix all four problem groups: type-safety holes, diagnostics, limits and scaling, and the preprocessor and modules.
+  - Add switch, `?:`, bitwise and shift operators, explicit conversions, string functions and virtual methods.
+  - Add a runtime line table across every layer.
+  - Do not restructure `Compiler.java` beyond what these changes need.
+- **Debug info is opt-in with `-g`.** The default exec has no debug records. There is no `--strip-debug`.
+- **Heap memory safety is out of scope for this round.** This covers use after delete with address reuse, double delete, and automatic objects escaping. Document these as Known limitations, planned for C22.
+- **Function IDs:** documentation and better runtime collision messages only. No `--emit-header`/`--id-lock` and no default-namespace warning.
+- **AGENTS.md/AGENTS.en.md:** update the core-contract wording where the changes require it. Debug info was done in C13; method tables come in C24.
+- **Function-like macros:** reject them with a clear diagnostic only; they are not implemented.
+
+## Done (each passed review plus its validation sets before commit)
+
+| # | Commit | Summary |
+|---|---|---|
+| C01 | 732d3a7 | Source map. Diagnostics read `file:L:C: error: ...` with include and macro notes. Shared CLI argument parser; `--` ends options. |
+| C02 | f0ef208 | Several errors per run (`--max-errors`), parser panic-mode recovery. `AstShape` validates compile-json input. Internal errors exit 2 (`--debug-compiler`). |
+| C03 | 4af96e8 | Warnings `assign-in-condition`, `unreachable-code` and `unused-variable` (off by default). Options `-Wall`, `-W<x>`, `-Wno-<x>`, `-w`, `-Werror`. |
+| C04 | 61ef61a | Runtime function IDs print as `0x%08x`. Duplicate-ID errors name the namespace, the module and a remedy. |
+| C05 | 2ddfee1 | Bounded strict-UTF-8 source reading, `#pragma once`, preprocessing limits, a function-like macro diagnostic. |
+| C06 | a8a26b3 | Include roots, `-I/--include-dir`, `--unrestricted-includes`, the `azscript.stdlib` default include directory. |
+| C07 | e39c4a0 | `#namespace 0` and `0abd` are rejected. |
+| C08 | 00d7bce | Constant-time symbol tables. `CompilerScalingTest` uses deterministic work counters. Opt-in `tools/bench_compiler.py`. |
+| C09 | 8edfd20 | `SourceRules`: one place for reserved words, identifiers, hex and namespace rules. Class layout errors are reported by the compiler only. |
+| C10 | 9ee79aa | Nominal class typing; `commonType()`. |
+| C11 | 86471cc | Typed globals `T g;` / `T g = e;`, initialized in the onload. |
+| C12 | cc4b022 | Qualified base calls `Base::m(args)`. |
+| C13 | 5af1331 | **Exec v10**, the only format bump: optional per-function debug records with `-g`, and root `debug_files`. |
+| C14 | 0b50e08 | Script/native stack traces; trace-preserving cleanup; UTF-8 JNI messages with original exception types and callback identity. V0–V3 passed on Linux x86_64. |
+| C15 | 80cd387 | Boolean-only conditions and compatible equality, enforced in compiler and runtime. V0–V3 passed on Linux x86_64. |
+| C16 | 704a0a8 | Int32 bitwise and shift operators, adjacent preprocessed-token shifts and checked counts. V0–V3 passed on Linux x86_64. |
+| C17 | 262302f | Checked scalar conversions with strict locale-independent decimal parsing; opcode 49. V0–V3 passed on Linux x86_64. |
+| C18 | 1deec3d | Exact or widening-only returns; explicit narrowing in the math library. V0–V3 passed on Linux x86_64. |
+| C19 | 72ac02e | Lazy ternary expressions in the current scope, numeric promotion and colon-ID/literal lexing; opcode50. V0–V3 passed on Linux x86_64. |
+| C20 | 28c31ed | Flat switch lowering, grouped literal labels, no fall-through and enclosing-loop continue. V0,V1,V3 passed on Linux x86_64. |
+| C21 | 8069303 | Unicode string functions, immutable code-point indexing and method sugar. V0–V3 passed on Linux x86_64. |
+| C22 | 5ce9d75 | Typed class pointers, explicit address erasure and closed object storage across runtime/JNI; Known limitations documented. V0–V3 passed on Linux x86_64. |
+| C23 | e620817 | Checked reflection results with opcode51: object liveness, known direct slot tags, runtime generic widths and buffer layouts. V0–V3 passed on Linux x86_64. |
+| C24 | df6a1c3 | Virtual methods and phase-bound method tables; opcodes52–53 and JNI snapshot v10. Construction rollback and cleanup preserve the first error. V0–V3 passed on Linux x86_64. |
+| C25 | 9d5103f | Exact physical ABD depth, eager statement spilling and conservative lifetime/scope checks; forced96/64/48 differentials. V0–V2 passed on Linux x86_64. |
+| C26 | e686960 | Flat chains above 128 operands, ordered segmented folds and safe string/boolean balancing; iterative precedence parsing. V0–V2 passed on Linux x86_64. |
+| C27 | 7fc5a12 | Budget-sensitive flat else-if ladders, preserved first-predicate scope and conservative transitive scope proofs. V0–V2 passed on Linux x86_64. |
+| C28 | this commit | Final V1/V2 evidence, fresh V3 (30 checks/175 verified files), seven measured scaling inputs and documented probe coverage. |
+
+## Completed plan
+
+No C01–C28 items remain. See the actual [validation record](../../VALIDATION.en.md) and [probe inventory](PROBE_COVERAGE.en.md). V0–V3 are defined below.
+
+### Follow-ups found while implementing C01–C13
+
+- `compile-json` reads its JSON input with `Files.readString`, with no regular-file or size check (`Main.readTree`). A FIFO hangs and `/dev/zero` runs out of memory.
+- A stray `}` that closes a function early causes cascading errors, capped at 20.
+- Typed globals are checked at compile time only, because exec v10 records no global types.
+- Compiling 20,000 functions remains memory-heavy; the C28 validation record reports measured process RSS with a 1 GiB heap limit.
+- Only Linux x86_64 was exercised. The Windows and macOS path, launcher and float-parsing code is untested.
+- Hint-assumption conflicts use `Map.containsValue`, which is a quadratic scan.
+- Operator methods cannot be called through `Base::op`.
+
+## How to resume
+
+- **Validation sets.** Always run with `env -u JAVA_TOOL_OPTIONS`, because the tests require empty stderr. Run them one after another, never in parallel.
+  - V0: `git diff --check`, plus a review of untracked files.
+  - V1: `python3 tools/build_and_test.py --offline`
+  - V2: `python3 tools/build_and_test.py --offline --sanitize`
+  - V3: `python3 tools/export_distribution.py build/dist-check --offline [--force]`
+- **Per commit:**
+  1. Implement it from its DESIGN section, adjusted by this file.
+  2. Run targeted tests, then its validation sets.
+  3. Review the diff adversarially for correctness, missed sites and paired zh/en docs.
+  4. Fix what the review finds.
+  5. Commit. One commit per item, in the order above.
+- **Opcode numbering is dense, in landing order:** 43–48 bitwise, 49 convert, 50 select, 51 check_object, 52 set_methods, 53 call_virtual.
+- Every commit that adds AST keys must also update `AstShape`, the warnings, `SourceRules`, and the help text in `Main` and the launcher.

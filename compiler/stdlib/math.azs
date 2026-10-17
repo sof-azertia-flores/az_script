@@ -12,6 +12,7 @@ double math_epsilon():0006 { return 2.220446049250313e-16; }
 
 // Produce the runtime's standard arithmetic exception for invalid domains.
 double math__domain_error() { return 1.0 / 0.0; }
+int math__domain_error_int() { return 1 / 0; }
 
 double math_abs(double x):0007 {
     // The double subtraction also makes abs(INT_MIN) representable.
@@ -21,7 +22,7 @@ double math_abs(double x):0007 {
 }
 
 int math_abs_int(int x):0008 {
-    if (x == -2147483648) { return math__domain_error(); }
+    if (x == -2147483648) { return math__domain_error_int(); }
     if (x < 0) { return -x; }
     return x;
 }
@@ -60,7 +61,7 @@ int math_max_int(int a, int b):000e {
 }
 
 int math_clamp_int(int x, int lower, int upper):000f {
-    if (lower > upper) { return math__domain_error(); }
+    if (lower > upper) { return math__domain_error_int(); }
     if (x < lower) { return lower; }
     if (x > upper) { return upper; }
     return x;
@@ -155,7 +156,7 @@ double math_pow(double base, int exponent):0018 {
 
 // Checked int32 power. Exponent must be a non-negative int.
 int math_int_pow(int base, int exponent):0019 {
-    if (exponent < 0) { return math__domain_error(); }
+    if (exponent < 0) { return math__domain_error_int(); }
     int power = exponent;
     int result = 1;
     int factor = base;
@@ -187,9 +188,9 @@ double math_sqrt(double x):001a {
     return guess;
 }
 
-// Efficient truncation without a native cast. Result must fit signed int32.
+// Efficient truncation with an explicit conversion. Result must fit signed int32.
 int math_trunc(double x):001b {
-    if (x >= 2147483648.0 || x <= -2147483649.0) { return math__domain_error(); }
+    if (x >= 2147483648.0 || x <= -2147483649.0) { return math__domain_error_int(); }
     boolean negative = x < 0;
     double value = math_abs(x);
     double step = 1.0;
@@ -202,19 +203,19 @@ int math_trunc(double x):001b {
         }
         step /= 2.0;
     }
-    if (negative) { return -whole; }
-    return whole;
+    if (negative) { return int(-whole); }
+    return int(whole);
 }
 
 int math_floor(double x):001c {
-    if (x < -2147483648.0 || x >= 2147483648.0) { return math__domain_error(); }
+    if (x < -2147483648.0 || x >= 2147483648.0) { return math__domain_error_int(); }
     int result = math_trunc(x);
     if (x < 0 && result != x) { result -= 1; }
     return result;
 }
 
 int math_ceil(double x):001d {
-    if (x <= -2147483649.0 || x > 2147483647.0) { return math__domain_error(); }
+    if (x <= -2147483649.0 || x > 2147483647.0) { return math__domain_error_int(); }
     int result = math_trunc(x);
     if (x > 0 && result != x) { result += 1; }
     return result;
@@ -222,7 +223,7 @@ int math_ceil(double x):001d {
 
 // Half values are rounded away from zero.
 int math_round(double x):001e {
-    if (x >= 2147483647.5 || x <= -2147483648.5) { return math__domain_error(); }
+    if (x >= 2147483647.5 || x <= -2147483648.5) { return math__domain_error_int(); }
     if (x >= 0) { return math_floor(x + 0.5); }
     return math_ceil(x - 0.5);
 }
@@ -242,7 +243,7 @@ int math_gcd(int a, int b):0020 {
 
 // Remainder in [0, modulus). Both operands must be int and modulus > 0.
 int math_positive_mod(int value, int modulus):0021 {
-    if (modulus <= 0) { return math__domain_error(); }
+    if (modulus <= 0) { return math__domain_error_int(); }
     int result = value % modulus;
     if (result < 0) { result += modulus; }
     return result;
@@ -276,7 +277,7 @@ int math_lcm(int a, int b):0026 {
 }
 
 int math_factorial(int n):0027 {
-    if (n < 0 || n > 12 || n != math_trunc(n * 1.0)) { return math__domain_error(); }
+    if (n < 0 || n > 12 || n != math_trunc(n * 1.0)) { return math__domain_error_int(); }
     int result = 1;
     int i = 2;
     while (i <= n) {
@@ -287,7 +288,7 @@ int math_factorial(int n):0027 {
 }
 
 int math_fibonacci(int n):0028 {
-    if (n < 0 || n > 46 || n != math_trunc(n * 1.0)) { return math__domain_error(); }
+    if (n < 0 || n > 46 || n != math_trunc(n * 1.0)) { return math__domain_error_int(); }
     if (n == 0) { return 0; }
     int previous = 0;
     int current = 1;

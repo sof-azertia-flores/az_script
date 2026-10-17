@@ -33,7 +33,7 @@ def main():
                                     '--ast', str(ast), '--exec-json', str(executable)],
                                     cwd=ROOT, capture_output=True, text=True, timeout=30)
             if not valid:
-                assert result.returncode != 0 and 'Error:' in result.stderr, (name, result.stdout, result.stderr)
+                assert result.returncode == 1 and 'Error:' in result.stderr and 'internal compiler error' not in result.stderr, (name, result.stdout, result.stderr)
                 assert 'Exception in thread' not in result.stderr, (name, result.stderr)
                 return None, None
             assert result.returncode == 0, (name, result.stdout, result.stderr)
@@ -110,6 +110,27 @@ def main():
         execute('static-method-binding', '''class A{int x;int value(){return 1;}int call(){return value();}}
             class B:A{int y;int value(){return 2;}int own(){return value();}}
             void main(){B * b();A* a=b;print(b.value());print(a.value());print(b.call());print(b.own());}''', '2\n1\n1\n2\n')
+        execute('qualified-base-call', '''class A{int x=1;int value(){return 10+x;}int twice(int n){return n*2;}}
+            class B:A{int y=2;int value(){return A::value()+100;}int same(){return B::value();}}
+            class C:B{int z=3;int value(){return B::value()+1000;}int root(){return A::value();}
+            int doubled(){return A::twice(z);}void say(){A::twice(1);print("said");}}
+            void main(){C * c();B* b=c;A* a=c;print(c.value());print(b.value());print(a.value());
+            print(c.root());print(c.doubled());print(b.same());c.say();}''', '1111\n111\n11\n11\n6\n111\nsaid\n')
+        execute('qualified-base-call-shadowed-by-field', '''class A{int x=4;int value(){return x;}}
+            class B:A{int value=9;int sum(){return A::value()+value;}}
+            void main(){B b;print(b.sum());}''', '13\n')
+        execute('qualified-base-call-statement-and-initializer', '''class A{int x=4;int value(){return x;}void hello(){print("A");}}
+            class B:A{int y=A::value()+1;void hello(){A::hello();print("B");for(A::hello();false;){}}}
+            void main(){B b;print(b.y);b.hello();}''', '5\nA\nB\nA\n')
+        execute('qualified-base-call-constructor-destructor', '''class A{int x=1;int f(){return x;}}
+            class B:A{int y=2;B():A(){print(A::f());}~B(){print(A::f()+10);}int f(){return 5;}}
+            void main(){B b;print(b.f());}''', '1\n5\n11\n')
+        execute('qualified-base-call-generic', '''class Box<T>{T v;Box(T a){v=a;}T get(){return v;}<U> U echo(U u){return u;}}
+            class IntBox:Box<int>{int extra=5;IntBox():Box<int>(7){}int get(){return Box::get()+extra;}
+            string text(){return Box::echo<string>("e");}}
+            class Wrap<T>:Box<T>{int k=1;Wrap(T a):Box<T>(a){}T get(){return Box::get();}}
+            void main(){IntBox i;print(i.get());print(i.text());Wrap<string>* w=new Wrap<string>("s");print(w.get());delete w;}''',
+            '12\ne\ns\n')
         execute('inherited-recursion', '''class A{int x=1;int sum(int n){if(n==0){return x;}return x+sum(n-1);}}
             class B:A{int x=10;}
             void main(){B b;print(b.sum(3));}''', '4\n')
@@ -134,15 +155,11 @@ def main():
         execute('base-alias-delete-automatic', '''class A{int x=3;~A(){print(x);}}
             class B:A{int y=7;~B(){print(y);}}
             void main(){B * b();A* a=b;delete a;}''', '7\n3\n', error=True)
-        execute('most-derived-destructor-structural-alias', '''class A{int x=3;~A(){print("A");}}
-            class B:A{int y=7;~B(){print("B");}}class C{int first;int second;~C(){print("wrong");}}
-            void main(){B* b=new B();C* c=b;delete c;}''', 'B\nA\n')
-        execute('structural-flat-equivalence', '''class A{int x=3;}class B:A{double y=4.5;}
-            class C{int first;double second;}
-            void main(){B b;C c=b;print(c.first);print(c.second);}''', '3\n4.5\n')
-        execute('recursive-structural-equivalence', '''class A{int x;A* next;}
-            class B:A{int y;}class C{int renamed;D* next;int end;}class D{int renamed;D* next;}
-            void main(){B b;C c=b;print(c.next==null);}''', 'true\n')
+        execute('most-derived-destructor-base-alias', '''class A{int x=3;~A(){print("A");}}
+            class B:A{int y=7;~B(){print("B");}}
+            void main(){B* b=new B();A* a=b;delete a;}''', 'B\nA\n')
+        execute('inherited-value-copy', '''class A{int x=3;}class B:A{double y=4.5;}
+            void main(){B b;B c=b;print(c.x);print(c.y);}''', '3\n4.5\n')
         execute('inherited-self-return', '''class A{int x=5;A* self(){return this;}}
             class B:A{int y=7;}
             void main(){B b;print(b.self().x);}''', '5\n')
@@ -202,7 +219,7 @@ def main():
         allocations = []
         def inspect(value):
             if isinstance(value, dict):
-                if value.get('t') == 1 and value.get('id') == 0x0ABD0003:
+                if value.get('t') == 1 and value.get('id') == 0x0ABD0014:
                     allocations.append(value['param'])
                 for child in value.values():
                     inspect(child)
@@ -235,10 +252,31 @@ def main():
             'return-downcast': 'class A{int x;}class B:A{int y;}B bad(A a){return a;}void main(){}',
             'inherited-self-downcast': 'class A{int x;A* self(){return this;}}class B:A{int y;}void main(){B b;B* c=b.self();}',
             'unrelated-prefix': 'class A{int x;}class B{int x;int y;}void main(){B b;A a=b;}',
+            # Classes are nominal: a flattened layout equal to another class does not convert.
+            'flat-layout-alias': 'class A{int x=3;~A(){print("A");}}class B:A{int y=7;~B(){print("B");}}'
+                                 'class C{int first;int second;~C(){print("wrong");}}void main(){B* b=new B();C* c=b;delete c;}',
+            'flat-layout-value': 'class A{int x=3;}class B:A{double y=4.5;}class C{int first;double second;}void main(){B b;C c=b;}',
+            'recursive-layout-value': 'class A{int x;A* next;}class B:A{int y;}class C{int renamed;D* next;int end;}'
+                                      'class D{int renamed;D* next;}void main(){B b;C c=b;}',
+            'fieldless-derived-downcast': 'class A{int x;}class B:A{}void main(){A* a=new A();B* b=a;}',
+            'fieldless-derived-slice': 'class A{int x;}class B:A{}void main(){B b;A a=b;}',
             'hidden-field-wrong-type': 'class A{int x;}class B:A{string x;}void main(){B b;b.x=7;}',
             'hidden-method-wrong-signature': 'class A{int x;int f(int n){return n;}}class B:A{int y;int f(){return 2;}}void main(){B b;b.f(3);}',
             'duplicate-derived-field': 'class A{int x;}class B:A{int y;int y;}void main(){}',
             'dynamic-derived-member': 'class A{int x;}class B:A{int y;}void main(){var b=new B();print(b.x);}',
+            'base-call-outside-class': 'class A{int x;int f(){return 1;}}void main(){print(A::f());}',
+            'base-call-non-ancestor': 'class A{int x;int f(){return 1;}}class B{int y;int g(){return A::f();}}void main(){}',
+            'base-call-derived-from-base': 'class A{int x;int f(){return B::g();}}class B:A{int y;int g(){return 1;}}void main(){}',
+            'base-call-unknown-method': 'class A{int x;}class B:A{int y;int g(){return A::h();}}void main(){}',
+            'base-call-field': 'class A{int x;}class B:A{int y;int g(){return A::x();}}void main(){}',
+            'base-call-type-arguments': 'class A<T>{T x;int f(){return 1;}}class B:A<int>{int y;int g(){return A<int>::f();}}void main(){}',
+            'base-call-not-a-class': 'class A{int x;}class B:A{int y;int g(){return Q::f();}}void main(){}',
+            'base-call-without-call': 'class A{int x;int f(){return 1;}}class B:A{int y;int g(){return A::f;}}void main(){}',
+            'base-call-wrong-argument': 'class A{int x;int f(int n){return n;}}class B:A{int y;int g(){return A::f("s");}}void main(){}',
+            'base-call-operator': 'class A{int x;int operator+(int n){return x+n;}}class B:A{int y;int g(){return A::operator+(1);}}void main(){}',
+            'base-call-with-receiver': 'class A{int x;int f(){return 1;}}class B:A{int y;int g(){return this.A::f();}}void main(){}',
+            'base-call-derived-constructor': 'class A{int x;}class B:A{int y;void g(){B::A();}}void main(){}',
+            'base-call-destructor': 'class A{int x;~A(){}}class B:A{int y;void g(){A::~A();}}void main(){}',
         }
         for name, source in bad_sources.items():
             compile_case(source, 'invalid-' + name, valid=False)
@@ -265,6 +303,7 @@ class Child:Base{
  int extra=childSeed();
  extern Child(int seed):c0010002;
  extern int sum():c0010003;
+ extern int scaled():c0010008;
  extern ~Child():c0010004;
 }
 #fi
@@ -285,6 +324,7 @@ class Child:Base{
             int childSeed():0005{return seed;}
             Child::Child(int seed):0002 : Base(seed+1){extra=extra+seed;if(seed<0){int bad=1/0;}}
             int Child::sum():0003{return get()+extra;}
+            int Child::scaled():0008{return Base::get()*100+extra;}
             Child::~Child():0004{print("child:"+extra);if(extra==199){int bad=1/0;}}
             Base* produce():0006{Child * c(2);return c;}
             Base* manual():0007{return new Child(3);}''', 'child')
@@ -293,9 +333,9 @@ class Child:Base{
             extern Base* produce():c0010006;
             extern int readBase(Base* b):b0010006;
             extern Base* manual():c0010007;
-            void main(){seed=1000;{Child * c(4);Base* b=c;print(b.get());print(c.sum());print(readBase(c));}
+            void main(){seed=1000;{Child * c(4);Base* b=c;print(b.get());print(c.sum());print(c.scaled());print(readBase(c));}
             {Base* a=produce();print(a.get());}Base* m=manual();print(m.get());delete m;print(seed);}''', 'client')
-        expected = '15\n119\n15\nchild:104\nbase:15\n13\nchild:102\nbase:13\n14\nchild:103\nbase:14\n1000\n'
+        expected = '15\n119\n1604\n15\nchild:104\nbase:15\n13\nchild:102\nbase:13\n14\nchild:103\nbase:14\n1000\n'
         run_case('cross-hint-base-first', client, expected, libraries=(base, child))
         run_case('cross-hint-child-first', client, expected, libraries=(child, base))
 
