@@ -1,7 +1,8 @@
 #ifndef AZSCRIPT_VM_PROGRAM_H
 #define AZSCRIPT_VM_PROGRAM_H
 
-#include "value.h"
+#include "../core/value.h"
+#include "../core/value_ops.h"
 #include "../core/debug.h"
 #include <cstdint>
 #include <limits>
@@ -34,12 +35,6 @@ enum class Opcode : std::uint16_t {
     count
 };
 enum class BudgetKind : std::uint32_t { expression, loop_iteration, method_entry };
-enum class UnaryOperation : std::uint32_t { logical_not, negate };
-enum class BinaryOperation : std::uint32_t {
-    add, subtract, multiply, divide, remainder, greater, less, equal,
-    not_equal, greater_equal, less_equal, bit_and, bit_or, bit_xor,
-    shift_left, shift_right, unsigned_shift_right
-};
 
 // Fixed-size records keep dispatch linear. Variable length arguments and
 // bindings live in immutable side tables. Unused operands must be no_index.

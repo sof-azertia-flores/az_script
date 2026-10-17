@@ -39,7 +39,7 @@ Value HostBridge::invoke_external(const CallTarget& target,std::span<const Value
     std::vector<std::shared_ptr<variable>> host_arguments;
     host_arguments.reserve(arguments.size());
     for(const auto& value:arguments) {
-        auto argument=std::make_shared<variable>();HostValueAccess::assign(*argument,value);
+        auto argument=std::make_shared<variable>();value_access::assign(*argument,value);
         host_arguments.push_back(std::move(argument));
     }
     const auto& function=program_.functions[caller.function];
@@ -67,7 +67,7 @@ Value HostBridge::invoke_external(const CallTarget& target,std::span<const Value
     if(!result)throw std::runtime_error("VM host callback returned a null value");
     if(result->type_tag()==OBJECT_VALUE)
         throw std::invalid_argument("Scalar VM does not support object callback results");
-    return HostValueAccess::read(*result);
+    return value_access::read(*result);
 }
 std::shared_ptr<variable> HostBridge::invoke_external_in(const CallTarget& target,std::span<const Value> arguments,
         const ExecutionPosition& caller,const std::shared_ptr<environment>& scope) {
@@ -77,7 +77,7 @@ std::shared_ptr<variable> HostBridge::invoke_external_in(const CallTarget& targe
     std::vector<std::shared_ptr<variable>> host_arguments;
     host_arguments.reserve(arguments.size());
     for(const auto& value:arguments) {
-        auto argument=std::make_shared<variable>();HostValueAccess::assign(*argument,value);
+        auto argument=std::make_shared<variable>();value_access::assign(*argument,value);
         host_arguments.push_back(std::move(argument));
     }
     std::shared_ptr<variable> result;

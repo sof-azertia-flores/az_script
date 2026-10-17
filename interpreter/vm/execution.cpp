@@ -1,6 +1,6 @@
 #include "execution.h"
 #include "cleanup.h"
-#include "operations.h"
+#include "../core/value_ops.h"
 #include "session.h"
 #include "../blocks.h"
 #include "../heepalloc.h"
@@ -67,7 +67,7 @@ ExecutionPosition position_of(const FrameRecord& frame) noexcept {
         frame.pc==no_index?no_index:frame.pc-1};
 }
 std::shared_ptr<variable> wrap(const Value& value) {
-    auto result=std::make_shared<variable>();HostValueAccess::assign(*result,value);return result;
+    auto result=std::make_shared<variable>();value_access::assign(*result,value);return result;
 }
 }
 
@@ -201,7 +201,7 @@ struct ScalarExecutor::State {
         const auto& reg=registers[frame.registers.begin+index];
         if(!reg.reference)return reg.value;
         if(reg.cell!=no_index)return pool.resolve(cells[reg.cell].slot);
-        if(reg.host)return HostValueAccess::read(*reg.host);
+        if(reg.host)return value_access::read(*reg.host);
         return pool.resolve(reg.global);
     }
     void value(const FrameRecord& frame,Register destination,Value next) noexcept {
@@ -313,7 +313,7 @@ struct ScalarExecutor::State {
             if(value->type_tag()==OBJECT_VALUE||storage->type_tag()==OBJECT_VALUE)
                 runtime(options,[&]{blocks::store(storage,value,scope_of(frame));});
             else blocks::store(storage,value,scope_of(frame));
-            this->value(frame,destination,HostValueAccess::read(*storage));return;
+            this->value(frame,destination,value_access::read(*storage));return;
         }
         Value next=read(frame,source);
         if(next.type_tag()==OBJECT_VALUE)
@@ -509,15 +509,15 @@ struct ScalarExecutor::State {
                     if(frame.object==no_index||current.type_tag()!=OBJECT_VALUE){value(frame,instruction.result,current);break;}
                     auto source=variable_of(frame,instruction.left);std::shared_ptr<variable> result;
                     runtime(options,[&]{result=blocks::materialize(source,scope_of(frame));});
-                    value(frame,instruction.result,HostValueAccess::read(*result));break;
+                    value(frame,instruction.result,value_access::read(*result));break;
                 }
                 case Opcode::copy_reference:copy(frame,instruction.result,instruction.left);break;
-                case Opcode::truth:value(frame,instruction.result,Value(vm::truth(read(frame,instruction.left))));break;
-                case Opcode::unary:value(frame,instruction.result,vm::unary(static_cast<UnaryOperation>(instruction.operand),read(frame,instruction.left)));break;
-                case Opcode::binary:value(frame,instruction.result,vm::binary(static_cast<BinaryOperation>(instruction.operand),read(frame,instruction.left),read(frame,instruction.right)));break;
-                case Opcode::convert:value(frame,instruction.result,vm::convert(read(frame,instruction.left),static_cast<int>(instruction.operand)));break;
+                case Opcode::truth:value(frame,instruction.result,Value(value_ops::truth(read(frame,instruction.left))));break;
+                case Opcode::unary:value(frame,instruction.result,value_ops::unary(static_cast<UnaryOperation>(instruction.operand),read(frame,instruction.left)));break;
+                case Opcode::binary:value(frame,instruction.result,value_ops::binary(static_cast<BinaryOperation>(instruction.operand),read(frame,instruction.left),read(frame,instruction.right)));break;
+                case Opcode::convert:value(frame,instruction.result,value_ops::convert(read(frame,instruction.left),static_cast<int>(instruction.operand)));break;
                 case Opcode::jump:frame.pc=instruction.target;break;
-                case Opcode::branch_false:if(!vm::truth(read(frame,instruction.left)))frame.pc=instruction.target;break;
+                case Opcode::branch_false:if(!value_ops::truth(read(frame,instruction.left)))frame.pc=instruction.target;break;
                 case Opcode::branch_flow:if(frame.returned||frame.broken||frame.continued)frame.pc=instruction.target;break;
                 case Opcode::branch_returned:if(frame.returned)frame.pc=instruction.target;break;
                 case Opcode::scope_enter:
@@ -607,9 +607,9 @@ struct ScalarExecutor::State {
                     if(source->type_tag()==OBJECT_VALUE) {
                         std::shared_ptr<variable> exported;
                         runtime(options,[&]{exported=blocks::export_result(source,scope);});
-                        result=HostValueAccess::read(*exported);
+                        result=value_access::read(*exported);
                     } else {
-                        result=HostValueAccess::read(*source);
+                        result=value_access::read(*source);
                         if(instruction.operand) {
                             if(result.type_tag()!=ADDRESS_VALUE)throw std::runtime_error("Object return requires address or object type");
                             heap::return_object(result.get<address>(),scope);
@@ -668,7 +668,7 @@ struct ScalarExecutor::State {
                     const auto slot=std::bit_cast<int>(instruction.operand);
                     if(slot<0){value(frame,instruction.result,pool.resolve(global_slot(slot,frame,globals)));break;}
                     auto moved=blocks::move_out(object_local(frame,slot),scope_of(frame));
-                    value(frame,instruction.result,HostValueAccess::read(*moved));break;
+                    value(frame,instruction.result,value_access::read(*moved));break;
                 }
                 case Opcode::drop: {
                     // Only object storage can own a value; globals never do.
@@ -704,7 +704,7 @@ struct ScalarExecutor::State {
                 }
                 case Opcode::function_end: {
                     frame.location=frame.return_location;position=position_of(frame);
-                    auto output=vm::convert_return(frame.result,function_of(frame).return_type);
+                    auto output=value_ops::convert_return(frame.result,function_of(frame).return_type);
                     if(frame.object!=no_index) {
                         // The root scope ends after return conversion, as the
                         // tree executor's with_cleanup does.

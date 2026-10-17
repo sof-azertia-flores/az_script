@@ -1,7 +1,7 @@
 #ifndef AZSCRIPT_VM_STORAGE_H
 #define AZSCRIPT_VM_STORAGE_H
 
-#include "value.h"
+#include "../core/value.h"
 #include <cstddef>
 #include <cstdint>
 #include <limits>

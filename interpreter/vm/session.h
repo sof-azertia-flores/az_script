@@ -16,10 +16,6 @@ void select_backend(script& owner,std::size_t workspace_limit);
 struct WorkspaceUsage {std::size_t used_bytes=0,peak_bytes=0,limit_bytes=0;};
 WorkspaceUsage workspace_usage(const script& owner);
 
-struct HostValueAccess {
-    static const Value& read(const variable& source) noexcept;
-    static void assign(variable& destination,Value value) noexcept;
-};
 
 class Session {
     struct Prepared;

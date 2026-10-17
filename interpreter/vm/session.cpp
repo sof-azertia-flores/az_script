@@ -8,11 +8,6 @@
 #include <stdexcept>
 
 namespace azertian::vm {
-const Value& HostValueAccess::read(const variable& source) noexcept {return source.value_;}
-void HostValueAccess::assign(variable& destination,Value value) noexcept {
-    destination.replace_value(std::move(value));
-}
-
 struct Session::Prepared final:HostBoundary {
     struct GlobalBinding {
         std::shared_ptr<variable> host;
@@ -118,7 +113,7 @@ struct Session::Prepared final:HostBoundary {
             else {
                 binding=bindings.size();
                 auto wrapper=owner.baseEnv->variables[incoming[i].index];
-                const auto slot=slots.emplace(HostValueAccess::read(*wrapper));
+                const auto slot=slots.emplace(value_access::read(*wrapper));
                 bindings.emplace_back(GlobalBinding{std::move(wrapper),slot,false});
                 identities.emplace_back(IdentityIndex{host,binding});
             }
@@ -134,7 +129,7 @@ struct Session::Prepared final:HostBoundary {
         for(const auto& entry:incoming.span())bindings[entry.index].reachable=true;
         for(auto& binding:bindings.span())if(binding.reachable||active_invocations) {
             auto* value=slots.try_resolve(binding.slot);if(!value)std::terminate();
-            *value=HostValueAccess::read(*binding.host);
+            *value=value_access::read(*binding.host);
         }
         if(globals.size()>count)globals.truncate(count);
         else globals.append_default(count-globals.size());
@@ -150,7 +145,7 @@ struct Session::Prepared final:HostBoundary {
         for(const auto& binding:bindings.span()) {
             const auto* value=slots.try_resolve(binding.slot);
             if(!value)std::terminate();
-            HostValueAccess::assign(*binding.host,*value);
+            value_access::assign(*binding.host,*value);
         }
         export_allowed=false;
     }
@@ -224,7 +219,7 @@ std::shared_ptr<variable> Session::invoke(std::uint32_t function,
     state.arguments.prepare_append(arguments.size());
     for(const auto& argument:arguments) {
         if(!argument)throw std::invalid_argument("Null argument pointer; use variable(nullptr)");
-        state.arguments.emplace_back(HostValueAccess::read(*argument));
+        state.arguments.emplace_back(value_access::read(*argument));
     }
     Value result;
     try {
@@ -236,7 +231,7 @@ std::shared_ptr<variable> Session::invoke(std::uint32_t function,
     }
     state.export_globals(owner_);
     auto host_result=std::make_shared<variable>();
-    HostValueAccess::assign(*host_result,std::move(result));
+    value_access::assign(*host_result,std::move(result));
     return host_result;
     } catch(...) {
         if(!state.active_invocations)state.retire_unreachable(owner_);

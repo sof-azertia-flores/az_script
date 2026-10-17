@@ -1,8 +1,8 @@
-#ifndef AZSCRIPT_VM_VALUE_H
-#define AZSCRIPT_VM_VALUE_H
+#ifndef AZSCRIPT_CORE_VALUE_H
+#define AZSCRIPT_CORE_VALUE_H
 
 #include "../../abdC/address.h"
-#include "../core/types.h"
+#include "types.h"
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -13,7 +13,6 @@
 namespace azertian {
 struct slot_block;
 
-namespace vm {
 // Values have no storage identity. Copying an object handle does not copy its
 // fields or transfer its script ownership; the owning Slot/variable handles it.
 // Strings are immutable and share their bytes until a value is replaced.
@@ -119,6 +118,5 @@ public:
         Value held(std::move(other));other.move_from(*this);move_from(held);
     }
 };
-}
 }
 #endif

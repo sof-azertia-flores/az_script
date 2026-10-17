@@ -8,9 +8,9 @@ find_package(Threads REQUIRED)
 if(NOT TARGET azertianBinaryData)
     add_subdirectory(../abdC "${CMAKE_CURRENT_BINARY_DIR}/abdC")
 endif()
-set(AZSCRIPT_RUNTIME_SOURCES core/trace.cpp core/admission.cpp core/types.cpp library.cpp internelFunctions.cpp heepalloc.cpp blocks.cpp p256.cpp extern_library.cpp runtime_abi.cpp
+set(AZSCRIPT_RUNTIME_SOURCES core/trace.cpp core/admission.cpp core/types.cpp core/value_ops.cpp library.cpp internelFunctions.cpp heepalloc.cpp blocks.cpp p256.cpp extern_library.cpp runtime_abi.cpp
     vm/storage.cpp vm/frames.cpp vm/program.cpp vm/lowering.cpp vm/source_decode.cpp vm/loader.cpp
-    vm/operations.cpp vm/execution.cpp vm/session.cpp vm/host_bridge.cpp vm/cleanup.cpp)
+    vm/execution.cpp vm/session.cpp vm/host_bridge.cpp vm/cleanup.cpp)
 add_library(abdInvoker SHARED ${AZSCRIPT_RUNTIME_SOURCES})
 add_library(abdInvokero STATIC ${AZSCRIPT_RUNTIME_SOURCES})
 foreach(target abdInvoker abdInvokero)
@@ -56,9 +56,8 @@ install(TARGETS abdInvoker abdInvokero EXPORT AzScriptTargets
 install(TARGETS azscript-run RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
 install(FILES library.h internelFunctions.h heepalloc.h blocks.h azertianBinaryDataValues.h acs.h
     DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/azscript/detail/interpreter")
-install(FILES vm/value.h DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/azscript/detail/interpreter/vm")
 # library.h includes these neutral declarations (debug records, error traces).
-install(FILES core/debug.h core/errors.h core/types.h core/limits.h DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/azscript/detail/interpreter/core")
+install(FILES core/debug.h core/errors.h core/types.h core/limits.h core/value.h DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/azscript/detail/interpreter/core")
 if(BUILD_TESTING)
     add_executable(runtime-tests runtime_tests.cpp)
     target_link_libraries(runtime-tests PRIVATE abdInvoker)

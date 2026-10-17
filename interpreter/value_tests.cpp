@@ -45,9 +45,9 @@ void scalar_values() {
         require(std::bit_cast<std::uint64_t>(stored.get<double>())==0x8000000000000000ull,"double negative zero changed");
         stored.setValue(true);require(stored.get<bool>(),"boolean changed");
         stored.setValue(nullptr);require(stored.type_tag()==VOID_VALUE,"void has an incorrect tag");
-        vm::Value value(address{42}),moved(std::move(value));
+        Value value(address{42}),moved(std::move(value));
         require(value.type_tag()==VOID_VALUE&&moved.get<address>()==address{42},"Value move leaves invalid state");
-        vm::Value another(12);another.swap(moved);
+        Value another(12);another.swap(moved);
         require(another.type_tag()==ADDRESS_VALUE&&moved.get<int>()==12,"Value swap changes tags");
     }
     count_allocations=false;
@@ -73,7 +73,7 @@ void string_values() {
     require(source.get<std::string>()==text,"string self-aliasing replacement loses bytes");
     source.setValue(std::string("replacement"));
     require(copy.get<std::string>()==text,"string snapshot changes when its source is replaced");
-    vm::Value moved_from(text),moved(std::move(moved_from));
+    Value moved_from(text),moved(std::move(moved_from));
     require(moved_from.type_tag()==VOID_VALUE&&moved.get<std::string>()==text,"moved string has invalid state");
     variable null_text(static_cast<const char*>(nullptr));
     require(null_text.type_tag()==VOID_VALUE,"null C string does not become void");
@@ -135,7 +135,7 @@ void strong_replacement() {
 }
 int main() {
     try {
-        std::cout<<"sizeof(Value)="<<sizeof(azertian::vm::Value)<<" sizeof(variable)="<<sizeof(azertian::variable)<<'\n';
+        std::cout<<"sizeof(Value)="<<sizeof(azertian::Value)<<" sizeof(variable)="<<sizeof(azertian::variable)<<'\n';
         scalar_values();string_values();object_values();strong_replacement();return 0;
     }catch(const std::exception& error) {
         count_allocations=false;fail_after=-1;

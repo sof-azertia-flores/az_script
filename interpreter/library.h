@@ -14,7 +14,7 @@
 #include <vector>
 #include <azscript/runtime_abi.hpp>
 #include "../abdC/azertianBinaryDataValues.h"
-#include "vm/value.h"
+#include "core/value.h"
 #include "core/debug.h"
 #include "core/errors.h"
 #include "core/limits.h"
@@ -26,7 +26,6 @@ inline constexpr int EXEC_FORMAT_VERSION=10;
 class expression; class function; class environment; class variable; class script; struct loaded_module;
 namespace vm {
 class Session;
-struct HostValueAccess;
 struct WorkspaceUsage;
 void select_backend(script& owner,std::size_t workspace_limit);
 WorkspaceUsage workspace_usage(const script& owner);
@@ -236,6 +235,11 @@ class continueExpression : public expression {
 public:
     std::shared_ptr<variable> execute(std::shared_ptr<environment> env) override;
 };
+// Engine-side access to a variable's payload; not part of the host API.
+struct value_access {
+    static const Value& read(const variable& source) noexcept;
+    static void assign(variable& destination,Value value) noexcept;
+};
 class variable {
 public:
     variable()=default;
@@ -277,10 +281,10 @@ public:
     void setValue(std::nullptr_t value);
     void setValue(std::shared_ptr<slot_block> value);
 private:
-    friend struct vm::HostValueAccess;
-    vm::Value value_;
+    friend struct value_access;
+    Value value_;
     void clear() noexcept;
-    void replace_value(vm::Value value) noexcept;
+    void replace_value(Value value) noexcept;
     void copy_value(const variable& other);
 };
 struct function_frame {

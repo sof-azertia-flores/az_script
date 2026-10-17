@@ -1,4 +1,4 @@
-#include "vm/operations.h"
+#include "core/value_ops.h"
 #include <bit>
 #include <cstdlib>
 #include <iostream>
@@ -24,7 +24,7 @@ void operator delete[](void* value,std::size_t) noexcept {std::free(value);}
 
 namespace {
 using namespace azertian;
-using namespace azertian::vm;
+using namespace azertian::value_ops;
 using Op=BinaryOperation;
 std::size_t checks=0;
 void check(bool value,const char* message){++checks;if(!value)throw std::runtime_error(message);}

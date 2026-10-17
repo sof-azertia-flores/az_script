@@ -8,6 +8,7 @@
 #include <type_traits>
 #include <vector>
 
+using namespace azertian;
 using namespace azertian::vm;
 namespace {
 int checks=0;

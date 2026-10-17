@@ -1,7 +1,7 @@
 #include "library.h"
 #include "vm/execution.h"
 #include "vm/lowering.h"
-#include "vm/operations.h"
+#include "core/value_ops.h"
 #include <array>
 #include <bit>
 #include <cstdlib>
@@ -156,7 +156,7 @@ bool equal(const Value& left,const Value& right) {
     switch(left.type_tag()) {
     case FLOAT_VALUE:return std::bit_cast<std::uint32_t>(left.get<float>())==std::bit_cast<std::uint32_t>(right.get<float>());
     case DOUBLE_VALUE:return std::bit_cast<std::uint64_t>(left.get<double>())==std::bit_cast<std::uint64_t>(right.get<double>());
-    default:return vm::to_string(left)==vm::to_string(right);
+    default:return value_ops::to_string(left)==value_ops::to_string(right);
     }
 }
 struct Observation {

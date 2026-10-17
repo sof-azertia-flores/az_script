@@ -1,4 +1,4 @@
-#include "operations.h"
+#include "value_ops.h"
 #include <bit>
 #include <cerrno>
 #include <charconv>
@@ -10,7 +10,7 @@
 #include <string_view>
 #include <type_traits>
 
-namespace azertian::vm {
+namespace azertian::value_ops {
 bool numeric(const Value& v) noexcept { return (v.type_tag()==INT_VALUE||v.type_tag()==FLOAT_VALUE||v.type_tag()==DOUBLE_VALUE); }
 double number(const Value& v) {
     switch(v.type_tag()) {
