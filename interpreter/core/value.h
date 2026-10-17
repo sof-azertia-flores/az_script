@@ -3,6 +3,8 @@
 
 #include "../../abdC/address.h"
 #include "types.h"
+#include <cstddef>
+#include <cstring>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -34,28 +36,32 @@ class Value {
         Object object_;
     };
     Kind kind_=Kind::none;
+    static constexpr std::size_t scalar_bytes=8;
+    static_assert(sizeof(int)<=scalar_bytes&&sizeof(float)<=scalar_bytes&&sizeof(double)<=scalar_bytes&&
+                  sizeof(bool)<=scalar_bytes&&sizeof(address)<=scalar_bytes);
     static_assert(std::is_nothrow_copy_constructible_v<String>&&std::is_nothrow_move_constructible_v<String>);
     static_assert(std::is_nothrow_copy_constructible_v<Object>&&std::is_nothrow_move_constructible_v<Object>);
     static_assert(std::is_trivially_copyable_v<address>);
     // No reference-counted alternative: assignment is a plain copy.
     bool trivial() const noexcept {return kind_!=Kind::string&&kind_!=Kind::object;}
+    // Only the reference-counted alternatives need a release. Keeping it apart
+    // leaves the trivial path small enough to inline at every destruction,
+    // whichever out-of-line copy of release() the linker keeps.
     void destroy() noexcept {
-        if(kind_==Kind::string)string_.~String();
-        else if(kind_==Kind::object)object_.~Object();
+        if(!trivial())release();
         kind_=Kind::none;
     }
+    void release() noexcept {
+        if(kind_==Kind::string)string_.~String();
+        else object_.~Object();
+    }
     // Both helpers require *this to hold no value. move_from leaves source empty.
+    // The scalar alternatives fit in the first 8 bytes and are trivially
+    // copyable, so one fixed-size copy replaces a switch on the hot path.
     void copy_from(const Value& source) noexcept {
-        switch(source.kind_) {
-        case Kind::none:break;
-        case Kind::integer:integer_=source.integer_;break;
-        case Kind::string: ::new(static_cast<void*>(&string_)) String(source.string_);break;
-        case Kind::single:single_=source.single_;break;
-        case Kind::real:real_=source.real_;break;
-        case Kind::boolean:boolean_=source.boolean_;break;
-        case Kind::pointer:pointer_=source.pointer_;break;
-        case Kind::object: ::new(static_cast<void*>(&object_)) Object(source.object_);break;
-        }
+        if(source.kind_==Kind::string)::new(static_cast<void*>(&string_)) String(source.string_);
+        else if(source.kind_==Kind::object)::new(static_cast<void*>(&object_)) Object(source.object_);
+        else std::memcpy(static_cast<void*>(&integer_),static_cast<const void*>(&source.integer_),scalar_bytes);
         kind_=source.kind_;
     }
     void move_from(Value& source) noexcept {
