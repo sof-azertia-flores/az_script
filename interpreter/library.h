@@ -17,12 +17,13 @@
 #include "core/value.h"
 #include "core/debug.h"
 #include "core/errors.h"
+#include "core/format.h"
 #include "core/limits.h"
 
 namespace azertian {
 inline constexpr std::size_t MAX_VARIABLE_SLOTS=limits::max_slots;
 // The only exec format the loader reads; ExecCodec.VERSION in the compiler matches it.
-inline constexpr int EXEC_FORMAT_VERSION=10;
+inline constexpr int EXEC_FORMAT_VERSION=exec::format_version;
 class expression; class function; class environment; class variable; class script; struct loaded_module;
 namespace vm {
 class Session;
@@ -203,7 +204,7 @@ public:
 class constantExpression : public expression {
 public:
     std::shared_ptr<variable> value;
-    explicit constantExpression(std::shared_ptr<AbdMapValue> value);
+    explicit constantExpression(const Value& value);
     std::shared_ptr<variable> execute(std::shared_ptr<environment> env) override;
 };
 #define AZ_BINARY_EXPRESSION(Name) \

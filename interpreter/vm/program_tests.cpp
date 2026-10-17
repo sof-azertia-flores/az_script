@@ -11,7 +11,7 @@
 using namespace azertian;
 using namespace azertian::vm;
 namespace {
-using Node=std::shared_ptr<SourceExpression>;
+using Node=std::shared_ptr<exec::expression>;
 void expect(bool condition,const char* message) {if(!condition)throw std::runtime_error(message);}
 template<class Body> void rejects(Body body,const std::string& fragment) {
     try {body();}catch(const std::invalid_argument& error) {
@@ -21,7 +21,7 @@ template<class Body> void rejects(Body body,const std::string& fragment) {
     throw std::runtime_error("Expected rejection: "+fragment);
 }
 Node node(int opcode,std::initializer_list<Node> children={}) {
-    auto result=std::make_shared<SourceExpression>();result->opcode=opcode;
+    auto result=std::make_shared<exec::expression>();result->opcode=opcode;
     for(const auto& child:children)result->children.push_back(child);
     return result;
 }
@@ -29,9 +29,9 @@ Node integer(int value=7) {auto result=node(0);result->constant=Value(value);ret
 Node boolean(bool value=true) {auto result=node(0);result->constant=Value(value);return result;}
 Node pointer() {auto result=node(0);result->constant=Value(address{0xffffffffffffffffULL});return result;}
 Node slot(int index=0) {auto result=node(3);result->immediate=index;return result;}
-std::shared_ptr<SourceContext> scalar_context() {auto result=std::make_shared<SourceContext>();result->abi=INT_VALUE;return result;}
+std::shared_ptr<exec::context> scalar_context() {auto result=std::make_shared<exec::context>();result->abi=INT_VALUE;return result;}
 void number_nodes(const Node& root,std::uint32_t& next) {
-    root->node=next++;for(const auto& child:root->children)number_nodes(std::const_pointer_cast<SourceExpression>(child),next);
+    root->node=next++;for(const auto& child:root->children)number_nodes(std::const_pointer_cast<exec::expression>(child),next);
 }
 SourceFunction source_function(Node body,int id=0x0fff0010) {
     std::uint32_t next=0;number_nodes(body,next);
@@ -103,7 +103,7 @@ void all_wire_operations() {
     for(int opcode=43;opcode<=48;++opcode)samples.push_back(node(opcode,{integer(),integer()}));
     auto convert=node(49,{integer()});convert->immediate=DOUBLE_VALUE;samples.push_back(convert);
     samples.push_back(node(50,{boolean(),integer(),integer()}));
-    auto check=node(51,{pointer()});auto context=std::make_shared<SourceContext>();context->abi=ADDRESS_VALUE;context->kind=2;
+    auto check=node(51,{pointer()});auto context=std::make_shared<exec::context>();context->abi=ADDRESS_VALUE;context->kind=2;
     check->contexts.push_back(context);check->slot_types={INT_VALUE,ANY_VALUE};samples.push_back(check);
     auto methods=node(52,{pointer()});methods->methods.push_back({0x0fff0020,{}});samples.push_back(methods);
     auto virtual_call=node(53,{pointer()});virtual_call->return_type=VOID_VALUE;samples.push_back(virtual_call);
@@ -133,9 +133,9 @@ void all_wire_operations() {
 void contexts_and_targets() {
     auto factory=source_function(integer(),0x0fff0021);factory.return_type=OBJECT_VALUE;factory.hidden_count=0;
     auto placement=source_function(node(7),0x0fff0022);placement.hidden_count=0;placement.param_types={ADDRESS_VALUE};placement.entry_kind=1;
-    auto object=std::make_shared<SourceContext>();object->abi=OBJECT_VALUE;object->kind=3;object->width=4;
+    auto object=std::make_shared<exec::context>();object->abi=OBJECT_VALUE;object->kind=3;object->width=4;
     object->factory_id=factory.function_id;object->placement_id=placement.function_id;
-    auto buffer=std::make_shared<SourceContext>();buffer->abi=OBJECT_VALUE;buffer->kind=4;buffer->element=object;
+    auto buffer=std::make_shared<exec::context>();buffer->abi=OBJECT_VALUE;buffer->kind=4;buffer->element=object;
     auto instruction=node(37);instruction->contexts.push_back(buffer);
     SourceProgram source;source.functions={source_function(instruction),factory,placement};
     auto program=lower_program(source);expect(program.functions[0].contexts.size()==2,"nested context pool");
@@ -143,7 +143,7 @@ void contexts_and_targets() {
     rejects([&]{verify_program(corrupt);},"cyclic context");
     corrupt=program;corrupt.functions[0].contexts[0].factory=0;
     rejects([&]{verify_program(corrupt);},"factory target signature");
-    auto reference=std::make_shared<SourceContext>();reference->reference=0;
+    auto reference=std::make_shared<exec::context>();reference->reference=0;
     auto abi=node(36);abi->contexts.push_back(reference);program=lower(abi);
     corrupt=program;corrupt.functions[0].contexts[0].reference=1;
     rejects([&]{verify_program(corrupt);},"hidden context reference");

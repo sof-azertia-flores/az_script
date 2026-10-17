@@ -29,14 +29,14 @@ void operator delete[](void* value,std::size_t) noexcept {std::free(value);}
 namespace {
 using namespace azertian;
 using namespace azertian::vm;
-using Node=std::shared_ptr<SourceExpression>;
+using Node=std::shared_ptr<exec::expression>;
 using Raw=std::shared_ptr<AbdValue>;
 std::size_t checks=0;
 void check(bool condition,const std::string& detail) {
     ++checks;if(!condition)throw std::runtime_error(detail);
 }
 Node op(int code,std::initializer_list<Node> children={}) {
-    auto result=std::make_shared<SourceExpression>();result->opcode=code;
+    auto result=std::make_shared<exec::expression>();result->opcode=code;
     result->children.assign(children.begin(),children.end());return result;
 }
 Node constant(Value value) {auto result=op(0);result->constant=std::move(value);return result;}
@@ -52,8 +52,8 @@ Node block(std::initializer_list<Node> children){return op(1,children);}
 Node cleanup(Node body,Node finalizer,bool on_error=false) {
     auto result=op(31,{std::move(body),std::move(finalizer)});result->on_error=on_error;return result;
 }
-void number_nodes(const std::shared_ptr<const SourceExpression>& node,std::uint32_t& count,DebugInfo& debug) {
-    auto& writable=const_cast<SourceExpression&>(*node);
+void number_nodes(const std::shared_ptr<const exec::expression>& node,std::uint32_t& count,DebugInfo& debug) {
+    auto& writable=const_cast<exec::expression&>(*node);
     writable.node=count++;writable.location=count;
     debug.locations.push_back({0,100+writable.node,7});
     for(const auto& child:node->children)number_nodes(child,count,debug);
@@ -81,7 +81,7 @@ std::shared_ptr<AbdMapValue> abd_value(const Value& value) {
     default:throw std::runtime_error("test encoder does not support objects");
     }
 }
-Raw wire(const std::shared_ptr<const SourceExpression>& node) {
+Raw wire(const std::shared_ptr<const exec::expression>& node) {
     AbdStack record;record.vs.push_back(integer(node->opcode));
     auto child=[&](std::size_t index){record.vs.push_back(wire(node->children.at(index)));};
     switch(node->opcode) {
@@ -110,7 +110,7 @@ Raw module_wire(const SourceFunction* source,std::uint32_t globals) {
     if(source) {
         AbdStack params;for(int type:source->param_types)params.vs.push_back(integer(type));
         AbdStack locations;
-        const auto add_locations=[&](auto&& self,const std::shared_ptr<const SourceExpression>& node)->void {
+        const auto add_locations=[&](auto&& self,const std::shared_ptr<const exec::expression>& node)->void {
             if(node->location) {
                 const auto at=source->debug->locations.at(node->location-1);
                 locations.vs.push_back(integer(static_cast<int>(node->node)));locations.vs.push_back(integer(0));
@@ -274,8 +274,8 @@ void scalar_cases() {
     differential("int-overflow",function(returned(op(12,{literal(std::numeric_limits<int>::max()),literal(1)}))));
     differential("division-zero",function(returned(op(15,{literal(1),literal(0)}))));
     auto inherited=function(returned(op(15,{literal(1),literal(0)})));
-    const_cast<SourceExpression&>(*inherited.body->children[0]).location=0;
-    for(const auto& child:inherited.body->children[0]->children)const_cast<SourceExpression&>(*child).location=0;
+    const_cast<exec::expression&>(*inherited.body->children[0]).location=0;
+    for(const auto& child:inherited.body->children[0]->children)const_cast<exec::expression&>(*child).location=0;
     differential("inherited-error-position",std::move(inherited));
     differential("shift-range",function(returned(op(46,{literal(1),literal(32)}))));
     differential("address-underflow",function(returned(op(13,{literal(address{0}),literal(1)}))));

@@ -10,19 +10,19 @@
 namespace {
 using namespace azertian;
 using namespace azertian::vm;
-using Node=std::shared_ptr<SourceExpression>;
+using Node=std::shared_ptr<exec::expression>;
 std::size_t checks=0;
 void check(bool value,const char* detail){++checks;if(!value)throw std::runtime_error(detail);}
 Node op(int code,std::initializer_list<Node> children={}) {
-    auto value=std::make_shared<SourceExpression>();value->opcode=code;value->children.assign(children.begin(),children.end());return value;
+    auto value=std::make_shared<exec::expression>();value->opcode=code;value->children.assign(children.begin(),children.end());return value;
 }
 Node literal(Value value){auto node=op(0);node->constant=std::move(value);return node;}
 template<class T> Node literal(T value){return literal(Value(value));}
 Node slot(int index){auto node=op(3);node->immediate=index;return node;}
 Node call(int id,std::initializer_list<Node> arguments={}){auto node=op(2,arguments);node->immediate=id;return node;}
 Node returned(Node value){return op(7,{value});}
-void number(const std::shared_ptr<const SourceExpression>& node,std::uint32_t& next) {
-    auto& mutable_node=const_cast<SourceExpression&>(*node);mutable_node.node=next++;mutable_node.location=next;
+void number(const std::shared_ptr<const exec::expression>& node,std::uint32_t& next) {
+    auto& mutable_node=const_cast<exec::expression&>(*node);mutable_node.node=next++;mutable_node.location=next;
     for(const auto& child:node->children)number(child,next);
 }
 SourceFunction function(int id,Node body,std::vector<int> parameters={},int result=INT_VALUE) {

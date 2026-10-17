@@ -91,8 +91,8 @@ class DistributionOutputTests(unittest.TestCase):
         version = int(re.search(r'\bVERSION\s*=\s*(\d+)', codec).group(1))
         self.assertEqual(verifier.EXEC_VERSION, version,
                          'Update distribution verification when the executable format changes')
-        runtime = (exporter.ROOT / 'interpreter/library.h').read_text(encoding='utf-8')
-        loader = int(re.search(r'\bEXEC_FORMAT_VERSION\s*=\s*(\d+)', runtime).group(1))
+        runtime = (exporter.ROOT / 'interpreter/core/format.h').read_text(encoding='utf-8')
+        loader = int(re.search(r'\bformat_version\s*=\s*(\d+)', runtime).group(1))
         self.assertEqual(loader, version, 'The C++ loader and the compiler must use one exec format version')
 
     def test_manifest_tracks_exec_and_snapshot_versions_independently(self):

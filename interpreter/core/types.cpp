@@ -15,4 +15,8 @@ const char* type_name(int type) noexcept {
     default:return "unknown";
     }
 }
+bool valid_context_kind(int abi,int kind) noexcept {
+    return (kind==0&&abi>=INT_VALUE&&abi<=VOID_VALUE)||((kind==1||kind==2)&&abi==ADDRESS_VALUE)
+        ||((kind==3||kind==4)&&abi==OBJECT_VALUE);
+}
 }

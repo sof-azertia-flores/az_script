@@ -1,4 +1,6 @@
-#include "source_decode.h"
+#include "exec.h"
+#include "../library.h"
+#include "../vm/lowering.h"
 #include <algorithm>
 #include <bit>
 #include <cmath>
@@ -7,20 +9,19 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
-#ifdef AZSCRIPT_SOURCE_BRIDGE_LEGACY_ORACLE
-#include "../library.h"
-#endif
 
 namespace {
 using namespace azertian;
 using namespace azertian::vm;
+namespace limits=azertian::limits;
 using B=std::vector<unsigned char>;
 int checks=0;
 void check(bool success,const char* label) {
     ++checks;if(!success)throw std::runtime_error(label);
 }
-template<class F> void rejects(F operation,const char* label) {
-    bool failed=false;try {operation();}catch(const std::invalid_argument&){failed=true;}
+template<class F> void rejects(F operation,const char* label,const char* message=nullptr) {
+    bool failed=false;
+    try {operation();}catch(const std::invalid_argument& error){failed=!message||std::string(error.what())==message;}
     check(failed,label);
 }
 B integer(int value) {
@@ -55,37 +56,53 @@ B class_context(int factory,int placement,B factories={},B placements={}) {
 }
 B call(int id,B args={},B contexts={}) {return expression(2,{integer(id),args,contexts});}
 
-#ifdef AZSCRIPT_SOURCE_BRIDGE_LOWERING_ORACLE
+// One main function (one local, one hidden context) around body, in a module
+// with one global; located body nodes get debug positions on lines 2, 3, ...
+B module_bytes(const B& body,const std::vector<std::uint32_t>& located={}) {
+    B debug{0},files;
+    if(!located.empty()) {
+        B quads;
+        for(std::size_t i=0;i<located.size();++i) {
+            const auto quad=stack({integer(static_cast<int>(located[i])),integer(0),integer(static_cast<int>(i)+2),integer(1)});
+            quads.insert(quads.end(),quad.begin(),quad.end());
+        }
+        const auto record=stack({text("main"),integer(0),integer(1),integer(1),quads});
+        debug=stack({B{1},record});
+        files=stack({text("exec.azs")});
+    } else debug=stack({B{0}});
+    // The debug flag and the optional record are the entry's last fields.
+    auto function=stack({integer(0x0fff0000),integer(INT_VALUE),integer(0),integer(1),B{},body,integer(1),integer(0)});
+    function.insert(function.end(),debug.begin(),debug.end());
+    return stack({stack({text("AZSCRIPT"),integer(10),integer(2),B{},integer(1),
+        B{},B{},stack({function}),B{},B{},files})});
+}
+std::shared_ptr<const exec::expression> read_body(const B& body,const std::vector<std::uint32_t>& located={}) {
+    const auto bytes=module_bytes(body,located);
+    return exec::read_module(bytes.data(),bytes.size(),0).functions.at(0).body;
+}
 SourceFunction source_function(int id,const B& body) {
-    SourceFunction result;result.function_id=id;result.body=decode_source(body);return result;
+    SourceFunction result;result.function_id=id;result.body=read_body(body);return result;
 }
 SourceFunction receiver_function(int id,std::uint32_t hidden=0,int entry=0) {
     auto result=source_function(id,expression(7,{B{0}}));
     result.param_types={ADDRESS_VALUE};result.hidden_count=hidden;result.entry_kind=entry;return result;
 }
-void lower_opcode(const std::shared_ptr<const SourceExpression>& body) {
+void lower_opcode(const std::shared_ptr<const exec::expression>& body) {
     SourceProgram source;SourceFunction function;
     function.function_id=0x0fff0000;function.local_count=1;function.global_count=1;
     function.hidden_count=1;function.body=body;source.functions.push_back(std::move(function));
     source.functions.push_back(receiver_function(0x12340002));
     source.functions.push_back(receiver_function(0x12340003,1));
     const auto lowered=lower_program(source);
-    check(lowered.functions.front().node_count>0,"every decoded wire opcode passes lowering and verifier");
+    check(lowered.functions.front().node_count>0,"every wire opcode passes lowering and verifier");
 }
-#endif
-
-void validated_by_legacy(const B& body) {
-#ifdef AZSCRIPT_SOURCE_BRIDGE_LEGACY_ORACLE
-    const auto function=stack({integer(0x0fff0000),integer(INT_VALUE),integer(0),integer(1),B{},body,
-        integer(1),integer(0),B{0}});
-    const auto bytes=stack({stack({B{'A','Z','S','C','R','I','P','T'},integer(10),integer(2),B{},integer(1),
-        B{},B{},stack({function}),B{},B{},B{}})});
+// The tree builds its expression tree from the same model and cross-checks
+// its patch list against exec::references while loading.
+void built_by_tree(const B& body) {
+    const auto bytes=module_bytes(body);
     auto loaded=load_script(bytes.data(),bytes.size());
-    check(static_cast<bool>(loaded),"legacy module/body validation precedes source bridge");
+    check(static_cast<bool>(loaded),"the tree builds every validated record");
     loaded->destroy();
-#else
-    (void)body;
-#endif
 }
 
 void all_opcodes() {
@@ -114,33 +131,31 @@ void all_opcodes() {
     inputs[52]=expression(52,{pointer,stack({stack({integer(0x12340003),stack({context})})})});
     inputs[53]=expression(53,{integer(2),integer(ADDRESS_VALUE),stack({pointer,one})});
     for(int opcode=0;opcode<54;++opcode) {
-        validated_by_legacy(inputs[opcode]);
-        auto parsed=decode_source(inputs[opcode]);check(parsed->opcode==opcode,"every v10 opcode decodes");
+        built_by_tree(inputs[opcode]);
+        auto parsed=read_body(inputs[opcode]);check(parsed->opcode==opcode,"every v10 opcode decodes");
         check(parsed->node==0&&parsed->location==0,"root node numbering starts at zero");
         // Traversal and relocation must work for every record, including ones
         // containing only contexts and no ordinary expression operands.
-        const auto before=source_references(parsed);
-        const auto moved=relocate_source(parsed,[](const auto& ref){return ref.function_id;});
-        check(source_references(moved).size()==before.size(),"identity relocation preserves references");
-#ifdef AZSCRIPT_SOURCE_BRIDGE_LOWERING_ORACLE
+        const auto before=exec::references(parsed);
+        const auto moved=exec::relocate(parsed,[](const auto& ref){return ref.function_id;});
+        check(exec::references(moved).size()==before.size(),"identity relocation preserves references");
         lower_opcode(parsed);
-#endif
     }
-    check(decode_source(inputs[4])->immediate==0,"definition preserves slot, not a permanent type");
-    check(decode_source(inputs[5])->immediate==-1,"negative global slot retained");
-    check(decode_source(inputs[9])->immediate==3,"member offset retained");
-    const auto binding=decode_source(inputs[10]);
+    check(read_body(inputs[4])->immediate==0,"definition preserves slot, not a permanent type");
+    check(read_body(inputs[5])->immediate==-1,"negative global slot retained");
+    check(read_body(inputs[9])->immediate==3,"member offset retained");
+    const auto binding=read_body(inputs[10]);
     check(binding->manual&&binding->destructor_id==0x12340002,"object registration fields retained");
-    check(decode_source(inputs[31])->on_error,"cleanup mode retained");
-    check(decode_source(inputs[41])->immediate==4&&decode_source(inputs[41])->children.size()==3,"buffer receiver precedes arguments");
-    check(decode_source(inputs[51])->slot_types==std::vector<int>{INT_VALUE},"object direct slot tags retained");
-    const auto virtual_call=decode_source(inputs[53]);
+    check(read_body(inputs[31])->on_error,"cleanup mode retained");
+    check(read_body(inputs[41])->immediate==4&&read_body(inputs[41])->children.size()==3,"buffer receiver precedes arguments");
+    check(read_body(inputs[51])->slot_types==std::vector<int>{INT_VALUE},"object direct slot tags retained");
+    const auto virtual_call=read_body(inputs[53]);
     check(virtual_call->immediate==2&&virtual_call->return_type==ADDRESS_VALUE&&virtual_call->children.size()==2,"virtual fields retained");
-    check(decode_source(expression(4,{integer(0),integer(ANY_VALUE),B{0}}))->children.empty(),"absent initializer");
-    check(decode_source(expression(7,{B{0}}))->children.empty(),"absent return expression");
-    check(decode_source(expression(27,{one,empty,B{0}}))->children.size()==2,"absent else");
-    check(!decode_source(expression(10,{pointer,B{0},B{0},B{}}))->destructor_id,"absent destructor");
-    check(decode_source(expression(52,{pointer,B{}}))->methods.empty(),"empty method phase retained");
+    check(read_body(expression(4,{integer(0),integer(ANY_VALUE),B{0}}))->children.empty(),"absent initializer");
+    check(read_body(expression(7,{B{0}}))->children.empty(),"absent return expression");
+    check(read_body(expression(27,{one,empty,B{0}}))->children.size()==2,"absent else");
+    check(!read_body(expression(10,{pointer,B{0},B{0},B{}}))->destructor_id,"absent destructor");
+    check(read_body(expression(52,{pointer,B{}}))->methods.empty(),"empty method phase retained");
 }
 
 void constants_and_locations() {
@@ -151,7 +166,7 @@ void constants_and_locations() {
     auto nil=expression(0,{stack({integer(0xce200a),B{0xff}})});
     auto bytes=expression(1,{stack({text,f,d,truth,nil,address_constant(0xfedcba9876543210ULL)})});
     const std::vector<std::uint32_t> locations{0,2,6};
-    auto result=decode_source(bytes,locations);
+    auto result=read_body(bytes,locations);
     // The source remains valid after the complete incoming buffer is destroyed.
     bytes.clear();bytes.shrink_to_fit();
     check(result->location==1&&result->children[0]->node==1&&result->children[0]->location==0,"unlocated nodes do not inherit during decode");
@@ -162,11 +177,13 @@ void constants_and_locations() {
     check(result->children[3]->constant.get<bool>(),"boolean exact");
     check(result->children[4]->constant.type_tag()==VOID_VALUE,"void sentinel exact");
     check(result->children[5]->constant.get<address>().value==0xfedcba9876543210ULL,"address full bit pattern");
-    rejects([&]{decode_source(constant(1),std::vector<std::uint32_t>{1});},"out-of-body debug index rejected");
-    rejects([&]{decode_source(constant(1),std::vector<std::uint32_t>{0,0});},"duplicate debug index rejected");
-    rejects([&]{decode_source(B{1,2,3});},"truncated buffer rejected without reading past it");
-    rejects([&]{decode_source(expression(54));},"unknown opcode rejected by bridge invariant check");
-    rejects([&]{decode_source(expression(3,{integer(0),integer(0)}));},"extra fields rejected");
+    rejects([&]{read_body(constant(1),std::vector<std::uint32_t>{1});},"out-of-body debug index rejected",
+        "Exec debug location refers to a missing body node");
+    rejects([&]{read_body(constant(1),std::vector<std::uint32_t>{0,0});},"duplicate debug index rejected",
+        "Exec debug location nodes must strictly increase");
+    rejects([&]{read_body(B{1,2,3});},"truncated buffer rejected without reading past it","Missing or truncated exec field");
+    rejects([&]{read_body(expression(54));},"unknown opcode rejected","Unknown exec opcode: 54");
+    rejects([&]{read_body(expression(3,{integer(0),integer(0)}));},"extra fields rejected","Unexpected extra exec fields");
 }
 
 void reference_binding() {
@@ -177,21 +194,21 @@ void reference_binding() {
     const auto methods=expression(52,{call(0x12340007),stack({stack({integer(0x12340008),stack({outer})})})});
     const auto destructor=expression(10,{address_constant(1),B{1},integer(0x12340009),B{0},stack({outer})});
     const auto full_id=std::bit_cast<std::int32_t>(0xf1230001u);
-    auto root=decode_source(expression(1,{stack({nested_call,comparison,methods,destructor,
+    auto root=read_body(expression(1,{stack({nested_call,comparison,methods,destructor,
         call(full_id,stack({constant(full_id)}))})}));
-    const auto refs=source_references(root);
+    const auto refs=exec::references(root);
     const std::vector<int> suffixes{6,4,3,2,1,5,4,3,2,1,6,7,7,4,3,2,1,8,4,3,2,1,9};
     check(refs.size()==suffixes.size()+1,"all ordinary and recursive metadata references found");
     for(std::size_t i=0;i<suffixes.size();++i)
         check(refs[i].function_id==0x12340000+suffixes[i],"reference discovery matches legacy field order");
     check(refs.back().function_id==full_id,"high-bit function ID retained");
-    check(refs[1].kind==SourceReferenceKind::placement&&refs[2].kind==SourceReferenceKind::factory,"factory and placement roles differ");
+    check(refs[1].kind==exec::reference_kind::placement&&refs[2].kind==exec::reference_kind::factory,"factory and placement roles differ");
     check(refs[3].hidden_count==1&&refs[4].hidden_count==1&&refs[5].hidden_count==1,"bound hidden argument counts retained");
-    check(refs[17].kind==SourceReferenceKind::method&&refs[22].kind==SourceReferenceKind::destructor,"method/destructor roles differ");
-    const auto relocated=relocate_source(root,[](const SourceReference& ref) {
+    check(refs[17].kind==exec::reference_kind::method&&refs[22].kind==exec::reference_kind::destructor,"method/destructor roles differ");
+    const auto relocated=exec::relocate(root,[](const exec::reference& ref) {
         return std::bit_cast<std::int32_t>(std::bit_cast<std::uint32_t>(static_cast<std::int32_t>(ref.function_id))^0x00100000u);
     });
-    const auto moved=source_references(relocated),unchanged=source_references(root);
+    const auto moved=exec::references(relocated),unchanged=exec::references(root);
     for(std::size_t i=0;i<refs.size();++i) {
         check(unchanged[i].function_id==refs[i].function_id,"relocation leaves original immutable graph intact");
         check(std::bit_cast<std::uint32_t>(static_cast<std::int32_t>(moved[i].function_id))==
@@ -199,25 +216,25 @@ void reference_binding() {
     }
     check(relocated->children.back()->children.front()->constant.get<int>()==full_id,"integer constants resembling IDs are untouched");
     int visited=0;
-    rejects([&]{relocate_source(root,[&](const auto& ref) {
+    rejects([&]{exec::relocate(root,[&](const auto& ref) {
         if(++visited==3)throw std::invalid_argument("planned failure");
         return ref.function_id+1;
     });},"resolver failure aborts prepared copy");
-    check(source_references(root)[0].function_id==refs[0].function_id,"failed relocation does not partially alter input");
+    check(exec::references(root)[0].function_id==refs[0].function_id,"failed relocation does not partially alter input");
 
     const auto member=call(0x0abd0006,stack({expression(9,{call(0x12340010),integer(0)})}));
     const auto raw=call(0x0abd0006,stack({address_constant(1)}));
-    auto member_source=decode_source(expression(1,{stack({member,raw})}));
-    const auto member_refs=source_references(member_source);
+    auto member_source=read_body(expression(1,{stack({member,raw})}));
+    const auto member_refs=exec::references(member_source);
     check(member_refs.size()==2&&member_refs[0].function_id==0x12340010&&member_refs[1].function_id==0x0abd0006,
         "typed member mem_get excludes callback binding, raw mem_get retains it");
-    const auto member_moved=relocate_source(member_source,[](const auto& ref){return ref.function_id+1;});
+    const auto member_moved=exec::relocate(member_source,[](const auto& ref){return ref.function_id+1;});
     check(member_moved->children[0]->immediate==0x0abd0006&&member_moved->children[0]->children[0]->children[0]->immediate==0x12340011,
         "typed member marker survives relocation while receiver calls relocate");
 
     const auto buffer=stack({integer(1),integer(OBJECT_VALUE),integer(4),integer(1),B{0},B{},B{0},B{},B{1},outer});
-    auto buffer_source=decode_source(expression(40,{buffer}));
-    check(source_references(buffer_source).size()==4,"buffer element contexts participate in references");
+    auto buffer_source=read_body(expression(40,{buffer}));
+    check(exec::references(buffer_source).size()==4,"buffer element contexts participate in references");
     check(buffer_source->contexts[0]->element->placement_contexts[0]->reference==0,"context reference kept, not expression numbered");
 }
 
@@ -238,43 +255,71 @@ void module_sources() {
         stack({signature}),stack({lifecycle(0),ordinary,lifecycle(1)}),text("BRIDGE"),
         stack({stack({text("BRIDGE"),integer(0x2222)}),stack({text("OTHER"),integer(0x3333)})}),
         stack({text("bridge.azs")})})});
-#ifdef AZSCRIPT_SOURCE_BRIDGE_LEGACY_ORACLE
     auto validated=load_script(bytes.data(),bytes.size());
-    check(static_cast<bool>(validated),"complete hinted/debug module passes existing loader first");
+    check(static_cast<bool>(validated),"complete hinted/debug module builds a tree");
     validated->destroy();
-#endif
-    const auto module=decode_module_sources(bytes,17);
+    const auto module=exec::read_module(bytes.data(),bytes.size(),17);
     bytes.clear();bytes.shrink_to_fit();
     check(module.global_offset==17&&module.global_count==2,"module global range retained");
-    check(module.hint=="BRIDGE"&&module.debug_files==std::vector<std::string>{"bridge.azs"},"module hint/debug file table retained");
-    check(module.assumptions.size()==2&&module.assumptions[0].hint=="BRIDGE"&&module.assumptions[0].namespace_id==0x2222&&
-        module.assumptions[1].hint=="OTHER"&&module.assumptions[1].namespace_id==0x3333,"module assumption order and aliases retained");
-    check(module.extern_signatures.size()==1&&module.extern_signatures[0].function_id==0x33330004&&
-        module.extern_signatures[0].return_type==ANY_VALUE&&module.extern_signatures[0].hidden_count==1&&
-        module.extern_signatures[0].param_types==std::vector<int>{ADDRESS_VALUE,ANY_VALUE},"external signature generic ABI retained");
-    check(module.functions.size()==3&&module.functions[0].lifecycle&&module.functions[0].function_id==0&&
-        module.functions[2].lifecycle&&module.functions[2].function_id==1,"both lifecycle functions retained without public ID relocation");
+    check(module.hint=="BRIDGE"&&module.meta,"module hint and metadata retained");
+    check(module.assumptions==std::map<int,std::string>{{0x2222,"BRIDGE"},{0x3333,"OTHER"}},"module assumptions retained");
+    const auto& signature_found=module.extern_signatures.at(0x33330004);
+    check(module.extern_signatures.size()==1&&signature_found.return_type==ANY_VALUE&&signature_found.hidden_count==1&&
+        signature_found.param_types==std::vector<int>{ADDRESS_VALUE,ANY_VALUE},"external signature generic ABI retained");
+    check(module.functions.size()==3&&module.functions[0].function_id==0&&module.functions[2].function_id==1,
+        "both lifecycle functions retained in wire order without relocation");
     const auto& function=module.functions[1];
-    check(function.function_id==2&&!function.lifecycle&&function.return_type==INT_VALUE&&function.local_count==3&&
-        function.hidden_count==1&&function.global_offset==17&&function.global_count==2&&
+    check(function.function_id==2&&function.return_type==INT_VALUE&&function.local_count==3&&function.hidden_count==1&&
         function.param_types==std::vector<int>{INT_VALUE,STRING_VALUE},"ordinary function layout and original wire ID retained");
     check(function.debug&&function.debug->name=="entry"&&function.debug->header.line==7&&function.debug->header.column==1&&
-        function.debug->locations.size()==2&&function.debug->locations[1].line==10&&function.debug->locations[1].column==3,
-        "full function debug positions retained");
+        function.debug->locations.size()==2&&function.debug->locations[1].line==10&&function.debug->locations[1].column==3&&
+        *function.debug->files==std::vector<std::string>{"bridge.azs"},"full function debug positions retained");
     check(function.body->location==1&&function.body->children[0]->location==0&&
         function.body->children[0]->children[0]->location==2,"module debug nodes mapped to one-based source locations");
     check(!module.functions[0].debug&&!module.functions[2].debug,"stripped lifecycle debug stays absent");
-#ifdef AZSCRIPT_SOURCE_BRIDGE_LOWERING_ORACLE
-    SourceProgram sources;sources.functions=module.functions;
+    SourceProgram sources;
+    for(const auto& definition:module.functions) {
+        SourceFunction lowered;lowered.function_id=definition.function_id;lowered.return_type=definition.return_type;
+        lowered.lifecycle=definition.function_id==0||definition.function_id==1;lowered.param_types=definition.param_types;
+        lowered.local_count=definition.local_count;lowered.hidden_count=definition.hidden_count;
+        lowered.global_offset=17;lowered.global_count=2;lowered.body=definition.body;
+        if(definition.debug)lowered.debug=*definition.debug;
+        sources.functions.push_back(std::move(lowered));
+    }
     const auto lowered=lower_program(sources);
     check(lowered.functions.size()==3&&lowered.targets.size()==1&&lowered.targets[0].function_id==2,
-        "decoded lifecycle functions stay outside public call targets");
+        "lifecycle functions stay outside public call targets");
     check(lowered.functions[1].global_offset==17&&lowered.functions[1].debug->locations[1].line==10,
         "module global and debug data survive lowering");
-#endif
 }
 
-#ifdef AZSCRIPT_SOURCE_BRIDGE_LOWERING_ORACLE
+void rejected_modules() {
+    // Module-level errors keep the loader's messages and order.
+    const auto main=[](const B& body,int hidden=0) {
+        return stack({integer(0x0fff0000),integer(INT_VALUE),integer(0),integer(0),B{},body,integer(hidden),integer(0),B{0}});
+    };
+    const auto file=[](const B& functions,int globals=0,const B& hint={},const B& assumptions={}) {
+        return stack({stack({text("AZSCRIPT"),integer(10),integer(2),B{},integer(globals),B{},B{},functions,hint,assumptions,B{}})});
+    };
+    const auto read=[](const B& bytes){return exec::read_module(bytes.data(),bytes.size(),0);};
+    rejects([&]{read(file(stack({main(constant(1)),main(constant(2))})));},"duplicate definitions","Duplicate function id: 0x0fff0000");
+    rejects([&]{read(file(stack({main(expression(3,{integer(1)}))})));},"local slot bound","Local variable slot is outside its function: 1");
+    rejects([&]{read(file(stack({main(expression(3,{integer(-1)}))})));},"global slot bound","Global variable slot is outside its module: -1");
+    rejects([&]{read(file(stack({main(expression(40,{reference(0)}))})));},"hidden reference bound","Invalid generic context reference");
+    rejects([&]{read(file(stack({main(expression(6,{constant(1),constant(2)}))})));},"assignment target",
+        "Assignment target must be a variable or mem_get(pointer)");
+    rejects([&]{read(file(stack({main(constant(1))}),0,text("lower")));},"hint without assumption",
+        "Hint module requires an assumption for itself");
+    rejects([&]{read(file(stack({}),-1));},"global count","Invalid global variable count");
+    const auto envelope=stack({text("AZSCRIPT"),integer(9)});
+    rejects([&]{read(stack({envelope}));},"exec version","Unsupported exec version 9; expected exec v10");
+    const auto bytes=file(stack({main(constant(1))}),3);
+    rejects([&]{exec::read_module(bytes.data(),bytes.size(),limits::max_slots-2);},"global offset at the slot limit",
+        "Invalid global variable count");
+    check(exec::read_module(bytes.data(),bytes.size(),limits::max_slots-3).global_offset==limits::max_slots-3,
+        "global offset up to the slot limit");
+}
+
 void lowered_metadata() {
     constexpr int factory=0x12340010,placement=0x12340011,method=0x12340012,destructor=0x12340013;
     const auto context=class_context(factory,placement,stack({reference(0)}),stack({reference(0)}));
@@ -288,7 +333,7 @@ void lowered_metadata() {
         expression(10,{address_constant(1),B{1},integer(destructor),B{0},stack({reference(0)})})})});
     SourceProgram source;SourceFunction function;
     function.function_id=0x0fff0000;function.hidden_count=1;
-    function.body=decode_source(body,std::vector<std::uint32_t>{0,3,7});
+    function.body=read_body(body,std::vector<std::uint32_t>{0,3,7});
     function.debug=DebugInfo{"bridge",std::make_shared<const std::vector<std::string>>(std::vector<std::string>{"bridge.azs"}),{0,1,1},{{0,2,1},{0,3,1},{0,4,1}}};
     source.functions.push_back(function);
     auto make=source_function(factory,address_constant(1));make.return_type=OBJECT_VALUE;make.hidden_count=1;
@@ -319,15 +364,11 @@ void lowered_metadata() {
     check(binding!=first.operations.end()&&program.targets[binding->methods[0].target].function_id==method&&
         first.contexts[binding->methods[0].contexts[0]].reference==0,"decoded method hidden context remains bound");
 }
-#endif
 }
 
 int main() {
     try {
-        all_opcodes();constants_and_locations();reference_binding();module_sources();
-#ifdef AZSCRIPT_SOURCE_BRIDGE_LOWERING_ORACLE
-        lowered_metadata();
-#endif
-        std::cout<<"VM source bridge checks passed: "<<checks<<"\n";return 0;
+        all_opcodes();constants_and_locations();reference_binding();module_sources();rejected_modules();lowered_metadata();
+        std::cout<<"Exec model checks passed: "<<checks<<"\n";return 0;
     } catch(const std::exception& error) {std::cerr<<error.what()<<'\n';return 1;}
 }

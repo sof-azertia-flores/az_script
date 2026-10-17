@@ -57,18 +57,18 @@ class Lowerer {
         emit(Opcode::constant,result,no_index,no_index,index);
     }
     void nil(Register result) {constant(result,Value{});}
-    void children(const SourceExpression& node,std::size_t low,std::size_t high) const {
+    void children(const exec::expression& node,std::size_t low,std::size_t high) const {
         if(node.children.size()<low||node.children.size()>high)bad("invalid operand count for wire opcode "+std::to_string(node.opcode));
     }
-    void contexts(const SourceExpression& node,std::size_t count) const {
+    void contexts(const exec::expression& node,std::size_t count) const {
         if(node.contexts.size()!=count)bad("invalid context count for wire opcode "+std::to_string(node.opcode));
     }
-    void assignment_target(const SourceExpression& node) const {
+    void assignment_target(const exec::expression& node) const {
         if(!node.children[0]||(node.children[0]->opcode!=3&&
             !(node.children[0]->opcode==2&&node.children[0]->immediate==ids::id(ids::builtin::mem_get))))
             bad("assignment target must be a variable or mem_get(pointer)");
     }
-    std::uint32_t context(const std::shared_ptr<const SourceContext>& source,std::size_t depth=0) {
+    std::uint32_t context(const std::shared_ptr<const exec::context>& source,std::size_t depth=0) {
         if(!source||depth>=128)bad("null, cyclic or excessively nested context");
         Context result;result.reference=source->reference;result.abi=source->abi;
         result.kind=source->kind;result.width=source->width;
@@ -79,26 +79,26 @@ class Lowerer {
         if(source->element)result.element=context(source->element,depth+1);
         auto index=index_of(function->contexts.size());function->contexts.push_back(std::move(result));return index;
     }
-    std::vector<std::uint32_t> context_list(const std::vector<std::shared_ptr<const SourceContext>>& list) {
+    std::vector<std::uint32_t> context_list(const std::vector<std::shared_ptr<const exec::context>>& list) {
         std::vector<std::uint32_t> result;result.reserve(list.size());
         for(const auto& item:list)result.push_back(context(item));
         return result;
     }
-    std::uint32_t bind(const SourceExpression& node) {
+    std::uint32_t bind(const exec::expression& node) {
         contexts(node,1);
         if(next_context==no_index)bad("too many bound context temporaries");
         const auto result=next_context++;
         function->bound_context_count=std::max(function->bound_context_count,next_context);
         emit(Opcode::bind_context,result,no_index,no_index,context(node.contexts[0]));return result;
     }
-    Register child(const SourceExpression& node,std::size_t index,std::size_t depth) {
+    Register child(const exec::expression& node,std::size_t index,std::size_t depth) {
         auto parent=site;auto result=expression(node.children[index],depth+1);site=parent;return result;
     }
-    std::uint32_t child_location(const SourceExpression& node,std::size_t index) const {
+    std::uint32_t child_location(const exec::expression& node,std::size_t index) const {
         if(index>=node.children.size()||!node.children[index])bad("null or missing child expression");
         return node.children[index]->location?node.children[index]->location:site.location;
     }
-    Register condition(const SourceExpression& node,std::size_t index,std::size_t depth,bool temporary_boundary) {
+    Register condition(const exec::expression& node,std::size_t index,std::size_t depth,bool temporary_boundary) {
         auto parent=site;site.location=child_location(node,index);
         if(temporary_boundary)emit(Opcode::statement_enter);
         const auto value=child(node,index,depth);
@@ -107,7 +107,7 @@ class Lowerer {
         if(temporary_boundary)emit(Opcode::statement_leave);
         site=parent;return value;
     }
-    Register scoped_child(const SourceExpression& node,std::size_t index,std::size_t depth) {
+    Register scoped_child(const exec::expression& node,std::size_t index,std::size_t depth) {
         if(!node.children[index])bad("null expression");
         const bool block=node.children[index]->opcode==1;
         auto parent=site;site.location=child_location(node,index);
@@ -117,13 +117,13 @@ class Lowerer {
         site=parent;return value;
     }
     void copy(Register destination,Register source) {emit(Opcode::copy_reference,destination,source);}
-    void arguments(const SourceExpression& node,std::size_t first,std::size_t depth,OperationData& data) {
+    void arguments(const exec::expression& node,std::size_t first,std::size_t depth,OperationData& data) {
         for(std::size_t i=first;i<node.children.size();++i) {
             const auto value=child(node,i,depth);emit(Opcode::materialize,value,value);
             data.arguments.push_back(value);
         }
     }
-    Register expression(const std::shared_ptr<const SourceExpression>& source,std::size_t depth,bool root=false) {
+    Register expression(const std::shared_ptr<const exec::expression>& source,std::size_t depth,bool root=false) {
         if(!source||depth>=128)bad("null, cyclic or excessively nested expression");
         const auto& node=*source;
         if(node.opcode<0||node.opcode>53)bad("unsupported wire opcode "+std::to_string(node.opcode));

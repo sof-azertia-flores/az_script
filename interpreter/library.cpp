@@ -6,6 +6,7 @@
 #include "core/trace.h"
 #include "core/admission.h"
 #include "core/ids.h"
+#include "core/exec.h"
 #include "core/value_ops.h"
 #include <algorithm>
 #include <cmath>
@@ -89,10 +90,6 @@ void mark_returned(const E& env,V result) {
     env->frame->return_location=env->frame->location;
     env->frame->result=std::move(result);env->frame->returned=true;
 }
-bool valid_context_kind(int abi,int kind) {
-    return (kind==0&&abi>=INT_VALUE&&abi<=VOID_VALUE)||((kind==1||kind==2)&&abi==ADDRESS_VALUE)
-        ||((kind==3||kind==4)&&abi==OBJECT_VALUE);
-}
 std::shared_ptr<const type_context> bind_context(const std::shared_ptr<context_spec>& spec,const E& env,std::size_t depth=0) {
     if(!spec||depth>=128)throw std::runtime_error("Generic context nesting exceeds 128 levels");
     if(spec->ref>=0) {
@@ -116,7 +113,6 @@ struct parsed_module {
     std::size_t global_count=0;
     std::map<int,std::shared_ptr<function>> functions;
     std::map<int,function_signature> extern_signatures;
-    std::set<int> namespaces{0};
     std::string hint;
     std::map<int,std::string> assumptions;
     std::vector<function_reference> references;
@@ -150,11 +146,6 @@ std::string duplicate_function_message(int id,const module_list& modules) {
 std::string mounted_hint_conflict(const char* what,int ns,const module_list& modules,std::size_t index,const char* remedy) {
     return std::string(what)+" "+namespace_text(ns)+" conflicts with hint "+modules[index]->manifest.hint+
         ", which module #"+std::to_string(index)+" mounted there; hint libraries take the lowest free namespace, so "+remedy;
-}
-bool valid_hint(const std::string& hint) {
-    auto first=[](unsigned char c){return (c>='a'&&c<='z')||(c>='A'&&c<='Z')||c=='_';};
-    if(hint.empty()||!first(hint[0]))return false;
-    return std::all_of(hint.begin()+1,hint.end(),[&](unsigned char c){return first(c)||(c>='0'&&c<='9');});
 }
 std::vector<std::weak_ptr<script>>& live_scripts(){static std::vector<std::weak_ptr<script>> result;return result;}
 std::shared_ptr<script> owner(E env) {
@@ -612,526 +603,186 @@ V convert_return(V v,int type) {
     auto result=value_ops::convert_return(value_access::read(*v),type);
     return type==VOID_VALUE?v:wrap(std::move(result));
 }
-// Exec records are raw ABD stacks. Views borrow the caller's input only while
-// decoding; the resulting native expression tree owns all retained data.
-struct raw_view {
-    const unsigned char* data;
-    std::size_t size;
-    std::size_t depth;
-};
-void validate_utf8(raw_view value) {
-    std::size_t i=0;
-    while(i<value.size) {
-        const unsigned first=value.data[i++];
-        if(first<0x80)continue;
-        int remaining;std::uint32_t code,minimum;
-        if(first>=0xc2&&first<=0xdf){remaining=1;code=first&0x1f;minimum=0x80;}
-        else if(first>=0xe0&&first<=0xef){remaining=2;code=first&0x0f;minimum=0x800;}
-        else if(first>=0xf0&&first<=0xf4){remaining=3;code=first&0x07;minimum=0x10000;}
-        else throw std::invalid_argument("Invalid UTF-8 in exec string");
-        if(static_cast<std::size_t>(remaining)>value.size-i)throw std::invalid_argument("Truncated UTF-8 in exec string");
-        while(remaining--) {
-            const unsigned next=value.data[i++];
-            if((next&0xc0)!=0x80)throw std::invalid_argument("Invalid UTF-8 in exec string");
-            code=(code<<6)|(next&0x3f);
-        }
-        if(code<minimum||code>0x10ffff||(code>=0xd800&&code<=0xdfff))throw std::invalid_argument("Invalid UTF-8 in exec string");
-    }
-}
-class raw_cursor {
-    raw_view view;
-    std::size_t position=0;
-public:
-    explicit raw_cursor(raw_view value):view(value) {
-        if(view.depth>128)throw std::invalid_argument("ABD nesting exceeds 128 levels");
-    }
-    bool empty() const{return position==view.size;}
-    raw_view take() {
-        if(view.size-position<4)throw std::invalid_argument("Missing or truncated exec field");
-        const int size=b2i(view.data+position);
-        if(size<0||static_cast<std::size_t>(size)>view.size-position-4)
-            throw std::invalid_argument("Negative or truncated exec field");
-        raw_view result{view.data+position+4,static_cast<std::size_t>(size),view.depth+1};
-        position+=4+result.size;return result;
-    }
-    int integer() {
-        auto value=take();
-        if(value.size!=4)throw std::invalid_argument("Exec integer field must contain four bytes");
-        return b2i(value.data);
-    }
-    bool boolean() {
-        auto value=take();
-        if(value.size!=1||value.data[0]>1)throw std::invalid_argument("Exec boolean field must be one byte, 0 or 1");
-        return value.data[0]==1;
-    }
-    std::string string() {auto value=take();validate_utf8(value);return std::string(reinterpret_cast<const char*>(value.data),value.size);}
-    void finish() const {if(!empty())throw std::invalid_argument("Unexpected extra exec fields");}
-};
-// Metadata is a genuinely extensible typed Map; unlike executable constants,
-// its fields can contain nested maps/arrays and arbitrary raw byte values.
-void check_typed_metadata(raw_view view,int type) {
-    if(type==2||type==0xad) {
-        raw_cursor cursor(view);std::set<std::string> keys;
-        while(!cursor.empty()) {
-            if(type==2&&!keys.insert(cursor.string()).second)throw std::invalid_argument("Duplicate extension key");
-            const int child_type=cursor.integer();check_typed_metadata(cursor.take(),child_type);
-        }
-        return;
-    }
-    switch(type) {
-    case 1:validate_utf8(view);return;
-    case 3:case 0xce867:
-        if(view.size!=4)throw std::invalid_argument("Invalid extension scalar width");return;
-    case 0xce1066:case 0xce200b:
-        if(view.size!=8)throw std::invalid_argument("Invalid extension scalar width");return;
-    case 0x0d00:
-        if(view.size!=1||view.data[0]>1)throw std::invalid_argument("Invalid extension boolean");return;
-    case 0xce2009:
-        if(view.size==0)throw std::invalid_argument("Empty extension BigInteger");return;
-    case 0xce200a:return;
-    default:throw std::invalid_argument("Unsupported extension value type");
-    }
-}
-std::shared_ptr<AbdValue> copy_raw(raw_view value) {
-    return std::make_shared<AbdValue>(value.data,static_cast<int>(value.size));
-}
-std::shared_ptr<expression> parse_raw_constant(raw_view envelope) {
-    raw_cursor fields(envelope);
-    const int type=fields.integer();const auto payload=fields.take();const auto value=copy_raw(payload);fields.finish();
-    std::shared_ptr<AbdMapValue> scalar;
-    switch(type) {
-    case 1:validate_utf8(payload);scalar=std::make_shared<StringAbdValue>(value);break;
-    case 3:scalar=std::make_shared<IntAbdValue>(value);break;
-    case 0xce200b:scalar=std::make_shared<AddressAbdValue>(value);break;
-    case 0xce1066: {
-        auto number=std::make_shared<DoubleAbdValue>(value);
-        if(!std::isfinite(number->data))throw std::invalid_argument("Non-finite exec constant");
-        scalar=std::move(number);break;
-    }
-    case 0xce867: {
-        auto number=std::make_shared<FloatAbdValue>(value);
-        if(!std::isfinite(number->data))throw std::invalid_argument("Non-finite exec constant");
-        scalar=std::move(number);break;
-    }
-    case 0x0d00:scalar=std::make_shared<BoolAbdValue>(value);break;
-    case 0xce200a:scalar=std::make_shared<ByteArrayValue>(value,type);break;
-    default:throw std::invalid_argument("Unsupported exec constant type: "+std::to_string(type));
-    }
-    return std::make_shared<constantExpression>(std::move(scalar));
-}
-// Pre-order numbers of a function body's expression stacks (the body is node 0,
-// contexts take none), matched against the nodes of its debug record.
-struct node_numbering {
-    std::uint32_t next=0;
-    std::size_t located=0;
-    const std::vector<std::uint32_t>* nodes=nullptr;
-};
-struct raw_function_layout {
-    std::size_t parameters,slots,globals;
-    std::vector<function_reference>* references;
-    std::size_t hidden_count=0;
-    node_numbering* numbering=nullptr;
-    void check_slot(int id,bool declaration=false) const {
-        if(id<0) {
-            if(declaration)throw std::invalid_argument("Cannot declare a negative variable slot");
-            const auto index=static_cast<std::uint64_t>(-static_cast<std::int64_t>(id)-1);
-            if(index>=globals)throw std::invalid_argument("Global variable slot is outside its module: "+std::to_string(id));
-        } else {
-            if(static_cast<std::size_t>(id)>=slots)throw std::invalid_argument("Local variable slot is outside its function: "+std::to_string(id));
-            if(declaration&&static_cast<std::size_t>(id)<parameters)throw std::invalid_argument("Cannot redeclare a parameter slot");
-        }
-    }
-};
-std::shared_ptr<context_spec> parse_context(raw_view view,const raw_function_layout& layout,std::size_t depth);
-std::vector<std::shared_ptr<context_spec>> parse_contexts(raw_view view,const raw_function_layout& layout,std::size_t depth) {
-    if(depth>128)throw std::invalid_argument("ABD nesting exceeds 128 levels");
-    raw_cursor cursor(view);std::vector<std::shared_ptr<context_spec>> result;
-    while(!cursor.empty()) {
-        if(result.size()>=MAX_VARIABLE_SLOTS)throw std::invalid_argument("Too many generic contexts");
-        result.push_back(parse_context(cursor.take(),layout,depth+1));
-    }
-    return result;
-}
-std::shared_ptr<context_spec> parse_context(raw_view view,const raw_function_layout& layout,std::size_t depth) {
-    if(depth>128)throw std::invalid_argument("ABD nesting exceeds 128 levels");
-    raw_cursor fields(view);auto spec=std::make_shared<context_spec>();const int kind=fields.integer();
-    if(kind==0) {
-        spec->ref=fields.integer();
-        if(spec->ref<0||static_cast<std::size_t>(spec->ref)>=layout.hidden_count)throw std::invalid_argument("Invalid generic context reference");
-    } else if(kind==1) {
-        spec->abi=fields.integer();spec->kind=fields.integer();spec->width=fields.integer();
-        if(!valid_context_kind(spec->abi,spec->kind)||spec->width<1||static_cast<std::size_t>(spec->width)>MAX_VARIABLE_SLOTS||(spec->kind!=3&&spec->width!=1))throw std::invalid_argument("Invalid generic type context");
-        if(fields.boolean())spec->factory_id=fields.integer();
-        spec->contexts=parse_contexts(fields.take(),layout,depth+1);
-        if((spec->factory_id||!spec->contexts.empty())&&spec->kind!=3)
-            throw std::invalid_argument("Only object type contexts have default factories");
-        if(!spec->factory_id&&!spec->contexts.empty())throw std::invalid_argument("Factory contexts require a factory");
-        if(fields.boolean())spec->placement_id=fields.integer();
-        spec->placement_contexts=parse_contexts(fields.take(),layout,depth+1);
-        if(fields.boolean())spec->element=parse_context(fields.take(),layout,depth+1);
-        if((spec->placement_id||!spec->placement_contexts.empty())&&spec->kind!=3)
-            throw std::invalid_argument("Only class contexts have placement initializers");
-        if(!spec->placement_id&&!spec->placement_contexts.empty())throw std::invalid_argument("Placement contexts require an initializer");
-        if((spec->kind==4)!=static_cast<bool>(spec->element))throw std::invalid_argument("Buffer context requires exactly one element context");
-        if(spec->element&&spec->element->ref<0&&spec->element->abi==VOID_VALUE)throw std::invalid_argument("Buffer element cannot be void");
-        if(spec->placement_id)layout.references->push_back({*spec->placement_id,&*spec->placement_id,false,static_cast<int>(spec->placement_contexts.size()),false,true});
-        if(spec->factory_id)layout.references->push_back({*spec->factory_id,&*spec->factory_id,false,static_cast<int>(spec->contexts.size()),true});
-    } else throw std::invalid_argument("Unknown generic context kind");
-    fields.finish();return spec;
-}
+// The expression tree is built from the validated core model. References are
+// recorded in the model's discovery order, so the linker can patch them in place.
 using X=std::shared_ptr<expression>;
-X parse_raw_expression(raw_view view,const raw_function_layout& layout,std::size_t logical_depth);
-std::vector<X> parse_raw_expressions(raw_view view,const raw_function_layout& layout,std::size_t logical_depth) {
-    raw_cursor cursor(view);std::vector<X> result;
-    while(!cursor.empty())result.push_back(parse_raw_expression(cursor.take(),layout,logical_depth));
-    return result;
-}
 template<class T> X raw_binary(X a,X b) {
     auto node=std::make_shared<T>();node->exp1=std::move(a);node->exp2=std::move(b);return node;
 }
-X parse_raw_expression(raw_view view,const raw_function_layout& layout,std::size_t logical_depth) {
-    std::uint32_t location=0;
-    if(auto* numbering=layout.numbering) {
-        const auto node=numbering->next++;
-        if(numbering->nodes&&numbering->located<numbering->nodes->size()&&(*numbering->nodes)[numbering->located]==node)
-            location=static_cast<std::uint32_t>(++numbering->located);
+class tree_builder {
+    std::vector<function_reference>& references;
+    std::shared_ptr<context_spec> context(const exec::context& source) {
+        auto spec=std::make_shared<context_spec>();
+        if(source.reference){spec->ref=static_cast<int>(*source.reference);return spec;}
+        spec->abi=source.abi;spec->kind=source.kind;spec->width=static_cast<int>(source.width);
+        spec->factory_id=source.factory_id;spec->contexts=contexts(source.contexts);
+        spec->placement_id=source.placement_id;spec->placement_contexts=contexts(source.placement_contexts);
+        if(source.element)spec->element=context(*source.element);
+        if(spec->placement_id)references.push_back({*spec->placement_id,&*spec->placement_id,false,static_cast<int>(spec->placement_contexts.size()),false,true});
+        if(spec->factory_id)references.push_back({*spec->factory_id,&*spec->factory_id,false,static_cast<int>(spec->contexts.size()),true});
+        return spec;
     }
-    raw_cursor fields(view);const int opcode=fields.integer();
-    // The old representation counted Map/Array levels, while literal scalars
-    // did not introduce a level. Retain that budget as well as raw stack depth.
-    if(logical_depth>128||(opcode!=0&&logical_depth>=128))throw std::invalid_argument("ABD nesting exceeds 128 levels");
-    const auto child=[&]{return parse_raw_expression(fields.take(),layout,logical_depth+1);};
-    X result;
-    switch(opcode) {
-    case 0:result=parse_raw_constant(fields.take());break;
-    case 1: {
-        auto node=std::make_shared<complex_expression>();
-        node->expressions=parse_raw_expressions(fields.take(),layout,logical_depth+1);result=std::move(node);break;
+    std::vector<std::shared_ptr<context_spec>> contexts(const std::vector<std::shared_ptr<const exec::context>>& source) {
+        std::vector<std::shared_ptr<context_spec>> result;result.reserve(source.size());
+        for(const auto& value:source)result.push_back(context(*value));
+        return result;
     }
-    case 2: {
-        auto node=std::make_shared<functionInvocationExpression>();node->function_id=fields.integer();
-        node->params=parse_raw_expressions(fields.take(),layout,logical_depth+2);
-        node->contexts=parse_contexts(fields.take(),layout,logical_depth+1);
-        auto member=node->params.size()==1?std::dynamic_pointer_cast<object_expression>(node->params[0]):nullptr;
-        if(node->function_id==ids::id(ids::builtin::mem_get)&&node->contexts.empty()&&member&&member->is_member_address())
-            result=std::make_shared<member_access_expression>(std::move(node->params[0]));
-        else {
-            layout.references->push_back({node->function_id,&node->function_id,false,static_cast<int>(node->contexts.size())});
-            result=std::move(node);
-        }
-        break;
+    std::vector<X> expressions(const exec::expression& source,std::size_t first=0) {
+        std::vector<X> result;result.reserve(source.children.size()-first);
+        for(auto i=first;i<source.children.size();++i)result.push_back(build(*source.children[i]));
+        return result;
     }
-    case 3: {
-        const int slot=fields.integer();layout.check_slot(slot);
-        auto node=std::make_shared<varExpression>();node->varindex=slot;result=std::move(node);break;
-    }
-    case 4: {
-        const int slot=fields.integer();layout.check_slot(slot,true);const int type=fields.integer();
-        if(type<INT_VALUE||type>OBJECT_VALUE||type==VOID_VALUE)throw std::invalid_argument("Invalid declared variable type");
-        auto node=std::make_shared<varDefineExpression>();node->varindex=slot;
-        if(fields.boolean())node->initializer=child();result=std::move(node);break;
-    }
-    case 5: {
-        const int slot=fields.integer();layout.check_slot(slot);
-        auto node=std::make_shared<varSetExpression>();node->varindex=slot;node->expression=child();result=std::move(node);break;
-    }
-    case 6: {
-        auto target=child();auto value=child();
-        auto call=std::dynamic_pointer_cast<functionInvocationExpression>(target);
-        if(!std::dynamic_pointer_cast<varExpression>(target)&&!std::dynamic_pointer_cast<member_access_expression>(target)&&!(call&&call->function_id==ids::id(ids::builtin::mem_get)))
-            throw std::invalid_argument("Assignment target must be a variable or mem_get(pointer)");
-        result=raw_binary<movExpression>(std::move(target),std::move(value));break;
-    }
-    case 32: {
-        const int size=fields.integer();
-        if(size<1||static_cast<std::size_t>(size)>MAX_VARIABLE_SLOTS)throw std::invalid_argument("Invalid object slot count");
-        result=std::make_shared<new_block_expression>(static_cast<std::size_t>(size));break;
-    }
-    case 33:result=std::make_shared<block_address_expression>(child());break;
-    case 34: {
-        const int slot=fields.integer();layout.check_slot(slot);
-        if(slot<0)throw std::invalid_argument("Object move requires a local slot");
-        result=std::make_shared<move_out_expression>(slot);break;
-    }
-    case 35: {
-        auto target=child();auto call=std::dynamic_pointer_cast<functionInvocationExpression>(target);
-        if(!std::dynamic_pointer_cast<varExpression>(target)&&!std::dynamic_pointer_cast<member_access_expression>(target)&&!(call&&call->function_id==ids::id(ids::builtin::mem_get)))
-            throw std::invalid_argument("Object drop target must be a variable or mem_get(pointer)");
-        result=std::make_shared<drop_expression>(std::move(target));break;
-    }
-    case 36:case 37:result=std::make_shared<context_expression>(opcode,parse_context(fields.take(),layout,logical_depth+1));break;
-    case 38:case 39: {
-        auto value=child();auto context=parse_context(fields.take(),layout,logical_depth+1);
-        result=std::make_shared<context_expression>(opcode,std::move(context),std::move(value));break;
-    }
-    case 40:result=std::make_shared<buffer_new_expression>(parse_context(fields.take(),layout,logical_depth+1));break;
-    case 41: {
-        const int operation=fields.integer();auto receiver=child();
-        auto arguments=parse_raw_expressions(fields.take(),layout,logical_depth+1);
-        static constexpr std::size_t counts[]{0,0,1,1,2,1,1};
-        if(operation<0||operation>6||arguments.size()!=counts[operation])throw std::invalid_argument("Invalid buffer operation arguments");
-        result=std::make_shared<buffer_operation_expression>(operation,std::move(receiver),std::move(arguments));break;
-    }
-    case 42: {
-        auto context=parse_context(fields.take(),layout,logical_depth+1);auto left=child();auto right=child();
-        result=std::make_shared<value_compare_expression>(std::move(context),std::move(left),std::move(right));break;
-    }
-    case 43:case 44:case 45:case 46:case 47:case 48: {
-        auto left=child();auto right=child();
-        result=std::make_shared<bitwise_expression>(opcode,std::move(left),std::move(right));break;
-    }
-    case 49: {
-        const int target=fields.integer();
-        if(target!=INT_VALUE&&target!=STRING_VALUE&&target!=FLOAT_VALUE&&target!=DOUBLE_VALUE&&target!=ADDRESS_VALUE)
-            throw std::invalid_argument("Invalid conversion target type: "+std::to_string(target));
-        result=std::make_shared<convert_expression>(target,child());break;
-    }
-    case 52: {
-        auto node=std::make_shared<set_methods_expression>(child());raw_cursor entries(fields.take());
-        while(!entries.empty()) {
-            if(node->entries.size()>=MAX_VARIABLE_SLOTS)throw std::invalid_argument("Too many virtual method entries");
-            raw_cursor entry(entries.take());auto method=std::make_shared<method_spec>();method->function_id=entry.integer();
-            method->contexts=parse_contexts(entry.take(),layout,logical_depth+2);entry.finish();
-            layout.references->push_back({method->function_id,&method->function_id,false,static_cast<int>(method->contexts.size()),false,false,true});
-            node->entries.push_back(std::move(method));
-        }
-        result=std::move(node);break;
-    }
-    case 53: {
-        const int slot=fields.integer(),type=fields.integer();
-        if(slot<0||static_cast<std::size_t>(slot)>=MAX_VARIABLE_SLOTS)throw std::invalid_argument("Invalid virtual method slot");
-        if(type<INT_VALUE||type>OBJECT_VALUE)throw std::invalid_argument("Invalid virtual method return type");
-        auto args=parse_raw_expressions(fields.take(),layout,logical_depth+2);
-        if(args.empty()||args.size()>MAX_VARIABLE_SLOTS)throw std::invalid_argument("Virtual method call requires a receiver and at most 1048576 arguments");
-        result=std::make_shared<call_virtual_expression>(slot,type,std::move(args));break;
-    }
-    case 51: {
-        auto value=child();auto context=parse_context(fields.take(),layout,logical_depth+1);
-        raw_cursor tags(fields.take());std::vector<int> slot_types;
-        while(!tags.empty()) {
-            const int tag=tags.integer();
-            if(tag<INT_VALUE||tag>OBJECT_VALUE||tag==VOID_VALUE||slot_types.size()>=MAX_VARIABLE_SLOTS)
-                throw std::invalid_argument("Invalid object-check slot type");
-            slot_types.push_back(tag);
-        }
-        if(context->ref<0&&context->kind==3&&slot_types.size()!=static_cast<std::size_t>(context->width))
-            throw std::invalid_argument("Object-check class slot count must match context width");
-        result=std::make_shared<check_object_expression>(std::move(value),std::move(context),std::move(slot_types));break;
-    }
-    case 50: {
-        auto condition=child();auto when_true=child();auto when_false=child();
-        result=std::make_shared<select_expression>(std::move(condition),std::move(when_true),std::move(when_false));break;
-    }
-    case 7:case 8: {
-        auto node=std::make_shared<returnExpression>();node->object_return=opcode==8;
-        if(opcode==8||fields.boolean())node->returnType=child();result=std::move(node);break;
-    }
-    case 9: {
-        auto base=child();const int offset=fields.integer();
-        if(offset<0)throw std::invalid_argument("Negative object member offset");
-        result=std::make_shared<object_expression>("oa",std::move(base),offset);break;
-    }
-    case 10: {
-        auto address=child();std::optional<int> destructor;
-        if(fields.boolean())destructor=fields.integer();
-        const bool manual=fields.boolean();
-        if(destructor&&(*destructor==0||*destructor==1||*destructor==0x0fff0000||namespace_of(*destructor)==0x0abd))
-            throw std::invalid_argument("Invalid object destructor id");
-        auto node=std::make_shared<object_expression>(std::move(address),destructor,manual);
-        node->contexts=parse_contexts(fields.take(),layout,logical_depth+1);
-        if(!destructor&&!node->contexts.empty())throw std::invalid_argument("Destructor contexts require a destructor");
-        if(destructor)layout.references->push_back({*destructor,node->destructor_address(),true,static_cast<int>(node->contexts.size())});
-        result=std::move(node);break;
-    }
-    case 11:result=std::make_shared<object_expression>("od",child());break;
-    case 12:case 13:case 14:case 15:case 16:case 17:case 18:case 19:case 20:case 21:case 22:case 23:case 24: {
-        auto a=child();auto b=child();
+public:
+    explicit tree_builder(std::vector<function_reference>& references):references(references) {}
+    X build(const exec::expression& source) {
+        const auto child=[&](std::size_t index){return build(*source.children[index]);};
+        const int opcode=source.opcode;
+        X result;
         switch(opcode) {
-        case 12:result=raw_binary<addExpression>(std::move(a),std::move(b));break;
-        case 13:result=raw_binary<minusExpression>(std::move(a),std::move(b));break;
-        case 14:result=raw_binary<multiplyExpression>(std::move(a),std::move(b));break;
-        case 15:result=raw_binary<divideExpression>(std::move(a),std::move(b));break;
-        case 17:result=raw_binary<gtExpression>(std::move(a),std::move(b));break;
-        case 18:result=raw_binary<ltExpression>(std::move(a),std::move(b));break;
-        case 19:result=raw_binary<equalExpression>(std::move(a),std::move(b));break;
-        default: {
-            const char* operation=opcode==16?"mod":opcode==20?"ne":opcode==21?"ge":opcode==22?"le":opcode==23?"and":"or";
-            result=std::make_shared<extra_expression>(operation,std::move(a),std::move(b));break;
+        case 0:result=std::make_shared<constantExpression>(source.constant);break;
+        case 1: {
+            auto node=std::make_shared<complex_expression>();node->expressions=expressions(source);result=std::move(node);break;
         }
+        case 2: {
+            auto node=std::make_shared<functionInvocationExpression>();node->function_id=source.immediate;
+            node->params=expressions(source);node->contexts=contexts(source.contexts);
+            auto member=node->params.size()==1?std::dynamic_pointer_cast<object_expression>(node->params[0]):nullptr;
+            if(node->function_id==ids::id(ids::builtin::mem_get)&&node->contexts.empty()&&member&&member->is_member_address())
+                result=std::make_shared<member_access_expression>(std::move(node->params[0]));
+            else {
+                references.push_back({node->function_id,&node->function_id,false,static_cast<int>(node->contexts.size())});
+                result=std::move(node);
+            }
+            break;
         }
-        break;
-    }
-    case 25:case 26:result=std::make_shared<extra_expression>(opcode==25?"not":"neg",child());break;
-    case 27: {
-        auto node=std::make_shared<ifExpression>();node->exp1=child();node->exp2=child();
-        if(fields.boolean())node->otherwise=child();result=std::move(node);break;
-    }
-    case 28: {auto condition=child();auto body=child();result=raw_binary<whileExpression>(std::move(condition),std::move(body));break;}
-    case 29:result=std::make_shared<breakExpression>();break;
-    case 30:result=std::make_shared<continueExpression>();break;
-    case 31: {
-        auto body=child();auto cleanup=child();const bool on_error=fields.boolean();
-        result=std::make_shared<cleanup_expression>(std::move(body),std::move(cleanup),on_error);break;
-    }
-    default:throw std::invalid_argument("Unknown exec opcode: "+std::to_string(opcode));
-    }
-    fields.finish();result->location=location;return result;
-}
-std::vector<int> parse_raw_types(raw_view view,bool script_parameters) {
-    raw_cursor fields(view);std::vector<int> result;
-    while(!fields.empty()) {
-        if(result.size()>=MAX_VARIABLE_SLOTS)throw std::invalid_argument("Too many parameter types");
-        const int type=fields.integer();
-        if(type<INT_VALUE||(type>BOOLEAN_VALUE&&type!=ADDRESS_VALUE&&type!=OBJECT_VALUE&&type!=ANY_VALUE))
-            throw std::invalid_argument("Invalid parameter type");
-        result.push_back(type);
-    }
-    return result;
-}
-// Debug names and files are valid UTF-8 without controls (C0, DEL, C1), line or
-// paragraph separators or bidirectional formatting characters, like the compiler's
-// SourceRules.unsafeDisplayCharacter, so they cannot forge a stack-trace line.
-std::string debug_text(raw_cursor& fields,const char* label) {
-    auto text=fields.string();
-    if(text.empty())throw std::invalid_argument(std::string("Empty exec debug ")+label);
-    for(std::size_t i=0;i<text.size();) {
-        const auto first=static_cast<unsigned char>(text[i]);
-        std::uint32_t code;std::size_t length;
-        if(first<0x80){code=first;length=1;}
-        else if(first<0xe0){code=first&0x1fu;length=2;}
-        else if(first<0xf0){code=first&0x0fu;length=3;}
-        else {code=first&0x07u;length=4;}
-        for(std::size_t k=1;k<length;k++)code=(code<<6)|(static_cast<unsigned char>(text[i+k])&0x3fu);
-        i+=length;
-        if(code<0x20||(code>=0x7f&&code<=0x9f)||code==0x2028||code==0x2029||code==0x061c||code==0x200e||code==0x200f||
-           (code>=0x202a&&code<=0x202e)||(code>=0x2066&&code<=0x2069))
-            throw std::invalid_argument(std::string("Exec debug ")+label+" contains a control, separator or bidirectional formatting character");
-    }
-    return text;
-}
-// [name, file, line, column, locations]; locations are (node, file, line, column)
-// quads with strictly increasing nodes. Nodes past the body are rejected after it is parsed.
-std::shared_ptr<function_debug> parse_function_debug(raw_view view,const std::shared_ptr<const std::vector<std::string>>& files,
-        std::vector<std::uint32_t>& nodes) {
-    raw_cursor fields(view);auto debug=std::make_shared<function_debug>();debug->files=files;
-    debug->name=debug_text(fields,"name");
-    const auto file=[&](int value) {
-        if(value<0||static_cast<std::size_t>(value)>=files->size())throw std::invalid_argument("Exec debug file index outside debug files");
-        return static_cast<std::uint32_t>(value);
-    };
-    debug->header.file=file(fields.integer());
-    const int line=fields.integer(),column=fields.integer();
-    if(line<0||column<0||(line==0)!=(column==0))throw std::invalid_argument("Exec debug header position must be both zero or both positive");
-    debug->header.line=static_cast<std::uint32_t>(line);debug->header.column=static_cast<std::uint32_t>(column);
-    raw_cursor quads(fields.take());fields.finish();
-    while(!quads.empty()) {
-        if(debug->locations.size()>=MAX_VARIABLE_SLOTS)throw std::invalid_argument("Too many exec debug locations");
-        const int node=quads.integer();
-        if(quads.empty())throw std::invalid_argument("Exec debug locations must be node, file, line, column quads");
-        source_position position;position.file=file(quads.integer());
-        const int at_line=quads.integer(),at_column=quads.integer();
-        if(node<0||(!nodes.empty()&&static_cast<std::uint32_t>(node)<=nodes.back()))
-            throw std::invalid_argument("Exec debug location nodes must strictly increase");
-        if(at_line<1||at_column<1)throw std::invalid_argument("Exec debug location line and column must be positive");
-        position.line=static_cast<std::uint32_t>(at_line);position.column=static_cast<std::uint32_t>(at_column);
-        nodes.push_back(static_cast<std::uint32_t>(node));debug->locations.push_back(position);
-    }
-    return debug;
-}
-parsed_module parse_raw_module(raw_view root,std::size_t offset) {
-    raw_cursor fields(root);parsed_module module;
-    if(fields.string()!="AZSCRIPT")throw std::invalid_argument("Invalid exec magic");
-    if(const int version=fields.integer();version!=EXEC_FORMAT_VERSION)
-        throw std::invalid_argument("Unsupported exec version "+std::to_string(version)+"; expected exec v"+std::to_string(EXEC_FORMAT_VERSION));
-    fields.integer();fields.string(); // Source version/author are non-executable metadata.
-    const int globals=fields.integer();
-    if(globals<0||static_cast<std::size_t>(globals)>MAX_VARIABLE_SLOTS||offset>MAX_VARIABLE_SLOTS-static_cast<std::size_t>(globals))
-        throw std::invalid_argument("Invalid global variable count");
-    module.global_count=static_cast<std::size_t>(globals);
-    auto extension=fields.take();check_typed_metadata(extension,2);
-    module.meta=std::make_shared<AbdMap>(std::make_shared<AbdStack>(copy_raw(extension)));
-    raw_cursor signatures(fields.take());
-    while(!signatures.empty()) {
-        raw_cursor entry(signatures.take());const int id=entry.integer();function_signature signature;
-        if(id==0||id==1||id==0x0fff0000||namespace_of(id)==0x0abd)throw std::invalid_argument("Invalid external function id");
-        signature.return_type=entry.integer();
-        if(signature.return_type<INT_VALUE||signature.return_type>OBJECT_VALUE)throw std::invalid_argument("Invalid external return type");
-        signature.param_types=parse_raw_types(entry.take(),false);
-        signature.hidden_count=entry.integer();signature.entry_kind=entry.integer();entry.finish();
-        if(signature.hidden_count<0||static_cast<std::size_t>(signature.hidden_count)>MAX_VARIABLE_SLOTS||signature.entry_kind<0||signature.entry_kind>1)
-            throw std::invalid_argument("Invalid external generic ABI");
-        if(!signature.hidden_count&&(signature.return_type==ANY_VALUE||std::find(signature.param_types.begin(),signature.param_types.end(),ANY_VALUE)!=signature.param_types.end()))
-            throw std::invalid_argument("External any types require generic contexts");
-        if(!module.extern_signatures.emplace(id,std::move(signature)).second)throw std::invalid_argument("Duplicate external signature id: "+function_id_text(id));
-    }
-    raw_cursor functions(fields.take());
-    module.hint=fields.string();
-    if(!module.hint.empty()&&!valid_hint(module.hint))throw std::invalid_argument("Invalid namespace hint");
-    raw_cursor assumptions(fields.take());
-    auto debug_files=std::make_shared<std::vector<std::string>>();
-    {
-        raw_cursor files(fields.take());std::set<std::string> names;
-        while(!files.empty()) {
-            if(debug_files->size()>=MAX_VARIABLE_SLOTS)throw std::invalid_argument("Too many exec debug files");
-            auto name=debug_text(files,"file name");
-            if(!names.insert(name).second)throw std::invalid_argument("Duplicate exec debug file name");
-            debug_files->push_back(std::move(name));
+        case 3: {auto node=std::make_shared<varExpression>();node->varindex=source.immediate;result=std::move(node);break;}
+        case 4: {
+            auto node=std::make_shared<varDefineExpression>();node->varindex=source.immediate;
+            if(!source.children.empty())node->initializer=child(0);
+            result=std::move(node);break;
         }
+        case 5: {
+            auto node=std::make_shared<varSetExpression>();node->varindex=source.immediate;node->expression=child(0);result=std::move(node);break;
+        }
+        case 6: {auto target=child(0);auto value=child(1);result=raw_binary<movExpression>(std::move(target),std::move(value));break;}
+        case 32:result=std::make_shared<new_block_expression>(static_cast<std::size_t>(source.immediate));break;
+        case 33:result=std::make_shared<block_address_expression>(child(0));break;
+        case 34:result=std::make_shared<move_out_expression>(source.immediate);break;
+        case 35:result=std::make_shared<drop_expression>(child(0));break;
+        case 36:case 37:result=std::make_shared<context_expression>(opcode,context(*source.contexts[0]));break;
+        case 38:case 39: {
+            auto value=child(0);auto spec=context(*source.contexts[0]);
+            result=std::make_shared<context_expression>(opcode,std::move(spec),std::move(value));break;
+        }
+        case 40:result=std::make_shared<buffer_new_expression>(context(*source.contexts[0]));break;
+        case 41: {
+            auto receiver=child(0);auto arguments=expressions(source,1);
+            result=std::make_shared<buffer_operation_expression>(source.immediate,std::move(receiver),std::move(arguments));break;
+        }
+        case 42: {
+            auto spec=context(*source.contexts[0]);auto left=child(0);auto right=child(1);
+            result=std::make_shared<value_compare_expression>(std::move(spec),std::move(left),std::move(right));break;
+        }
+        case 43:case 44:case 45:case 46:case 47:case 48: {
+            auto left=child(0);auto right=child(1);
+            result=std::make_shared<bitwise_expression>(opcode,std::move(left),std::move(right));break;
+        }
+        case 49:result=std::make_shared<convert_expression>(source.immediate,child(0));break;
+        case 52: {
+            auto node=std::make_shared<set_methods_expression>(child(0));
+            for(const auto& entry:source.methods) {
+                auto method=std::make_shared<method_spec>();method->function_id=entry.function_id;method->contexts=contexts(entry.contexts);
+                references.push_back({method->function_id,&method->function_id,false,static_cast<int>(method->contexts.size()),false,false,true});
+                node->entries.push_back(std::move(method));
+            }
+            result=std::move(node);break;
+        }
+        case 53:result=std::make_shared<call_virtual_expression>(source.immediate,source.return_type,expressions(source));break;
+        case 51: {
+            auto value=child(0);auto spec=context(*source.contexts[0]);
+            result=std::make_shared<check_object_expression>(std::move(value),std::move(spec),source.slot_types);break;
+        }
+        case 50: {
+            auto condition=child(0);auto when_true=child(1);auto when_false=child(2);
+            result=std::make_shared<select_expression>(std::move(condition),std::move(when_true),std::move(when_false));break;
+        }
+        case 7:case 8: {
+            auto node=std::make_shared<returnExpression>();node->object_return=opcode==8;
+            if(!source.children.empty())node->returnType=child(0);
+            result=std::move(node);break;
+        }
+        case 9:result=std::make_shared<object_expression>("oa",child(0),source.immediate);break;
+        case 10: {
+            auto node=std::make_shared<object_expression>(child(0),source.destructor_id,source.manual);
+            node->contexts=contexts(source.contexts);
+            if(source.destructor_id)references.push_back({*source.destructor_id,node->destructor_address(),true,static_cast<int>(node->contexts.size())});
+            result=std::move(node);break;
+        }
+        case 11:result=std::make_shared<object_expression>("od",child(0));break;
+        case 12:case 13:case 14:case 15:case 16:case 17:case 18:case 19:case 20:case 21:case 22:case 23:case 24: {
+            auto a=child(0);auto b=child(1);
+            switch(opcode) {
+            case 12:result=raw_binary<addExpression>(std::move(a),std::move(b));break;
+            case 13:result=raw_binary<minusExpression>(std::move(a),std::move(b));break;
+            case 14:result=raw_binary<multiplyExpression>(std::move(a),std::move(b));break;
+            case 15:result=raw_binary<divideExpression>(std::move(a),std::move(b));break;
+            case 17:result=raw_binary<gtExpression>(std::move(a),std::move(b));break;
+            case 18:result=raw_binary<ltExpression>(std::move(a),std::move(b));break;
+            case 19:result=raw_binary<equalExpression>(std::move(a),std::move(b));break;
+            default: {
+                const char* operation=opcode==16?"mod":opcode==20?"ne":opcode==21?"ge":opcode==22?"le":opcode==23?"and":"or";
+                result=std::make_shared<extra_expression>(operation,std::move(a),std::move(b));break;
+            }
+            }
+            break;
+        }
+        case 25:case 26:result=std::make_shared<extra_expression>(opcode==25?"not":"neg",child(0));break;
+        case 27: {
+            auto node=std::make_shared<ifExpression>();node->exp1=child(0);node->exp2=child(1);
+            if(source.children.size()==3)node->otherwise=child(2);
+            result=std::move(node);break;
+        }
+        case 28: {auto condition=child(0);auto body=child(1);result=raw_binary<whileExpression>(std::move(condition),std::move(body));break;}
+        case 29:result=std::make_shared<breakExpression>();break;
+        case 30:result=std::make_shared<continueExpression>();break;
+        case 31: {
+            auto body=child(0);auto cleanup=child(1);
+            result=std::make_shared<cleanup_expression>(std::move(body),std::move(cleanup),source.on_error);break;
+        }
+        default:throw std::logic_error("Unknown exec model opcode: "+std::to_string(opcode));
+        }
+        result->location=source.location;return result;
     }
-    fields.finish();std::set<std::string> hint_names;
-    while(!assumptions.empty()) {
-        raw_cursor record(assumptions.take());auto hint=record.string();const int ns=record.integer();record.finish();
-        if(!valid_hint(hint)||ns<=0||ns>0xffff||ns==0x0abd||ns==0x0fff)throw std::invalid_argument("Invalid namespace assumption");
-        if(!hint_names.insert(hint).second||!module.assumptions.emplace(ns,std::move(hint)).second)
-            throw std::invalid_argument("Duplicate namespace assumption");
-    }
-    if(!module.hint.empty()&&!hint_names.contains(module.hint))throw std::invalid_argument("Hint module requires an assumption for itself");
-    while(!functions.empty()) {
-        raw_cursor entry(functions.take());auto fn=std::make_shared<ofunction>();
-        fn->global_offset=offset;fn->global_count=module.global_count;
-        fn->function_id=entry.integer();fn->rett=entry.integer();fn->param_count=entry.integer();fn->local_count=entry.integer();
-        if(namespace_of(fn->function_id)==0x0abd)
-            throw std::invalid_argument("Invalid script function id");
-        if(!module.hint.empty()&&namespace_of(fn->function_id)!=0)throw std::invalid_argument("Hint module definitions require namespace zero");
-        if(module.hint.empty()&&fn->function_id!=0&&fn->function_id!=1&&module.assumptions.contains(namespace_of(fn->function_id)))
-            throw std::invalid_argument("Namespace assumption overlaps module definitions");
-        if(fn->rett<INT_VALUE||fn->rett>OBJECT_VALUE)throw std::invalid_argument("Unknown return type");
-        if(fn->param_count<0||fn->local_count<0||static_cast<std::size_t>(fn->param_count)>MAX_VARIABLE_SLOTS||
-           static_cast<std::size_t>(fn->local_count)>MAX_VARIABLE_SLOTS-static_cast<std::size_t>(fn->param_count))
-            throw std::invalid_argument("Invalid function variable count");
-        fn->param_types=parse_raw_types(entry.take(),true);
-        auto body=entry.take();fn->hidden_count=entry.integer();fn->entry_kind=entry.integer();
-        std::vector<std::uint32_t> located;
-        if(entry.boolean())fn->debug=parse_function_debug(entry.take(),debug_files,located);
-        entry.finish();
-        if(fn->hidden_count<0||static_cast<std::size_t>(fn->hidden_count)>MAX_VARIABLE_SLOTS||fn->entry_kind<0||fn->entry_kind>1)
-            throw std::invalid_argument("Invalid function generic ABI");
-        if(fn->rett==ANY_VALUE&&!fn->hidden_count)throw std::invalid_argument("Any return requires generic contexts");
-        if(fn->param_types.size()!=static_cast<std::size_t>(fn->param_count))throw std::invalid_argument("param-count and param-types disagree");
-        if((fn->function_id==0||fn->function_id==1)&&(fn->rett!=VOID_VALUE||fn->param_count!=0||fn->hidden_count!=0))
-            throw std::invalid_argument("Lifecycle function must return void and take no parameters");
-        node_numbering numbering;numbering.nodes=&located;
-        const raw_function_layout layout{static_cast<std::size_t>(fn->param_count),
-            static_cast<std::size_t>(fn->param_count)+static_cast<std::size_t>(fn->local_count),module.global_count,&module.references,
-            static_cast<std::size_t>(fn->hidden_count),&numbering};
-        fn->code=parse_raw_expression(body,layout,3);
-        if(numbering.located!=located.size())throw std::invalid_argument("Exec debug location refers to a missing body node");
-        const int id=fn->function_id;
-        if(!module.functions.emplace(id,std::move(fn)).second)throw std::invalid_argument("Duplicate function id: "+function_id_text(id));
-        module.namespaces.insert(namespace_of(id));
+};
+parsed_module build_module(exec::module model) {
+    parsed_module module;
+    module.meta=std::move(model.meta);module.global_count=model.global_count;
+    module.hint=std::move(model.hint);module.assumptions=std::move(model.assumptions);
+    for(auto& [id,source]:model.extern_signatures)
+        module.extern_signatures.emplace(id,function_signature{source.return_type,std::move(source.param_types),
+            static_cast<int>(source.hidden_count),source.entry_kind});
+    for(const auto& source:model.functions) {
+        auto fn=std::make_shared<ofunction>();
+        fn->global_offset=model.global_offset;fn->global_count=module.global_count;
+        fn->function_id=source.function_id;fn->rett=source.return_type;
+        fn->param_count=static_cast<int>(source.param_types.size());fn->local_count=static_cast<int>(source.local_count);
+        fn->param_types=source.param_types;fn->hidden_count=static_cast<int>(source.hidden_count);
+        fn->entry_kind=source.entry_kind;fn->debug=source.debug;
+        const auto first=module.references.size();
+        fn->code=tree_builder(module.references).build(*source.body);
+        // The core linker plan and the tree's patch list must name the same references.
+        const auto expected=exec::references(source.body);
+        if(module.references.size()-first!=expected.size())throw std::logic_error("Tree references differ from the exec model");
+        for(std::size_t i=0;i<expected.size();++i) {
+            const auto& found=module.references[first+i];const auto& wanted=expected[i];
+            const auto kind=found.destructor?exec::reference_kind::destructor:found.factory?exec::reference_kind::factory:
+                found.placement?exec::reference_kind::placement:found.method?exec::reference_kind::method:exec::reference_kind::call;
+            if(found.original_id!=wanted.function_id||kind!=wanted.kind||found.hidden_count!=static_cast<int>(wanted.hidden_count))
+                throw std::logic_error("Tree references differ from the exec model");
+        }
+        module.functions.emplace(source.function_id,std::move(fn));
     }
     return module;
-}
-parsed_module decode_module(const unsigned char* bytes,std::size_t length,std::size_t offset=0) {
-    if(length>64*1024*1024)throw std::invalid_argument("Script exceeds 64 MiB limit");
-    if(!bytes||length<4)throw std::invalid_argument("Truncated ABD script");
-    raw_cursor file({bytes,length,0});auto root=file.take();file.finish();
-    raw_cursor fields(root);
-    if(!fields.empty()) {
-        const auto first=fields.take();
-        if(first.size==8&&std::memcmp(first.data,"AZSCRIPT",8)==0)return parse_raw_module(root,offset);
-    }
-    throw std::invalid_argument("Unsupported script format: expected raw exec v"+std::to_string(EXEC_FORMAT_VERSION));
 }
 }
 std::recursive_mutex& runtime_mutex(){static std::recursive_mutex m;return m;}
@@ -1289,7 +940,7 @@ void script::insert_script(const unsigned char* bytes,std::size_t length) {
     if(closed)throw std::runtime_error("Script is closed");
     if(faulted)throw std::runtime_error("Script initialization failed; close and rebuild the script");
     if(destroying||initializing||active_calls)throw std::runtime_error("Cannot insert during script execution");
-    auto parsed=decode_module(bytes,length,baseEnv->variables.size());
+    auto parsed=build_module(exec::read_module(bytes,length,baseEnv->variables.size()));
     auto module=std::make_shared<loaded_module>();
     module->manifest.bytes.assign(bytes,bytes+length);
     module->manifest.global_offset=baseEnv->variables.size();module->manifest.global_count=parsed.global_count;
@@ -1662,16 +1313,7 @@ V returnExpression::execute(E env) {
     }
     mark_returned(env,std::move(result));return nil();
 }
-constantExpression::constantExpression(std::shared_ptr<AbdMapValue> v) {
-    if(auto p=std::dynamic_pointer_cast<IntAbdValue>(v)) value=std::make_shared<variable>(p->data);
-    else if(auto p=std::dynamic_pointer_cast<AddressAbdValue>(v)) value=std::make_shared<variable>(p->data);
-    else if(auto p=std::dynamic_pointer_cast<StringAbdValue>(v)) value=std::make_shared<variable>(p->data);
-    else if(auto p=std::dynamic_pointer_cast<FloatAbdValue>(v)) value=std::make_shared<variable>(p->data);
-    else if(auto p=std::dynamic_pointer_cast<DoubleAbdValue>(v)) value=std::make_shared<variable>(p->data);
-    else if(auto p=std::dynamic_pointer_cast<BoolAbdValue>(v)) value=std::make_shared<variable>(p->data);
-    else if(auto p=std::dynamic_pointer_cast<ByteArrayValue>(v);p&&p->length==1&&p->data[0]==0xff) value=nil();
-    else throw std::invalid_argument("Unsupported script constant");
-}
+constantExpression::constantExpression(const Value& v):value(std::make_shared<variable>()) {value_access::assign(*value,v);}
 V constantExpression::execute(E env){tick(env);return value->deepCopy();}
 #define BINARY_IMPL(Class,Op) \
 V Class::execute(E env){tick(env);auto a=run(exp1,env)->deepCopy();auto b=run(exp2,env);return binary(Op,a,b);}

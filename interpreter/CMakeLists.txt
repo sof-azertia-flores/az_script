@@ -8,8 +8,8 @@ find_package(Threads REQUIRED)
 if(NOT TARGET azertianBinaryData)
     add_subdirectory(../abdC "${CMAKE_CURRENT_BINARY_DIR}/abdC")
 endif()
-set(AZSCRIPT_RUNTIME_SOURCES core/trace.cpp core/admission.cpp core/types.cpp core/value_ops.cpp library.cpp internelFunctions.cpp heepalloc.cpp blocks.cpp p256.cpp extern_library.cpp runtime_abi.cpp
-    vm/storage.cpp vm/frames.cpp vm/program.cpp vm/lowering.cpp vm/source_decode.cpp vm/loader.cpp
+set(AZSCRIPT_RUNTIME_SOURCES core/trace.cpp core/admission.cpp core/types.cpp core/value_ops.cpp core/exec.cpp library.cpp internelFunctions.cpp heepalloc.cpp blocks.cpp p256.cpp extern_library.cpp runtime_abi.cpp
+    vm/storage.cpp vm/frames.cpp vm/program.cpp vm/lowering.cpp vm/loader.cpp
     vm/execution.cpp vm/session.cpp vm/host_bridge.cpp vm/cleanup.cpp)
 add_library(abdInvoker SHARED ${AZSCRIPT_RUNTIME_SOURCES})
 add_library(abdInvokero STATIC ${AZSCRIPT_RUNTIME_SOURCES})
@@ -57,7 +57,7 @@ install(TARGETS azscript-run RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
 install(FILES library.h internelFunctions.h heepalloc.h blocks.h azertianBinaryDataValues.h acs.h
     DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/azscript/detail/interpreter")
 # library.h includes these neutral declarations (debug records, error traces).
-install(FILES core/debug.h core/errors.h core/types.h core/limits.h core/value.h DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/azscript/detail/interpreter/core")
+install(FILES core/debug.h core/errors.h core/format.h core/types.h core/limits.h core/value.h DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/azscript/detail/interpreter/core")
 if(BUILD_TESTING)
     add_executable(runtime-tests runtime_tests.cpp)
     target_link_libraries(runtime-tests PRIVATE abdInvoker)
@@ -89,7 +89,7 @@ if(BUILD_TESTING)
             "vm-storage-tests:../tests/vm_storage_tests.cpp"
             "vm-frame-tests:../tests/vm_frame_tests.cpp"
             "vm-program-tests:vm/program_tests.cpp"
-            "source-decode-tests:vm/source_decode_tests.cpp"
+            "exec-model-tests:core/exec_tests.cpp"
             "operations-tests:operations_tests.cpp"
             "scalar-vm-tests:scalar_vm_tests.cpp"
             "vm-call-tests:../tests/vm_call_tests.cpp"
@@ -102,8 +102,6 @@ if(BUILD_TESTING)
         target_link_libraries(${vm_test_name} PRIVATE abdInvokero)
         add_test(NAME ${vm_test_name} COMMAND ${vm_test_name})
     endforeach()
-    target_compile_definitions(source-decode-tests PRIVATE
-        AZSCRIPT_SOURCE_BRIDGE_LEGACY_ORACLE AZSCRIPT_SOURCE_BRIDGE_LOWERING_ORACLE)
     add_executable(vm-loader-host ../tests/vm_loader_host.cpp)
     target_link_libraries(vm-loader-host PRIVATE abdInvokero)
     # Protocol-2 observation adapter for every runtime under comparison; the
