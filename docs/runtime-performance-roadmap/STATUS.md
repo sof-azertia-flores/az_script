@@ -126,6 +126,7 @@ scalar 与 calls 的每一轮配对比值都大于 1.4；objects/virtual 的个�
 - 强制 VM 直接运行（含真实 JNI）：math、end_to_end、classes、literal objects、loops、address、numeric slots、hint linking 套件全部通过。
 - `vm_suite_triage.py`（无 JNI）：全部 19 个套件退出 0；1151 次调用由 VM 执行并满足套件预期，214 次因泛型/buffer/反射/插件被拒绝后改用树后端。ASan 构建下对象相关套件同样全部通过、无 sanitizer 报告。
 - 普通与 ASan/UBSan 构建的 ctest 全部通过。
+- 在 `0cf525d` 上顺序运行完整验证：`build_and_test.py --offline` 退出 0（`build/full-normal-4.log`），`--offline --sanitize` 退出 0（`build/full-sanitize-3.log`）；两者都包含 57 个案例、2310/2310 对 VM 差分。
 
 ## 下一步
 
