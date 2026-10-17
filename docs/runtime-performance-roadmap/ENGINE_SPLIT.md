@@ -1,8 +1,8 @@
-# 双执行器共存与源码拆分决策
+# 执行器解耦：让树执行器可以干净地移除
 
-日期：2026-10-17（UTC）。适用分支：`claude/runtime-performance-handoff-5mdt6h`，起点 `97968ba`。本文件是用户提出“新 VM 与旧解释器是否重叠、去掉不必要重叠、两个执行器作为可二选一的库同时发行一段时间”后的可行性研究结论，修订 [PLAN.md](PLAN.md) 中 R11 之后的顺序和 R18 的含义。实际进度仍以 [STATUS.md](STATUS.md) 为准。
+日期：2026-10-17（UTC）。适用分支：`claude/runtime-performance-handoff-5mdt6h`，起点 `97968ba`。本文件是用户提出“新 VM 与旧解释器是否重叠、去掉不必要重叠”后的研究结论，修订 [PLAN.md](PLAN.md) 中 R11 之后的顺序和 R18 的含义。实际进度仍以 [STATUS.md](STATUS.md) 为准。
 
-**状态划分：** S0–S4（证据工具、R11b 所需的核心提取、R11b、核心整理、R12）按本文件实施，因为它们直接服务“先 R11b 再 R12”及严格行为一致；S5（运行时 ABI 2、拆分为三个库、双引擎发行）是可行性结论和建议方案，**须经用户在 R12 之后确认才实施**，在此之前两个执行器仍在同一个库中。
+**目标（用户确认）：** 两个执行器目前深度交织，像一株半数器官已坏死却仍连在主干上的植物。目标是解开这种交织，使 VM 被证明足够可靠后可以**简单地删除较慢的树执行器**：届时只删除树组件和迁移选择器，其余代码不受牵连。曾经研究过的“核心库加两个引擎库同时发行”（三个 DSO、两个 runner、两个 JNI 库）并非实现该目标所必需，**不再计划**；第 2 节末尾保留其结论仅作可行性记录。
 
 ## 1. 现状：不是两个独立项目
 
@@ -17,24 +17,23 @@
 
 ## 2. 目标结构
 
-VM 重建的是“怎样执行代码”。exec 格式、链接器、对象/堆模型和宿主 API 是可观察契约，两份实现会长期威胁一致性，因此只共享这些契约，不共享任何求值代码。
+VM 重建的是“怎样执行代码”。exec 格式、链接器、对象/堆模型和宿主 API 是可观察契约，两份实现会长期威胁一致性，因此只共享这些契约，不共享任何求值代码。运行库仍是同一个 `abdInvoker` 库，内部分为三个源码组件：
 
-| 组件 | 共享库 / 静态库 | 源码 | 内容 |
-| --- | --- | --- | --- |
-| 核心 | `abdInvoker-2` / `abdInvokerCore` | `interpreter/core/` | 宿主 API、校验型 exec v10 读取器及中立模块模型、链接器、脚本生命周期与引擎分派、调用准入、trace、宿主调用边界、全部内建、唯一对象模型（存储、代数检查的所有者身份、语句协议、可恢复生命周期状态机）、global 存储、snapshot v10 编解码、插件加载与 ABI 身份 |
-| 树引擎 | `abdInvokerTree-2` / `abdInvokerTree` | `interpreter/tree/` | 从模型构建表达式树并递归求值；原生驱动生命周期状态机 |
-| VM 引擎 | `abdInvokerVM-2` / `abdInvokerVM` | `interpreter/vm/` | lowering、只检查自身 IR 的 verifier、dispatch 循环、显式帧、VM 作用域记录、continuation 驱动和 workspace |
-| 签名算法 | `azscript_crypto`（内部静态） | `interpreter/crypto/` | P-256；签名工具不再链接整个运行库 |
+| 组件 | 源码 | 内容 |
+| --- | --- | --- |
+| 核心 | `interpreter/core/` | 宿主 API、校验型 exec v10 读取器及中立模块模型、链接器、脚本生命周期与引擎分派、调用准入、trace、宿主调用边界、全部内建、唯一对象模型（存储、代数检查的所有者身份、语句协议、可恢复生命周期状态机）、global 存储、snapshot v10 编解码、插件加载与 ABI 身份 |
+| 树引擎 | `interpreter/tree/` | 从模型构建表达式树并递归求值；原生驱动生命周期状态机 |
+| VM 引擎 | `interpreter/vm/` | lowering、只检查自身 IR 的 verifier、dispatch 循环、显式帧、VM 作用域记录、continuation 驱动和 workspace |
 
-规则：一个源文件只属于一个组件；tree 与 vm 互不包含，core 不包含二者；由 `tools/check_component_boundaries.py` 检查 include 和重复定义。
+“可以删除树”由三项机械检查证明，而不是靠约定：
 
-选择方式：
+1. **边界检查**：一个源文件只属于一个组件；`core/` 与 `vm/` 不包含、不引用 `tree/` 的任何头文件或符号，`tree/` 只依赖 `core/`。由 `tools/check_component_boundaries.py` 检查 include 和目标文件的未定义符号。
+2. **无树构建**：CMake 选项（如 `AZSCRIPT_ENGINES=vm`）完全不编译 `interpreter/tree/`，运行库仍能链接，并通过 VM 单测、一致性语料及在该构建中可运行的端到端套件。这条构建进入统一验证。
+3. **公开 API 不含树类型**：宿主回调、global 访问、函数签名查询和快照不再经过 `environment`、`function_frame`、`ofunction` 或表达式类（运行时 ABI 2）。否则宿主代码会把树一直“拴”在运行库里。
 
-- C++ 链接 `AzScript::RuntimeTree[Shared]` 或 `AzScript::RuntimeVM[Shared]`；`AzScript::Runtime[Shared]` 是默认引擎的别名。
-- 独立解释器 `azscript-run`（树）与 `azscript-run-vm`；JNI 为 `abdJ-tree` 与 `abdJ-vm`，Java 用 `-Dazertia.runtime=tree|vm` 选择。
-- **每个进程只用一个引擎**：CMake 兼容属性、链接守卫、核心首次绑定检查及 JNI 单库加载四层拒绝混用。
-- 插件只链接核心库，一个签名二进制在两个引擎下都可用；依赖引擎库的插件被明确拒绝。
-- 共存期默认引擎为树，达到 R18 的覆盖和性能门槛后再切换；删除树引擎是之后单独决定的步骤，届时只需删除 `interpreter/tree/` 及其目标。
+迁移期由迁移选择器在两个引擎间切换（测试强制 VM），默认仍为树；达到 R18 的覆盖和性能门槛后切换默认引擎。删除树时只删除 `interpreter/tree/`、选择器及其测试分支。
+
+研究记录：若将来确需同时发行两个可选执行器，可行形态是“核心库加两个引擎库”（插件只链接核心、一进程一引擎），而不是两个导出相同符号的独立库；该方案当前不实施。
 
 ## 3. 共享核心与重复逻辑的唯一归属
 
@@ -72,9 +71,11 @@ VM 重建的是“怎样执行代码”。exec 格式、链接器、对象/堆�
 | S0.3 | 所有权/析构一致性语料、差异登记表、逐字节双跑工具及负对照 | 测试 |
 | S1.1–S1.4 | trace 模块、VM 每入口 trace 状态修正、统一准入与调用规划、共享 ID/上限/谓词 | 纯重构；S1.2 为 VM 修正 |
 | S2.1–S2.8 | **R11b**：代数身份 → 语句协议 → 生命周期状态机（树原生驱动）→ VM 原生对象记录与循环内内建 → 作用域/语句/函数退出及展开的 continuation → 存储/物化/返回 continuation → drop/delete/release continuation 并删除嵌套根骨架 → 文档 | 纯重构与 VM 修正 |
-| S3.1–S3.4 | 统一值运算、校验型读取器与模型、核心链接器与引擎接口、同一库内的组件目标拆分 | 纯重构 |
+| S3.1–S3.4 | 统一值运算、校验型读取器与模型、核心链接器与引擎接口、`core/`/`tree/`/`vm/` 组件拆分及边界检查 | 纯重构 |
 | S4.1–S4.6 | **R12**：泛型上下文、buffer（先树原生再 VM continuation）、默认工厂/`value_compare`/`check_object`、反射与插件加载、全部套件双引擎运行 | VM 修正 |
-| S5.1–S5.5 | 运行时 ABI 2 宿主 API（项目 0.4.0）、三个 DSO 与引擎选择、隐藏可见性与导出白名单、双引擎发行、验证记录 | API/打包 |
+| S5.1 | 运行时 ABI 2 宿主 API（项目 0.4.0）：宿主接口不再出现树类型，JNI、插件、测试与文档迁移 | API |
+| S5.2 | 无树构建门禁：`AZSCRIPT_ENGINES=vm` 不编译树组件并通过统一验证中的 VM 部分 | 构建/测试 |
+| R18 之后 | 默认切换为 VM；满足退出条件后删除树组件（单独决定） | — |
 
 每个代码提交都通过完整普通验证和随后的 sanitizer 验证；任一阶段边界都保持可构建、可验证，可在边界暂停。
 
@@ -93,23 +94,19 @@ VM 重建的是“怎样执行代码”。exec 格式、链接器、对象/堆�
 | --- | --- | --- |
 | D1 `native_stack` | 树以 `Script native stack limit exceeded` 失败而 VM 成功；R11b 后扩展到深析构链和循环内内建，R12 后扩展到 placement、工厂和反射 | 在 1 GiB 栈线程、`max_stack_bytes=0` 下重跑 F0 或候选树，必须完整复现 VM 观察；无登记或过期登记均失败 |
 | D2 `vm_workspace_limit` | VM 以 `VM workspace limit exceeded` 失败而树无此限制（默认 128 MiB，C++/Java 可配置） | 以更大上限重跑 VM 必须复现树；清理中耗尽须保留首错并完成原生释放 |
-| D3 `transitional_vm_refusal` | R12 完成前 VM 对未支持功能明确拒绝 | 每条注明移除它的步骤；S5.2 前须为零，VM 库发行时不得含任何 D3 |
+| D3 `transitional_vm_refusal` | R12 完成前 VM 对未支持功能明确拒绝 | 每条注明移除它的步骤；默认切换为 VM 之前须为零 |
 
 另登记两类两个引擎相同、但与 F0 不同的变化：`api_migration`（ABI 2 的有意 API 变化，附新旧行为夹具）和 `defect_fix`（只在有复现时修复，例如 `default_element` 对已失效脚本的空指针、`store` 跨析构持有的裸 `owner_env`）。畸形 exec 消息、已发布 trace 状态与 `describe_error`、`getDepth`、`destroy` 与深度 0 的步数核算、实参校验消息、快照字节均不是差异。
 
-## 8. 研究结论中的建议（用户可否决；S5 部分须用户确认后实施）
+## 8. 采用的做法（用户可否决）
 
-1. 拓扑采用“核心 + 两个引擎 DSO”，而不是两个导出相同符号的独立库：进程级状态只有一份，插件在所有平台引擎中立，将来删除树引擎只需删除组件。
-2. 沿用 `abdInvoker` 命名：`abdInvoker-2`、`abdInvokerTree-2`、`abdInvokerVM-2`，归档 `abdInvoker{Core,Tree,VM}`，`abdJ-tree`/`abdJ-vm`，`azscript-run`/`azscript-run-vm`。
-3. 运行时 ABI 2 与 CMake 包 0.4.0 在 R12 之后的 S5.1 一次完成；此前对已安装 detail 头的修改属于未发布的 ABI 1 内部变动，不单独发版。
-4. 一进程一引擎；共存期默认树。
-5. R11b 改写树的递归驱动为共享状态机，使析构顺序只有一个来源；风险由 F0、A/B 和变异测试控制。
-6. 所有者身份采用代数检查的 ID，不用带序号的裸指针。
-7. VM 的 trace 状态精确模拟，不登记为差异；普通同脚本 CALL 不增加检查。
-8. 快照编解码移入核心，v10 字节不变，跨引擎可移植作为测试保证；快照接口保持为 SPI。
-9. VM 库只在 R12 完成且 D3 为零后进入发行包，不提前发布“实验版”。
-10. 隐藏可见性，以 `AZSCRIPT_API`/`AZSCRIPT_ENGINE_API` 和导出白名单替代 `WINDOWS_EXPORT_ALL_SYMBOLS`。
-11. 两个库都提供 `max_vm_workspace_bytes`（树忽略），保持 API 相同。
-12. 静态运行库宿主仍不能加载插件，保持并记录现状。
+1. 不拆为多个发行库，不做双引擎发行；解耦的完成标准是第 2 节的三项机械检查。
+2. R11b 改写树的递归驱动为核心中的共享状态机，使析构顺序只有一个来源，且 VM 所需的一切都不在树组件中；风险由 F0、A/B 和变异测试控制。
+3. 所有者身份采用代数检查的 ID，不用带序号的裸指针。
+4. VM 的 trace 状态精确模拟，不登记为差异；普通同脚本 CALL 不增加检查。
+5. 运行时 ABI 2 与 CMake 包 0.4.0 在 R12 之后的 S5.1 一次完成；此前对已安装 detail 头的修改属于未发布的 ABI 1 内部变动，不单独发版。
+6. 快照编解码移入核心，v10 字节不变，两个引擎互通作为测试保证。
+7. 宿主可配置 `max_vm_workspace_bytes`（树忽略），删除树前后 API 不变。
+8. 静态运行库宿主仍不能加载插件，保持并记录现状。
 
-仍需用户确认：S3 核心整理放在 R11b 与 R12 之间是否符合“先 R11b 再 R12”；D1 扩展范围与 D2 默认值；共存期内新功能是否必须同一提交进入两个引擎、双发行的退出条件；ABI 2 公开接口收窄范围（`environment` 退出宿主回调 ABI、不再安装 detail 头、`call_context` 不暴露模块相对 global）；首个双引擎发行包是否只覆盖已实际验证的 Linux。
+仍需用户确认：D1 扩展范围与 D2 默认值；ABI 2 公开接口收窄范围（`environment` 退出宿主回调 ABI、不再安装 detail 头、`call_context` 不暴露模块相对 global）；切换默认引擎及删除树组件的退出条件。
