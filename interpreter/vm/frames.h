@@ -2,7 +2,8 @@
 #define AZSCRIPT_VM_FRAMES_H
 
 #include "program.h"
-#include "workspace.h"
+#include "storage.h"
+#include "../core/workspace.h"
 #include "../core/admission.h"
 
 namespace azertian::vm {

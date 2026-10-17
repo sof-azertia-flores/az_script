@@ -1,6 +1,7 @@
 #include "session.h"
 #include "host_bridge.h"
-#include "workspace.h"
+#include "storage.h"
+#include "../core/workspace.h"
 #include "../library.h"
 #include "../core/trace.h"
 #include <algorithm>

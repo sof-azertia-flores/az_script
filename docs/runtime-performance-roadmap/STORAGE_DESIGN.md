@@ -105,7 +105,7 @@ workspace 记实际 backing capacity：
 
 ## 6. 当前原语实现范围
 
-`interpreter/vm/storage.h/.cpp` 提供强类型 ID、分段通用池、`SlotPool<Value>`、可用于实际帧/作用域记录的 `FramePool<T>` / `ScopePool<T>`，以及共享 WorkspaceBudget。池在页面和页目录增长前预留完整额度；目录替换时旧数组与新数组并存的瞬时空间也计费。分配/构造失败恢复原 size、capacity、预算和身份序列。回收 free-list 存于记录本身，不分配新内存；代数耗尽后永久退役该索引。
+`interpreter/core/storage.h/.cpp` 提供强类型 ID、分段通用池及共享 WorkspaceBudget，`core/workspace.h` 提供计费的 WorkspaceVector；`interpreter/vm/storage.h` 在其上定义 VM 的 `SlotPool<Value>` 及可用于实际帧/作用域记录的 `FramePool<T>` / `ScopePool<T>`。池在页面和页目录增长前预留完整额度；目录替换时旧数组与新数组并存的瞬时空间也计费。分配/构造失败恢复原 size、capacity、预算和身份序列。回收 free-list 存于记录本身，不分配新内存；代数耗尽后永久退役该索引。
 
 `tests/vm_storage_tests.cpp` 使用可注入失败的 memory_resource 检查这些性质，同时实际填满 32k 和合法最大槽范围。它没有调用脚本析构，没有切换旧环境/对象的 owner 字段；这些仍是生产身份迁移的未完成工作。
 

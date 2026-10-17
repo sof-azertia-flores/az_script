@@ -1,5 +1,5 @@
-#ifndef AZSCRIPT_VM_WORKSPACE_H
-#define AZSCRIPT_VM_WORKSPACE_H
+#ifndef AZSCRIPT_CORE_WORKSPACE_H
+#define AZSCRIPT_CORE_WORKSPACE_H
 
 #include "storage.h"
 #include <algorithm>
@@ -7,7 +7,7 @@
 #include <memory>
 #include <span>
 
-namespace azertian::vm {
+namespace azertian {
 
 // A session-owned vector with explicit backing-capacity accounting. Frame
 // records retain offsets into these arrays, never element addresses: growing

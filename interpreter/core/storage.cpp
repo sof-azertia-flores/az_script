@@ -2,7 +2,7 @@
 #include <atomic>
 #include <exception>
 
-namespace azertian::vm {
+namespace azertian {
 WorkspaceBudget::WorkspaceBudget(std::size_t limit):limit_(limit) {
     if(!limit)throw std::invalid_argument("VM workspace limit must be positive");
 }
