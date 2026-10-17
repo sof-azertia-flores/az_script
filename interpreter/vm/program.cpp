@@ -1,4 +1,5 @@
 #include "program.h"
+#include "../core/limits.h"
 #include <algorithm>
 #include <array>
 #include <bit>
@@ -11,7 +12,7 @@
 
 namespace azertian::vm {
 namespace {
-constexpr std::uint32_t max_slots=1048576;
+constexpr auto max_slots=static_cast<std::uint32_t>(limits::max_slots);
 [[noreturn]] void bad(const std::string& message) {throw std::invalid_argument("Invalid VM program: "+message);}
 bool type(int value,bool allow_void=true) {
     return value>=INT_VALUE&&value<=OBJECT_VALUE&&(allow_void||value!=VOID_VALUE);

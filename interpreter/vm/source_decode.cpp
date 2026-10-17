@@ -1,4 +1,5 @@
 #include "source_decode.h"
+#include "../core/ids.h"
 #include <bit>
 #include <limits>
 #include <stdexcept>
@@ -165,7 +166,7 @@ public:
 };
 
 bool typed_member(const SourceExpression& expression) {
-    return expression.opcode==2&&expression.immediate==0x0abd0006&&expression.contexts.empty()&&
+    return expression.opcode==2&&expression.immediate==ids::id(ids::builtin::mem_get)&&expression.contexts.empty()&&
         expression.children.size()==1&&expression.children.front()&&expression.children.front()->opcode==9;
 }
 std::uint32_t count(std::size_t size) {

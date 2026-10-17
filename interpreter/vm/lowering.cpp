@@ -1,4 +1,6 @@
 #include "lowering.h"
+#include "../core/limits.h"
+#include "../core/ids.h"
 #include <algorithm>
 #include <bit>
 #include <limits>
@@ -8,7 +10,7 @@
 
 namespace azertian::vm {
 namespace {
-constexpr std::uint32_t max_slots=1048576;
+constexpr auto max_slots=static_cast<std::uint32_t>(limits::max_slots);
 [[noreturn]] void bad(const std::string& message) {
     throw std::invalid_argument("VM lowering: "+message);
 }
@@ -63,7 +65,7 @@ class Lowerer {
     }
     void assignment_target(const SourceExpression& node) const {
         if(!node.children[0]||(node.children[0]->opcode!=3&&
-            !(node.children[0]->opcode==2&&node.children[0]->immediate==0x0abd0006)))
+            !(node.children[0]->opcode==2&&node.children[0]->immediate==ids::id(ids::builtin::mem_get))))
             bad("assignment target must be a variable or mem_get(pointer)");
     }
     std::uint32_t context(const std::shared_ptr<const SourceContext>& source,std::size_t depth=0) {
@@ -157,7 +159,7 @@ class Lowerer {
         case 2: {
             // This is the same decoder-only typed member path as v10. It must
             // not become a native mem_get callback with a second call charge.
-            if(node.immediate==0x0abd0006&&node.contexts.empty()&&node.children.size()==1&&node.children[0]&&node.children[0]->opcode==9) {
+            if(node.immediate==ids::id(ids::builtin::mem_get)&&node.contexts.empty()&&node.children.size()==1&&node.children[0]&&node.children[0]->opcode==9) {
                 const auto value=child(node,0,depth);emit(Opcode::member_get,result,value);break;
             }
             OperationData data;data.target=target(node.immediate,true);

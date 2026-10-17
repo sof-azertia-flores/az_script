@@ -17,9 +17,10 @@
 #include "vm/value.h"
 #include "core/debug.h"
 #include "core/errors.h"
+#include "core/limits.h"
 
 namespace azertian {
-inline constexpr std::size_t MAX_VARIABLE_SLOTS=1048576;
+inline constexpr std::size_t MAX_VARIABLE_SLOTS=limits::max_slots;
 // The only exec format the loader reads; ExecCodec.VERSION in the compiler matches it.
 inline constexpr int EXEC_FORMAT_VERSION=10;
 class expression; class function; class environment; class variable; class script; struct loaded_module;

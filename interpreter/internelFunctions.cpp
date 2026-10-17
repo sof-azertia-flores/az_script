@@ -1,4 +1,5 @@
 #include "internelFunctions.h"
+#include "core/ids.h"
 #include "extern_library.h"
 #include "heepalloc.h"
 #include "blocks.h"
@@ -146,7 +147,9 @@ std::shared_ptr<function> builtin(int id) {
         std::make_shared<string_function>(0x0e),std::make_shared<string_function>(0x0f),std::make_shared<string_function>(0x10),
         std::make_shared<string_function>(0x11),std::make_shared<string_function>(0x12),std::make_shared<string_function>(0x13),
         std::make_shared<f_object_alloc>()};
-    int i=id&0xffff;
+    // The table is indexed by ids::builtin order; both engines classify by those ids.
+    if(functions.size()!=static_cast<std::size_t>(ids::builtin_count))throw std::logic_error("Builtin table does not match the builtin ids");
+    int i=ids::local_of(id);
     return i<static_cast<int>(functions.size())?functions[i]:nullptr;
 }
 }

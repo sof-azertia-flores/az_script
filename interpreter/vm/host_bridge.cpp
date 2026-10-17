@@ -3,19 +3,14 @@
 #include "workspace.h"
 #include "../library.h"
 #include "../core/trace.h"
+#include "../core/ids.h"
 #include <algorithm>
 #include <stdexcept>
 
 namespace azertian::vm {
 namespace {
-bool builtin(int function_id,bool heap) {
-    const auto id=static_cast<std::uint32_t>(function_id);
-    if((id>>16)!=0x0abdu)return false;
-    const auto local=id&0xffffu;
-    return heap?((local>=2&&local<=6)||local==0x14):(local==7||local==8);
-}
 void require_scalar_host_target(int function_id) {
-    if(builtin(function_id,false))
+    if(function_id==ids::id(ids::builtin::load_extern_library)||function_id==ids::id(ids::builtin::reflect_invoke_function))
         throw std::invalid_argument("Scalar VM does not support reflection or plugin-loading builtins");
 }
 }
@@ -35,7 +30,7 @@ Value HostBridge::invoke_external(const CallTarget& target,std::span<const Value
         const ExecutionPosition& caller,std::size_t lexical_depth) {
     require_scalar_host_target(target.function_id);
     // Heap builtins act on scope ownership; their callers are object frames.
-    if(builtin(target.function_id,true))throw std::logic_error("VM heap builtin called from a scalar frame");
+    if(ids::is_heap_builtin(target.function_id))throw std::logic_error("VM heap builtin called from a scalar frame");
     if(caller.function>=program_.functions.size()||lexical_depth<2)
         throw std::logic_error("VM host boundary has an invalid caller");
     boundary_.publish_globals(owner_);

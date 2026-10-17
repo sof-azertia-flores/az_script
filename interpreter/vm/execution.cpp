@@ -4,6 +4,7 @@
 #include "session.h"
 #include "../blocks.h"
 #include "../heepalloc.h"
+#include "../core/ids.h"
 #include <algorithm>
 #include <array>
 #include <bit>
@@ -40,13 +41,6 @@ void require_scalar_value(const Value& value) {
 }
 bool object_signature(int return_type,const std::vector<int>& params) {
     return return_type==OBJECT_VALUE||std::find(params.begin(),params.end(),OBJECT_VALUE)!=params.end();
-}
-// Raw allocation and ownership builtins act on the caller's scope records.
-bool heap_builtin(int id) {
-    const auto bits=static_cast<std::uint32_t>(id);
-    if((bits>>16)!=0x0abdu)return false;
-    const auto local=bits&0xffffu;
-    return (local>=2&&local<=6)||local==0x14;
 }
 bool object_opcode(Opcode opcode) {
     switch(opcode) {
@@ -161,7 +155,7 @@ struct ScalarExecutor::State {
                     if(target.kind==TargetKind::script) {
                         if(target.entry_kind)objects=true;
                         callers[target.function].push_back(index);
-                    } else if(heap_builtin(target.function_id))objects=true;
+                    } else if(ids::is_heap_builtin(target.function_id))objects=true;
                 }
             }
             object_function[index]=objects;

@@ -58,7 +58,7 @@ install(FILES library.h internelFunctions.h heepalloc.h blocks.h azertianBinaryD
     DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/azscript/detail/interpreter")
 install(FILES vm/value.h DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/azscript/detail/interpreter/vm")
 # library.h includes these neutral declarations (debug records, error traces).
-install(FILES core/debug.h core/errors.h core/types.h DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/azscript/detail/interpreter/core")
+install(FILES core/debug.h core/errors.h core/types.h core/limits.h DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/azscript/detail/interpreter/core")
 if(BUILD_TESTING)
     add_executable(runtime-tests runtime_tests.cpp)
     target_link_libraries(runtime-tests PRIVATE abdInvoker)

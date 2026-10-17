@@ -1,4 +1,5 @@
 #include "loader.h"
+#include "../core/ids.h"
 #include "source_decode.h"
 #include "../library.h"
 #include <bit>
@@ -8,13 +9,8 @@
 
 namespace azertian::vm {
 namespace {
-int namespace_of(int id) noexcept {
-    return static_cast<int>(static_cast<std::uint32_t>(id)>>16);
-}
-int relocate(int id,int name_space) noexcept {
-    return std::bit_cast<int>((static_cast<std::uint32_t>(name_space)<<16)|
-                             (static_cast<std::uint32_t>(id)&0xffffu));
-}
+using ids::namespace_of;
+using ids::relocate;
 }
 
 CompiledScript compile_script(const azertian::script& script) {

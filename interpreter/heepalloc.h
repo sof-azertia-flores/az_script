@@ -20,7 +20,7 @@ struct object_record {
     type_contexts destructor_contexts;
     std::shared_ptr<const method_table> methods;
 };
-inline constexpr int max_slots=1048576;
+inline constexpr int max_slots=static_cast<int>(limits::max_slots);
 int resize_heap();
 void resize_heap(int size);
 address alloc(int size);

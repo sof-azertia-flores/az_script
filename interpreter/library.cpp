@@ -5,6 +5,7 @@
 #include "vm/session.h"
 #include "core/trace.h"
 #include "core/admission.h"
+#include "core/ids.h"
 #include <charconv>
 #include <algorithm>
 #include <bit>
@@ -137,10 +138,8 @@ struct parsed_module {
     std::map<int,std::string> assumptions;
     std::vector<function_reference> references;
 };
-int namespace_of(int id) { return static_cast<int>(static_cast<unsigned int>(id)>>16); }
-int relocate_id(int id,int ns) {
-    return std::bit_cast<int>((static_cast<std::uint32_t>(ns)<<16)|(static_cast<std::uint32_t>(id)&0xffffu));
-}
+using ids::namespace_of;
+int relocate_id(int id,int ns) noexcept {return ids::relocate(id,ns);}
 using module_list=std::vector<std::shared_ptr<loaded_module>>;
 // Ordinary modules keep their compiled IDs, so a collision names the earlier
 // owner and how to separate the modules. Module ordinals count successful
@@ -1078,7 +1077,7 @@ X parse_raw_expression(raw_view view,const raw_function_layout& layout,std::size
         node->params=parse_raw_expressions(fields.take(),layout,logical_depth+2);
         node->contexts=parse_contexts(fields.take(),layout,logical_depth+1);
         auto member=node->params.size()==1?std::dynamic_pointer_cast<object_expression>(node->params[0]):nullptr;
-        if(node->function_id==0x0abd0006&&node->contexts.empty()&&member&&member->is_member_address())
+        if(node->function_id==ids::id(ids::builtin::mem_get)&&node->contexts.empty()&&member&&member->is_member_address())
             result=std::make_shared<member_access_expression>(std::move(node->params[0]));
         else {
             layout.references->push_back({node->function_id,&node->function_id,false,static_cast<int>(node->contexts.size())});
@@ -1103,7 +1102,7 @@ X parse_raw_expression(raw_view view,const raw_function_layout& layout,std::size
     case 6: {
         auto target=child();auto value=child();
         auto call=std::dynamic_pointer_cast<functionInvocationExpression>(target);
-        if(!std::dynamic_pointer_cast<varExpression>(target)&&!std::dynamic_pointer_cast<member_access_expression>(target)&&!(call&&call->function_id==0x0abd0006))
+        if(!std::dynamic_pointer_cast<varExpression>(target)&&!std::dynamic_pointer_cast<member_access_expression>(target)&&!(call&&call->function_id==ids::id(ids::builtin::mem_get)))
             throw std::invalid_argument("Assignment target must be a variable or mem_get(pointer)");
         result=raw_binary<movExpression>(std::move(target),std::move(value));break;
     }
@@ -1120,7 +1119,7 @@ X parse_raw_expression(raw_view view,const raw_function_layout& layout,std::size
     }
     case 35: {
         auto target=child();auto call=std::dynamic_pointer_cast<functionInvocationExpression>(target);
-        if(!std::dynamic_pointer_cast<varExpression>(target)&&!std::dynamic_pointer_cast<member_access_expression>(target)&&!(call&&call->function_id==0x0abd0006))
+        if(!std::dynamic_pointer_cast<varExpression>(target)&&!std::dynamic_pointer_cast<member_access_expression>(target)&&!(call&&call->function_id==ids::id(ids::builtin::mem_get)))
             throw std::invalid_argument("Object drop target must be a variable or mem_get(pointer)");
         result=std::make_shared<drop_expression>(std::move(target));break;
     }
