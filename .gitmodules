@@ -1,0 +1,3 @@
+[submodule "decompiler"]
+	path = decompiler
+	url = git@github.com:AzertiaNovem/azscript_decompilor.git
