@@ -71,6 +71,18 @@ wire op 31（`cleanup`）的 `cleanup_enter/leave/end` 由标量 executor 执行
 
 medium/large 几何平均：scalar 1.93×，calls 2.30×；small 规模为 1.98–2.29×。峰值 RSS 两者相同（约 22.4–22.8 MiB 进程高水位，不是 VM 工作区）。large 整数循环仍约 1.36 µs/迭代，说明独立 tick 指令、引用寄存器读取和通用 Value 运算仍有可观成本；按计划这些留给 R17 的受检 fast path，不在此提前改变预算或检查。
 
+## R05 Value 在未优化构建中的回退及修复
+
+首次完整 sanitizer 验证在 `tests/end_to_end.py` 的 `void main(){while(true){}}`（默认 1,000,000 步）上超过该用例的 10 秒进程超时。同一编译源码的实测（Debug，同机）：
+
+| 运行库 | 普通 Debug | ASan/UBSan | Release |
+| --- | --- | --- | --- |
+| `c2b572d`（main） | 1.29 s | 6.12 s | 0.12–0.20 s |
+| `019c440`（R05） / 本分支修复前 | 3.26 s / 3.07 s | 11.0 s | 0.12–0.24 s |
+| 本分支修复后 | 1.32 s | 6.16 s | 0.12–0.15 s |
+
+callgrind 显示新增指令几乎全部来自 `vm::Value` 内部 `std::variant` 的拷贝、移动、析构访问表；-O0 下这些模板不会内联，每次树执行器的值复制都要经过多层调用。Release 不受影响，因此 R05 的 Release 基准没有暴露它。修复把存储改为手写 tagged union：同样的 8 种取值、同样的无异常拷贝/移动、赋值先复制/移动再释放旧值（源值可能由当前对象间接持有），`sizeof(Value)` 仍为 24、`sizeof(variable)` 仍为 64。这是安装的 detail 头文件中的内部布局变化；运行时 ABI 1 尚未发布，未改变编号。
+
 ## 环境
 
 每个 shell 激活 `/workspace/azscript-toolchain/activate.sh`。Java 验证清除 `JAVA_TOOL_OPTIONS`、`JDK_JAVA_OPTIONS` 和 `_JAVA_OPTIONS`，避免环境横幅污染有意检查的 stderr。普通和 sanitizer 全量测试顺序运行。性能测量使用独立 Release 构建，并避开其他编译/验证负载。
