@@ -83,6 +83,18 @@ medium/large 几何平均：scalar 1.93×，calls 2.30×；small 规模为 1.98�
 
 callgrind 显示新增指令几乎全部来自 `vm::Value` 内部 `std::variant` 的拷贝、移动、析构访问表；-O0 下这些模板不会内联，每次树执行器的值复制都要经过多层调用。Release 不受影响，因此 R05 的 Release 基准没有暴露它。修复把存储改为手写 tagged union：同样的 8 种取值、同样的无异常拷贝/移动、赋值先复制/移动再释放旧值（源值可能由当前对象间接持有），`sizeof(Value)` 仍为 24、`sizeof(variable)` 仍为 64。这是安装的 detail 头文件中的内部布局变化；运行时 ABI 1 尚未发布，未改变编号。
 
+## 当前分支完整验证（`50bd4f8`）
+
+- `python3 tools/build_and_test.py --offline`：退出 0（`build/full-normal-3.log`），含真实 JNI、插件、快照、ABI 29 项、VM lowering 桥及 825/825 VM 差分。
+- `python3 tools/build_and_test.py --offline --sanitize`：退出 0（`build/full-sanitize-2.log`），ASan/UBSan、无 JNI，VM 差分同样 825/825。两次顺序运行，共用 `build/java/`。
+- 这是 R02/R04/R05 改动首次在完整 sanitizer 下通过，但验证对象是当前分支源码，不是冻结的 `r05-source/`。未运行：发行导出搬迁（`tools/export_distribution.py`）以及按冻结 heap-growth-only 参考的正式性能采样。
+
+## 下一步
+
+1. R11：VM 对象模型（heap、类值、自动/手动对象、字段、借用、复制、owned-return、析构及构造失败回滚），析构等脚本调用使用 `CleanupActions` continuation，不递归进入 C++ invoke。旧实现所有权依赖 `blocks.cpp`/`heepalloc.cpp` 中的 `shared_ptr<variable>`、`slot_block::owner/owner_env/temp_frame` 和 environment 的 owned 列表，需先按 [STORAGE_DESIGN.md](STORAGE_DESIGN.md) 第 3 节完成 R06b/c 身份桥。
+2. 之后按计划进行 R12–R16，R16 前不切换默认后端；R17 处理上文 Release 对照显示的 tick、引用寄存器和通用运算开销。
+3. 宿主可配置的 VM workspace 上限（C++ 及 Java getter/setter）与 VM 成为宿主可选后端同时加入。
+
 ## 环境
 
 每个 shell 激活 `/workspace/azscript-toolchain/activate.sh`。Java 验证清除 `JAVA_TOOL_OPTIONS`、`JDK_JAVA_OPTIONS` 和 `_JAVA_OPTIONS`，避免环境横幅污染有意检查的 stderr。普通和 sanitizer 全量测试顺序运行。性能测量使用独立 Release 构建，并避开其他编译/验证负载。
