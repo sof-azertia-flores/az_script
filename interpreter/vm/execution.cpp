@@ -277,7 +277,9 @@ struct ScalarExecutor::State {
         if(locals[frame.locals.begin+static_cast<std::size_t>(index)]!=no_index)
             throw std::runtime_error("Duplicate variable slot: "+std::to_string(index));
     }
-    SlotId global_slot(int index,const FunctionRecord& function,std::span<const SlotId> globals) const {
+    const FunctionRecord& function_of(const FrameRecord& frame) const noexcept {return program.functions[frame.function];}
+    SlotId global_slot(int index,const FrameRecord& frame,std::span<const SlotId> globals) const {
+        const auto& function=function_of(frame);
         const auto relative=static_cast<std::uint64_t>(-static_cast<std::int64_t>(index)-1);
         if(relative>=function.global_count||function.global_offset>globals.size()||
                 relative>=globals.size()-function.global_offset)
@@ -292,9 +294,8 @@ struct ScalarExecutor::State {
         if(!result)throw std::runtime_error("Variable slot is not declared in this scope: "+std::to_string(index));
         return result;
     }
-    void load(const FrameRecord& frame,Register destination,int index,
-            const FunctionRecord& function,std::span<const SlotId> globals) {
-        if(index<0) {reference(frame,destination,global_slot(index,function,globals),no_index);return;}
+    void load(const FrameRecord& frame,Register destination,int index,std::span<const SlotId> globals) {
+        if(index<0) {reference(frame,destination,global_slot(index,frame,globals),no_index);return;}
         if(frame.object!=no_index){reference(frame,destination,object_local(frame,index));return;}
         if(static_cast<std::size_t>(index)>=frame.locals.count)
             throw std::runtime_error("Local variable slot is outside its function: "+std::to_string(index));
@@ -382,7 +383,7 @@ struct ScalarExecutor::State {
             const bool objects=object_function[index];
             validate_arguments(function,count,argument,objects);
             const auto layout=layouts[index];
-            frame.pc=function.begin;
+            frame.pc=function.begin;frame.end=function.end;
             frame.registers={registers.size(),layout.registers};frame.locals={locals.size(),layout.locals};
             frame.declared={declared.size(),layout.locals};frame.scope_marks={scopes.size(),layout.scope_marks};
             // Preflight every backing array before publishing any live range.
@@ -463,8 +464,7 @@ struct ScalarExecutor::State {
             if(resumed)std::exchange(resumed,pending_error{}).rethrow();
             while(frames.size()>mark) {
                 auto& frame=frames.top();
-                const auto& function=program.functions[frame.function];
-                if(frame.pc>=function.end)throw std::logic_error("Scalar VM function did not terminate");
+                if(frame.pc>=frame.end)throw std::logic_error("Scalar VM function did not terminate");
                 const auto& instruction=program.instructions[frame.pc];
                 const auto& source=program.sources[frame.pc];
                 frame.node=source.node;frame.location=source.location;++frame.pc;
@@ -474,8 +474,8 @@ struct ScalarExecutor::State {
                     if(!steps)throw std::runtime_error("Script execution step limit exceeded");
                     --steps;break;
                 case Opcode::constant:value(frame,instruction.result,program.constants[instruction.operand]);break;
-                case Opcode::load_slot:load(frame,instruction.result,std::bit_cast<int>(instruction.operand),function,globals);break;
-                case Opcode::check_declaration:check_declaration(frame,std::bit_cast<int>(instruction.operand),function);break;
+                case Opcode::load_slot:load(frame,instruction.result,std::bit_cast<int>(instruction.operand),globals);break;
+                case Opcode::check_declaration:check_declaration(frame,std::bit_cast<int>(instruction.operand),function_of(frame));break;
                 case Opcode::declare_slot: {
                     const auto slot=instruction.operand;
                     if(frame.object!=no_index) {
@@ -567,7 +567,7 @@ struct ScalarExecutor::State {
                     if(!frame.loop_depth)throw std::runtime_error("Continue outside loop");
                     frame.continued=true;break;
                 case Opcode::call: {
-                    const auto& operation=function.operations[instruction.operand];
+                    const auto& operation=function_of(frame).operations[instruction.operand];
                     const auto& target=program.targets[*operation.target];
                     if(target.kind==TargetKind::script) {
                         enter(target.function,operation.arguments.size(),
@@ -618,7 +618,7 @@ struct ScalarExecutor::State {
                     frame.result=std::move(result);frame.returned=true;frame.return_location=frame.location;break;
                 }
                 case Opcode::cleanup_enter:
-                    regions.enter(frames.top_id(),function.cleanups[instruction.operand],
+                    regions.enter(frames.top_id(),function_of(frame).cleanups[instruction.operand],
                         CleanupWatermark{{},frame.scope_count,0,0,frame.statement_depth,frame.loop_depth,
                             frame.object==no_index?0:objects(frame).controls.size()});break;
                 case Opcode::cleanup_leave: {
@@ -653,7 +653,7 @@ struct ScalarExecutor::State {
                     reference(frame,instruction.result,heap::getAt(pointer(read(frame,instruction.left),"Object pointer requires address type")));break;
                 case Opcode::object_register: {
                     const auto object=pointer(read(frame,instruction.left),"Object pointer requires address type");
-                    const auto& operation=function.operations[instruction.operand];
+                    const auto& operation=function_of(frame).operations[instruction.operand];
                     std::optional<int> destructor;
                     if(operation.target)destructor=program.targets[*operation.target].function_id;
                     heap::register_object(object,destructor,operation.manual,scope_of(frame));
@@ -666,7 +666,7 @@ struct ScalarExecutor::State {
                 }
                 case Opcode::move_out: {
                     const auto slot=std::bit_cast<int>(instruction.operand);
-                    if(slot<0){value(frame,instruction.result,pool.resolve(global_slot(slot,function,globals)));break;}
+                    if(slot<0){value(frame,instruction.result,pool.resolve(global_slot(slot,frame,globals)));break;}
                     auto moved=blocks::move_out(object_local(frame,slot),scope_of(frame));
                     value(frame,instruction.result,HostValueAccess::read(*moved));break;
                 }
@@ -686,7 +686,7 @@ struct ScalarExecutor::State {
                         methods(frame.function,instruction.operand),host_of(options).owner());
                     value(frame,instruction.result,Value{});break;
                 case Opcode::call_virtual: {
-                    const auto& operation=function.operations[instruction.operand];
+                    const auto& operation=function_of(frame).operations[instruction.operand];
                     if(operation.arguments.empty())throw std::runtime_error("Virtual method receiver must be address");
                     const auto receiver=pointer(read(frame,operation.arguments[0]),"Virtual method receiver must be address");
                     const auto table=heap::methods_at(receiver,host_of(options).owner());
@@ -704,7 +704,7 @@ struct ScalarExecutor::State {
                 }
                 case Opcode::function_end: {
                     frame.location=frame.return_location;position=position_of(frame);
-                    auto output=vm::convert_return(frame.result,function.return_type);
+                    auto output=vm::convert_return(frame.result,function_of(frame).return_type);
                     if(frame.object!=no_index) {
                         // The root scope ends after return conversion, as the
                         // tree executor's with_cleanup does.

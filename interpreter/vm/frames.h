@@ -32,6 +32,9 @@ struct FrameRecord {
     std::uint32_t function=no_index;
     ProgramCounter pc=no_index;
     Register return_register=no_index; // Relative to caller's register range.
+    // The function's end PC, copied at entry so the per-instruction bound check
+    // does not index the function table (it fills existing padding).
+    ProgramCounter end=0;
     WorkspaceRange registers,locals,declared,scope_marks;
     std::size_t declared_count=0,scope_count=0;
     std::uint32_t loop_depth=0,statement_depth=0;
