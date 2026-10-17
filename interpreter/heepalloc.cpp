@@ -53,7 +53,7 @@ void extend_packed() {
 void validate(const std::vector<std::shared_ptr<variable>>& values,std::vector<heap_allocation>& ranges) {
     if(values.empty()||values.size()>static_cast<std::size_t>(max_slots)) throw std::invalid_argument("Invalid heap size");
     for(auto& v:values) if(!v) throw std::invalid_argument("Null heap slot");
-    if(values[0]->type!=VOID_VALUE) throw std::invalid_argument("Heap slot zero is reserved");
+    if(values[0]->type_tag()!=VOID_VALUE) throw std::invalid_argument("Heap slot zero is reserved");
     std::sort(ranges.begin(),ranges.end(),[](auto a,auto b){return a.startpos<b.startpos;});
     std::uint64_t end=1;
     for(auto a:ranges) {
@@ -172,6 +172,13 @@ void resize_heap(int size) {
 }
 int lenHeap(){std::lock_guard<std::recursive_mutex> lock(runtime_mutex());return static_cast<int>(slots.size());}
 int lenAlloc(){std::lock_guard<std::recursive_mutex> lock(runtime_mutex());return static_cast<int>(allocations.size());}
+#if defined(AZSCRIPT_HEAP_GROWTH_TESTS)
+// Only the dedicated regression executable compiles this observation point.
+// Installed runtimes neither expose it nor collect allocation statistics.
+std::size_t allocation_capacity_for_test() {
+    std::lock_guard<std::recursive_mutex> lock(runtime_mutex());return allocations.capacity();
+}
+#endif
 address alloc(int size) {
     std::lock_guard<std::recursive_mutex> lock(runtime_mutex());
     if(size<0||size>=max_slots)throw std::invalid_argument("Invalid allocation size");
@@ -186,7 +193,14 @@ address alloc(int size) {
     if(static_cast<std::int64_t>(start)+size>max_slots)throw std::runtime_error("Heap capacity exceeded");
     // Allocate everything that can throw before publishing the range, so a failure
     // cannot leave a partial allocation; insertion into reserved capacity cannot throw.
-    allocations.reserve(allocations.size()+1);
+    if(allocations.size()==allocations.capacity()) {
+        // At most max_slots-1 nonempty ranges fit: slot zero is reserved.
+        // Growing by one would relocate every existing range on each append.
+        const auto limit=static_cast<std::size_t>(max_slots-1);
+        const auto capacity=allocations.capacity();
+        const auto next=capacity>limit/2?limit:std::max<std::size_t>(1,capacity*2);
+        allocations.reserve(next);
+    }
     std::vector<std::shared_ptr<variable>> fresh;
     fresh.reserve(size);
     for(int i=0;i<size;++i)fresh.push_back(std::make_shared<variable>(nullptr));
@@ -231,7 +245,7 @@ void check_object(address pointer,const std::vector<int>& slot_types) {
     if(width<slot_types.size())throw std::runtime_error("Object check failed: object has too few slots");
     for(std::size_t i=0;i<slot_types.size();++i) {
         const auto& member=literal?literal->slots[i]:slots[static_cast<std::size_t>(pointer.value)+i];
-        if(slot_types[i]!=ANY_VALUE&&(!member||member->type!=slot_types[i]))
+        if(slot_types[i]!=ANY_VALUE&&(!member||member->type_tag()!=slot_types[i]))
             throw std::runtime_error("Object check failed: slot "+std::to_string(i)+" has an incompatible type");
     }
 }
@@ -437,12 +451,12 @@ void discard_script_objects(const azertian::script* script_owner) noexcept {
 }
 namespace {
 int size_argument(const std::vector<std::shared_ptr<variable>>& args,const char* name="alloc") {
-    if(args.size()!=1||!args[0]||args[0]->type!=INT_VALUE)throw std::invalid_argument(std::string(name)+" requires one int argument");
-    return *static_cast<int*>(args[0]->value);
+    if(args.size()!=1||!args[0]||args[0]->type_tag()!=INT_VALUE)throw std::invalid_argument(std::string(name)+" requires one int argument");
+    return args[0]->get<int>();
 }
 address pointer_argument(const std::vector<std::shared_ptr<variable>>& args) {
-    if(args.size()!=1||!args[0]||args[0]->type!=ADDRESS_VALUE)throw std::invalid_argument("Memory function requires one address argument");
-    return *static_cast<address*>(args[0]->value);
+    if(args.size()!=1||!args[0]||args[0]->type_tag()!=ADDRESS_VALUE)throw std::invalid_argument("Memory function requires one address argument");
+    return args[0]->get<address>();
 }
 address raw_pointer_argument(const std::vector<std::shared_ptr<variable>>& args,const char* name) {
     const address pointer=pointer_argument(args);

@@ -8,13 +8,15 @@
 #include <mutex>
 #include <optional>
 #include <set>
+#include <stdexcept>
 #include <string>
+#include <type_traits>
 #include <vector>
+#include <azscript/runtime_abi.hpp>
 #include "../abdC/azertianBinaryDataValues.h"
+#include "vm/value.h"
 
 namespace azertian {
-inline constexpr int INT_VALUE=0, STRING_VALUE=1, FLOAT_VALUE=2, DOUBLE_VALUE=3,
-                     BOOLEAN_VALUE=4, VOID_VALUE=5, ANY_VALUE=6, ADDRESS_VALUE=7, OBJECT_VALUE=8;
 inline constexpr std::size_t MAX_VARIABLE_SLOTS=1048576;
 // The only exec format the loader reads; ExecCodec.VERSION in the compiler matches it.
 inline constexpr int EXEC_FORMAT_VERSION=10;
@@ -265,8 +267,15 @@ class variable {
 public:
     variable()=default;
     std::string name;
-    char type=VOID_VALUE;
-    void* value=nullptr;
+    int type_tag() const noexcept { return value_.type_tag(); }
+    // Access is checked and read-only. The reference remains valid until this
+    // variable is assigned or destroyed; use setValue() to replace its value.
+    template<class T> const T& get() const {return value_.get<T>();}
+    // Non-object values, including void, have no object handle.
+    std::shared_ptr<slot_block> object_handle() const noexcept;
+    // Storage transfer exchanges only payloads, retaining each slot's metadata.
+    // Ownership bookkeeping belongs to the storage manager invoking this.
+    void swap_storage(variable& other) noexcept;
     // Set only for the slots of a literal object; copies never inherit it.
     slot_block* container=nullptr;
     std::shared_ptr<variable> deepCopy();
@@ -295,7 +304,9 @@ public:
     void setValue(std::nullptr_t value);
     void setValue(std::shared_ptr<slot_block> value);
 private:
+    vm::Value value_;
     void clear() noexcept;
+    void replace_value(vm::Value value) noexcept;
     void copy_value(const variable& other);
 };
 struct function_frame {

@@ -81,8 +81,8 @@ def copy_assets(package):
     (package / 'docs').mkdir()
     for name in ('USAGE.md', 'QUICKSTART.md', 'USAGE.en.md', 'QUICKSTART.en.md'):
         shutil.copy2(TEMPLATES / name, package / 'docs' / name)
-    for name in ('EXEC_FORMAT.md', 'HINT_LINKING.md', 'EXTERN_LIBRARY.md',
-                 'EXEC_FORMAT.en.md', 'HINT_LINKING.en.md', 'EXTERN_LIBRARY.en.md'):
+    for name in ('EXEC_FORMAT.md', 'HINT_LINKING.md', 'EXTERN_LIBRARY.md', 'RUNTIME_ABI.md',
+                 'EXEC_FORMAT.en.md', 'HINT_LINKING.en.md', 'EXTERN_LIBRARY.en.md', 'RUNTIME_ABI.en.md'):
         destination = package / 'docs' / name
         shutil.copy2(ROOT / 'docs' / name, destination)
         content = destination.read_text(encoding='utf-8')

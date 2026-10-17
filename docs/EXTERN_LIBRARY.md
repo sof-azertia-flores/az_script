@@ -22,7 +22,9 @@ int main() {
 
 运行时先读入整个动态库（上限 64MiB），用已配置的公钥验签，再映射这份已校验的字节。Linux 通过 `memfd` 或仅由文件描述符引用的私有文件加载，避免验签之后路径上的文件被换掉。同一规范化路径再次加载直接返回。库不会被卸载，这样已经注册的函数对象保持有效。
 
-插件可以依赖共享运行库 `libabdInvoker`（Windows 上是 `abdInvoker.dll`），以及 C/C++ 运行库和系统加载器。加载器先由宿主进程装入这些库，再打开插件，因此插件自己的 RPATH 不能换入另一份未签名的依赖。除此之外的动态依赖会被拒绝。
+插件可以依赖 ABI 1 共享运行库 `libabdInvoker-1`（Windows 上是 `abdInvoker-1.dll`），以及 C/C++ 运行库和系统加载器。Linux SONAME 为 `libabdInvoker-1.so.1`，macOS 安装名为 `libabdInvoker-1.1.dylib`。加载器先由宿主进程装入这些库，再打开插件，因此插件自己的 RPATH 不能换入另一份未签名的依赖。除此之外的动态依赖会被拒绝。
+
+验签和映射完成后，加载器先读取插件的 `azscript_extern_runtime_abi()`，只有返回当前运行时 ABI（`1`）才调用注册入口。`AZSCRIPT_EXTERN_ENTRY` 自动定义这个导出；缺失或不匹配时在调用 `azscript_load_extern` 前拒绝。ABI 检查不改变签名封套，也不改变 exec v10 或 JNI snapshot v10。原生库的静态初始化由系统加载器在映射时执行；插件应将宿主注册和业务初始化放在注册入口中。旧插件须用当前头文件及共享库重编译并重新签名，详见 [C++ API 与 ABI 迁移](RUNTIME_ABI.md)。
 
 `azscript_load_extern` 返回前必须调用 `registerExecutor`。注册进入的必须是宿主进程里的那一份运行时；链到另一份副本时，调用会失败。命名空间规则与手写宿主相同：不能占用 `0`、`0xfff`、`0xabd`，也不能占用活动脚本已经挂载的 namespace。
 
@@ -65,7 +67,7 @@ public:
     std::shared_ptr<azertian::variable> invoke(
         std::shared_ptr<azertian::environment>,
         std::vector<std::shared_ptr<azertian::variable>> args) override {
-        int value = *static_cast<int*>(args.at(0)->value) + *static_cast<int*>(args.at(1)->value);
+        int value = args.at(0)->get<int>() + args.at(1)->get<int>();
         return std::make_shared<azertian::variable>(value);
     }
 };
@@ -84,7 +86,7 @@ AZSCRIPT_EXTERN_ENTRY {
 }
 ```
 
-库必须链接共享运行库 `abdInvoker`（CMake 目标 `AzScript::RuntimeShared`）。静态库 `AzScript::Runtime` 有自己的一份注册表，插件里的 `registerExecutor` 不会进入那个副本。Java JNI 已经链接这份共享库。
+库必须链接 ABI 1 共享运行库（手写链接参数为 `-labdInvoker-1`，Windows 导入库为 `abdInvoker-1.lib`；CMake 目标仍为 `AzScript::RuntimeShared`）。静态库 `AzScript::Runtime` 有自己的一份注册表，插件里的 `registerExecutor` 不会进入那个副本。Java JNI 已经链接这份共享库。
 
 发行包根目录：
 

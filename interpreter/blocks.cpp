@@ -51,7 +51,7 @@ B lookup(address pointer) {
     return found==state.blocks.end()?nullptr:found->second.lock();
 }
 B handle_of(const variable& value) noexcept {
-    return value.type==OBJECT_VALUE&&value.value?*static_cast<B*>(value.value):nullptr;
+    return value.object_handle();
 }
 address raw_address(const slot_block& block,std::uint64_t offset=0) noexcept {
     return address{address_tag|(block.id<<offset_bits)|offset};
@@ -146,7 +146,7 @@ bool same_element(const std::shared_ptr<const type_context>& a,const std::shared
         (a->kind!=4||same_element(a->element,b->element,depth+1));
 }
 void check_element(const std::shared_ptr<const type_context>& type,const V& value) {
-    if(!value||value->type!=type->abi)throw std::runtime_error("Buffer element type mismatch");
+    if(!value||value->type_tag()!=type->abi)throw std::runtime_error("Buffer element type mismatch");
     if(type->abi==OBJECT_VALUE) {
         auto block=of(value);require_usable(block);
         if(type->kind==4) {
@@ -157,7 +157,7 @@ void check_element(const std::shared_ptr<const type_context>& type,const V& valu
 }
 void move_storage(const V& from,const V& to) noexcept {
     // Destinations are empty. Transfer payloads, never owning variable addresses.
-    std::swap(from->type,to->type);std::swap(from->value,to->value);
+    from->swap_storage(*to);
     if(auto nested=handle_of(*to);nested&&nested->owner==from.get())nested->owner=to.get();
 }
 B copy_block(const B& source,std::size_t depth,const E& env={});
@@ -305,7 +305,7 @@ void validate_buffer(const std::shared_ptr<slot_block>& block) {
         }
     }
     for(std::size_t i=data.length;i<data.capacity;++i)
-        if(block->slots[i]->type!=VOID_VALUE)throw std::invalid_argument("Unused buffer element contains a value");
+        if(block->slots[i]->type_tag()!=VOID_VALUE)throw std::invalid_argument("Unused buffer element contains a value");
 }
 namespace {
 void check_operation_alive(const B& block) {
@@ -401,8 +401,8 @@ std::shared_ptr<variable> buffer_operation(int operation,const std::shared_ptr<s
     try {
         std::size_t index=0;
         if(operation!=5) {
-            if(!arguments[0]||arguments[0]->type!=INT_VALUE)throw std::runtime_error("Buffer index or size must be int");
-            const int signed_index=*static_cast<int*>(arguments[0]->value);
+            if(!arguments[0]||arguments[0]->type_tag()!=INT_VALUE)throw std::runtime_error("Buffer index or size must be int");
+            const int signed_index=arguments[0]->get<int>();
             if(signed_index<0)throw std::out_of_range("Buffer index or size is negative");
             index=static_cast<std::size_t>(signed_index);
         }
@@ -451,25 +451,25 @@ std::shared_ptr<variable> buffer_operation(int operation,const std::shared_ptr<s
 }
 int compare_value(const std::shared_ptr<const type_context>& context,const std::shared_ptr<variable>& left,
                   const std::shared_ptr<variable>& right,const std::shared_ptr<environment>&) {
-    if(!context||!left||!right||left->type!=context->abi||right->type!=context->abi)
+    if(!context||!left||!right||left->type_tag()!=context->abi||right->type_tag()!=context->abi)
         throw std::runtime_error("Comparison value type mismatch");
     const auto compare=[](auto a,auto b){return a<b?-1:a>b?1:0;};
     switch(context->abi) {
-    case INT_VALUE:return compare(*static_cast<int*>(left->value),*static_cast<int*>(right->value));
-    case BOOLEAN_VALUE:return compare(*static_cast<bool*>(left->value),*static_cast<bool*>(right->value));
-    case ADDRESS_VALUE:return compare(*static_cast<address*>(left->value),*static_cast<address*>(right->value));
+    case INT_VALUE:return compare(left->get<int>(),right->get<int>());
+    case BOOLEAN_VALUE:return compare(left->get<bool>(),right->get<bool>());
+    case ADDRESS_VALUE:return compare(left->get<address>(),right->get<address>());
     case STRING_VALUE: {
-        const auto& a=*static_cast<std::string*>(left->value);const auto& b=*static_cast<std::string*>(right->value);
+        const auto& a=left->get<std::string>();const auto& b=right->get<std::string>();
         const int result=std::memcmp(a.data(),b.data(),std::min(a.size(),b.size()));
         return result<0?-1:result>0?1:compare(a.size(),b.size());
     }
     case FLOAT_VALUE: {
-        const auto a=*static_cast<float*>(left->value),b=*static_cast<float*>(right->value);
+        const auto a=left->get<float>(),b=right->get<float>();
         if(!std::isfinite(a)||!std::isfinite(b))throw std::runtime_error("Cannot compare non-finite values");
         return compare(a,b);
     }
     case DOUBLE_VALUE: {
-        const auto a=*static_cast<double*>(left->value),b=*static_cast<double*>(right->value);
+        const auto a=left->get<double>(),b=right->get<double>();
         if(!std::isfinite(a)||!std::isfinite(b))throw std::runtime_error("Cannot compare non-finite values");
         return compare(a,b);
     }

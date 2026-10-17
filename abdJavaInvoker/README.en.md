@@ -16,7 +16,7 @@ cd abdJavaInvoker
 
 On macOS, the JDK is discovered through `java_home`; `JAVA_HOME` can also be set. Standalone `build.sh` needs only a local JDK; the original Gradle project also supports `./gradlew jar`. CTest runs JNI regressions in a real JVM with `-Xcheck:jni`; the required Java/Python tools run locally without Maven downloads.
 
-Set `-Djava.library.path=/absolute/path/build/native/abdjni` to locate `abdJ`, or specify the file with `-Dazertia.native.library=/absolute/path/libabdJ.dylib`. Windows uses `abdJ.dll`, Linux `libabdJ.so`. The associated `abdInvoker` shared library must also be loadable by the system.
+Set `-Djava.library.path=/absolute/path/build/native/abdjni` to locate `abdJ`, or specify the file with `-Dazertia.native.library=/absolute/path/libabdJ.dylib`. Windows uses `abdJ.dll`, Linux `libabdJ.so`. The associated ABI 1 `abdInvoker-1` shared library must also be loadable by the system.
 
 ```java
 int hostAdd = 0x12340001;

@@ -279,8 +279,8 @@ std::shared_ptr<script> load_module(M m){auto result=load_raw(encode_fixture(m))
 void insert_module(const std::shared_ptr<script>& target,M m){const auto offset=target->baseEnv->variables.size();insert_raw(target,encode_fixture(m));fixture_names(target,m,offset);}
 std::shared_ptr<script> program(std::initializer_list<MV> funcs,A globals=block({}),A signatures=nullptr){return load_module(module(funcs,std::move(globals),std::move(signatures)));}
 void insert_program(const std::shared_ptr<script>& target,std::initializer_list<MV> funcs,A globals=block({}),A signatures=nullptr){insert_module(target,module(funcs,std::move(globals),std::move(signatures)));}
-address pointer(std::shared_ptr<variable> v){check(v->type==ADDRESS_VALUE,"expected address result");return *static_cast<address*>(v->value);}
-int integer(std::shared_ptr<variable> v){check(v->type==INT_VALUE,"expected int result");return *static_cast<int*>(v->value);}
+address pointer(std::shared_ptr<variable> v){check(v->type_tag()==ADDRESS_VALUE,"expected address result");return v->get<address>();}
+int integer(std::shared_ptr<variable> v){check(v->type_tag()==INT_VALUE,"expected int result");return v->get<int>();}
 class test_function final:public function {
     int declared_type;
     std::function<V(const std::vector<V>&)> body;
@@ -420,7 +420,7 @@ void buffer_tests() {
     auto failing=blocks::create_buffer(failing_type,program);operation(2,failing,{number(2)});
     const int failure_count=integer(env->getVariable(-1));
     rejects_containing([&]{operation(6,failing,{number(2)});},"Division by zero","failed placement preserves its original error");
-    check(failing->buffer->length==0&&failing->slots[0]->type==VOID_VALUE&&integer(env->getVariable(-1))==failure_count,
+    check(failing->buffer->length==0&&failing->slots[0]->type_tag()==VOID_VALUE&&integer(env->getVariable(-1))==failure_count,
           "failed construction does not call the incomplete element destructor");
     blocks::finalize(failing,env,true);
     auto throwing_type=std::make_shared<type_context>(*type);throwing_type->placement_id=504;
@@ -473,7 +473,7 @@ void buffer_tests() {
         auto outer=blocks::create(1,program);outer->slots[0]->setValue(active);active->owner=outer->slots[0].get();
         outer_storage=std::make_shared<variable>(outer);outer->owner=outer_storage.get();
         rejects_containing([&]{operation(6,active,{number(1)});},"owner ended","placement fails safely if callback destroys its owner");
-        check(active->state==slot_block::status::dead&&!active->buffer->slab&&outer_storage->type==VOID_VALUE,
+        check(active->state==slot_block::status::dead&&!active->buffer->slab&&outer_storage->type_tag()==VOID_VALUE,
               "deferred owner destruction eventually releases the slab and every element");
     }
     {
@@ -532,7 +532,7 @@ void buffer_tests() {
                       "buffer replacement retains the scope cleanup registration and finishes every old destructor");
                 blocks::drop(destination,env);
             } else {
-                check(destination->type==VOID_VALUE&&(mode>=4||enclosing_storage->type==VOID_VALUE)&&callbacks==before_callbacks+3,
+                check(destination->type_tag()==VOID_VALUE&&(mode>=4||enclosing_storage->type_tag()==VOID_VALUE)&&callbacks==before_callbacks+3,
                       "a destroyed assignment owner receives no replacement and candidate elements are finalized");
                 if(mode>=4)rejects([&]{heap::getAt(heap_parent);},"delete and raw free retire a buffer assignment's heap parent");
             }
@@ -759,7 +759,7 @@ void runtime_trace_tests() {
     }
     auto storage=std::make_shared<variable>(nested);nested->owner=storage.get();
     first_destructor_only([&]{blocks::drop(storage,cleanup->baseEnv);});
-    check(storage->type==VOID_VALUE&&nested->state==slot_block::status::dead,"drop finishes every nested value after the first destructor failure");
+    check(storage->type_tag()==VOID_VALUE&&nested->state==slot_block::status::dead,"drop finishes every nested value after the first destructor failure");
     try{throw std::out_of_range("host range");}catch(...) {
         auto unrelated=pending_error::capture();bool recaught=false;
         try{unrelated.rethrow();}catch(const std::out_of_range& e) {
@@ -780,7 +780,7 @@ void runtime_trace_tests() {
               "direct host cleanup preserves a non-standard exception and excludes later cleanup frames");
         saved_nonstandard.capture_current();
     }
-    check(static_cast<bool>(saved_nonstandard)&&nonstandard_storage->type==VOID_VALUE&&later->state==slot_block::status::dead,
+    check(static_cast<bool>(saved_nonstandard)&&nonstandard_storage->type_tag()==VOID_VALUE&&later->state==slot_block::status::dead,
           "direct cleanup finishes nested values before a non-standard failure is recaptured");
     for(int attempt=0;attempt<2;++attempt) {
         bool recaught=false;
@@ -904,7 +904,7 @@ void virtual_tests() {
     auto class_type=std::make_shared<type_context>();class_type->abi=OBJECT_VALUE;class_type->kind=3;class_type->factory_id=1015;
     heap::set_methods(live,table({{1005,{class_type}}}),program);
     auto returned=program->invoke(1022,{at(live)});
-    check(returned->type==OBJECT_VALUE&&blocks::of(returned)->slots.size()==1,"ANY virtual return tags support runtime generic class results");
+    check(returned->type_tag()==OBJECT_VALUE&&blocks::of(returned)->slots.size()==1,"ANY virtual return tags support runtime generic class results");
     auto foreign=load_raw(rmodule({rfn(1030,VOID_VALUE,rblock({})),rfn(1000,INT_VALUE,rreturn(rc(n(0))),0,{ADDRESS_VALUE})}));
     rejects_message([&]{heap::set_methods(live,base,foreign);},"Object belongs to another script","a foreign script cannot change heap methods");
     rejects_message([&]{heap::methods_at(live,foreign);},"Object belongs to another script","a foreign script cannot dispatch heap methods");
@@ -1248,12 +1248,12 @@ void string_tests() {
     auto number=[](int value){return std::make_shared<variable>(value);};
     auto call=[&](int operation,std::vector<V> args){return program->invoke(builtin_base+operation,std::move(args));};
     auto string_result=[&](int operation,std::vector<V> args) {
-        auto value=call(operation,std::move(args));check(value->type==STRING_VALUE,"string operations preserve their string result ABI");
-        return *static_cast<std::string*>(value->value);
+        auto value=call(operation,std::move(args));check(value->type_tag()==STRING_VALUE,"string operations preserve their string result ABI");
+        return value->get<std::string>();
     };
     auto boolean_result=[&](int operation,std::vector<V> args) {
-        auto value=call(operation,std::move(args));check(value->type==BOOLEAN_VALUE,"string predicates return boolean values");
-        return *static_cast<bool*>(value->value);
+        auto value=call(operation,std::move(args));check(value->type_tag()==BOOLEAN_VALUE,"string predicates return boolean values");
+        return value->get<bool>();
     };
     auto failure=[&](int operation,std::vector<V> args,const std::string& message,bool range=false) {
         bool caught=false;
@@ -1528,26 +1528,26 @@ void checked_return_tests() {
         {"double",std::make_shared<variable>(std::numeric_limits<double>::denorm_min())},
     };
     auto numeric_result=[](const V& value) {
-        if(value->type==INT_VALUE)return static_cast<double>(*static_cast<int*>(value->value));
-        if(value->type==FLOAT_VALUE)return static_cast<double>(*static_cast<float*>(value->value));
-        return *static_cast<double*>(value->value);
+        if(value->type_tag()==INT_VALUE)return static_cast<double>(value->get<int>());
+        if(value->type_tag()==FLOAT_VALUE)return static_cast<double>(value->get<float>());
+        return value->get<double>();
     };
     for(const auto& item:numeric)for(const auto& target:std::initializer_list<std::pair<int,const char*>>{
         {INT_VALUE,"int"},{FLOAT_VALUE,"float"},{DOUBLE_VALUE,"double"},
     }) {
-        const bool widening=(item.value->type==INT_VALUE&&(target.first==FLOAT_VALUE||target.first==DOUBLE_VALUE))||
-                            (item.value->type==FLOAT_VALUE&&target.first==DOUBLE_VALUE);
-        if(item.value->type==target.first||widening) {
+        const bool widening=(item.value->type_tag()==INT_VALUE&&(target.first==FLOAT_VALUE||target.first==DOUBLE_VALUE))||
+                            (item.value->type_tag()==FLOAT_VALUE&&target.first==DOUBLE_VALUE);
+        if(item.value->type_tag()==target.first||widening) {
             auto result=program->invoke(400+target.first,{item.value});
             const double input=numeric_result(item.value);
             const double expected=target.first==FLOAT_VALUE?static_cast<double>(static_cast<float>(input)):input;
-            check(result->type==target.first&&numeric_result(result)==expected,
+            check(result->type_tag()==target.first&&numeric_result(result)==expected,
                   "numeric returns preserve exact types or apply only the approved widenings");
             if(input==0.0)check(std::signbit(numeric_result(result))==std::signbit(input),"allowed numeric returns preserve signed zero");
         } else runtime_failure(400+target.first,{item.value},
             "Function return type mismatch: expected "+std::string(target.second)+", got "+item.type);
         auto dynamic=dynamic_return(item.value);
-        check(dynamic->type==item.value->type&&numeric_result(dynamic)==numeric_result(item.value),"any returns preserve the actual numeric ABI");
+        check(dynamic->type_tag()==item.value->type_tag()&&numeric_result(dynamic)==numeric_result(item.value),"any returns preserve the actual numeric ABI");
     }
     runtime_failure(400+DOUBLE_VALUE,{std::make_shared<variable>(std::numeric_limits<float>::infinity())},"Non-finite return value");
     runtime_failure(400+DOUBLE_VALUE,{std::make_shared<variable>(std::numeric_limits<float>::quiet_NaN())},"Non-finite return value");
@@ -1556,8 +1556,8 @@ void checked_return_tests() {
           std::isinf(numeric_result(dynamic_return(nonfinite))),"same-type and any return handling remains unchanged for host nonfinite values");
     for(const auto& value:std::vector<V>{std::make_shared<variable>("same"),std::make_shared<variable>(true),
         std::make_shared<variable>(address{std::numeric_limits<std::uint64_t>::max()}),std::make_shared<variable>(nullptr)}) {
-        auto exact=program->invoke(400+value->type,{value}),dynamic=dynamic_return(value);
-        check(exact->type==value->type&&dynamic->type==value->type&&value_to_string(exact)==value_to_string(value)&&
+        auto exact=program->invoke(400+value->type_tag(),{value}),dynamic=dynamic_return(value);
+        check(exact->type_tag()==value->type_tag()&&dynamic->type_tag()==value->type_tag()&&value_to_string(exact)==value_to_string(value)&&
               value_to_string(dynamic)==value_to_string(value),"scalar identity, void and any return behavior is unchanged");
     }
     runtime_failure(400+VOID_VALUE,{std::make_shared<variable>(1)},"Void function returned a value");
@@ -1572,8 +1572,8 @@ void checked_return_tests() {
         blocks::finalize(returned,program->baseEnv,true);
     }
     for(const auto& item:numeric) {
-        auto result=program->invoke(510+item.value->type,{item.value});
-        check(result->type==item.value->type&&numeric_result(result)==numeric_result(item.value),"generic return_typed retains exact context ABI values");
+        auto result=program->invoke(510+item.value->type_tag(),{item.value});
+        check(result->type_tag()==item.value->type_tag()&&numeric_result(result)==numeric_result(item.value),"generic return_typed retains exact context ABI values");
     }
     check(numeric_result(program->invoke(520,{std::make_shared<variable>(7)}))==7.0,"a caller may widen an exactly checked generic int result");
     runtime_failure(510+INT_VALUE,{std::make_shared<variable>(1.0f)},"Generic value type mismatch");
@@ -1614,8 +1614,8 @@ void conversion_tests() {
     auto evaluate=[&](int target,V value){return program->invoke(300+target,{std::move(value)});};
     auto real=[&](int target,V value) {
         auto result=evaluate(target,std::move(value));
-        check(result->type==target,"explicit numeric conversions return the requested tag");
-        return target==FLOAT_VALUE?static_cast<double>(*static_cast<float*>(result->value)):*static_cast<double*>(result->value);
+        check(result->type_tag()==target,"explicit numeric conversions return the requested tag");
+        return target==FLOAT_VALUE?static_cast<double>(result->get<float>()):result->get<double>();
     };
     auto text=[](std::string value){return std::make_shared<variable>(std::move(value));};
     auto runtime_failure=[&](int target,V value,const std::string& message) {
@@ -1634,11 +1634,11 @@ void conversion_tests() {
         std::make_shared<variable>(address{std::numeric_limits<std::uint64_t>::max()}),
     };
     for(const auto& input:identities) {
-        auto result=evaluate(input->type,input);
-        check(result!=input&&result->type==input->type&&value_to_string(result)==value_to_string(input),
+        auto result=evaluate(input->type_tag(),input);
+        check(result!=input&&result->type_tag()==input->type_tag()&&value_to_string(result)==value_to_string(input),
               "same-tag conversions through any preserve a copied value");
-        if(input->type==FLOAT_VALUE)check(std::signbit(*static_cast<float*>(result->value)),"float identity preserves negative zero");
-        if(input->type==DOUBLE_VALUE)check(std::signbit(*static_cast<double*>(result->value)),"double identity preserves negative zero");
+        if(input->type_tag()==FLOAT_VALUE)check(std::signbit(result->get<float>()),"float identity preserves negative zero");
+        if(input->type_tag()==DOUBLE_VALUE)check(std::signbit(result->get<double>()),"double identity preserves negative zero");
     }
     check(real(FLOAT_VALUE,std::make_shared<variable>(16777217))==16777216.0,"int to float uses float precision");
     check(real(DOUBLE_VALUE,std::make_shared<variable>(std::numeric_limits<int>::max()))==2147483647.0,"int to double widens without loss");
@@ -1673,7 +1673,7 @@ void conversion_tests() {
         check(std::signbit(real(target,text("-1e-9999"))),"decimal underflow preserves negative zero");
     }
     auto float_subnormal=evaluate(FLOAT_VALUE,text("1e-40"));
-    check(std::fpclassify(*static_cast<float*>(float_subnormal->value))==FP_SUBNORMAL,"parsed float subnormals are accepted");
+    check(std::fpclassify(float_subnormal->get<float>())==FP_SUBNORMAL,"parsed float subnormals are accepted");
     check(std::fpclassify(real(DOUBLE_VALUE,text("1e-310")))==FP_SUBNORMAL,"parsed double subnormals are accepted");
     check(real(FLOAT_VALUE,text("1.401298464324817070923729583289916131280e-45"))==
           static_cast<double>(std::numeric_limits<float>::denorm_min()),"the smallest float subnormal parses");
@@ -1886,8 +1886,8 @@ void boolean_condition_equality_tests() {
     }));
     auto truth_result=[&](int id,std::vector<V> args) {
         auto result=program->invoke(id,std::move(args));
-        check(result->type==BOOLEAN_VALUE,"boolean operations return boolean values");
-        return *static_cast<bool*>(result->value);
+        check(result->type_tag()==BOOLEAN_VALUE,"boolean operations return boolean values");
+        return result->get<bool>();
     };
     auto runtime_failure=[&](int id,std::vector<V> args,const std::string& message) {
         bool caught=false;
@@ -1993,7 +1993,7 @@ void native_stack_tests() {
     std::weak_ptr<script> weak;
     auto host=std::make_shared<test_executor>(0x7a02);
     host->functions[host_id]=std::make_shared<test_function>(INT_VALUE,[&](const std::vector<V>& args) {
-        return weak.lock()->invoke(reenter_id,{std::make_shared<variable>(*static_cast<int*>(args.at(0)->value)-1)});
+        return weak.lock()->invoke(reenter_id,{std::make_shared<variable>(args.at(0)->get<int>()-1)});
     });
     registered_executor registered(host);
     const auto stop=rx(27,{rx(19,{rvar(0),rc(n(0))}),rblock({rreturn(rc(n(0)))}),rb(false)});
@@ -2056,8 +2056,8 @@ int main(){try{
         constexpr int host_id=0x6abc0002;
         auto host=std::make_shared<test_executor>(0x6abc);
         host->functions[host_id]=std::make_shared<test_function>(VOID_VALUE,[](const std::vector<V>& args) {
-            if(args.size()!=1||args[0]->type!=INT_VALUE)throw std::invalid_argument("host expects int");
-            return std::make_shared<variable>(*static_cast<int*>(args[0]->value)+2);
+            if(args.size()!=1||args[0]->type_tag()!=INT_VALUE)throw std::invalid_argument("host expects int");
+            return std::make_shared<variable>(args[0]->get<int>()+2);
         });
         registered_executor registered(host);
         auto ci=cfixed(INT_VALUE,0),cs=cfixed(STRING_VALUE,0),ca=cfixed(ADDRESS_VALUE,1);
@@ -2106,8 +2106,8 @@ int main(){try{
         check(integer(generic->invoke(20))==0,"generic int defaults to zero");
         check(value_to_string(generic->invoke(21)).empty(),"generic string defaults to empty");
         check(pointer(generic->invoke(22))==address{},"generic address defaults to null");
-        check(*static_cast<double*>(generic->invoke(23)->value)==0.0,"generic double defaults to zero");
-        check(!*static_cast<bool*>(generic->invoke(24)->value),"generic boolean defaults to false");
+        check(generic->invoke(23)->get<double>()==0.0,"generic double defaults to zero");
+        check(!generic->invoke(24)->get<bool>(),"generic boolean defaults to false");
         check(integer(generic->invoke(25))==42,"shared generic calls forward immutable contexts");
         rejects_containing([&]{generic->invoke(26);},"Generic value type mismatch","typed generic return checks the actual value");
         check(integer(generic->invoke(27))==42,"generic reflection gets its expected ABI from the current context");
@@ -2152,9 +2152,9 @@ int main(){try{
         insert_raw(queries,rhint("ReflectionLibrary",{rfn(2,INT_VALUE,rreturn(rc(n(42))))}),false);
         check(queries->hint_loaded("ReflectionLibrary"),"hint presence means mounted before initialization");
         queries->flush();
-        check(*static_cast<bool*>(queries->baseEnv->getVariable(-1)->value),"onload can query already mounted hints");
+        check(queries->baseEnv->getVariable(-1)->get<bool>(),"onload can query already mounted hints");
         check(integer(queries->invoke(10))==queries->namespace_for_hint("ReflectionLibrary"),"script and host report the same mounted namespace");
-        check(!*static_cast<bool*>(queries->invoke(11)->value)&&!*static_cast<bool*>(queries->invoke(12)->value),"hint presence is case-sensitive and missing hints return false");
+        check(!queries->invoke(11)->get<bool>()&&!queries->invoke(12)->get<bool>(),"hint presence is case-sensitive and missing hints return false");
         rejects_containing([&]{queries->invoke(13);},"Unknown namespace hint","namespace query rejects absent hints");
         check(integer(queries->invoke(14))==42,"reflection uses the queried runtime mount namespace");
         queries->destroy();
@@ -2219,7 +2219,7 @@ int main(){try{
         check(pointer(addresses->invoke(11))==address{high-1},"int plus address supports negative offsets");
         check(pointer(addresses->invoke(12))==address{high-17},"address minus int preserves high bits");
         check(pointer(addresses->invoke(13))==address{2147483648ull},"INT_MIN address subtraction avoids signed overflow");
-        check(*static_cast<bool*>(addresses->invoke(14)->value)&&*static_cast<bool*>(addresses->invoke(15)->value),"address equality and ordering compare unsigned values");
+        check(addresses->invoke(14)->get<bool>()&&addresses->invoke(15)->get<bool>(),"address equality and ordering compare unsigned values");
         check(pointer(addresses->invoke(16,{copy}))==address{maximum},"typed address argument and return round-trip exactly");
         rejects([&]{addresses->invoke(16,{std::make_shared<variable>(1)});},"address parameter rejects integer");
         rejects([&]{addresses->invoke(17,{copy});},"integer parameter rejects address");
@@ -2272,11 +2272,11 @@ int main(){try{
         auto ret_node=std::dynamic_pointer_cast<returnExpression>(entry->code);
         auto add_node=std::dynamic_pointer_cast<addExpression>(ret_node->returnType);
         auto reference=std::dynamic_pointer_cast<functionInvocationExpression>(add_node->exp2);
-        check(!linked->setup&&!linked->faulted&&linked->baseEnv->getVariable(-1)->type==VOID_VALUE,"mount does not execute onload");
+        check(!linked->setup&&!linked->faulted&&linked->baseEnv->getVariable(-1)->type_tag()==VOID_VALUE,"mount does not execute onload");
         rejects([&]{linked->invoke(0x0fff0000);},"invoke requires successful flush");
         rejects([&]{entry->invoke(linked->baseEnv);},"cached script function cannot bypass setup gate");
         rejects_containing([&]{linked->flush();},"Missing namespace hint","missing library reports its hint before initialization");
-        check(reference->function_id==alias&&linked->baseEnv->getVariable(-1)->type==VOID_VALUE&&!linked->faulted,
+        check(reference->function_id==alias&&linked->baseEnv->getVariable(-1)->type_tag()==VOID_VALUE&&!linked->faulted,
               "failed linking neither patches references nor runs initialization");
         auto alpha=rhint("Alpha",{rfn(0,VOID_VALUE,rset(-1,rc(n(7)))),rfn(2,INT_VALUE,rreturn(rvar(-1)))},1);
         insert_raw(linked,alpha,false);const int alpha_ns=linked->namespace_for_hint("Alpha");
@@ -2317,8 +2317,8 @@ int main(){try{
         char mismatch[80];std::snprintf(mismatch,sizeof mismatch,"External signature does not match script function: 0x%08x",
             static_cast<unsigned>(bad_signature->namespace_for_hint("Alpha")<<16|2));
         rejects_message([&]{bad_signature->flush();},mismatch,"imported script signatures must match exactly");
-        check(!bad_signature->setup&&!bad_signature->faulted&&bad_signature->baseEnv->getVariable(-1)->type==VOID_VALUE&&
-              bad_signature->baseEnv->getVariable(-2)->type==VOID_VALUE,"signature failure executes no onload and is not a runtime fault");
+        check(!bad_signature->setup&&!bad_signature->faulted&&bad_signature->baseEnv->getVariable(-1)->type_tag()==VOID_VALUE&&
+              bad_signature->baseEnv->getVariable(-2)->type_tag()==VOID_VALUE,"signature failure executes no onload and is not a runtime fault");
         bad_signature->destroy();
 
         for(auto malformed:{replace_raw(rmodule({}),1,ri(4)),rhint("bad-hint",{}),
@@ -2339,7 +2339,7 @@ int main(){try{
         constexpr int host_ns=0xf240,record_id=static_cast<int>(0xf2400001u),reentry_id=static_cast<int>(0xf2400002u),recursive_id=static_cast<int>(0xf2400003u);
         std::vector<int> events;std::shared_ptr<script> initializing_script;
         auto callback=std::make_shared<test_executor>(host_ns);
-        callback->functions[record_id]=std::make_shared<test_function>(VOID_VALUE,[&](const std::vector<V>& args){events.push_back(*static_cast<int*>(args.at(0)->value));return std::make_shared<variable>(nullptr);});
+        callback->functions[record_id]=std::make_shared<test_function>(VOID_VALUE,[&](const std::vector<V>& args){events.push_back(args.at(0)->get<int>());return std::make_shared<variable>(nullptr);});
         callback->functions[reentry_id]=std::make_shared<test_function>(INT_VALUE,[&](const std::vector<V>&){
             check(initializing_script->active_calls>0,"host callbacks run within an active call guard");
             rejects([&]{initializing_script->flush();},"host callback cannot flush");
@@ -2499,7 +2499,7 @@ int main(){try{
         auto constant_null=rx(0,{raw({ri(0xce200a),byte(sentinel)})});
         auto scalar_program=load_raw(rmodule({rfn(10,VOID_VALUE,rx(7,{rb(true),constant_null})),
             rfn(11,STRING_VALUE,rx(7,{rb(true),rc(s(std::string("中文\0",7)))}))}));
-        check(scalar_program->invoke(10)->type==VOID_VALUE,"exec current void sentinel round-trips");
+        check(scalar_program->invoke(10)->type_tag()==VOID_VALUE,"exec current void sentinel round-trips");
         check(value_to_string(scalar_program->invoke(11))==std::string("中文\0",7),"exec UTF-8 string preserves embedded zero");
         auto metadata=std::make_shared<AbdMap>();auto child=std::make_shared<AbdMap>();
         child->put("flag",std::make_shared<BoolAbdValue>(true));metadata->put("nested",block({n(3),child}));
@@ -2818,8 +2818,8 @@ int main(){try{
     auto arguments=program({fn(10,INT_VALUE,block({def("x",n(2)),ret(call(11,{var("x"),set("x",n(8))}))})),fn(11,INT_VALUE,block({ret(var("__func_param0"))}),2)});
     check(integer(arguments->invoke(10))==2,"arguments snapshot before later side effects");
     auto numeric=program({fn(10,DOUBLE_VALUE,block({ret(binary("minus",n(5),std::make_shared<DoubleAbdValue>(0.5)))})),fn(11,FLOAT_VALUE,block({ret(binary("multiply",n(2),std::make_shared<FloatAbdValue>(0.25f)))}))});
-    check(*static_cast<double*>(numeric->invoke(10)->value)==4.5,"int minus double");
-    check(*static_cast<float*>(numeric->invoke(11)->value)==0.5f,"int times float");
+    check(numeric->invoke(10)->get<double>()==4.5,"int minus double");
+    check(numeric->invoke(11)->get<float>()==0.5f,"int times float");
     auto typed=program({
         typed_fn(20,INT_VALUE,block({ret(var("__func_param0"))}),{INT_VALUE}),
         typed_fn(21,INT_VALUE,block({ret(n(7))}),{ANY_VALUE})
@@ -2840,7 +2840,7 @@ int main(){try{
     // Deliberately report the wrong static return_type(): runtime signatures
     // must validate the callback's actual dynamic value instead.
     host->functions[host_add]=std::make_shared<test_function>(VOID_VALUE,[&](const std::vector<V>& args){
-        ++add_calls;return std::make_shared<variable>(*static_cast<int*>(args[0]->value)+*static_cast<int*>(args[1]->value));
+        ++add_calls;return std::make_shared<variable>(args[0]->get<int>()+args[1]->get<int>());
     });
     host->functions[host_wrong_return]=std::make_shared<test_function>(INT_VALUE,[&](const std::vector<V>&){
         ++wrong_return_calls;return std::make_shared<variable>(1.0f);
@@ -2877,8 +2877,8 @@ int main(){try{
     rejects_message([&]{external->invoke(host_wrong_return);},"External function 0xf2340002 return type mismatch: expected int, got float","direct external return type checked");
     rejects_containing([&]{external->invoke(33);},"return type mismatch: expected int, got float","internal external return type checked");
     check(wrong_return_calls==2,"return mismatch is checked after callback");
-    check(external->invoke(host_void)->type==VOID_VALUE,"direct external void return accepts actual void");
-    check(external->invoke(34)->type==VOID_VALUE,"internal external void return accepts actual void");
+    check(external->invoke(host_void)->type_tag()==VOID_VALUE,"direct external void return accepts actual void");
+    check(external->invoke(34)->type_tag()==VOID_VALUE,"internal external void return accepts actual void");
     rejects_containing([&]{external->invoke(host_wrong_void);},"return type mismatch: expected void, got int","direct external void return must match");
     rejects_containing([&]{external->invoke(35);},"return type mismatch: expected void, got int","internal external void return must match");
     check(void_calls==2&&wrong_void_calls==2,"void callbacks exercised on direct and internal paths");
@@ -2888,10 +2888,10 @@ int main(){try{
     rejects([&]{program({},block({}),block({signature(host_add,ANY_VALUE,{})}));},"external any return metadata rejected");
     rejects([&]{auto malformed=std::make_shared<AbdMap>();malformed->put("id",n(host_add));malformed->put("return-type",n(INT_VALUE));program({},block({}),block({malformed}));},"missing external param-types rejected");
     rejects([&]{program({},block({}),block({signature(host_add,INT_VALUE,{}),signature(host_add,INT_VALUE,{})}));},"duplicate external signature rejected");
-    check(program({fn(40,VOID_VALUE,block({}))},block({}),block({signature(40,VOID_VALUE,{})}))->invoke(40)->type==VOID_VALUE,"matching declaration and script definition link successfully");
+    check(program({fn(40,VOID_VALUE,block({}))},block({}),block({signature(40,VOID_VALUE,{})}))->invoke(40)->type_tag()==VOID_VALUE,"matching declaration and script definition link successfully");
     rejects([&]{program({fn(0x0abd0000,VOID_VALUE,block({}))});},"script cannot shadow a runtime builtin id");
-    check(program({fn(0x10000000,VOID_VALUE,block({}))})->invoke(0x10000000)->type==VOID_VALUE,"script ids use all 32 bits");
-    check(program({fn(-1,VOID_VALUE,block({}))})->invoke(-1)->type==VOID_VALUE,"signed negative function ids retain their unsigned address bits");
+    check(program({fn(0x10000000,VOID_VALUE,block({}))})->invoke(0x10000000)->type_tag()==VOID_VALUE,"script ids use all 32 bits");
+    check(program({fn(-1,VOID_VALUE,block({}))})->invoke(-1)->type_tag()==VOID_VALUE,"signed negative function ids retain their unsigned address bits");
     rejects_containing([&]{program({fn(0,INT_VALUE,block({ret(n(1))}))});},"Lifecycle function","onload return type metadata rejected");
     rejects_containing([&]{program({typed_fn(0,VOID_VALUE,block({}),{INT_VALUE})});},"Lifecycle function","onload parameter metadata rejected");
     rejects_containing([&]{program({fn(1,STRING_VALUE,block({ret(s("bad"))}))});},"Lifecycle function","predestroy return type metadata rejected");
@@ -2919,11 +2919,11 @@ int main(){try{
     bad->max_steps=100;rejects([&]{bad->invoke(13);},"execution budget");
     bad->max_call_depth=8;rejects([&]{bad->invoke(14);},"recursion budget");check(bad->active_calls==0,"call depth unwound after failure");
     auto lazy=program({fn(10,BOOLEAN_VALUE,block({ret(binary("and",boolean(false),binary("divide",n(1),n(0))))})),fn(11,BOOLEAN_VALUE,block({ret(binary("or",boolean(true),binary("divide",n(1),n(0))))}))});
-    check(!*static_cast<bool*>(lazy->invoke(10)->value),"and short circuits");check(*static_cast<bool*>(lazy->invoke(11)->value),"or short circuits");
+    check(!lazy->invoke(10)->get<bool>(),"and short circuits");check(lazy->invoke(11)->get<bool>(),"or short circuits");
     heap::clearHeap();check(heap::alloc(0)==address{},"zero allocation");rejects([]{heap::alloc(-1);},"negative allocation");
     auto a=heap::alloc(2),b=heap::alloc(2);check(a==address{1}&&b==address{3},"zero address reserved");
     heap::getAt(a)->setValue(99);check(heap::free(a),"free allocation");rejects([&]{heap::getAt(a);},"freed address rejection");
-    check(heap::alloc(1)==address{1},"reuse leading hole");check(heap::getAt(address{1})->type==VOID_VALUE,"reused allocation cleared");
+    check(heap::alloc(1)==address{1},"reuse leading hole");check(heap::getAt(address{1})->type_tag()==VOID_VALUE,"reused allocation cleared");
     rejects([]{heap::getAt(address{});},"null address");rejects([&]{heap::getAt(address{b.value+2});},"out of bounds");
     rejects([]{heap::restore({std::make_shared<variable>(nullptr)},{{address{1},1}});},"invalid snapshot");check(heap::lenAlloc()==2,"snapshot failure atomic");
     {
@@ -2967,17 +2967,17 @@ int main(){try{
         heap::clearHeap();
         std::vector<address> many;
         for(int i=0;i<20000;++i)many.push_back(heap::alloc(2));
-        check(many.back()==address{39999}&&heap::getAt(address{many[10000].value+1})->type==VOID_VALUE,"appending allocations stays contiguous");
+        check(many.back()==address{39999}&&heap::getAt(address{many[10000].value+1})->type_tag()==VOID_VALUE,"appending allocations stays contiguous");
         check(heap::free(many[5])&&heap::alloc(2)==many[5]&&heap::alloc(1)==address{40001},"freed gap is reused before appending");
     }
     heap::clearHeap();
     auto memory=program({fn(10,INT_VALUE,block({def("p",call(0x0abd0003,{n(3)})),binary("m",call(0x0abd0006,{var("p")}),n(42)),ret(call(0x0abd0006,{var("p")}))})),fn(11,INT_VALUE,block({def("p",call(0x0abd0003,{n(3)})),ret(binary("divide",n(1),n(0)))}))});
     check(integer(memory->invoke(10))==42,"heap assignment and return copy");check(heap::lenAlloc()==0,"normal scope cleanup");
     rejects([&]{memory->invoke(11);},"heap cleanup on exception");check(heap::lenAlloc()==0,"exception scope cleanup");
-    variable v(std::string("hello"));v.copy_from(std::make_shared<variable>(5));v.setValue(true);v.setValue(1.5f);v.setValue(2.5);v.setValue(nullptr);check(v.type==VOID_VALUE,"safe type transitions");
-    variable literal("hello");check(literal.type==STRING_VALUE&&value_to_string(std::make_shared<variable>(literal))=="hello","C string literal stays a string");
-    const char* null_text=nullptr;variable null_literal(null_text);check(null_literal.type==VOID_VALUE,"null C string pointer stays null");
-    auto original=std::make_shared<variable>(std::string("value"));auto copy=original->deepCopy();copy->setValue(std::string("other"));check(*static_cast<std::string*>(original->value)=="value","deep copy independent");
+    variable v(std::string("hello"));v.copy_from(std::make_shared<variable>(5));v.setValue(true);v.setValue(1.5f);v.setValue(2.5);v.setValue(nullptr);check(v.type_tag()==VOID_VALUE,"safe type transitions");
+    variable literal("hello");check(literal.type_tag()==STRING_VALUE&&value_to_string(std::make_shared<variable>(literal))=="hello","C string literal stays a string");
+    const char* null_text=nullptr;variable null_literal(null_text);check(null_literal.type_tag()==VOID_VALUE,"null C string pointer stays null");
+    auto original=std::make_shared<variable>(std::string("value"));auto copy=original->deepCopy();copy->setValue(std::string("other"));check(original->get<std::string>()=="value","deep copy independent");
     rejects([]{unsigned char b[]={100,0,0,0};load_script(b,sizeof b);},"truncated input");
     rejects([]{program({fn(10,VOID_VALUE,block({op("nonsense")}))});},"unknown opcode");
     rejects([]{program({fn(10,INT_VALUE,block({binary("m",n(1),n(2)),ret(n(0))}))});},"literal assignment rejection");
@@ -3011,8 +3011,8 @@ int main(){try{
         check(heap::lenAlloc()==0,"rejected free leaves nothing behind after unwinding");
         check(integer(owner_script->invoke(12))==0,"global-lifetime allocation created");
         check(integer(owner_script->invoke(13))==42,"global-lifetime allocation survives unrelated scope exits");
-        check(*static_cast<bool*>(owner_script->invoke(14)->value),"callee may free an allocation owned by its caller chain");
-        check(*static_cast<bool*>(owner_script->invoke(16)->value),"make_free detaches ownership so any scope may free");
+        check(owner_script->invoke(14)->get<bool>(),"callee may free an allocation owned by its caller chain");
+        check(owner_script->invoke(16)->get<bool>(),"make_free detaches ownership so any scope may free");
         check(heap::lenAlloc()==1,"only the global allocation remains");
         auto host_block=heap::alloc(1);check(heap::owner_of(host_block)==nullptr,"host allocations are untracked");
         rejects([&]{heap::set_owner(address{host_block.value+7},owner_script->baseEnv.get());},"owner requires an allocation start");
@@ -3106,7 +3106,7 @@ int main(){try{
         check(run(27)==8&&integer(log)==88,"by-value parameters are separate copies destroyed with the call");
         check(run(29)==3&&integer(log)==3,"a moved parameter is not destroyed twice");
         auto result=literal->invoke(13);
-        check(result->type==OBJECT_VALUE&&!blocks::of(result)->owner,"a host call receives a host-held object");
+        check(result->type_tag()==OBJECT_VALUE&&!blocks::of(result)->owner,"a host call receives a host-held object");
         literal->destroy();
         check(heap::lenAlloc()==0,"literal objects leave no heap allocations");
     }
@@ -3137,7 +3137,7 @@ int main(){try{
         rejects([&]{deferred->invoke(10);},"script requires explicit flush before invocation");
         deferred->flush();deferred->flush();
         check(deferred->setup&&deferred->module_manifest()[0].initialized,"onload retired after running");
-        check(*static_cast<bool*>(deferred->invoke(10)->value),"onload effects visible after flush");
+        check(deferred->invoke(10)->get<bool>(),"onload effects visible after flush");
     }
     p->destroy();p->destroy();rejects([&]{p->invoke(10);},"closed script");
     p256_self_test();check(true,"P-256 vectors, reduction, and sign/verify roundtrip");

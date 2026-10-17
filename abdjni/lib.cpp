@@ -238,7 +238,7 @@ std::shared_ptr<variable> writableRawSlot(jlong pointer) {
 }
 std::shared_ptr<variable> typedSlot(jlong pointer, int type) {
     auto value = heap::getAt(fromJAddress(pointer));
-    if (value->type != type) throw std::invalid_argument("Heap value has the wrong type");
+    if (value->type_tag() != type) throw std::invalid_argument("Heap value has the wrong type");
     return value;
 }
 
@@ -270,7 +270,7 @@ public:
         HeapBlock block(arguments.size());
         std::vector<jlong> pointers(arguments.size());
         for (std::size_t i = 0; i < arguments.size(); ++i) {
-            if (arguments[i] && arguments[i]->type == OBJECT_VALUE)
+            if (arguments[i] && arguments[i]->type_tag() == OBJECT_VALUE)
                 throw std::invalid_argument("A literal object cannot be passed to a Java callback; pass a pointer or its fields");
             const address pointer{block.pointer.value + i};
             pointers[i] = toJAddress(pointer);
@@ -420,7 +420,7 @@ void addSnapshotBufferCapacity(std::size_t capacity, int width, std::size_t& tot
     total += slots;
 }
 void checkSnapshotBufferBudget(const std::shared_ptr<variable>& value, std::size_t& total, std::size_t depth = 0) {
-    if (value->type != OBJECT_VALUE) return;
+    if (value->type_tag() != OBJECT_VALUE) return;
     if (depth > blocks::max_depth) throw std::invalid_argument("Snapshot object nesting is too deep");
     auto block = blocks::of(value);
     if (!block || !blocks::owns(*value) || block->state != slot_block::status::live)
@@ -433,7 +433,7 @@ void checkSnapshotBufferBudget(const std::shared_ptr<variable>& value, std::size
     for (std::size_t i = 0; i < count; ++i) checkSnapshotBufferBudget(block->slots[i], total, depth + 1);
 }
 std::shared_ptr<AbdMapValue> encodeValue(const std::shared_ptr<variable>& value, std::size_t depth = 0) {
-    switch (value->type) {
+    switch (value->type_tag()) {
         case OBJECT_VALUE: {
             // A literal object is saved with its slots and the address it had, so
             // saved pointers into it can be renumbered on restore.
@@ -466,12 +466,12 @@ std::shared_ptr<AbdMapValue> encodeValue(const std::shared_ptr<variable>& value,
             entry->put("slots", items);
             return entry;
         }
-        case INT_VALUE: return std::make_shared<IntAbdValue>(*static_cast<int*>(value->value));
-        case ADDRESS_VALUE: return std::make_shared<AddressAbdValue>(*static_cast<address*>(value->value));
-        case FLOAT_VALUE: return std::make_shared<FloatAbdValue>(*static_cast<float*>(value->value));
-        case DOUBLE_VALUE: return std::make_shared<DoubleAbdValue>(*static_cast<double*>(value->value));
-        case BOOLEAN_VALUE: return std::make_shared<BoolAbdValue>(*static_cast<bool*>(value->value));
-        case STRING_VALUE: return std::make_shared<StringAbdValue>(*static_cast<std::string*>(value->value));
+        case INT_VALUE: return std::make_shared<IntAbdValue>(value->get<int>());
+        case ADDRESS_VALUE: return std::make_shared<AddressAbdValue>(value->get<address>());
+        case FLOAT_VALUE: return std::make_shared<FloatAbdValue>(value->get<float>());
+        case DOUBLE_VALUE: return std::make_shared<DoubleAbdValue>(value->get<double>());
+        case BOOLEAN_VALUE: return std::make_shared<BoolAbdValue>(value->get<bool>());
+        case STRING_VALUE: return std::make_shared<StringAbdValue>(value->get<std::string>());
         case VOID_VALUE: { unsigned char sentinel = 0xff; return std::make_shared<ByteArrayValue>(&sentinel, 1); }
         default: throw std::invalid_argument("Unsupported value in snapshot");
     }
@@ -557,11 +557,11 @@ struct SnapshotDecoder {
         if (auto block = blocks::of(target); block && block->is_view)
             throw std::invalid_argument("Snapshot class view requires an object record");
         target->copy_from(decodeValue(value));
-        if (target->type == ADDRESS_VALUE && blocks::is_block_address(*static_cast<address*>(target->value))) addresses.push_back(target);
+        if (target->type_tag() == ADDRESS_VALUE && blocks::is_block_address(target->get<address>())) addresses.push_back(target);
     }
     void renumber() {
         for (auto& value : addresses) {
-            const address saved = *static_cast<address*>(value->value);
+            const address saved = value->get<address>();
             if (auto found = objects.find(idOf(saved)); found != objects.end())
                 value->setValue(address{blocks::address_tag | (found->second->id << blocks::offset_bits) | (saved.value & offsetMask)});
         }
@@ -751,7 +751,7 @@ std::string memoryReport() {
     for (std::size_t i = 0; i < loadedScript->baseEnv->variables.size(); ++i) {
         const auto& value = loadedScript->baseEnv->variables[i];
         out << (value->name.empty() ? "-" + std::to_string(i + 1) : value->name)
-            << " :: type " << static_cast<int>(value->type) << '\n';
+            << " :: type " << static_cast<int>(value->type_tag()) << '\n';
     }
     out << "Heap slots: " << heap::lenHeap() << "\nAllocations: " << heap::lenAlloc() << '\n';
     return out.str();
@@ -822,13 +822,13 @@ JNIEXPORT jlong JNICALL Java_azertia_jni_Caller_call(JNIEnv* env, jclass, jint i
         std::vector<std::shared_ptr<variable>> values;
         for (jlong pointer : pointers) {
             auto value = heap::getAt(fromJAddress(pointer));
-            if (value->type == OBJECT_VALUE) throw std::invalid_argument("A literal object cannot be passed from Java; pass a pointer or its fields");
+            if (value->type_tag() == OBJECT_VALUE) throw std::invalid_argument("A literal object cannot be passed from Java; pass a pointer or its fields");
             values.push_back(value->deepCopy());
         }
         CallScope calling;
         auto result = loadedScript->invoke(id, std::move(values));
-        if (!result || result->type == VOID_VALUE) return jlong(0);
-        if (result->type == OBJECT_VALUE) {
+        if (!result || result->type_tag() == VOID_VALUE) return jlong(0);
+        if (result->type_tag() == OBJECT_VALUE) {
             // The value cannot reach Java, so it ends here; its destructor still runs.
             try { blocks::finalize(blocks::of(result), loadedScript->baseEnv, true); }
             catch (...) { clear_error_trace(); }
@@ -841,25 +841,25 @@ JNIEXPORT jlong JNICALL Java_azertia_jni_Caller_call(JNIEnv* env, jclass, jint i
     });
 }
 JNIEXPORT jint JNICALL Java_azertia_jni_Caller_getMemType(JNIEnv* env, jclass, jlong pointer) {
-    return boundary<jint>(env, 0, [&] { return static_cast<jint>(heap::getAt(fromJAddress(pointer))->type); });
+    return boundary<jint>(env, 0, [&] { return static_cast<jint>(heap::getAt(fromJAddress(pointer))->type_tag()); });
 }
 JNIEXPORT jstring JNICALL Java_azertia_jni_Caller_getMemStr(JNIEnv* env, jclass, jlong pointer) {
-    return boundary<jstring>(env, nullptr, [&] { return toJava(env, *static_cast<std::string*>(typedSlot(pointer, STRING_VALUE)->value)); });
+    return boundary<jstring>(env, nullptr, [&] { return toJava(env, typedSlot(pointer, STRING_VALUE)->get<std::string>()); });
 }
 JNIEXPORT jfloat JNICALL Java_azertia_jni_Caller_getMemFloat(JNIEnv* env, jclass, jlong pointer) {
-    return boundary<jfloat>(env, 0, [&] { return *static_cast<float*>(typedSlot(pointer, FLOAT_VALUE)->value); });
+    return boundary<jfloat>(env, 0, [&] { return typedSlot(pointer, FLOAT_VALUE)->get<float>(); });
 }
 JNIEXPORT jdouble JNICALL Java_azertia_jni_Caller_getMemDouble(JNIEnv* env, jclass, jlong pointer) {
-    return boundary<jdouble>(env, 0, [&] { return *static_cast<double*>(typedSlot(pointer, DOUBLE_VALUE)->value); });
+    return boundary<jdouble>(env, 0, [&] { return typedSlot(pointer, DOUBLE_VALUE)->get<double>(); });
 }
 JNIEXPORT jboolean JNICALL Java_azertia_jni_Caller_getMemBool(JNIEnv* env, jclass, jlong pointer) {
-    return boundary<jboolean>(env, JNI_FALSE, [&] { return static_cast<jboolean>(*static_cast<bool*>(typedSlot(pointer, BOOLEAN_VALUE)->value) ? JNI_TRUE : JNI_FALSE); });
+    return boundary<jboolean>(env, JNI_FALSE, [&] { return static_cast<jboolean>(typedSlot(pointer, BOOLEAN_VALUE)->get<bool>() ? JNI_TRUE : JNI_FALSE); });
 }
 JNIEXPORT jint JNICALL Java_azertia_jni_Caller_getMemInt(JNIEnv* env, jclass, jlong pointer) {
-    return boundary<jint>(env, 0, [&] { return *static_cast<int*>(typedSlot(pointer, INT_VALUE)->value); });
+    return boundary<jint>(env, 0, [&] { return typedSlot(pointer, INT_VALUE)->get<int>(); });
 }
 JNIEXPORT jlong JNICALL Java_azertia_jni_Caller_getMemAddress(JNIEnv* env, jclass, jlong pointer) {
-    return boundary<jlong>(env, 0, [&] { return toJAddress(*static_cast<address*>(typedSlot(pointer, ADDRESS_VALUE)->value)); });
+    return boundary<jlong>(env, 0, [&] { return toJAddress(typedSlot(pointer, ADDRESS_VALUE)->get<address>()); });
 }
 JNIEXPORT jlong JNICALL Java_azertia_jni_Caller20_memAlloc(JNIEnv* env, jclass, jint size) {
     return boundary<jlong>(env, 0, [&] { return toJAddress(heap::alloc(size)); });

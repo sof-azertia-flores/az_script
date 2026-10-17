@@ -12,7 +12,13 @@
 #define AZSCRIPT_EXTERN_EXPORT __attribute__((visibility("default")))
 #endif
 
-// The loader looks up this exact C symbol after the signature check.
-#define AZSCRIPT_EXTERN_ENTRY extern "C" AZSCRIPT_EXTERN_EXPORT void azscript_load_extern()
+// Define this macro once in the plugin. The loader checks the declared ABI
+// after signature verification and mapping, before calling the registration
+// entry point. Rebuild and re-sign plugins when the runtime ABI changes.
+#define AZSCRIPT_EXTERN_ENTRY \
+    extern "C" AZSCRIPT_EXTERN_EXPORT std::uint32_t azscript_extern_runtime_abi() noexcept { \
+        return AZSCRIPT_RUNTIME_ABI; \
+    } \
+    extern "C" AZSCRIPT_EXTERN_EXPORT void azscript_load_extern()
 
 extern "C" AZSCRIPT_EXTERN_EXPORT void azscript_load_extern();

@@ -305,7 +305,7 @@ void validate_arguments(const std::string& kind,int id,const std::vector<int>& e
         if(!actual[i])
             throw std::runtime_error(kind+" "+function_id_text(id)+" argument "+std::to_string(i+1)+
                 " is a null pointer; use variable(nullptr) for void");
-        const int got=static_cast<int>(actual[i]->type);
+        const int got=static_cast<int>(actual[i]->type_tag());
         if(expected[i]!=got&&!(allow_any&&expected[i]==ANY_VALUE))
             throw std::runtime_error(kind+" "+function_id_text(id)+" argument "+std::to_string(i+1)+
                 " type mismatch: expected "+type_name(expected[i])+", got "+type_name(got));
@@ -437,20 +437,20 @@ void tick(E env) {
     if(!s->remaining_steps) throw std::runtime_error("Script execution step limit exceeded");
     --s->remaining_steps;
 }
-bool numeric(const V& v) { return v && (v->type==INT_VALUE||v->type==FLOAT_VALUE||v->type==DOUBLE_VALUE); }
+bool numeric(const V& v) { return v && (v->type_tag()==INT_VALUE||v->type_tag()==FLOAT_VALUE||v->type_tag()==DOUBLE_VALUE); }
 double number(const V& v) {
     if(!v) throw std::runtime_error("Null host value");
-    switch(v->type) {
-    case INT_VALUE:return *static_cast<int*>(v->value);
-    case FLOAT_VALUE:return *static_cast<float*>(v->value);
-    case DOUBLE_VALUE:return *static_cast<double*>(v->value);
+    switch(v->type_tag()) {
+    case INT_VALUE:return v->get<int>();
+    case FLOAT_VALUE:return v->get<float>();
+    case DOUBLE_VALUE:return v->get<double>();
     default:throw std::runtime_error("Expected a numeric value");
     }
 }
 bool truth(const V& v) {
     if(!v) throw std::runtime_error("Null host value");
-    if(v->type==BOOLEAN_VALUE) return *static_cast<bool*>(v->value);
-    throw std::runtime_error("Condition must be boolean, got "+std::string(type_name(v->type)));
+    if(v->type_tag()==BOOLEAN_VALUE) return v->get<bool>();
+    throw std::runtime_error("Condition must be boolean, got "+std::string(type_name(v->type_tag())));
 }
 V checked_int(std::int64_t n) {
     if(n<std::numeric_limits<int>::min()||n>std::numeric_limits<int>::max())
@@ -458,12 +458,12 @@ V checked_int(std::int64_t n) {
     return std::make_shared<variable>(static_cast<int>(n));
 }
 V binary(const std::string& op,const V& a,const V& b) {
-    if(a->type==OBJECT_VALUE||b->type==OBJECT_VALUE)throw std::runtime_error("Unsupported object value operands for "+op);
-    if(op=="add"&&(a->type==STRING_VALUE||b->type==STRING_VALUE))
+    if(a->type_tag()==OBJECT_VALUE||b->type_tag()==OBJECT_VALUE)throw std::runtime_error("Unsupported object value operands for "+op);
+    if(op=="add"&&(a->type_tag()==STRING_VALUE||b->type_tag()==STRING_VALUE))
         return std::make_shared<variable>(value_to_string(a)+value_to_string(b));
-    if(a->type==ADDRESS_VALUE||b->type==ADDRESS_VALUE) {
-        if(a->type==ADDRESS_VALUE&&b->type==ADDRESS_VALUE) {
-            const auto x=static_cast<address*>(a->value)->value,y=static_cast<address*>(b->value)->value;
+    if(a->type_tag()==ADDRESS_VALUE||b->type_tag()==ADDRESS_VALUE) {
+        if(a->type_tag()==ADDRESS_VALUE&&b->type_tag()==ADDRESS_VALUE) {
+            const auto x=a->get<address>().value,y=b->get<address>().value;
             if(op=="eq")return std::make_shared<variable>(x==y);
             if(op=="ne")return std::make_shared<variable>(x!=y);
             if(op=="lt")return std::make_shared<variable>(x<y);
@@ -471,11 +471,11 @@ V binary(const std::string& op,const V& a,const V& b) {
             if(op=="gt")return std::make_shared<variable>(x>y);
             if(op=="ge")return std::make_shared<variable>(x>=y);
         }
-        const bool left_address=a->type==ADDRESS_VALUE;
+        const bool left_address=a->type_tag()==ADDRESS_VALUE;
         if((op=="add"||(op=="minus"&&left_address))&&
-           (left_address?b->type==INT_VALUE:a->type==INT_VALUE)) {
-            const auto base=static_cast<address*>((left_address?a:b)->value)->value;
-            std::int64_t offset=*static_cast<int*>((left_address?b:a)->value);
+           (left_address?b->type_tag()==INT_VALUE:a->type_tag()==INT_VALUE)) {
+            const auto base=(left_address?a:b)->get<address>().value;
+            std::int64_t offset=(left_address?b:a)->get<int>();
             if(op=="minus")offset=-offset;
             if(offset>=0) {
                 const auto magnitude=static_cast<std::uint64_t>(offset);
@@ -491,13 +491,13 @@ V binary(const std::string& op,const V& a,const V& b) {
     if(op=="eq"||op=="ne") {
         bool eq=false;
         if(numeric(a)&&numeric(b)) eq=number(a)==number(b);
-        else if(a->type!=b->type)
+        else if(a->type_tag()!=b->type_tag())
             throw std::runtime_error("Equality requires compatible operand types, got "+
-                std::string(type_name(a->type))+" and "+type_name(b->type));
+                std::string(type_name(a->type_tag()))+" and "+type_name(b->type_tag()));
         else {
-            if(a->type==VOID_VALUE) eq=true;
-            else if(a->type==STRING_VALUE) eq=*static_cast<std::string*>(a->value)==*static_cast<std::string*>(b->value);
-            else if(a->type==BOOLEAN_VALUE) eq=*static_cast<bool*>(a->value)==*static_cast<bool*>(b->value);
+            if(a->type_tag()==VOID_VALUE) eq=true;
+            else if(a->type_tag()==STRING_VALUE) eq=a->get<std::string>()==b->get<std::string>();
+            else if(a->type_tag()==BOOLEAN_VALUE) eq=a->get<bool>()==b->get<bool>();
         }
         return std::make_shared<variable>(op=="eq"?eq:!eq);
     }
@@ -508,8 +508,8 @@ V binary(const std::string& op,const V& a,const V& b) {
     if(op=="ge") return std::make_shared<variable>(x>=y);
     if(op=="le") return std::make_shared<variable>(x<=y);
     if((op=="divide"||op=="mod")&&y==0) throw std::runtime_error("Division by zero");
-    if(a->type==INT_VALUE&&b->type==INT_VALUE) {
-        const std::int64_t i=*static_cast<int*>(a->value),j=*static_cast<int*>(b->value);
+    if(a->type_tag()==INT_VALUE&&b->type_tag()==INT_VALUE) {
+        const std::int64_t i=a->get<int>(),j=b->get<int>();
         if(op=="add") return checked_int(i+j);
         if(op=="minus") return checked_int(i-j);
         if(op=="multiply") return checked_int(i*j);
@@ -524,7 +524,7 @@ V binary(const std::string& op,const V& a,const V& b) {
     else if(op=="divide") out=x/y;
     else throw std::runtime_error("Unknown binary operation: "+op);
     if(!std::isfinite(out)) throw std::overflow_error("Non-finite arithmetic result");
-    if(a->type==DOUBLE_VALUE||b->type==DOUBLE_VALUE) return std::make_shared<variable>(out);
+    if(a->type_tag()==DOUBLE_VALUE||b->type_tag()==DOUBLE_VALUE) return std::make_shared<variable>(out);
     const auto f=static_cast<float>(out);
     if(!std::isfinite(f)) throw std::overflow_error("Float overflow");
     return std::make_shared<variable>(f);
@@ -565,8 +565,8 @@ std::string quoted_conversion_text(const std::string& value) {
     return result+'"';
 }
 [[noreturn]] void conversion_error(const V& value,int target,const char* reason=nullptr) {
-    std::string source=type_name(value->type);
-    if(reason&&value->type==STRING_VALUE)source+=' '+quoted_conversion_text(*static_cast<std::string*>(value->value));
+    std::string source=type_name(value->type_tag());
+    if(reason&&value->type_tag()==STRING_VALUE)source+=' '+quoted_conversion_text(value->get<std::string>());
     std::string message="Cannot convert "+source+" to "+type_name(target);
     if(reason)message+=std::string(": ")+reason;
     throw std::runtime_error(message);
@@ -619,7 +619,7 @@ public:
     }
 };
 template<class T> T parsed_real(const V& value,int target) {
-    const auto& text=*static_cast<std::string*>(value->value);
+    const auto& text=value->get<std::string>();
     if(!decimal_text(text,false))conversion_error(value,target,"invalid decimal number");
     conversion_locale locale;char* end=nullptr;errno=0;
     const auto result=locale.parse<T>(text.c_str(),&end);
@@ -633,15 +633,15 @@ template<class T> T parsed_real(const V& value,int target) {
 }
 V convert_value(const V& value,int target) {
     if(!value)throw std::runtime_error("Null host value");
-    if(value->type==target)return value->deepCopy();
+    if(value->type_tag()==target)return value->deepCopy();
     if(target==STRING_VALUE) {
-        if(numeric(value)||value->type==ADDRESS_VALUE)return std::make_shared<variable>(value_to_string(value));
+        if(numeric(value)||value->type_tag()==ADDRESS_VALUE)return std::make_shared<variable>(value_to_string(value));
         conversion_error(value,target);
     }
     if(target==ADDRESS_VALUE)conversion_error(value,target);
-    if(value->type==STRING_VALUE) {
+    if(value->type_tag()==STRING_VALUE) {
         if(target==INT_VALUE) {
-            const auto& text=*static_cast<std::string*>(value->value);
+            const auto& text=value->get<std::string>();
             if(!decimal_text(text,true))conversion_error(value,target,"invalid decimal integer");
             const char* first=text.data();const char* last=first+text.size();
             if(*first=='+')++first;
@@ -695,17 +695,17 @@ public:
 };
 V bitwise(int opcode,const V& left,const V& right) {
     static constexpr const char* names[]{"bit_and","bit_or","bit_xor","shl","shr","ushr"};
-    if(left->type!=INT_VALUE||right->type!=INT_VALUE)
+    if(left->type_tag()!=INT_VALUE||right->type_tag()!=INT_VALUE)
         throw std::runtime_error(std::string(names[opcode-43])+" operands must be int, got "+
-            type_name(left->type)+" and "+type_name(right->type));
-    const auto a=static_cast<std::uint32_t>(*static_cast<int*>(left->value));
-    const auto b=static_cast<std::uint32_t>(*static_cast<int*>(right->value));
+            type_name(left->type_tag())+" and "+type_name(right->type_tag()));
+    const auto a=static_cast<std::uint32_t>(left->get<int>());
+    const auto b=static_cast<std::uint32_t>(right->get<int>());
     std::uint32_t result;
     if(opcode==43)result=a&b;
     else if(opcode==44)result=a|b;
     else if(opcode==45)result=a^b;
     else {
-        const int count=*static_cast<int*>(right->value);
+        const int count=right->get<int>();
         if(count<0||count>31)
             throw std::runtime_error("Shift count must be between 0 and 31, got "+std::to_string(count));
         const auto shift=static_cast<unsigned>(count);
@@ -742,9 +742,9 @@ public:
         auto x=run(a,env)->deepCopy();
         if(op=="not") return std::make_shared<variable>(!truth(x));
         if(op=="neg") {
-            if(x->type==INT_VALUE) return checked_int(-static_cast<std::int64_t>(*static_cast<int*>(x->value)));
+            if(x->type_tag()==INT_VALUE) return checked_int(-static_cast<std::int64_t>(x->get<int>()));
             if(!numeric(x)) throw std::runtime_error("Negation requires a numeric operand");
-            return x->type==FLOAT_VALUE?std::make_shared<variable>(-*static_cast<float*>(x->value)):
+            return x->type_tag()==FLOAT_VALUE?std::make_shared<variable>(-x->get<float>()):
                 std::make_shared<variable>(-number(x));
         }
         if(op=="and"&&!truth(x)) return std::make_shared<variable>(false);
@@ -790,7 +790,7 @@ public:
         discard_active_trace();
         if(!result)
             throw std::runtime_error("External function "+function_id_text(id)+" returned a null pointer");
-        const int got=static_cast<int>(result->type);
+        const int got=static_cast<int>(result->type_tag());
         if(typed&&signature.return_type!=ANY_VALUE&&got!=signature.return_type)
             throw std::runtime_error("External function "+function_id_text(id)+
                 " return type mismatch: expected "+type_name(signature.return_type)+", got "+type_name(got));
@@ -882,8 +882,8 @@ public:
     int* destructor_address(){return destructor?&*destructor:nullptr;}
     V execute(E env) override {
         tick(env);auto pointer=run(value,env);
-        if(pointer->type!=ADDRESS_VALUE)throw std::runtime_error("Object pointer requires address type");
-        const auto object_pointer=*static_cast<address*>(pointer->value);
+        if(pointer->type_tag()!=ADDRESS_VALUE)throw std::runtime_error("Object pointer requires address type");
+        const auto object_pointer=pointer->get<address>();
         if(op=="oa")return std::make_shared<variable>(heap::object_address(object_pointer,offset));
         if(op=="ob")heap::register_object(object_pointer,destructor,manual,env,bind_contexts(contexts,env));
         else heap::delete_object(object_pointer,env);
@@ -898,8 +898,8 @@ public:
     explicit member_access_expression(std::shared_ptr<expression> pointer):pointer(std::move(pointer)) {}
     V execute(E env) override {
         tick(env);const auto result=run(pointer,env);
-        if(result->type!=ADDRESS_VALUE)throw std::runtime_error("Object pointer requires address type");
-        return heap::getAt(*static_cast<address*>(result->value));
+        if(result->type_tag()!=ADDRESS_VALUE)throw std::runtime_error("Object pointer requires address type");
+        return heap::getAt(result->get<address>());
     }
 };
 // Literal object storage. The compiler emits these only for its own lowering:
@@ -973,13 +973,13 @@ public:
             }
         }
         auto result=run(value,env);
-        if(!result||result->type!=bound->abi)throw std::runtime_error("Generic value type mismatch");
+        if(!result||result->type_tag()!=bound->abi)throw std::runtime_error("Generic value type mismatch");
         if(opcode==39)return result;
         if(!env->frame)throw std::runtime_error("Return outside function");
-        if(result->type==OBJECT_VALUE)result=blocks::export_result(result,env);
+        if(result->type_tag()==OBJECT_VALUE)result=blocks::export_result(result,env);
         else {
             result=result->deepCopy();
-            if(bound->kind==2)heap::return_object(*static_cast<address*>(result->value),env);
+            if(bound->kind==2)heap::return_object(result->get<address>(),env);
         }
         mark_returned(env,std::move(result));return nil();
     }
@@ -999,7 +999,7 @@ public:
     explicit set_methods_expression(std::shared_ptr<expression> pointer):pointer(std::move(pointer)) {}
     V execute(E env) override {
         tick(env);auto address_value=run(pointer,env);
-        if(address_value->type!=ADDRESS_VALUE)throw std::runtime_error("Virtual method receiver must be address");
+        if(address_value->type_tag()!=ADDRESS_VALUE)throw std::runtime_error("Virtual method receiver must be address");
         bool context_free=true;for(const auto& entry:entries) {
             tick(env);for(const auto& context:entry->contexts)if(!constant_context(context))context_free=false;
         }
@@ -1009,7 +1009,7 @@ public:
             for(const auto& entry:entries)bound->push_back({entry->function_id,bind_contexts(entry->contexts,env)});
             methods=std::move(bound);
         }
-        heap::set_methods(*static_cast<address*>(address_value->value),methods,owner(env));
+        heap::set_methods(address_value->get<address>(),methods,owner(env));
         if(context_free)cached=std::move(methods);
         return nil();
     }
@@ -1024,15 +1024,15 @@ public:
     V execute(E env) override {
         tick(env);std::vector<V> args;args.reserve(arguments.size());
         for(const auto& argument:arguments)args.push_back(blocks::materialize(run(argument,env),env));
-        if(args.empty()||args[0]->type!=ADDRESS_VALUE)throw std::runtime_error("Virtual method receiver must be address");
-        const auto script=owner(env);const auto methods=heap::methods_at(*static_cast<address*>(args[0]->value),script);
+        if(args.empty()||args[0]->type_tag()!=ADDRESS_VALUE)throw std::runtime_error("Virtual method receiver must be address");
+        const auto script=owner(env);const auto methods=heap::methods_at(args[0]->get<address>(),script);
         if(slot>=methods->size())throw std::runtime_error("Virtual method slot is out of range");
         const auto& method=(*methods)[slot];
         auto result=invoke_bound_function(script,method.function_id,env,std::move(args),method.contexts);
         if(!result)throw std::runtime_error("Host function returned a null pointer");
         blocks::adopt_result(result,env);
-        if(return_type!=ANY_VALUE&&result->type!=return_type)
-            throw std::runtime_error(std::string("Virtual method return type mismatch: expected ")+type_name(return_type)+", got "+type_name(result->type));
+        if(return_type!=ANY_VALUE&&result->type_tag()!=return_type)
+            throw std::runtime_error(std::string("Virtual method return type mismatch: expected ")+type_name(return_type)+", got "+type_name(result->type_tag()));
         return result;
     }
 };
@@ -1050,8 +1050,8 @@ public:
         :value(std::move(value)),context(std::move(context)),slot_types(std::move(slot_types)) {}
     V execute(E env) override {
         tick(env);auto result=run(value,env);auto bound=bind_context(context,env);
-        if(!result||result->type!=bound->abi)throw std::runtime_error("Object check failed: value has an incompatible type");
-        if(bound->kind==2)heap::check_object(*static_cast<address*>(result->value),slot_types);
+        if(!result||result->type_tag()!=bound->abi)throw std::runtime_error("Object check failed: value has an incompatible type");
+        if(bound->kind==2)heap::check_object(result->get<address>(),slot_types);
         else if(bound->kind==3||bound->kind==4) {
             auto block=blocks::of(result);
             if(!block||block->state!=slot_block::status::live)throw std::runtime_error("Object check failed: value object has expired");
@@ -1063,7 +1063,7 @@ public:
                    (!slot_types.empty()&&block->slots.size()!=slot_types.size()))
                     throw std::runtime_error("Object check failed: class value width mismatch");
                 for(std::size_t i=0;i<slot_types.size();++i)
-                    if(slot_types[i]!=ANY_VALUE&&(!block->slots[i]||block->slots[i]->type!=slot_types[i]))
+                    if(slot_types[i]!=ANY_VALUE&&(!block->slots[i]||block->slots[i]->type_tag()!=slot_types[i]))
                         throw std::runtime_error("Object check failed: slot "+std::to_string(i)+" has an incompatible type");
             }
         }
@@ -1104,12 +1104,12 @@ public:
 V convert_return(V v,int type) {
     if(type==ANY_VALUE)return v->deepCopy();
     if(type==VOID_VALUE) {
-        if(v->type!=VOID_VALUE) throw std::runtime_error("Void function returned a value");
+        if(v->type_tag()!=VOID_VALUE) throw std::runtime_error("Void function returned a value");
         return v;
     }
-    if(v->type==type) return v->deepCopy();
-    if((v->type==INT_VALUE&&(type==FLOAT_VALUE||type==DOUBLE_VALUE))||
-       (v->type==FLOAT_VALUE&&type==DOUBLE_VALUE)) {
+    if(v->type_tag()==type) return v->deepCopy();
+    if((v->type_tag()==INT_VALUE&&(type==FLOAT_VALUE||type==DOUBLE_VALUE))||
+       (v->type_tag()==FLOAT_VALUE&&type==DOUBLE_VALUE)) {
         double n=number(v);
         if(!std::isfinite(n)) throw std::runtime_error("Non-finite return value");
         if(type==DOUBLE_VALUE) return std::make_shared<variable>(n);
@@ -1119,7 +1119,7 @@ V convert_return(V v,int type) {
             return std::make_shared<variable>(f);
         }
     }
-    throw std::runtime_error("Function return type mismatch: expected "+std::string(type_name(type))+", got "+type_name(v->type));
+    throw std::runtime_error("Function return type mismatch: expected "+std::string(type_name(type))+", got "+type_name(v->type_tag()));
 }
 // Exec records are raw ABD stacks. Views borrow the caller's input only while
 // decoding; the resulting native expression tree owns all retained data.
@@ -2089,12 +2089,12 @@ V returnExpression::execute(E env) {
     tick(env);if(!env->frame) throw std::runtime_error("Return outside function");
     auto value=returnType?run(returnType,env):nil();
     V result;
-    if(value->type==OBJECT_VALUE)result=blocks::export_result(value,env);
+    if(value->type_tag()==OBJECT_VALUE)result=blocks::export_result(value,env);
     else {
         result=value->deepCopy();
         if(object_return) {
-            if(result->type!=ADDRESS_VALUE)throw std::runtime_error("Object return requires address or object type");
-            heap::return_object(*static_cast<address*>(result->value),env);
+            if(result->type_tag()!=ADDRESS_VALUE)throw std::runtime_error("Object return requires address or object type");
+            heap::return_object(result->get<address>(),env);
         }
     }
     mark_returned(env,std::move(result));return nil();
@@ -2159,53 +2159,45 @@ V continueExpression::execute(E env) {
     return nil();
 }
 void variable::clear() noexcept {
-    switch(type) {
-    case INT_VALUE:delete static_cast<int*>(value);break;
-    case ADDRESS_VALUE:delete static_cast<address*>(value);break;
-    case STRING_VALUE:delete static_cast<std::string*>(value);break;
-    case FLOAT_VALUE:delete static_cast<float*>(value);break;
-    case DOUBLE_VALUE:delete static_cast<double*>(value);break;
-    case BOOLEAN_VALUE:delete static_cast<bool*>(value);break;
-    case OBJECT_VALUE: {
-        auto holder=static_cast<std::shared_ptr<slot_block>*>(value);
-        // The owning storage variable ended: its object's address expires.
-        if(*holder&&(*holder)->owner==this)blocks::abandon(*holder);
-        delete holder;break;
-    }
-    }
-    value=nullptr;type=VOID_VALUE;
+    // The owning storage variable ended: its object's address expires. Value
+    // itself only retains a handle; it never owns script cleanup responsibility.
+    if(auto block=value_.object_handle();block&&block->owner==this)blocks::abandon(block);
+    value_=vm::Value{};
 }
 variable::~variable(){clear();}
-#define VALUE_IMPL(T,Tag) \
+void variable::replace_value(vm::Value value) noexcept {
+    // The argument is already a complete snapshot, even when it came from a
+    // field of the object that clear() is about to abandon.
+    clear();value_.swap(value);
+}
+#define VALUE_IMPL(T) \
 variable::variable(T v){setValue(std::move(v));} \
-void variable::setValue(T v){auto p=std::make_unique<T>(std::move(v));clear();value=p.release();type=Tag;}
-VALUE_IMPL(int,INT_VALUE)
-VALUE_IMPL(address,ADDRESS_VALUE)
-VALUE_IMPL(std::string,STRING_VALUE)
-VALUE_IMPL(float,FLOAT_VALUE)
-VALUE_IMPL(double,DOUBLE_VALUE)
-VALUE_IMPL(bool,BOOLEAN_VALUE)
-VALUE_IMPL(std::shared_ptr<slot_block>,OBJECT_VALUE)
+void variable::setValue(T v){replace_value(vm::Value(std::move(v)));}
+VALUE_IMPL(int)
+VALUE_IMPL(address)
+VALUE_IMPL(std::string)
+VALUE_IMPL(float)
+VALUE_IMPL(double)
+VALUE_IMPL(bool)
+VALUE_IMPL(std::shared_ptr<slot_block>)
 #undef VALUE_IMPL
 variable::variable(const char* value){setValue(value);}
 void variable::setValue(const char* value){if(value)setValue(std::string(value));else setValue(nullptr);}
 variable::variable(std::nullptr_t){}
 void variable::setValue(std::nullptr_t){clear();}
-void variable::copy_value(const variable& v) {
-    switch(v.type) {
-    case INT_VALUE:setValue(*static_cast<int*>(v.value));break;
-    case ADDRESS_VALUE:setValue(*static_cast<address*>(v.value));break;
-    case STRING_VALUE:setValue(*static_cast<std::string*>(v.value));break;
-    case FLOAT_VALUE:setValue(*static_cast<float*>(v.value));break;
-    case DOUBLE_VALUE:setValue(*static_cast<double*>(v.value));break;
-    case BOOLEAN_VALUE:setValue(*static_cast<bool*>(v.value));break;
-    case OBJECT_VALUE:setValue(*static_cast<std::shared_ptr<slot_block>*>(v.value));break;
-    case VOID_VALUE:setValue(nullptr);break;
-    default:throw std::runtime_error("Unknown runtime value type");
-    }
+std::shared_ptr<slot_block> variable::object_handle() const noexcept {
+    return value_.object_handle();
 }
-variable::variable(const variable& v):name(v.name){copy_value(v);}
-variable& variable::operator=(const variable& v){if(this!=&v){copy_value(v);name=v.name;}return *this;}
+void variable::swap_storage(variable& other) noexcept {
+    value_.swap(other.value_);
+}
+void variable::copy_value(const variable& v) {
+    replace_value(v.value_);
+}
+variable::variable(const variable& v):name(v.name),value_(v.value_){}
+variable& variable::operator=(const variable& v){
+    if(this!=&v){std::string next_name(v.name);replace_value(v.value_);name.swap(next_name);}return *this;
+}
 void variable::copy_from(V v){if(!v)throw std::invalid_argument("Null variable");if(v.get()!=this)copy_value(*v);}
 V variable::deepCopy(){auto v=std::make_shared<variable>(*this);v->name.clear();return v;}
 environment::~environment() {heap::discard_owned(this);}
@@ -2270,14 +2262,14 @@ template<class T> std::string shortest_number(T value) {
 }
 std::string value_to_string(const V& v) {
     if(!v)throw std::invalid_argument("Null variable");
-    if(v->type==STRING_VALUE)return *static_cast<std::string*>(v->value);
-    if(v->type==BOOLEAN_VALUE)return *static_cast<bool*>(v->value)?"true":"false";
-    if(v->type==VOID_VALUE)return "null";
-    if(v->type==INT_VALUE)return shortest_number(*static_cast<int*>(v->value));
-    if(v->type==ADDRESS_VALUE)return shortest_number(static_cast<address*>(v->value)->value);
-    if(v->type==FLOAT_VALUE)return shortest_number(*static_cast<float*>(v->value));
-    if(v->type==DOUBLE_VALUE)return shortest_number(*static_cast<double*>(v->value));
-    if(v->type==OBJECT_VALUE)throw std::runtime_error("An object value cannot be converted to a string");
+    if(v->type_tag()==STRING_VALUE)return v->get<std::string>();
+    if(v->type_tag()==BOOLEAN_VALUE)return v->get<bool>()?"true":"false";
+    if(v->type_tag()==VOID_VALUE)return "null";
+    if(v->type_tag()==INT_VALUE)return shortest_number(v->get<int>());
+    if(v->type_tag()==ADDRESS_VALUE)return shortest_number(v->get<address>().value);
+    if(v->type_tag()==FLOAT_VALUE)return shortest_number(v->get<float>());
+    if(v->type_tag()==DOUBLE_VALUE)return shortest_number(v->get<double>());
+    if(v->type_tag()==OBJECT_VALUE)throw std::runtime_error("An object value cannot be converted to a string");
     throw std::runtime_error("Unknown runtime value type");
 }
 }

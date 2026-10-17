@@ -1,5 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
-project(AzScript VERSION 0.2.0 LANGUAGES CXX)
+project(AzScript VERSION 0.3.0 LANGUAGES CXX)
+set(AZSCRIPT_RUNTIME_ABI 1)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -41,12 +42,13 @@ install(FILES
     "${CMAKE_CURRENT_BINARY_DIR}/public-headers/azscript/runtime.hpp"
     "${CMAKE_CURRENT_BINARY_DIR}/public-headers/azscript/data.hpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/include/azscript/extern_library.hpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/include/azscript/runtime_abi.hpp"
     DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/azscript")
 configure_package_config_file(cmake/AzScriptConfig.cmake.in
     "${CMAKE_CURRENT_BINARY_DIR}/AzScriptConfig.cmake"
     INSTALL_DESTINATION "${CMAKE_INSTALL_LIBDIR}/cmake/AzScript")
 write_basic_package_version_file("${CMAKE_CURRENT_BINARY_DIR}/AzScriptConfigVersion.cmake"
-    VERSION "${AzScript_VERSION}" COMPATIBILITY SameMajorVersion)
+    VERSION "${AzScript_VERSION}" COMPATIBILITY SameMinorVersion)
 install(EXPORT AzScriptTargets NAMESPACE AzScript::
     DESTINATION "${CMAKE_INSTALL_LIBDIR}/cmake/AzScript")
 install(FILES

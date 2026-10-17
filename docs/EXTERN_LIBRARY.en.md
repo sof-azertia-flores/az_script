@@ -22,7 +22,9 @@ Names may contain directories. `plugins/demo` searches only that directory. A na
 
 The runtime reads the entire library (at most 64 MiB), verifies it against configured public keys, then maps those verified bytes. Linux uses `memfd` or a private file referenced only by its descriptor, preventing path replacement after verification. Loading the same canonical path again returns immediately. Libraries are never unloaded, keeping registered function objects valid.
 
-Plugins may depend on shared `libabdInvoker` (`abdInvoker.dll` on Windows), C/C++ runtimes, and the system loader. The host loads these dependencies before opening plugins, preventing a plugin RPATH from substituting an unsigned dependency. Other dynamic dependencies are rejected.
+Plugins may depend on ABI 1 shared `libabdInvoker-1` (`abdInvoker-1.dll` on Windows), C/C++ runtimes, and the system loader. Its Linux SONAME is `libabdInvoker-1.so.1`; its macOS install name is `libabdInvoker-1.1.dylib`. The host loads these dependencies before opening plugins, preventing a plugin RPATH from substituting an unsigned dependency. Other dynamic dependencies are rejected.
+
+After verifying and mapping the library, the loader reads `azscript_extern_runtime_abi()` and calls the registration entry only if it returns the current runtime ABI (`1`). `AZSCRIPT_EXTERN_ENTRY` defines this export automatically. Missing or mismatched metadata is rejected before `azscript_load_extern`. The handshake changes neither the signature envelope nor exec v10 or JNI snapshot v10. The system loader runs native static initialization while mapping the image; put host registration and business initialization in the registration entry. Rebuild old plugins with current headers and the shared runtime, then sign them again. See [C++ API and ABI migration](RUNTIME_ABI.en.md).
 
 `azscript_load_extern` must call `registerExecutor` before returning. Registration must reach the host process's runtime instance; linking another copy causes failure. Namespace rules match direct hosts: do not occupy `0`, `0xfff`, `0xabd`, or namespaces mounted by active scripts.
 
@@ -65,7 +67,7 @@ public:
     std::shared_ptr<azertian::variable> invoke(
         std::shared_ptr<azertian::environment>,
         std::vector<std::shared_ptr<azertian::variable>> args) override {
-        int value = *static_cast<int*>(args.at(0)->value) + *static_cast<int*>(args.at(1)->value);
+        int value = args.at(0)->get<int>() + args.at(1)->get<int>();
         return std::make_shared<azertian::variable>(value);
     }
 };
@@ -84,7 +86,7 @@ AZSCRIPT_EXTERN_ENTRY {
 }
 ```
 
-Link shared `abdInvoker` (CMake target `AzScript::RuntimeShared`). Static `AzScript::Runtime` has a separate registry which plugin `registerExecutor` calls will not reach. Java JNI already links the shared library.
+Link the ABI 1 shared runtime (`-labdInvoker-1` manually, or `abdInvoker-1.lib` on Windows; the CMake target remains `AzScript::RuntimeShared`). Static `AzScript::Runtime` has a separate registry which plugin `registerExecutor` calls will not reach. Java JNI already links the shared library.
 
 From the distribution root:
 

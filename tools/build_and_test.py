@@ -200,6 +200,12 @@ def main():
             '--libdir', native/'interpreter']
     if jni:extern += ['--bridge', bridge, '--library', native/'abdjni'/libname]
     run(extern)
+    runtime_abi=[sys.executable, ROOT/'tests/runtime_abi_end_to_end.py', '--classpath', classpath,
+                 '--runner', native/'interpreter/azscript-run',
+                 '--signer', native/'interpreter/azscript-sign-extern',
+                 '--libdir', native/'interpreter']
+    if args.sanitize:runtime_abi += ['--sanitize']
+    run(runtime_abi)
     print('Build and all selected tests passed. Use ./azscript --help.')
 
 if __name__=='__main__':

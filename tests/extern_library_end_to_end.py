@@ -16,7 +16,7 @@ public:
     int return_type() override { return azertian::INT_VALUE; }
     std::shared_ptr<azertian::variable> invoke(std::shared_ptr<azertian::environment>,
         std::vector<std::shared_ptr<azertian::variable>> args) override {
-        int value = *static_cast<int*>(args.at(0)->value) + *static_cast<int*>(args.at(1)->value);
+        int value = args.at(0)->get<int>() + args.at(1)->get<int>();
         return std::make_shared<azertian::variable>(value);
     }
 };
