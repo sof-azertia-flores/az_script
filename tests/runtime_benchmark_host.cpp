@@ -19,6 +19,15 @@
 #ifndef AZSCRIPT_BENCHMARK_BUILD_TYPE
 #define AZSCRIPT_BENCHMARK_BUILD_TYPE "unknown"
 #endif
+// Migration-only build of this harness: the experimental VM is selected before
+// the first flush. Without the macro the default tree backend is measured, so
+// frozen runtimes without VM sources still build the identical harness.
+#ifdef AZSCRIPT_BENCHMARK_VM
+#include "../interpreter/vm/session.h"
+#define AZSCRIPT_BENCHMARK_BACKEND "vm"
+#else
+#define AZSCRIPT_BENCHMARK_BACKEND "tree"
+#endif
 
 namespace {
 using Clock = std::chrono::steady_clock;
@@ -140,6 +149,9 @@ int main(int argc, char** argv) {
         phase = "load";
         Start load_start; script = azertian::load_script(bytes.data(), bytes.size()); const auto load_time = load_start.end();
         script->max_steps = steps; script->max_call_depth = depth; script->max_stack_bytes = stack;
+#ifdef AZSCRIPT_BENCHMARK_VM
+        azertian::vm::select_backend(*script, azertian::vm::default_workspace_bytes);
+#endif
         phase = "flush";
         Start flush_start; script->flush(); const auto flush_time = flush_start.end();
         std::vector<std::shared_ptr<azertian::variable>> parameters{std::make_shared<azertian::variable>(argument)};
@@ -171,6 +183,7 @@ int main(int argc, char** argv) {
         Start destroy_start; script->destroy(); script.reset(); const auto destroy_time = destroy_start.end();
         std::cout << std::setprecision(17) << "{\"schema_version\":1,\"ok\":true,\"build_type\":";
         write_quoted(AZSCRIPT_BENCHMARK_BUILD_TYPE);
+        std::cout << ",\"backend\":"; write_quoted(AZSCRIPT_BENCHMARK_BACKEND);
         std::cout << ",\"compiler\":";
 #ifdef __VERSION__
         write_quoted(__VERSION__);

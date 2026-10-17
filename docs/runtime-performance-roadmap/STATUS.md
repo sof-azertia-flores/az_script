@@ -54,6 +54,23 @@ wire op 31（`cleanup`）的 `cleanup_enter/leave/end` 由标量 executor 执行
 
 未完成：`CleanupActions`（析构/工厂/比较器的脚本 continuation）、语句临时量与对象所有权清理需要 R11 对象模型；编译器只在构造/析构包装中生成 cleanup 节点，源码级差分要等对象执行接入后才能覆盖。
 
+## 标量 VM 与树后端的首次 Release 对照
+
+目的：在对象路径接入前，确认寄存器 VM 对循环与调用的方向和量级，用于定位 R17 热点。**不是**计划第 4 节的采用评分：只选 scalar 与 calls 两组（子集不计核心分数），参考是同一 Release 构建中的树后端（隔离后端变化），不是冻结的 heap-growth-only 参考；VM 尚不能运行对象与虚调用组。
+
+方法：`build/runtime-perf/release`（GCC 13.3.0 Release，无 JNI）中的 `runtime-benchmark-host`（tree）与 `runtime-benchmark-vm-host`（vm，默认 128 MiB workspace）；`tools/bench_runtime.py --cases integer_loop,branch_loop,call_0,call_1,call_4,call_16`，参考端校准 250 ms 批次，7 轮 × 5 批、交替顺序的独立进程，期间没有其他编译或测试。全部观察的结果与独立 oracle/校验和一致。原始数据 `build/runtime-perf/vm-vs-tree-release-1/`（不入库）。
+
+| case | tree µs/call | vm µs/call | 中位提速 | 逐轮配对范围 |
+| --- | --- | --- | --- | --- |
+| integer_loop medium / large | 1285.5 / 10435.7 | 732.1 / 5552.8 | 1.86× / 1.91× | 1.41–1.91 / 1.68–2.40 |
+| branch_loop medium / large | 1560.5 / 13171.6 | 793.2 / 6400.5 | 1.95× / 2.01× | 1.11–2.28 / 1.82–2.48 |
+| call_0 medium / large | 1384.8 / 10119.2 | 608.1 / 4618.3 | 2.23× / 2.20× | 2.03–2.76 / 1.95–2.38 |
+| call_1 medium / large | 1884.6 / 15136.2 | 826.3 / 6272.5 | 2.32× / 2.29× | 2.01–2.99 / 2.20–2.97 |
+| call_4 medium / large | 2472.2 / 20583.6 | 1112.4 / 9012.9 | 2.19× / 2.33× | 2.00–2.59 / 1.93–2.46 |
+| call_16 medium / large | 5875.3 / 47034.2 | 2397.5 / 19177.3 | 2.49× / 2.34× | 2.19–2.58 / 1.74–2.56 |
+
+medium/large 几何平均：scalar 1.93×，calls 2.30×；small 规模为 1.98–2.29×。峰值 RSS 两者相同（约 22.4–22.8 MiB 进程高水位，不是 VM 工作区）。large 整数循环仍约 1.36 µs/迭代，说明独立 tick 指令、引用寄存器读取和通用 Value 运算仍有可观成本；按计划这些留给 R17 的受检 fast path，不在此提前改变预算或检查。
+
 ## 环境
 
 每个 shell 激活 `/workspace/azscript-toolchain/activate.sh`。Java 验证清除 `JAVA_TOOL_OPTIONS`、`JDK_JAVA_OPTIONS` 和 `_JAVA_OPTIONS`，避免环境横幅污染有意检查的 stderr。普通和 sanitizer 全量测试顺序运行。性能测量使用独立 Release 构建，并避开其他编译/验证负载。
