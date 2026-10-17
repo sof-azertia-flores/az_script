@@ -2,6 +2,7 @@
 #include "blocks.h"
 #include "heepalloc.h"
 #include "internelFunctions.h"
+#include "vm/session.h"
 #include <charconv>
 #include <algorithm>
 #include <bit>
@@ -125,6 +126,19 @@ void note_script_frame(const ofunction& function,const std::shared_ptr<function_
         note_frame(std::move(result));
     } catch(...) {if(auto state=trace_storage())++state->active.omitted_frames;}
 }
+}
+void vm::record_script_frame(const FunctionRecord& function,std::uint32_t location) noexcept {
+    try {
+        trace_frame result;result.function_id=function.function_id;
+        if(const auto& debug=function.debug) {
+            result.name=debug->name;
+            const auto position=location&&location<=debug->locations.size()?debug->locations[location-1]:debug->header;
+            if(position.line&&position.column&&position.file<debug->files.size()) {
+                result.file=debug->files[position.file];result.line=position.line;result.column=position.column;
+            }
+        }
+        note_frame(std::move(result));
+    } catch(...) {if(auto state=trace_storage())++state->active.omitted_frames;}
 }
 std::string function_id_text(int id) {
     char text[16];std::snprintf(text,sizeof text,"0x%08x",static_cast<unsigned>(static_cast<std::uint32_t>(id)));
@@ -1775,6 +1789,23 @@ std::vector<module_manifest_entry> script::module_manifest() const {
     for(auto& module:modules)result.push_back(module->manifest);
     return result;
 }
+void vm::select_backend(script& owner,std::size_t workspace_limit) {
+    std::lock_guard<std::recursive_mutex> lock(runtime_mutex());
+    if(owner.closed)throw std::runtime_error("Script is closed");
+    if(owner.faulted)throw std::runtime_error("Script initialization failed; close and rebuild the script");
+    if(owner.destroying||owner.initializing||owner.active_calls)
+        throw std::runtime_error("Cannot select a VM backend during script execution");
+    if(owner.setup||std::any_of(owner.modules.begin(),owner.modules.end(),
+            [](const auto& module){return module->manifest.initialized;}))
+        throw std::runtime_error("VM backend must be selected before the first flush");
+    if(!workspace_limit)throw std::invalid_argument("VM workspace limit must be positive");
+    owner.vm_session_=std::make_shared<Session>(owner,workspace_limit);
+}
+vm::WorkspaceUsage vm::workspace_usage(const script& owner) {
+    std::lock_guard<std::recursive_mutex> lock(runtime_mutex());
+    if(!owner.vm_session_)return {};
+    return {owner.vm_session_->workspace_bytes(),owner.vm_session_->workspace_peak_bytes(),owner.vm_session_->workspace_limit()};
+}
 void script::insert_script(const unsigned char* bytes,std::size_t length) {
     entry_scope entry;return entry.run([&]() -> void {
     std::lock_guard<std::recursive_mutex> lock(runtime_mutex());
@@ -1954,8 +1985,46 @@ void script::flush() {
         for(std::size_t i=0;i<groups.size();++i)if(waits[i].erase(current)&&waits[i].empty())ready.emplace(groups[i][0],static_cast<int>(i));
     }
     on_destory.reserve(on_destory.size()+modules.size());
+    std::vector<std::pair<ofunction*,std::uint32_t>> vm_bindings;
+    std::shared_ptr<vm::Session> vm_candidate;
+    if(vm_session_) {
+        // Preparation is the last fallible validation phase. It reads immutable
+        // manifests, so neither tree relocation nor onload can run partially.
+        // Keep the prior session until all binding checks and allocations finish:
+        // destroy() can still run initialized hooks after a failed insertion.
+        vm_candidate=std::make_shared<vm::Session>(*this,vm_session_->workspace_limit());
+        vm_candidate->prepare();
+        const auto& compiled=vm_candidate->compiled();
+        if(compiled.modules.size()!=modules.size())throw std::logic_error("VM module binding differs from validated linkage");
+        const auto bind=[&](const std::shared_ptr<ofunction>& function,std::uint32_t index,bool lifecycle) {
+            if(!function) {
+                if(index!=vm::no_index)throw std::logic_error("VM lifecycle binding differs from validated linkage");
+                return;
+            }
+            if(index>=compiled.program.functions.size())throw std::logic_error("VM function binding is unavailable");
+            const auto& record=compiled.program.functions[index];
+            if(record.function_id!=function->function_id||record.lifecycle!=lifecycle||
+                    record.global_offset!=function->global_offset||record.global_count!=function->global_count||
+                    record.return_type!=function->rett||record.param_types!=function->param_types||
+                    record.hidden_count!=static_cast<std::uint32_t>(function->hidden_count)||record.entry_kind!=function->entry_kind)
+                throw std::logic_error("VM function binding differs from validated linkage");
+            vm_bindings.emplace_back(function.get(),index);
+        };
+        for(std::size_t i=0;i<modules.size();++i) {
+            for(const auto& [original,function]:modules[i]->definitions) {
+                (void)original;
+                const auto found=compiled.public_functions.find(function->function_id);
+                if(found==compiled.public_functions.end())throw std::logic_error("VM public function binding is unavailable");
+                bind(function,found->second,false);
+            }
+            bind(modules[i]->onload,compiled.modules[i].onload,true);
+            bind(modules[i]->pre_destroy,compiled.modules[i].pre_destroy,true);
+        }
+    }
     // Link validation is atomic: no references change and no onload runs before
     // every module has a valid resolution and the complete order is available.
+    for(const auto& [function,index]:vm_bindings)function->vm_function_index_=index;
+    if(vm_candidate)vm_session_.swap(vm_candidate);
     for(auto& [reference,id]:patches){*reference->target=id;reference->original_id=id;}
     for(std::size_t i=0;i<modules.size();++i) {
         modules[i]->extern_signatures.swap(resolved_externs[i]);
@@ -1965,7 +2034,7 @@ void script::flush() {
         if(modules[i]->onload)modules[i]->onload->linked=true;
         if(modules[i]->pre_destroy)modules[i]->pre_destroy->linked=true;
     }
-    extern_signatures.swap(bindings);initializing=true;
+    extern_signatures.swap(bindings);vm_candidate.reset();initializing=true;
     try {
         call_guard guard(baseEnv);
         for(auto index:order) {
@@ -1995,6 +2064,7 @@ void script::destroy() {
         blocks::finalize_storage(baseEnv->variables,baseEnv,true,failure);
     }catch(...){failure.capture_current();}
     heap::discard_script_objects(this);
+    vm_session_.reset();
     closed=true;setup=false;functions.clear();extern_signatures.clear();on_destory.clear();modules.clear();baseEnv.reset();destroying=false;
     if(failure)failure.rethrow();
     });
@@ -2009,6 +2079,7 @@ V ofunction::invoke(E ev,std::vector<V> args) {
 V ofunction::invoke_bound(E ev,std::vector<V> args,type_contexts contexts) {
     entry_scope entry;return entry.run([&]() -> V {
     std::shared_ptr<function_frame> frame;
+    bool vm_trace=false;
     try {
     std::lock_guard<std::recursive_mutex> lock(runtime_mutex());
     auto bound=script_owner.lock();
@@ -2019,6 +2090,15 @@ V ofunction::invoke_bound(E ev,std::vector<V> args,type_contexts contexts) {
     validate_type_contexts(contexts,bound);
     call_guard guard(ev);
     validate_arguments("Script function",function_id,param_types,args,true);
+    if(bound->vm_session_) {
+        if(vm_function_index_==vm::no_index)throw std::logic_error("VM function has not been linked");
+        vm::ExecutionPosition position;
+        // Session owns every VM frame, including the entry frame and failures
+        // while importing globals or reserving arguments. Do not append a
+        // duplicate tree frame when it propagates the original exception.
+        vm_trace=true;
+        return bound->vm_session_->invoke(vm_function_index_,args,&position);
+    }
     auto env=std::make_shared<environment>();
     env->script=guard.s;env->parent=guard.s->baseEnv;env->caller=ev;env->frame_root=true;
     env->frame=std::make_shared<function_frame>();
@@ -2043,7 +2123,7 @@ V ofunction::invoke_bound(E ev,std::vector<V> args,type_contexts contexts) {
         env->frame->location=env->frame->return_location;
         return convert_return(env->frame->result,rett);
     });
-    } catch(...) {note_script_frame(*this,frame);throw;}
+    } catch(...) {if(!vm_trace)note_script_frame(*this,frame);throw;}
     });
 }
 V complex_expression::execute_body(E env) {

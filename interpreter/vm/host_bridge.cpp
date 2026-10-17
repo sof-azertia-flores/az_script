@@ -1,0 +1,76 @@
+#include "host_bridge.h"
+#include "session.h"
+#include "workspace.h"
+#include "../library.h"
+#include <algorithm>
+#include <stdexcept>
+
+namespace azertian::vm {
+namespace {
+void require_scalar_host_target(int function_id) {
+    const auto id=static_cast<std::uint32_t>(function_id);
+    if((id>>16)!=0x0abdu)return;
+    const auto local=id&0xffffu;
+    if((local>=2&&local<=8)||local==0x14)
+        throw std::invalid_argument("Scalar VM does not support allocation, reflection or plugin-loading builtins");
+}
+}
+void require_scalar_host_targets(const ExecutableProgram& program) {
+    for(const auto& target:program.targets) {
+        if(target.kind!=TargetKind::script&&(target.hidden_count||target.entry_kind))
+            throw std::invalid_argument("Scalar VM does not support generic or object host call contexts");
+        if(target.kind==TargetKind::script)continue;
+        require_scalar_host_target(target.function_id);
+        if(target.return_type==OBJECT_VALUE||
+                std::find(target.param_types.begin(),target.param_types.end(),OBJECT_VALUE)!=target.param_types.end())
+            throw std::invalid_argument("Scalar VM does not support object callback signatures");
+    }
+}
+Value HostBridge::invoke_external(const CallTarget& target,std::span<const Value> arguments,
+        const ExecutionPosition& caller,std::size_t lexical_depth) {
+    require_scalar_host_target(target.function_id);
+    if(caller.function>=program_.functions.size()||lexical_depth<2)
+        throw std::logic_error("VM host boundary has an invalid caller");
+    boundary_.publish_globals(owner_);
+    // Host wrappers are boundary objects only. No variable or environment is
+    // created by the VM's ordinary arithmetic or script-to-script CALL path.
+    std::vector<std::shared_ptr<variable>> host_arguments;
+    host_arguments.reserve(arguments.size());
+    for(const auto& value:arguments) {
+        auto argument=std::make_shared<variable>();HostValueAccess::assign(*argument,value);
+        host_arguments.push_back(std::move(argument));
+    }
+    const auto& function=program_.functions[caller.function];
+    auto frame=std::make_shared<function_frame>();
+    frame->global_offset=function.global_offset;frame->global_count=function.global_count;
+    frame->location=caller.location;frame->return_location=caller.return_location;
+    WorkspaceVector<std::shared_ptr<environment>> scopes(boundary_.workspace());
+    scopes.reserve(lexical_depth-1);
+    auto parent=owner_.baseEnv;
+    for(std::size_t depth=1;depth<lexical_depth;++depth) {
+        auto scope=std::make_shared<environment>();scope->script=owner_.weak_from_this();
+        scope->parent=parent;scope->frame=frame;scope->frame_root=depth==1;
+        scopes.emplace_back(scope);parent=std::move(scope);
+    }
+    std::shared_ptr<variable> result;
+    pending_error failure;
+    try {
+        auto resolved=owner_.getFunction(target.function_id);
+        if(std::dynamic_pointer_cast<ofunction>(resolved))
+            throw std::logic_error("VM external target unexpectedly resolved to script code");
+        result=resolved->invoke(scopes.back(),std::move(host_arguments));
+    } catch(...) {failure.capture_current();}
+    try {boundary_.refresh_globals(owner_);}catch(...) {failure.capture_current();}
+    if(failure)failure.rethrow();
+    if(!result)throw std::runtime_error("VM host callback returned a null value");
+    if(result->type_tag()==OBJECT_VALUE)
+        throw std::invalid_argument("Scalar VM does not support object callback results");
+    return HostValueAccess::read(*result);
+}
+void HostBridge::note_script_error(const ExecutionPosition& position) noexcept {
+    if(position.function<program_.functions.size()) {
+        record_script_frame(program_.functions[position.function],position.location);
+        reported_=true;
+    }
+}
+}

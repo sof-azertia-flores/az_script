@@ -21,6 +21,13 @@ inline constexpr std::size_t MAX_VARIABLE_SLOTS=1048576;
 // The only exec format the loader reads; ExecCodec.VERSION in the compiler matches it.
 inline constexpr int EXEC_FORMAT_VERSION=10;
 class expression; class function; class environment; class variable; class script; struct loaded_module;
+namespace vm {
+class Session;
+struct HostValueAccess;
+struct WorkspaceUsage;
+void select_backend(script& owner,std::size_t workspace_limit);
+WorkspaceUsage workspace_usage(const script& owner);
+}
 struct slot_block; struct function_frame;
 struct type_context;
 using type_contexts=std::vector<std::shared_ptr<const type_context>>;
@@ -143,7 +150,13 @@ public:
     // bypass setup, fault, or destruction state.
     void require_execution() const;
 private:
+    friend class ofunction;
+    friend void vm::select_backend(script& owner,std::size_t workspace_limit);
+    friend vm::WorkspaceUsage vm::workspace_usage(const script& owner);
     std::vector<std::shared_ptr<loaded_module>> modules;
+    // Internal migration selection. Public consumers need no VM implementation
+    // headers, and the session does not retain shared ownership of its script.
+    std::shared_ptr<vm::Session> vm_session_;
     bool initializing=false;
 };
 class function {
@@ -176,6 +189,9 @@ public:
     std::shared_ptr<variable> invoke_bound(std::shared_ptr<environment> env,
         std::vector<std::shared_ptr<variable>> arguments,type_contexts contexts);
     std::shared_ptr<expression> code;
+private:
+    friend class script;
+    std::uint32_t vm_function_index_=UINT32_MAX;
 };
 class expression {
 public:
@@ -304,6 +320,7 @@ public:
     void setValue(std::nullptr_t value);
     void setValue(std::shared_ptr<slot_block> value);
 private:
+    friend struct vm::HostValueAccess;
     vm::Value value_;
     void clear() noexcept;
     void replace_value(vm::Value value) noexcept;
