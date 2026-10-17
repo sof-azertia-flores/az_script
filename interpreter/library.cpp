@@ -1878,6 +1878,11 @@ void script::flush() {
     if(faulted)throw std::runtime_error("Script initialization failed; close and rebuild the script");
     if(destroying||initializing||active_calls)throw std::runtime_error("Cannot flush during script execution");
     if(setup)return;
+    // Migration acceptance only: run every host (CLI, C++ hosts, JNI) on the
+    // experimental VM without changing them. Production keeps the tree default.
+    if(!vm_session_&&std::none_of(modules.begin(),modules.end(),[](const auto& module){return module->manifest.initialized;}))
+        if(const char* forced=std::getenv("AZSCRIPT_EXPERIMENTAL_VM_BACKEND");forced&&std::string_view(forced)=="1")
+            vm_session_=std::make_shared<vm::Session>(*this,vm::default_workspace_bytes);
     std::map<std::string,std::size_t> hints;
     for(std::size_t i=0;i<modules.size();++i)if(!modules[i]->manifest.hint.empty())hints.emplace(modules[i]->manifest.hint,i);
     std::map<int,std::size_t> function_modules;
@@ -2097,7 +2102,7 @@ V ofunction::invoke_bound(E ev,std::vector<V> args,type_contexts contexts) {
         // while importing globals or reserving arguments. Do not append a
         // duplicate tree frame when it propagates the original exception.
         vm_trace=true;
-        return bound->vm_session_->invoke(vm_function_index_,args,&position);
+        return bound->vm_session_->invoke(vm_function_index_,args,&position,ev);
     }
     auto env=std::make_shared<environment>();
     env->script=guard.s;env->parent=guard.s->baseEnv;env->caller=ev;env->frame_root=true;

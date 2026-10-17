@@ -30,10 +30,10 @@ R block(std::initializer_list<R> values){return op(1,{raw(values)});}
 R returned(R value){return op(7,{boolean(true),std::move(value)});}
 R slot(int index){return op(3,{integer(index)});}
 R store(int index,int value){return op(5,{integer(index),constant(value)});}
-R function(int id,int type,R body,std::initializer_list<int> params={},bool debug=false,int locals=0,int entry=0) {
+R function(int id,int type,R body,std::initializer_list<int> params={},bool debug=false,int locals=0,int entry=0,int hidden=0) {
     AbdStack types;for(int type:params)types.vs.push_back(integer(type));
     AbdStack fields;fields.vs={integer(id),integer(type),integer(static_cast<int>(params.size())),integer(locals),
-        types.toAbdValue(),body,integer(0),integer(entry),boolean(debug)};
+        types.toAbdValue(),body,integer(hidden),integer(entry),boolean(debug)};
     if(debug)fields.vs.push_back(raw({text("session_case"),integer(0),integer(10),integer(3),
         raw({integer(0),integer(0),integer(41),integer(2)})}));
     return fields.toAbdValue();
@@ -114,7 +114,7 @@ void preflight_and_selection() {
     host_program.targets[0].entry_kind=0;host_program.targets[0].return_type=OBJECT_VALUE;
     rejects([&]{vm::require_scalar_host_targets(host_program);},"object callback signatures");
     auto source=module({hook(0,block({store(-1,99)})),
-        function(10,VOID_VALUE,block({op(32,{integer(1)})}))},1);
+        function(10,VOID_VALUE,block({op(41,{integer(0),constant(1),raw({})})}))},1);
     auto script=load(source);script->baseEnv->variables[0]->setValue(3);
     rejects([&]{vm::select_backend(*script,0);},"workspace limit must be positive");
     vm::select_backend(*script,workspace);
@@ -126,15 +126,15 @@ void preflight_and_selection() {
         "preflight failure published tree relocation");
     script->destroy();
 
-    // A non-lifecycle internal entry (constructor/destructor/factory shape)
-    // is still refused while preparing, before onload changes the global.
+    // A generic function (hidden contexts) is still refused while preparing,
+    // before onload changes the global.
     script=load(module({hook(0,block({store(-1,99)})),
-        function(10,VOID_VALUE,block({constant(1)}),{ADDRESS_VALUE},false,0,1)},1));
+        function(10,VOID_VALUE,block({constant(1)}),{ADDRESS_VALUE},false,0,0,1)},1));
     script->baseEnv->variables[0]->setValue(3);
     vm::select_backend(*script,workspace);
     rejects([&]{script->flush();},"generic or object function contexts");
     check(script->baseEnv->variables[0]->get<int>()==3&&!script->setup&&!script->faulted,
-        "internal object entry refusal ran onload or partially initialized the module");
+        "generic function refusal ran onload or partially initialized the module");
     script->destroy();
 
     script=load(module({hook(0,block({store(-1,8)})),
@@ -172,7 +172,7 @@ void teardown_with_unprepared_insert() {
             hook(1,block({store(-1,99)}))},1));
         vm::select_backend(*script,workspace);script->flush();
         auto retained=script->baseEnv->variables[0];
-        insert(script,module({function(20,VOID_VALUE,block({op(32,{integer(1)})}))},1));
+        insert(script,module({function(20,VOID_VALUE,block({op(41,{integer(0),constant(1),raw({})})}))},1));
         if(attempt_flush)rejects([&]{script->flush();},"VM backend does not support");
         script->destroy();
         check(retained->get<int>()==99,"pending insertion prevented an initialized module's pre_destroy");

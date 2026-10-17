@@ -13,6 +13,8 @@ struct CleanupWatermark {
     ScopeId scope;
     std::size_t scopes=0,temporaries=0,actions=0;
     std::uint32_t statements=0,loops=0;
+    // Object frames: scope/statement ownership records to unwind.
+    std::size_t controls=0;
 };
 struct CleanupTransition {
     enum class Kind { unwind,finalizer,resume } kind=Kind::resume;

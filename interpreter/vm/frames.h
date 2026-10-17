@@ -75,6 +75,12 @@ struct FrameRecord {
     std::uint32_t loop_depth=0,statement_depth=0;
     std::uint32_t node=0,location=0,return_location=0;
     bool returned=false,broken=false,continued=false;
+    // A virtual call checks its declared result type in the caller after the
+    // callee frame has returned, as the tree executor does.
+    bool check_return=false;
+    int checked_return_type=VOID_VALUE;
+    // Index of the executor's object-frame ownership records, if any.
+    std::uint32_t object=no_index;
     Value result;
     CallDepthAccounting::Admission admission;
     FrameRecord() noexcept=default;

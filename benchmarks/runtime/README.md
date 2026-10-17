@@ -92,12 +92,11 @@ for the benchmark `--host`, not the ordinary `azscript-run` CLI.
 `runtime-benchmark-vm-host` is the same harness compiled with
 `AZSCRIPT_BENCHMARK_VM`: it selects the experimental register VM with the
 default 128 MiB workspace before the first flush. Every host reports its
-`backend` (`tree` or `vm`). The VM still refuses object, generic and virtual
-programs while preparing, so only the scalar and call groups run on it; pair it
-with `runtime-benchmark-host` from the same Release build and select
-`--cases integer_loop,branch_loop,call_0,call_1,call_4,call_16`. A subset never
-earns the core score, and such a comparison isolates the backend change, not
-the cumulative change against a frozen reference.
+`backend` (`tree` or `vm`). All four core groups run on it; generic, buffer,
+reflection and plugin programs are still refused while preparing. Pair it with
+`runtime-benchmark-host` from the same Release build: such a comparison
+isolates the backend change, not the cumulative change against a frozen
+reference, so it is not the roadmap's adoption comparison either.
 
 ## Timing boundaries and artifacts
 

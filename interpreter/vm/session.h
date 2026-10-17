@@ -6,7 +6,7 @@
 #include <memory>
 #include <span>
 
-namespace azertian {class script; class variable;}
+namespace azertian {class environment; class script; class variable;}
 
 namespace azertian::vm {
 // Internal migration entry point. Selection precedes the first flush, and an
@@ -40,8 +40,11 @@ public:
     // preserves the previous prepared program and host globals.
     void prepare();
     const CompiledScript& compiled() const;
+    // caller is the scope invoking the function; object frames return object
+    // results and transfer ownership into it, as the tree executor does.
     std::shared_ptr<variable> invoke(std::uint32_t function,
-        std::span<const std::shared_ptr<variable>> arguments,ExecutionPosition* position);
+        std::span<const std::shared_ptr<variable>> arguments,ExecutionPosition* position,
+        const std::shared_ptr<environment>& caller);
     std::size_t workspace_bytes() const noexcept;
     std::size_t workspace_peak_bytes() const noexcept;
     std::size_t workspace_limit() const noexcept{return workspace_limit_;}

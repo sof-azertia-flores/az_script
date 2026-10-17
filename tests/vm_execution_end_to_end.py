@@ -87,7 +87,7 @@ def main():
     parser.add_argument('--candidate-library', type=Path)
     parser.add_argument('--candidate-revision', default='unspecified')
     parser.add_argument('--candidate-arg', action='append', default=[], help='extra host argument; use = for leading --')
-    parser.add_argument('--stage', choices=['scalar', 'calls', 'all'], default='all')
+    parser.add_argument('--stage', choices=['scalar', 'calls', 'objects', 'all'], default='all')
     parser.add_argument('--only', help='select fixture names containing this text during collection')
     parser.add_argument('--work', type=Path, help='new directory, retained on success and failure')
     parser.add_argument('--budget-max', type=int, default=1024, help='positive sweep cap; incomplete sweeps fail')

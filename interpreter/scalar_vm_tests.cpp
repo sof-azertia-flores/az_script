@@ -356,18 +356,23 @@ void call_cases() {
     differential("dynamic-call-after-side-effect",function(call(0x76540001,{store(-1,literal(8))})),{Value(0)});
 }
 void refusal_and_resources() {
-    auto source=function(block({store(-1,literal(99)),op(32)}));
-    // A valid object opcode is rejected while preparing, before the first store.
-    const_cast<SourceExpression&>(*source.body->children[1]).immediate=1;
+    // A valid buffer opcode is rejected while preparing, before the first store.
+    auto source=function(block({store(-1,literal(99)),op(41,{literal(1)})}));
     const auto unsupported=lower_program(SourceProgram{{source},{}});
     WorkspaceBudget budget(1024*1024);SlotPool pool(budget);
     auto global=pool.emplace(Value(0));bool rejected=false;
     try{ScalarExecutor executor(unsupported,pool,budget);}catch(const std::invalid_argument&){rejected=true;}
     check(rejected&&pool.resolve(global).get<int>()==0,"unsupported opcode reached execution");
+    // An owned return makes an object frame. It is admitted while preparing,
+    // but entering it needs the script's ownership records.
     auto owned=lower_program(SourceProgram{{function(op(8,{literal(address{0})}),ADDRESS_VALUE)},{}});
     rejected=false;
-    try{ScalarExecutor executor(owned,pool,budget);}catch(const std::invalid_argument& error){rejected=std::string(error.what()).find("owned returns")!=std::string::npos;}
-    check(rejected,"owned return was admitted by scalar backend");
+    {
+        ScalarExecutor executor(owned,pool,budget);std::uint64_t steps=10;
+        try{executor.invoke(0,{},std::array{global},steps);}
+        catch(const std::invalid_argument& error){rejected=std::string(error.what()).find("object host")!=std::string::npos;}
+    }
+    check(rejected&&pool.resolve(global).get<int>()==0,"object frame ran without ownership records");
     pool.retire(global);
 
     const auto scalar=lower_program(SourceProgram{{function(block({define(0,literal(5)),returned(slot(0))}),INT_VALUE,1)},{}});

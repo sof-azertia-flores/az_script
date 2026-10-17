@@ -13,7 +13,8 @@
 | R06–R08 | 标量 VM 已接入构建并通过定向及独立进程差分 | VM 源码与 9 个定向测试、2 个 host 已加入 CMake；见下文“恢复后的集成”。R06 的生产 `blocks/heepalloc` 身份迁移仍未开始 |
 | R09 | 标量 CALL/宿主桥/Session 通过；默认 workspace 定为 128 MiB | 37 案例 / 825 对独立进程观察（冻结 `019c440` 参考及同构建树后端）全部字段一致；workspace 边界见 [STORAGE_DESIGN.md](STORAGE_DESIGN.md) 第 9 节。宿主可配置项待 VM 成为宿主可选后端时加入 |
 | R10 | 编译器 cleanup 节点已接入标量执行循环 | 见下文“R10 编译器清理接入”。CleanupActions 析构 continuation、语句临时量仍依赖 R11 对象模型 |
-| R11–R28 | 尚未完成 | 按依赖顺序执行 |
+| R11 | R11a 完成：非泛型对象、heap、继承、虚调用由 VM 执行；析构仍经新调用根重入 | 见下文“R11a 对象帧”。continuation 化析构与身份迁移（R11b）未开始，不能标为 R11 完成 |
+| R12–R28 | 尚未完成 | 按依赖顺序执行；泛型、buffer、反射、插件在 VM 准备阶段明确拒绝 |
 
 ## 暂停与交接
 
@@ -89,10 +90,47 @@ callgrind 显示新增指令几乎全部来自 `vm::Value` 内部 `std::variant`
 - `python3 tools/build_and_test.py --offline --sanitize`：退出 0（`build/full-sanitize-2.log`），ASan/UBSan、无 JNI，VM 差分同样 825/825。两次顺序运行，共用 `build/java/`。
 - 这是 R02/R04/R05 改动首次在完整 sanitizer 下通过，但验证对象是当前分支源码，不是冻结的 `r05-source/`。未运行：发行导出搬迁（`tools/export_distribution.py`）以及按冻结 heap-growth-only 参考的正式性能采样。
 
+## R11a 后的四组 Release 对照
+
+同一方法（同一 Release 构建的树后端作参考、参考端校准 250 ms、7 轮 × 5 批交替独立进程、无其他负载），对象与虚调用组现在也由 VM 执行，因此四组都能计分；它仍不是计划的 heap-growth-only 采用评分。原始数据 `build/runtime-perf/vm-vs-tree-release-3/`。
+
+| 组（medium/large 几何平均） | VM / 树 |
+| --- | --- |
+| scalar | 2.44× |
+| calls | 2.60× |
+| objects | 1.30× |
+| virtual | 1.49× |
+| 核心分数（四组各 25%） | 1.87× |
+
+scalar 与 calls 的每一轮配对比值都大于 1.4；objects/virtual 的个别配对低于 1（最低 0.83），对象帧仍使用树运行时的 variable、environment 与 shared_ptr 记录，是 R17 的主要热点。
+
+过程中发现并修复的回退：首次接入对象帧后（`vm-vs-tree-release-2`），VM 的标量/调用比值降到 1.61×/1.86×，与 `50bd4f8` 的同机 A/B 显示 VM 自身慢约 10–15%（寄存器增加 variable 引用后，每次写寄存器先清空再赋值两次）。改为只在原寄存器是引用时清空，并给 `Value` 拷贝/移动赋值增加“两侧都不含引用计数取值”时的直接复制路径后，同一 A/B 中 VM 比 `50bd4f8` 快约 20–30%。该 `Value` 路径也被树执行器使用。
+
+## R11a 对象帧
+
+设计：对象 payload 仍是 `slot_block`，heap 对象仍在 `heap::`。准备阶段把含对象 opcode、对象签名、heap 内建（alloc/object_alloc/mem_free/make_free/mem_send_up/mem_get）、owned return 或内部对象入口调用（构造、析构、工厂）的函数，以及**静态调用图上它们的全部调用者**归为对象帧：`ro` 与 `mem_send_up` 把所有权转入调用者作用域，`mem_free` 沿调用者链查找所有者，所以调用者也需要作用域记录。纯标量函数保留原快速路径。
+
+对象帧使用树运行时自身的所有权记录：每帧一个 `function_frame`（局部在 `slots` 中、语句临时量），每个 VM 作用域一个 `environment`（parent 为外层作用域，函数根的 caller 为调用点作用域）。寄存器增加第三种引用：树运行时 variable（对象局部、字段、heap 槽，含 `mem_get` 结果）。各 opcode 按树执行器的同一顺序调用 `blocks::`/`heap::` 帮助函数（store、materialize、export_result、move_out、drop、register/delete、set_methods），因此复制、移动、借用、owned return、析构顺序、构造失败回滚与地址失效都与树执行器共享实现。普通 CALL 和虚调用仍在同一 dispatch 循环中压入显式帧；虚调用按方法表的函数 ID 选择 VM 函数，并在调用者中检查声明的返回类型。
+
+错误路径：对象帧离开时先保存在途错误，按内到外结束语句临时量和作用域（可能运行析构），恢复 trace 后再报告本帧，与 `invoke_bound` 的 with_cleanup 顺序一致；cleanup 区域恢复时先由区域捕获首错，再结束正文内的作用域和临时量。
+
+尚未 continuation 化：`blocks::`/`heap::` 帮助函数内部的析构仍通过 `invoke_bound_function` 进入新的 Session 调用根（受原生栈保护和逻辑调用深度约束），这不满足计划中 R10/R11 “析构使用 continuation、不递归”的终态，记为 R11b。为此这些帮助函数被 Session 的运行时括号包围：嵌套调用开始时才发布外层 VM 的 global，嵌套调用发生过才在之后重新导入（共享槽已含脚本写入，重新导入用于恢复宿主侧变化与本调用最终发布）。对象帧的所有权记录由树运行时分配，**尚未计入 VM workspace**。
+
+仍明确拒绝（准备阶段，不回退）：隐藏上下文的泛型函数/调用/析构/方法、context/buffer/value_compare/check_object 指令、`load_extern_library`、`reflect_invoke_function`、对象签名的宿主回调。手写 wire 才能出现的两处新增差异：对象值写入 global 或标量帧槽会以 `invalid_argument` 拒绝（树执行器会复制进 global）；宿主回调返回对象值被拒绝。
+
+迁移验收入口：`AZSCRIPT_EXPERIMENTAL_VM_BACKEND=1` 时 `script::flush()` 在首次初始化前选择 VM（默认 workspace），覆盖 CLI、C++ 宿主与 JNI；仅用于迁移验收，生产默认仍为树执行器。`tools/vm_suite_triage.py` 用包装 runner 先以 VM 运行各端到端套件，只有 VM 在准备阶段明确拒绝时才对该次调用改用树后端并记录。
+
+验证（Debug）：
+
+- 独立进程差分新增 20 个 `objects` 阶段源码夹具（作用域析构顺序、值复制、返回移动、临时实参、复制实参、手动 heap 对象、继承构造/析构顺序、字段构造失败回滚、作用域退出析构失败、首错保留、虚调用及交替 receiver、循环 break 的对象、原始 heap 作用域/所有权上送/释放、局部方法、析构读写 global、析构中宿主重入）。全部 57 个案例 2310/2310 对进程观察逐字段一致（含逐预算扫描、heap 槽、对象登记、方法表数、析构事件），ASan/UBSan 下重放同样通过。去掉嵌套调用前发布或之后重新导入两种故意错误实现都被夹具识别。
+- 强制 VM 直接运行（含真实 JNI）：math、end_to_end、classes、literal objects、loops、address、numeric slots、hint linking 套件全部通过。
+- `vm_suite_triage.py`（无 JNI）：全部 19 个套件退出 0；1151 次调用由 VM 执行并满足套件预期，214 次因泛型/buffer/反射/插件被拒绝后改用树后端。ASan 构建下对象相关套件同样全部通过、无 sanitizer 报告。
+- 普通与 ASan/UBSan 构建的 ctest 全部通过。
+
 ## 下一步
 
-1. R11：VM 对象模型（heap、类值、自动/手动对象、字段、借用、复制、owned-return、析构及构造失败回滚），析构等脚本调用使用 `CleanupActions` continuation，不递归进入 C++ invoke。旧实现所有权依赖 `blocks.cpp`/`heepalloc.cpp` 中的 `shared_ptr<variable>`、`slot_block::owner/owner_env/temp_frame` 和 environment 的 owned 列表，需先按 [STORAGE_DESIGN.md](STORAGE_DESIGN.md) 第 3 节完成 R06b/c 身份桥。
-2. 之后按计划进行 R12–R16，R16 前不切换默认后端；R17 处理上文 Release 对照显示的 tick、引用寄存器和通用运算开销。
+1. R11b：析构、工厂、placement 等帮助函数内的脚本调用改为 `CleanupActions` continuation，并按 [STORAGE_DESIGN.md](STORAGE_DESIGN.md) 第 3 节迁移 owner/owner_env/temp_frame 身份；对象帧的所有权记录计入 workspace。
+2. R12 起接入泛型上下文、buffer、比较器与反射，使 triage 中的拒绝数降为 0；R16 前不切换默认后端。R17 处理对象帧仍沿用树运行时记录带来的开销。
 3. 宿主可配置的 VM workspace 上限（C++ 及 Java getter/setter）与 VM 成为宿主可选后端同时加入。
 
 ## 环境

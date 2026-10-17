@@ -1,15 +1,24 @@
 #include "execution.h"
 #include "cleanup.h"
 #include "operations.h"
+#include "session.h"
+#include "../blocks.h"
+#include "../heepalloc.h"
 #include <algorithm>
 #include <array>
 #include <bit>
 #include <cstdio>
+#include <deque>
 #include <limits>
 #include <stdexcept>
+#include <unordered_map>
 #include <utility>
 
 namespace azertian::vm {
+std::shared_ptr<variable> ExecutionCallbacks::invoke_external_in(const CallTarget&,std::span<const Value>,
+        const ExecutionPosition&,const std::shared_ptr<environment>&) {
+    throw std::invalid_argument("Scalar VM object frames require an object host");
+}
 namespace {
 constexpr std::array supported{
     Opcode::tick,Opcode::constant,Opcode::load_slot,Opcode::check_declaration,
@@ -19,7 +28,10 @@ constexpr std::array supported{
     Opcode::scope_enter,Opcode::scope_leave,Opcode::statement_enter,Opcode::statement_leave,
     Opcode::loop_enter,Opcode::loop_next,Opcode::loop_leave,Opcode::set_break,
     Opcode::set_continue,Opcode::call,Opcode::set_return,Opcode::function_end,
-    Opcode::cleanup_enter,Opcode::cleanup_leave,Opcode::cleanup_end
+    Opcode::cleanup_enter,Opcode::cleanup_leave,Opcode::cleanup_end,
+    Opcode::member_get,Opcode::object_address,Opcode::object_register,Opcode::object_delete,
+    Opcode::new_block,Opcode::block_address,Opcode::move_out,Opcode::drop,
+    Opcode::check_method_receiver,Opcode::set_methods,Opcode::call_virtual
 };
 
 std::string function_text(int id) {
@@ -30,14 +42,34 @@ void require_scalar_value(const Value& value) {
     if(value.type_tag()==OBJECT_VALUE)
         throw std::invalid_argument("Scalar VM does not support object values");
 }
+bool object_signature(int return_type,const std::vector<int>& params) {
+    return return_type==OBJECT_VALUE||std::find(params.begin(),params.end(),OBJECT_VALUE)!=params.end();
+}
+// Raw allocation and ownership builtins act on the caller's scope records.
+bool heap_builtin(int id) {
+    const auto bits=static_cast<std::uint32_t>(id);
+    if((bits>>16)!=0x0abdu)return false;
+    const auto local=bits&0xffffu;
+    return (local>=2&&local<=6)||local==0x14;
+}
+bool object_opcode(Opcode opcode) {
+    switch(opcode) {
+    case Opcode::member_get:case Opcode::object_address:case Opcode::object_register:
+    case Opcode::object_delete:case Opcode::new_block:case Opcode::block_address:
+    case Opcode::move_out:case Opcode::drop:case Opcode::check_method_receiver:
+    case Opcode::set_methods:case Opcode::call_virtual:return true;
+    default:return false;
+    }
+}
 template<class Argument> void validate_arguments(const FunctionRecord& function,
-        std::size_t count,Argument argument) {
+        std::size_t count,Argument argument,bool objects) {
     const auto& expected=function.param_types;
     if(count!=expected.size())
         throw std::runtime_error("Script function "+function_text(function.function_id)+" argument count mismatch: expected "+
             std::to_string(expected.size())+", got "+std::to_string(count));
     for(std::size_t i=0;i<count;++i) {
-        const auto& value=argument(i);require_scalar_value(value);
+        const auto& value=argument(i);
+        if(!objects)require_scalar_value(value);
         const auto got=value.type_tag();
         if(expected[i]!=got&&expected[i]!=ANY_VALUE)
             throw std::runtime_error("Script function "+function_text(function.function_id)+" argument "+std::to_string(i+1)+
@@ -47,6 +79,9 @@ template<class Argument> void validate_arguments(const FunctionRecord& function,
 ExecutionPosition position_of(const FrameRecord& frame) noexcept {
     return {frame.function,frame.node,frame.location,frame.return_location,
         frame.pc==no_index?no_index:frame.pc-1};
+}
+std::shared_ptr<variable> wrap(const Value& value) {
+    auto result=std::make_shared<variable>();HostValueAccess::assign(*result,value);return result;
 }
 }
 
@@ -60,11 +95,23 @@ struct ScalarExecutor::State {
         SlotId slot;
         std::uint32_t references=0,next=no_index;
     };
+    // A reference names a global SlotId, a scalar local cell, or (in object
+    // frames) a tree-runtime variable: an object local, field or heap slot.
     struct RegisterValue {
         Value value;
         SlotId global;
+        std::shared_ptr<variable> host;
         std::uint32_t cell=no_index;
         bool reference=false;
+    };
+    // Ownership records of one object frame. They are the tree runtime's own
+    // structures, so blocks/heap ownership, temporaries and scope cleanup keep
+    // their exact semantics. Locals live in frame->slots.
+    struct Control {bool scope=false;std::size_t temporaries=0;};
+    struct ObjectFrame {
+        std::shared_ptr<function_frame> frame;
+        std::vector<std::shared_ptr<environment>> scopes; // [0] is the function root.
+        std::vector<Control> controls;                    // Innermost last.
     };
     const ExecutableProgram& program;
     SlotPool& pool;
@@ -78,6 +125,12 @@ struct ScalarExecutor::State {
     // innermost last. Each frame reserves its own bound before publication,
     // so entering a region and recovering from a failure never allocate.
     CompilerCleanupStack regions;
+    // Stack-ordered with the object frames on FrameStack. A deque keeps the
+    // records in place while reentrant roots push and pop above them.
+    std::deque<ObjectFrame> object_frames;
+    std::vector<bool> object_function;
+    std::unordered_map<int,std::uint32_t> script_functions;
+    std::vector<std::vector<std::shared_ptr<const method_table>>> method_tables;
     std::uint32_t free_cell=no_index;
 
     State(const ExecutableProgram& source,SlotPool& storage,WorkspaceBudget& budget)
@@ -86,32 +139,55 @@ struct ScalarExecutor::State {
         verify_program(program);
         require_capabilities(program,scalar_capabilities());
         for(const auto& constant:program.constants)require_scalar_value(constant);
-        layouts.reserve(program.functions.size());
-        for(std::uint32_t index=0;index<program.functions.size();++index) {
+        const auto count=program.functions.size();
+        object_function.assign(count,false);method_tables.resize(count);
+        for(const auto& target:program.targets)
+            if(target.kind==TargetKind::script)script_functions.emplace(target.function_id,target.function);
+        // A function that uses objects, raw heap ownership or an internal
+        // object entry runs as an object frame. So does every static caller:
+        // ownership moves to the caller's scope (ro, mem_send_up) and mem_free
+        // searches the caller chain, so those frames need scope records too.
+        std::vector<std::vector<std::uint32_t>> callers(count);
+        for(std::uint32_t index=0;index<count;++index) {
             const auto& function=program.functions[index];
-            // Lifecycle hooks are internal entries but have no contexts or
-            // object signature. Constructors, destructors and factories remain
-            // internal object entries until the object VM supports them.
-            if(function.hidden_count||function.bound_context_count||(function.entry_kind&&!function.lifecycle))
+            if(function.hidden_count||function.bound_context_count)
                 throw std::invalid_argument("Scalar VM does not support generic or object function contexts");
-            if(function.return_type==OBJECT_VALUE||
-                    std::find(function.param_types.begin(),function.param_types.end(),OBJECT_VALUE)!=function.param_types.end())
-                throw std::invalid_argument("Scalar VM does not support object function signatures");
-            layouts.emplace_back(frame_layout(program,index));
+            bool objects=(function.entry_kind&&!function.lifecycle)||object_signature(function.return_type,function.param_types);
             for(auto pc=function.begin;pc<function.end;++pc) {
                 const auto& instruction=program.instructions[pc];
-                if(instruction.opcode==Opcode::set_return&&instruction.operand!=0)
-                    throw std::invalid_argument("Scalar VM does not support owned returns");
+                if(object_opcode(instruction.opcode)||(instruction.opcode==Opcode::set_return&&instruction.operand!=0))objects=true;
+                if(instruction.opcode==Opcode::object_register&&!function.operations[instruction.operand].contexts.empty())
+                    throw std::invalid_argument("Scalar VM does not support generic object destructors");
+                if(instruction.opcode==Opcode::set_methods)
+                    for(const auto& method:function.operations[instruction.operand].methods)
+                        if(!method.contexts.empty())throw std::invalid_argument("Scalar VM does not support generic virtual methods");
                 if(instruction.opcode==Opcode::call) {
                     const auto& operation=function.operations[instruction.operand];
                     const auto& target=program.targets[*operation.target];
-                    if(target.hidden_count||target.entry_kind||!operation.contexts.empty())
+                    if(target.hidden_count||!operation.contexts.empty())
                         throw std::invalid_argument("Scalar VM does not support generic or object call contexts");
-                    if(target.return_type==OBJECT_VALUE||
-                            std::find(target.param_types.begin(),target.param_types.end(),OBJECT_VALUE)!=target.param_types.end())
-                        throw std::invalid_argument("Scalar VM does not support object call signatures");
+                    if(object_signature(target.return_type,target.param_types))objects=true;
+                    if(target.kind==TargetKind::script) {
+                        if(target.entry_kind)objects=true;
+                        callers[target.function].push_back(index);
+                    } else if(heap_builtin(target.function_id))objects=true;
                 }
             }
+            object_function[index]=objects;
+        }
+        std::vector<std::uint32_t> work;
+        for(std::uint32_t index=0;index<count;++index)if(object_function[index])work.push_back(index);
+        while(!work.empty()) {
+            const auto callee=work.back();work.pop_back();
+            for(const auto caller:callers[callee])if(!object_function[caller]){object_function[caller]=true;work.push_back(caller);}
+        }
+        layouts.reserve(count);
+        for(std::uint32_t index=0;index<count;++index) {
+            auto layout=frame_layout(program,index);
+            // Object frames keep locals in their tree-runtime function frame.
+            if(object_function[index])layout.locals=0;
+            layouts.emplace_back(layout);
+            method_tables[index].resize(program.functions[index].operations.size());
         }
     }
     void release(std::uint32_t cell) noexcept {
@@ -120,17 +196,26 @@ struct ScalarExecutor::State {
         if(!pool.retire(binding.slot))std::terminate();
         binding.slot={};binding.next=free_cell;free_cell=cell;
     }
+    // Invariant: a value register has an empty global, cell and host.
+    void drop_reference(RegisterValue& reg) noexcept {
+        if(reg.cell!=no_index)release(reg.cell);
+        reg.host.reset();reg.global={};reg.cell=no_index;reg.reference=false;
+    }
     void clear(RegisterValue& reg) noexcept {
-        if(reg.reference&&reg.cell!=no_index)release(reg.cell);
-        reg.value=Value{};reg.global={};reg.cell=no_index;reg.reference=false;
+        if(reg.reference)drop_reference(reg);
+        reg.value=Value{};
     }
     const Value& read(const FrameRecord& frame,Register index) const {
         const auto& reg=registers[frame.registers.begin+index];
         if(!reg.reference)return reg.value;
-        return pool.resolve(reg.cell==no_index?reg.global:cells[reg.cell].slot);
+        if(reg.cell!=no_index)return pool.resolve(cells[reg.cell].slot);
+        if(reg.host)return HostValueAccess::read(*reg.host);
+        return pool.resolve(reg.global);
     }
     void value(const FrameRecord& frame,Register destination,Value next) noexcept {
-        auto& reg=registers[frame.registers.begin+destination];clear(reg);reg.value=std::move(next);
+        auto& reg=registers[frame.registers.begin+destination];
+        if(reg.reference)drop_reference(reg);
+        reg.value=std::move(next);
     }
     void reference(const FrameRecord& frame,Register destination,SlotId global,std::uint32_t cell) noexcept {
         // Retain before clearing: copy_reference may overwrite its own input.
@@ -138,10 +223,22 @@ struct ScalarExecutor::State {
         auto& reg=registers[frame.registers.begin+destination];clear(reg);
         reg.reference=true;reg.global=global;reg.cell=cell;
     }
+    void reference(const FrameRecord& frame,Register destination,std::shared_ptr<variable> host) noexcept {
+        auto& reg=registers[frame.registers.begin+destination];clear(reg);
+        reg.reference=true;reg.host=std::move(host);
+    }
     void copy(const FrameRecord& frame,Register destination,Register source) noexcept {
         const auto& reg=registers[frame.registers.begin+source];
-        if(reg.reference)reference(frame,destination,reg.global,reg.cell);
+        if(reg.reference&&reg.host)reference(frame,destination,std::shared_ptr<variable>(reg.host));
+        else if(reg.reference)reference(frame,destination,reg.global,reg.cell);
         else value(frame,destination,reg.value);
+    }
+    // The tree-runtime view of an operand: a referenced variable keeps its
+    // identity (store compares storage), anything else becomes a fresh handle.
+    std::shared_ptr<variable> variable_of(const FrameRecord& frame,Register index) const {
+        const auto& reg=registers[frame.registers.begin+index];
+        if(reg.reference&&reg.host)return reg.host;
+        return wrap(read(frame,index));
     }
     std::uint32_t allocate(Value initial) {
         if(free_cell==no_index) {
@@ -160,22 +257,52 @@ struct ScalarExecutor::State {
     std::uint32_t& local(const FrameRecord& frame,std::size_t index) noexcept {
         return locals[frame.locals.begin+index];
     }
-    void check_declaration(const FrameRecord& frame,int index,const FunctionRecord& function) const {
+    ObjectFrame& objects(const FrameRecord& frame) {return object_frames[frame.object];}
+    const std::shared_ptr<environment>& scope_of(const FrameRecord& frame) {return objects(frame).scopes.back();}
+    static ObjectHost& host_of(const ExecutionOptions& options) {
+        auto* host=options.callbacks?options.callbacks->objects():nullptr;
+        if(!host)throw std::invalid_argument("Scalar VM object frames require a script object host");
+        return *host;
+    }
+    // Brackets tree-runtime helpers that may run destructors (script code).
+    template<class Body> void runtime(const ExecutionOptions& options,Body body) {
+        auto& host=host_of(options);const auto mark=host.enter_runtime();
+        try{body();}catch(...){try{host.leave_runtime(mark);}catch(...){}throw;}
+        host.leave_runtime(mark);
+    }
+    void check_declaration(const FrameRecord& frame,int index,const FunctionRecord& function) {
+        if(frame.object!=no_index) {
+            const auto& slots=objects(frame).frame->slots;
+            if(index<0||static_cast<std::size_t>(index)<function.param_types.size()||static_cast<std::size_t>(index)>=slots.size())
+                throw std::runtime_error("Invalid local variable declaration: "+std::to_string(index));
+            if(slots[static_cast<std::size_t>(index)])throw std::runtime_error("Duplicate variable slot: "+std::to_string(index));
+            return;
+        }
         if(index<0||static_cast<std::size_t>(index)<function.param_types.size()||
                 static_cast<std::size_t>(index)>=frame.locals.count)
             throw std::runtime_error("Invalid local variable declaration: "+std::to_string(index));
         if(locals[frame.locals.begin+static_cast<std::size_t>(index)]!=no_index)
             throw std::runtime_error("Duplicate variable slot: "+std::to_string(index));
     }
+    SlotId global_slot(int index,const FunctionRecord& function,std::span<const SlotId> globals) const {
+        const auto relative=static_cast<std::uint64_t>(-static_cast<std::int64_t>(index)-1);
+        if(relative>=function.global_count||function.global_offset>globals.size()||
+                relative>=globals.size()-function.global_offset)
+            throw std::runtime_error("Global variable slot is outside its module: "+std::to_string(index));
+        return globals[function.global_offset+static_cast<std::size_t>(relative)];
+    }
+    std::shared_ptr<variable> object_local(const FrameRecord& frame,int index) {
+        const auto& slots=objects(frame).frame->slots;
+        if(static_cast<std::size_t>(index)>=slots.size())
+            throw std::runtime_error("Local variable slot is outside its function: "+std::to_string(index));
+        auto result=slots[static_cast<std::size_t>(index)];
+        if(!result)throw std::runtime_error("Variable slot is not declared in this scope: "+std::to_string(index));
+        return result;
+    }
     void load(const FrameRecord& frame,Register destination,int index,
             const FunctionRecord& function,std::span<const SlotId> globals) {
-        if(index<0) {
-            const auto relative=static_cast<std::uint64_t>(-static_cast<std::int64_t>(index)-1);
-            if(relative>=function.global_count||function.global_offset>globals.size()||
-                    relative>=globals.size()-function.global_offset)
-                throw std::runtime_error("Global variable slot is outside its module: "+std::to_string(index));
-            reference(frame,destination,globals[function.global_offset+static_cast<std::size_t>(relative)],no_index);return;
-        }
+        if(index<0) {reference(frame,destination,global_slot(index,function,globals),no_index);return;}
+        if(frame.object!=no_index){reference(frame,destination,object_local(frame,index));return;}
         if(static_cast<std::size_t>(index)>=frame.locals.count)
             throw std::runtime_error("Local variable slot is outside its function: "+std::to_string(index));
         const auto cell=local(frame,static_cast<std::size_t>(index));
@@ -183,9 +310,20 @@ struct ScalarExecutor::State {
             throw std::runtime_error("Variable slot is not declared in this scope: "+std::to_string(index));
         reference(frame,destination,{},cell);
     }
-    void store(const FrameRecord& frame,Register destination,Register target,Value next) {
+    void store(const FrameRecord& frame,Register destination,Register target,Register source,const ExecutionOptions& options) {
         auto& reg=registers[frame.registers.begin+target];
         if(!reg.reference)throw std::logic_error("Scalar VM store target is not a slot reference");
+        if(reg.host) {
+            // Assignment can copy, replace or finalize objects (destructors).
+            auto storage=reg.host;auto value=variable_of(frame,source);
+            if(value->type_tag()==OBJECT_VALUE||storage->type_tag()==OBJECT_VALUE)
+                runtime(options,[&]{blocks::store(storage,value,scope_of(frame));});
+            else blocks::store(storage,value,scope_of(frame));
+            this->value(frame,destination,HostValueAccess::read(*storage));return;
+        }
+        Value next=read(frame,source);
+        if(next.type_tag()==OBJECT_VALUE)
+            throw std::invalid_argument("Scalar VM global and scalar local storage cannot hold an object value");
         pool.resolve(reg.cell==no_index?reg.global:cells[reg.cell].slot)=next;
         value(frame,destination,std::move(next));
     }
@@ -196,20 +334,53 @@ struct ScalarExecutor::State {
             release(local(frame,index));local(frame,index)=no_index;
         }
     }
+    // Called inside an active catch block while an error unwinds an object
+    // frame: statement temporaries and scopes above mark end innermost first,
+    // and the root scope too when the frame is leaving. Cleanup errors after
+    // the in-flight one are discarded; its trace is restored afterwards.
+    void unwind_objects(FrameRecord& frame,std::size_t mark,bool whole,const ExecutionOptions& options) noexcept {
+        auto* host=options.callbacks?options.callbacks->objects():nullptr;
+        auto& record=objects(frame);
+        pending_error failure;failure.capture_current();
+        const auto runtime_mark=host?host->enter_runtime():0;
+        while(record.controls.size()>mark) {
+            const auto control=record.controls.back();record.controls.pop_back();
+            try {
+                if(control.scope) {
+                    auto scope=std::move(record.scopes.back());record.scopes.pop_back();
+                    scope->cleanup(scope);
+                } else blocks::finalize_temporaries(*record.frame,control.temporaries,record.scopes.back());
+            } catch(...) {failure.capture_current();}
+        }
+        if(whole)try{auto root=record.scopes.front();root->cleanup(root);}catch(...){failure.capture_current();}
+        if(host)try{host->leave_runtime(runtime_mark);}catch(...){failure.capture_current();}
+        try{failure.rethrow();}catch(...){}
+    }
     void cleanup(FrameRecord& frame) noexcept {
         for(std::size_t i=0;i<frame.registers.count;++i)clear(registers[frame.registers.begin+i]);
         for(std::size_t i=0;i<frame.locals.count;++i)if(local(frame,i)!=no_index)release(local(frame,i));
         registers.truncate(frame.registers.begin);locals.truncate(frame.locals.begin);
         declared.truncate(frame.declared.begin);scopes.truncate(frame.scope_marks.begin);
+        if(frame.object!=no_index) {
+            // Normal and error exits have already run every scope cleanup.
+            if(frame.object+1!=object_frames.size())std::terminate();
+            object_frames.pop_back();frame.object=no_index;
+        }
+    }
+    std::shared_ptr<environment> calling_scope(FrameId caller,const ExecutionOptions& options) {
+        if(!caller)return options.caller;
+        auto& record=frames.resolve(caller);
+        return record.object==no_index?nullptr:scope_of(record);
     }
     template<class Argument> void enter(std::uint32_t index,std::size_t count,Argument argument,
-            FrameId caller,Register destination,ExecutionPosition& position,ExecutionOptions options,bool admit) {
+            FrameId caller,Register destination,ExecutionPosition& position,const ExecutionOptions& options,bool admit) {
         const ExecutionPosition entry{index,0,0,0,no_index};
         try {
             FrameRecord frame;frame.function=index;frame.caller=caller;frame.return_register=destination;
             if(admit&&options.calls)frame.admission=options.calls->enter();
             const auto& function=program.functions[index];
-            validate_arguments(function,count,argument);
+            const bool objects=object_function[index];
+            validate_arguments(function,count,argument,objects);
             const auto layout=layouts[index];
             frame.pc=function.begin;
             frame.registers={registers.size(),layout.registers};frame.locals={locals.size(),layout.locals};
@@ -219,6 +390,31 @@ struct ScalarExecutor::State {
             registers.prepare_append(layout.registers);locals.prepare_append(layout.locals);
             declared.prepare_append(layout.locals);scopes.prepare_append(layout.scope_marks);
             regions.prepare(layout.cleanups);
+            if(objects) {
+                // Same order as the tree executor: parameters are stored from
+                // the calling scope, then bound to the new function root.
+                auto& host=host_of(options);
+                const auto calling=calling_scope(caller,options);
+                if(!calling)throw std::logic_error("Scalar VM object frame has no calling scope");
+                const auto owner=host.owner();
+                ObjectFrame record;record.frame=std::make_shared<function_frame>();
+                auto& tree=*record.frame;
+                tree.global_offset=function.global_offset;tree.global_count=function.global_count;tree.param_count=count;
+                tree.slots.resize(function.param_types.size()+static_cast<std::size_t>(function.local_count));
+                auto root=std::make_shared<environment>();
+                root->script=owner;root->parent=owner->baseEnv;root->caller=calling;root->frame_root=true;root->frame=record.frame;
+                record.scopes.push_back(root);
+                for(std::size_t i=0;i<count;++i) {
+                    auto storage=std::make_shared<variable>();auto value=wrap(argument(i));
+                    if(value->type_tag()==OBJECT_VALUE)runtime(options,[&]{blocks::store(storage,value,calling);});
+                    else blocks::store(storage,value,calling);
+                    tree.slots[i]=storage;blocks::bind_local(storage,root);
+                }
+                registers.append_default(layout.registers);scopes.append_default(layout.scope_marks);
+                object_frames.push_back(std::move(record));frame.object=static_cast<std::uint32_t>(object_frames.size()-1);
+                try{frames.push(std::move(frame));}catch(...){cleanup(frame);throw;}
+                return;
+            }
             registers.append_default(layout.registers);locals.append_default(layout.locals);
             declared.append_default(layout.locals);scopes.append_default(layout.scope_marks);
             for(std::size_t i=0;i<layout.locals;++i)local(frame,i)=no_index;
@@ -231,6 +427,20 @@ struct ScalarExecutor::State {
             if(options.callbacks)options.callbacks->note_script_error(entry);
             throw;
         }
+    }
+    std::shared_ptr<const method_table> methods(std::uint32_t function,std::uint32_t operand) {
+        auto& cached=method_tables[function][operand];
+        if(!cached) {
+            const auto& operation=program.functions[function].operations[operand];
+            auto table=std::make_shared<method_table>();table->reserve(operation.methods.size());
+            for(const auto& method:operation.methods)table->push_back({program.targets[method.target].function_id,{}});
+            cached=std::move(table);
+        }
+        return cached;
+    }
+    static address pointer(const Value& value,const char* message) {
+        if(value.type_tag()!=ADDRESS_VALUE)throw std::runtime_error(message);
+        return value.get<address>();
     }
     Value invoke(std::uint32_t index,std::span<const Value> arguments,std::span<const SlotId> globals,
             std::uint64_t& steps,ExecutionPosition& position,ExecutionOptions options) {
@@ -267,6 +477,20 @@ struct ScalarExecutor::State {
                 case Opcode::check_declaration:check_declaration(frame,std::bit_cast<int>(instruction.operand),function);break;
                 case Opcode::declare_slot: {
                     const auto slot=instruction.operand;
+                    if(frame.object!=no_index) {
+                        auto storage=std::make_shared<variable>();
+                        const auto& scope=scope_of(frame);
+                        if(instruction.left!=no_index) {
+                            auto initial=variable_of(frame,instruction.left);
+                            if(initial->type_tag()==OBJECT_VALUE)runtime(options,[&]{blocks::store(storage,initial,scope);});
+                            else blocks::store(storage,initial,scope);
+                        }
+                        // A hand-written initializer may have declared this
+                        // slot meanwhile; the tree executor replaces it too.
+                        scope->declared_slots.push_back(slot);
+                        objects(frame).frame->slots[slot]=storage;blocks::bind_local(storage,scope);
+                        break;
+                    }
                     // A hand-written initializer may declare this slot after
                     // the outer declaration's check; replace its storage then.
                     Value initial=instruction.left==no_index?Value{}:read(frame,instruction.left);
@@ -275,8 +499,17 @@ struct ScalarExecutor::State {
                     else declared[frame.declared.begin+frame.declared_count++]=slot;
                     local(frame,slot)=cell;break;
                 }
-                case Opcode::store:store(frame,instruction.result,instruction.left,read(frame,instruction.right));break;
-                case Opcode::snapshot:case Opcode::materialize:value(frame,instruction.result,read(frame,instruction.left));break;
+                case Opcode::store:store(frame,instruction.result,instruction.left,instruction.right,options);break;
+                case Opcode::snapshot:value(frame,instruction.result,read(frame,instruction.left));break;
+                case Opcode::materialize: {
+                    // Arguments snapshot an owned object before the next one
+                    // can change it; scalars are plain value copies.
+                    const auto& current=read(frame,instruction.left);
+                    if(frame.object==no_index||current.type_tag()!=OBJECT_VALUE){value(frame,instruction.result,current);break;}
+                    auto source=variable_of(frame,instruction.left);std::shared_ptr<variable> result;
+                    runtime(options,[&]{result=blocks::materialize(source,scope_of(frame));});
+                    value(frame,instruction.result,HostValueAccess::read(*result));break;
+                }
                 case Opcode::copy_reference:copy(frame,instruction.result,instruction.left);break;
                 case Opcode::truth:value(frame,instruction.result,Value(vm::truth(read(frame,instruction.left))));break;
                 case Opcode::unary:value(frame,instruction.result,vm::unary(static_cast<UnaryOperation>(instruction.operand),read(frame,instruction.left)));break;
@@ -288,10 +521,38 @@ struct ScalarExecutor::State {
                 case Opcode::branch_returned:if(frame.returned)frame.pc=instruction.target;break;
                 case Opcode::scope_enter:
                     if(frame.scope_count==frame.scope_marks.count)throw std::logic_error("Scalar VM scope capacity exceeded");
+                    if(frame.object!=no_index) {
+                        auto& record=objects(frame);
+                        record.controls.reserve(record.controls.size()+1);
+                        auto scope=std::make_shared<environment>();
+                        scope->parent=record.scopes.back();scope->script=record.scopes.back()->script;scope->frame=record.frame;
+                        record.scopes.push_back(std::move(scope));record.controls.push_back({true,0});
+                    }
                     scopes[frame.scope_marks.begin+frame.scope_count++]=static_cast<std::uint32_t>(frame.declared_count);break;
-                case Opcode::scope_leave:leave_scope(frame);break;
-                case Opcode::statement_enter:++frame.statement_depth;break;
-                case Opcode::statement_leave:--frame.statement_depth;break;
+                case Opcode::scope_leave:
+                    leave_scope(frame);
+                    if(frame.object!=no_index) {
+                        auto& record=objects(frame);
+                        if(record.controls.empty()||!record.controls.back().scope)throw std::logic_error("Scalar VM object scope records are unbalanced");
+                        record.controls.pop_back();
+                        auto scope=std::move(record.scopes.back());record.scopes.pop_back();
+                        runtime(options,[&]{scope->cleanup(scope);});
+                    }
+                    break;
+                case Opcode::statement_enter:
+                    ++frame.statement_depth;
+                    if(frame.object!=no_index){auto& record=objects(frame);record.controls.push_back({false,record.frame->temporaries.size()});}
+                    break;
+                case Opcode::statement_leave:
+                    --frame.statement_depth;
+                    if(frame.object!=no_index) {
+                        auto& record=objects(frame);
+                        if(record.controls.empty()||record.controls.back().scope)throw std::logic_error("Scalar VM object statement records are unbalanced");
+                        const auto mark=record.controls.back().temporaries;record.controls.pop_back();
+                        if(record.frame->temporaries.size()>mark)
+                            runtime(options,[&]{blocks::finalize_temporaries(*record.frame,mark,record.scopes.back());});
+                    }
+                    break;
                 case Opcode::loop_enter:++frame.loop_depth;break;
                 case Opcode::loop_leave:--frame.loop_depth;break;
                 case Opcode::loop_next:
@@ -318,16 +579,45 @@ struct ScalarExecutor::State {
                         WorkspaceVector<Value> snapshots(workspace);
                         snapshots.reserve(operation.arguments.size());
                         for(const auto argument:operation.arguments)snapshots.emplace_back(read(frame,argument));
+                        if(frame.object!=no_index) {
+                            // The result is the returned variable itself, as in
+                            // the tree executor; mem_get yields a heap slot.
+                            const auto scope=scope_of(frame);
+                            auto output=options.callbacks->invoke_external_in(target,snapshots.span(),position,scope);
+                            blocks::adopt_result(output,scope);
+                            reference(frame,instruction.result,std::move(output));
+                            break;
+                        }
                         const auto output=options.callbacks->invoke_external(target,snapshots.span(),position,2+frame.scope_count);
                         require_scalar_value(output);value(frame,instruction.result,output);
                     }
                     break;
                 }
-                case Opcode::set_return:
-                    frame.result=read(frame,instruction.left);frame.returned=true;frame.return_location=frame.location;break;
+                case Opcode::set_return: {
+                    if(frame.object==no_index) {
+                        frame.result=read(frame,instruction.left);frame.returned=true;frame.return_location=frame.location;break;
+                    }
+                    // Object results leave the frame now: a local moves to the
+                    // caller, anything else is copied into its temporaries.
+                    const auto& scope=scope_of(frame);
+                    auto source=variable_of(frame,instruction.left);Value result;
+                    if(source->type_tag()==OBJECT_VALUE) {
+                        std::shared_ptr<variable> exported;
+                        runtime(options,[&]{exported=blocks::export_result(source,scope);});
+                        result=HostValueAccess::read(*exported);
+                    } else {
+                        result=HostValueAccess::read(*source);
+                        if(instruction.operand) {
+                            if(result.type_tag()!=ADDRESS_VALUE)throw std::runtime_error("Object return requires address or object type");
+                            heap::return_object(result.get<address>(),scope);
+                        }
+                    }
+                    frame.result=std::move(result);frame.returned=true;frame.return_location=frame.location;break;
+                }
                 case Opcode::cleanup_enter:
                     regions.enter(frames.top_id(),function.cleanups[instruction.operand],
-                        CleanupWatermark{{},frame.scope_count,0,0,frame.statement_depth,frame.loop_depth});break;
+                        CleanupWatermark{{},frame.scope_count,0,0,frame.statement_depth,frame.loop_depth,
+                            frame.object==no_index?0:objects(frame).controls.size()});break;
                 case Opcode::cleanup_leave: {
                     const auto id=frames.top_id();regions.body_finished(id);
                     auto next=regions.unwound(id,frame);frame.pc=next.pc;
@@ -342,13 +632,94 @@ struct ScalarExecutor::State {
                     if(next.failure){position=next.position;next.failure.rethrow();}
                     break;
                 }
+                case Opcode::new_block: {
+                    auto block=blocks::create(static_cast<std::size_t>(std::bit_cast<int>(instruction.operand)),host_of(options).owner());
+                    blocks::adopt_temporary(block,objects(frame).frame.get());
+                    value(frame,instruction.result,Value(std::move(block)));break;
+                }
+                case Opcode::block_address: {
+                    const auto block=read(frame,instruction.left).object_handle();
+                    if(!block||block->buffer)throw std::runtime_error("Object address requires a class value");
+                    value(frame,instruction.result,Value(blocks::address_of(block)));break;
+                }
+                case Opcode::object_address: {
+                    const auto object=pointer(read(frame,instruction.left),"Object pointer requires address type");
+                    value(frame,instruction.result,Value(heap::object_address(object,std::bit_cast<int>(instruction.operand))));break;
+                }
+                case Opcode::member_get:
+                    reference(frame,instruction.result,heap::getAt(pointer(read(frame,instruction.left),"Object pointer requires address type")));break;
+                case Opcode::object_register: {
+                    const auto object=pointer(read(frame,instruction.left),"Object pointer requires address type");
+                    const auto& operation=function.operations[instruction.operand];
+                    std::optional<int> destructor;
+                    if(operation.target)destructor=program.targets[*operation.target].function_id;
+                    heap::register_object(object,destructor,operation.manual,scope_of(frame));
+                    value(frame,instruction.result,Value{});break;
+                }
+                case Opcode::object_delete: {
+                    const auto object=pointer(read(frame,instruction.left),"Object pointer requires address type");
+                    runtime(options,[&]{heap::delete_object(object,scope_of(frame));});
+                    value(frame,instruction.result,Value{});break;
+                }
+                case Opcode::move_out: {
+                    const auto slot=std::bit_cast<int>(instruction.operand);
+                    if(slot<0){value(frame,instruction.result,pool.resolve(global_slot(slot,function,globals)));break;}
+                    auto moved=blocks::move_out(object_local(frame,slot),scope_of(frame));
+                    value(frame,instruction.result,HostValueAccess::read(*moved));break;
+                }
+                case Opcode::drop: {
+                    // Only object storage can own a value; globals never do.
+                    auto& target=registers[frame.registers.begin+instruction.left];
+                    if(target.reference&&target.host) {
+                        auto storage=target.host;
+                        runtime(options,[&]{blocks::drop(storage,scope_of(frame));});
+                    }
+                    value(frame,instruction.result,Value{});break;
+                }
+                case Opcode::check_method_receiver:
+                    pointer(read(frame,instruction.left),"Virtual method receiver must be address");break;
+                case Opcode::set_methods:
+                    heap::set_methods(pointer(read(frame,instruction.left),"Virtual method receiver must be address"),
+                        methods(frame.function,instruction.operand),host_of(options).owner());
+                    value(frame,instruction.result,Value{});break;
+                case Opcode::call_virtual: {
+                    const auto& operation=function.operations[instruction.operand];
+                    if(operation.arguments.empty())throw std::runtime_error("Virtual method receiver must be address");
+                    const auto receiver=pointer(read(frame,operation.arguments[0]),"Virtual method receiver must be address");
+                    const auto table=heap::methods_at(receiver,host_of(options).owner());
+                    const auto slot=static_cast<std::size_t>(static_cast<std::uint32_t>(operation.immediate));
+                    if(slot>=table->size())throw std::runtime_error("Virtual method slot is out of range");
+                    const auto& method=(*table)[slot];
+                    if(!method.contexts.empty())throw std::invalid_argument("Scalar VM does not support generic virtual methods");
+                    const auto found=script_functions.find(method.function_id);
+                    if(found==script_functions.end())throw std::runtime_error("Unknown function id: "+function_text(method.function_id));
+                    enter(found->second,operation.arguments.size(),
+                        [&](std::size_t i)->const Value&{return read(frame,operation.arguments[i]);},
+                        frames.top_id(),instruction.result,position,options,true);
+                    auto& callee=frames.top();callee.check_return=true;callee.checked_return_type=operation.return_type;
+                    break;
+                }
                 case Opcode::function_end: {
                     frame.location=frame.return_location;position=position_of(frame);
                     auto output=vm::convert_return(frame.result,function.return_type);
+                    if(frame.object!=no_index) {
+                        // The root scope ends after return conversion, as the
+                        // tree executor's with_cleanup does.
+                        const auto root=objects(frame).scopes.front();
+                        runtime(options,[&]{root->cleanup(root);});
+                    }
                     const auto caller=frame.caller;const auto destination=frame.return_register;
+                    const bool check=frame.check_return;const int expected=frame.checked_return_type;
                     cleanup(frame);frames.pop();
                     if(!caller)return output;
-                    value(frames.resolve(caller),destination,std::move(output));break;
+                    auto& resumed_frame=frames.resolve(caller);
+                    if(resumed_frame.object!=no_index&&output.type_tag()==OBJECT_VALUE)
+                        blocks::adopt_result(wrap(output),scope_of(resumed_frame));
+                    const auto got=output.type_tag();
+                    value(resumed_frame,destination,std::move(output));
+                    if(check&&expected!=ANY_VALUE&&got!=expected)
+                        throw std::runtime_error(std::string("Virtual method return type mismatch: expected ")+type_name(expected)+", got "+type_name(got));
+                    break;
                 }
                 default:throw std::logic_error("Unsupported instruction reached the scalar VM");
                 }
@@ -364,12 +735,16 @@ struct ScalarExecutor::State {
             throw;
         }
     }
+    // A frame leaving with an error first ends its object scopes (which may
+    // run destructors), then reports its trace position, as invoke_bound does.
+    void unwind_frame(const ExecutionOptions& options) noexcept {
+        auto& frame=frames.top();
+        if(frame.object!=no_index)unwind_objects(frame,0,true,options);
+        if(options.callbacks)options.callbacks->note_script_error(position_of(frame));
+        cleanup(frame);frames.pop();
+    }
     void unwind_frames(std::size_t mark,const ExecutionOptions& options) noexcept {
-        while(frames.size()>mark) {
-            auto& frame=frames.top();
-            if(options.callbacks)options.callbacks->note_script_error(position_of(frame));
-            cleanup(frame);frames.pop();
-        }
+        while(frames.size()>mark)unwind_frame(options);
     }
     // Called inside the active catch block. Frames above the innermost active
     // region of this invocation root report their trace and release storage as
@@ -378,14 +753,13 @@ struct ScalarExecutor::State {
             const ExecutionOptions& options,pending_error& resumed) {
         if(regions.size()<=region_mark)return false;
         const auto owner=regions.owner();
-        while(frames.size()>mark&&frames.top_id()!=owner) {
-            auto& frame=frames.top();
-            if(options.callbacks)options.callbacks->note_script_error(position_of(frame));
-            cleanup(frame);frames.pop();
-        }
+        while(frames.size()>mark&&frames.top_id()!=owner)unwind_frame(options);
         if(frames.top_id()!=owner)throw std::logic_error("Scalar VM cleanup region lost its frame");
         auto& frame=frames.top();
         const auto failure=regions.failed(owner,frame,&position);
+        // The region now holds the first error; scopes and statements inside
+        // its body end before the finalizer runs.
+        if(frame.object!=no_index)unwind_objects(frame,failure.watermark.controls,false,options);
         while(frame.scope_count>failure.watermark.scopes)leave_scope(frame);
         frame.statement_depth=failure.watermark.statements;frame.loop_depth=failure.watermark.loops;
         auto next=regions.unwound(owner,frame);frame.pc=next.pc;

@@ -32,7 +32,12 @@ struct Session::Prepared final:HostBoundary {
     WorkspaceVector<SlotId> next_globals;
     ScalarExecutor executor;
     std::size_t active_invocations=0,minimum_globals=0;
-    bool export_allowed=false;
+    // Counts invocation starts; a runtime helper refreshes globals only if a
+    // nested invocation (a destructor) started while it ran. Nested roots
+    // share these slots, so script writes are already visible; the refresh
+    // rebinds host-side changes and re-enables this invocation's publication.
+    std::uint64_t invocations=0;
+    bool export_allowed=false,publication_deferred=false;
 
     Prepared(CompiledScript source,std::size_t workspace_limit,const script& owner)
         :compiled(std::move(source)),budget(workspace_limit),slots(budget),
@@ -170,6 +175,11 @@ struct Session::Prepared final:HostBoundary {
     WorkspaceBudget& workspace() noexcept override{return budget;}
     void publish_globals(script& owner) noexcept override{export_globals(owner);}
     void refresh_globals(const script& owner) override{import_globals(owner);}
+    std::uint64_t defer_publication() noexcept override{publication_deferred=true;return invocations;}
+    void end_deferred_publication(const script& owner,std::uint64_t mark) override {
+        publication_deferred=false;
+        if(invocations!=mark)import_globals(owner);
+    }
 };
 
 Session::Session(script& owner,std::size_t workspace_limit)
@@ -184,7 +194,8 @@ const CompiledScript& Session::compiled() const {
     return prepared_->compiled;
 }
 std::shared_ptr<variable> Session::invoke(std::uint32_t function,
-        std::span<const std::shared_ptr<variable>> arguments,ExecutionPosition* position) {
+        std::span<const std::shared_ptr<variable>> arguments,ExecutionPosition* position,
+        const std::shared_ptr<environment>& caller) {
     if(!prepared_)throw std::logic_error("VM program has not been prepared");
     auto& state=*prepared_;
     ExecutionPosition local_position;
@@ -194,6 +205,10 @@ std::shared_ptr<variable> Session::invoke(std::uint32_t function,
     CallDepthAccounting calls(owner_.active_calls,owner_.max_call_depth,
         owner_.remaining_steps,owner_.max_steps);
     try {
+    // A runtime helper of a suspended invocation may be running this one
+    // (a destructor): publish that invocation's globals first.
+    if(state.publication_deferred){state.export_globals(owner_);state.publication_deferred=false;}
+    ++state.invocations;
     state.import_globals(owner_);
     struct ActiveInvocation {
         Prepared& state;const script& owner;
@@ -214,7 +229,7 @@ std::shared_ptr<variable> Session::invoke(std::uint32_t function,
     try {
         result=state.executor.invoke(function,state.arguments.span().subspan(begin),
             state.globals.span(),owner_.remaining_steps,position,
-            ExecutionOptions{&calls,&callbacks,false});
+            ExecutionOptions{&calls,&callbacks,false,caller});
     } catch(...) {
         state.export_globals(owner_);throw;
     }
