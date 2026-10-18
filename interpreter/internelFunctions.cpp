@@ -24,8 +24,7 @@ public:
     int return_type()override{return INT_VALUE;}
     std::shared_ptr<variable> invoke(std::shared_ptr<environment> env,std::vector<std::shared_ptr<variable>> args)override {
         if(!args.empty())throw std::invalid_argument("getDepth takes no arguments");
-        int depth=0;for(auto e=env;e;e=e->parent.lock())++depth;
-        return std::make_shared<variable>(depth);
+        return std::make_shared<variable>(env?ownership::depth(env->ownership_id()):0);
     }
 };
 class load_extern_library_function final:public function {

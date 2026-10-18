@@ -104,9 +104,9 @@ MUTANTS = [
         for(auto hook=on_destory.rbegin();hook!=on_destory.rend();++hook) {"""),
     ]),
     ('depth-counts-callers', [
-        ('interpreter/internelFunctions.cpp',
-         'int depth=0;for(auto e=env;e;e=e->parent.lock())++depth;',
-         'int depth=0;for(auto e=env;e;e=e->caller.lock()?e->caller.lock():e->parent.lock())++depth;'),
+        ('interpreter/core/ownership.cpp',
+         'for(auto id=scope;const auto* record=find(id);id=record->parent)++result;',
+         'for(auto id=scope;const auto* record=find(id);id=find(record->caller)?record->caller:record->parent)++result;'),
     ]),
 ]
 

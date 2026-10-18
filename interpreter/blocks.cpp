@@ -598,10 +598,10 @@ void adopt_result(const std::shared_ptr<variable>& value,const std::shared_ptr<e
 std::shared_ptr<variable> export_result(const std::shared_ptr<variable>& value,const std::shared_ptr<environment>& env) {
     std::lock_guard<std::recursive_mutex> lock(runtime_mutex());
     auto block=of(value);require_usable(block);
-    auto frame=env->frame;std::shared_ptr<environment> root=env;
-    for(auto e=env;e&&e->frame==frame;e=e->parent.lock())root=e;
-    auto caller=root->caller.lock();
-    function_frame* destination=caller&&caller->frame?caller->frame.get():nullptr;
+    const auto& frame=env->frame;
+    // The caller's frame temporaries, when the call came from a script frame.
+    const auto* caller=ownership::find(ownership::find(ownership::frame_root(env->ownership_id()))->caller);
+    const auto destination=caller?caller->temporaries:ownership::TempListId{};
     B out;
     if(auto* owning=ownership::find(block->owner_scope);block->owner&&owning&&owning->temporaries==frame->temporary_id()) {
         // A local or parameter of this call moves to the caller instead of being copied.
@@ -637,6 +637,12 @@ void adopt_temporary(const std::shared_ptr<slot_block>& block,function_frame* fr
     if(!block||!frame)return;
     const auto index=frame->temporaries.size();
     frame->temporaries.push_back(block);block->temporary_list=frame->temporary_id();block->temporary_index=index;
+}
+void adopt_temporary(const std::shared_ptr<slot_block>& block,ownership::TempListId list) {
+    auto* record=block?ownership::find(list):nullptr;
+    if(!record)return;
+    const auto index=record->values.size();
+    record->values.push_back(block);block->temporary_list=list;block->temporary_index=index;
 }
 void finalize(const std::shared_ptr<slot_block>& block,const std::shared_ptr<environment>& env,bool run_destructor) {
     std::lock_guard<std::recursive_mutex> lock(runtime_mutex());

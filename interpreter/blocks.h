@@ -72,6 +72,7 @@ std::shared_ptr<variable> export_result(const std::shared_ptr<variable>& value,c
 std::shared_ptr<variable> move_out(const std::shared_ptr<variable>& storage,const std::shared_ptr<environment>& env);
 void drop(const std::shared_ptr<variable>& storage,const std::shared_ptr<environment>& env);
 void adopt_temporary(const std::shared_ptr<slot_block>& block,function_frame* frame);
+void adopt_temporary(const std::shared_ptr<slot_block>& block,ownership::TempListId list);
 void finalize(const std::shared_ptr<slot_block>& block,const std::shared_ptr<environment>& env,bool run_destructor);
 void finalize_temporaries(function_frame& frame,std::size_t mark,const std::shared_ptr<environment>& env);
 void finalize_temporaries(ownership::TempListId list,std::size_t mark,const std::shared_ptr<environment>& env);

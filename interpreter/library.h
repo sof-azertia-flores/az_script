@@ -326,10 +326,10 @@ public:
     const std::shared_ptr<ownership::Arena>& ownership_arena() const noexcept{return ownership_.arena();}
     ownership::ScopeId ownership_id() const noexcept{return ownership_.id();}
     std::vector<address>& owned_pointer;
+    // The caller (kept in the ownership record) is separate from the lexical
+    // parent: functions cannot see locals in their callers, while explicit
+    // allocation transfer still can.
     const std::weak_ptr<environment> parent;
-    // Caller is separate from the lexical parent: functions cannot see locals
-    // in their callers, while explicit allocation transfer still can.
-    const std::weak_ptr<environment> caller;
     std::vector<std::shared_ptr<variable>> variables;
     std::weak_ptr<azertian::script>& script;
     const std::shared_ptr<function_frame> frame;

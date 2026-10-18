@@ -66,5 +66,26 @@ void Arena::retire(TempListId id) noexcept {
 }
 ScopeRecord* find(ScopeId id) noexcept {return lookup(id);}
 TemporaryRecord* find(TempListId id) noexcept {return lookup(id);}
+ScopeId frame_root(ScopeId scope) noexcept {
+    const auto* start=find(scope);
+    if(!start)return {};
+    ScopeId root=scope;
+    for(auto id=start->parent;const auto* record=find(id);id=record->parent) {
+        if(record->temporaries!=start->temporaries)break;
+        root=id;
+    }
+    return root;
+}
+ScopeId transfer_parent(ScopeId scope) noexcept {
+    const auto* record=find(scope);
+    if(!record)return {};
+    if(find(record->caller))return record->caller;
+    return find(record->parent)?record->parent:ScopeId{};
+}
+int depth(ScopeId scope) noexcept {
+    int result=0;
+    for(auto id=scope;const auto* record=find(id);id=record->parent)++result;
+    return result;
+}
 }
 }

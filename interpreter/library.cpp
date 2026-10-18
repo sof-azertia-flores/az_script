@@ -1333,9 +1333,12 @@ function_frame::function_frame(std::shared_ptr<ownership::Arena> arena)
     :temporary_storage_(std::move(arena)),temporaries(temporary_storage_.record().values) {}
 environment::environment(std::shared_ptr<ownership::Arena> arena,const std::shared_ptr<environment>& parent,
                          const std::shared_ptr<environment>& caller,std::shared_ptr<function_frame> frame,bool frame_root)
-    :ownership_(std::move(arena)),owned_pointer(ownership_.record().owned),parent(parent),caller(caller),
+    :ownership_(std::move(arena)),owned_pointer(ownership_.record().owned),parent(parent),
      script(ownership_.record().script),frame(std::move(frame)),closing(ownership_.record().closing),frame_root(frame_root) {
-    if(this->frame)ownership_.record().temporaries=this->frame->temporary_id();
+    auto& record=ownership_.record();
+    if(this->frame)record.temporaries=this->frame->temporary_id();
+    if(parent)record.parent=parent->ownership_id();
+    if(caller)record.caller=caller->ownership_id();
 }
 environment::~environment() {heap::discard_owned(this);}
 namespace {

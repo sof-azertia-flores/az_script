@@ -126,13 +126,21 @@ void restore(std::vector<std::shared_ptr<variable>> values,std::vector<heap_allo
     packed=0;extend_packed();
     if(restored_owner)restored_owner->owned_pointer.swap(owned);
 }
-void set_owner(address pointer,const environment* owner) {
+namespace {
+void assign_owner(address pointer,ownership::ScopeId owner,bool closing) {
     std::lock_guard<std::recursive_mutex> lock(runtime_mutex());
     check_not_destroying(pointer);
-    if(owner&&owner->closing)throw std::runtime_error("Cannot transfer an allocation into a closing scope");
+    if(closing)throw std::runtime_error("Cannot transfer an allocation into a closing scope");
     if(!owner){owners.erase(pointer);return;}
     if(!is_allocation_start(pointer)) throw std::invalid_argument("Pointer is not the start of an active allocation: "+std::to_string(pointer.value));
-    owners[pointer]=owner->ownership_id();
+    owners[pointer]=owner;
+}
+}
+void set_owner(address pointer,const environment* owner) {
+    assign_owner(pointer,owner?owner->ownership_id():ownership::ScopeId{},owner&&owner->closing);
+}
+void set_owner(address pointer,ownership::ScopeId owner,const ownership::ScopeRecord& record) {
+    assign_owner(pointer,owner,record.closing);
 }
 ownership::ScopeId owner_of(address pointer) {
     std::lock_guard<std::recursive_mutex> lock(runtime_mutex());
@@ -394,9 +402,13 @@ void return_object(address pointer,const std::shared_ptr<environment>& env) {
     auto object=objects.find(pointer);
     if(!is_allocation_start(pointer))throw std::runtime_error("Object return requires a live allocation");
     const auto owner=owner_of(pointer);
-    std::shared_ptr<environment> holder,root=env;
-    for(auto e=env;e&&e->frame==env->frame;e=e->parent.lock()) {
-        root=e;if(e->ownership_id()==owner)holder=e;
+    // The scopes of this call: the parent chain while it shares the frame.
+    const auto start=env->ownership_id();
+    const auto frame=ownership::find(start)->temporaries;
+    ownership::ScopeId holder,root=start;
+    for(auto id=start;const auto* record=ownership::find(id);id=record->parent) {
+        if(record->temporaries!=frame)break;
+        root=id;if(id==owner)holder=id;
     }
     if(object==objects.end()) {
         // A constructor may call a method returning its borrowed this pointer.
@@ -407,11 +419,13 @@ void return_object(address pointer,const std::shared_ptr<environment>& env) {
     if(object->second.value.manual)return;
     if(!holder)return; // A borrowed object retains its original, longer-lived owner.
     check_not_destroying(pointer);
-    auto caller=root->caller.lock();
-    if(!caller||caller->closing)throw std::runtime_error("Cannot return an object into a closing or missing caller scope");
-    caller->owned_pointer.push_back(pointer);
-    try {set_owner(pointer,caller.get());}catch(...){caller->owned_pointer.pop_back();throw;}
-    holder->owned_pointer.erase(std::remove(holder->owned_pointer.begin(),holder->owned_pointer.end(),pointer),holder->owned_pointer.end());
+    const auto caller=ownership::find(root)->caller;
+    auto* destination=ownership::find(caller);
+    if(!destination||destination->closing)throw std::runtime_error("Cannot return an object into a closing or missing caller scope");
+    destination->owned.push_back(pointer);
+    try {set_owner(pointer,caller,*destination);}catch(...){destination->owned.pop_back();throw;}
+    auto& owned=ownership::find(holder)->owned;
+    owned.erase(std::remove(owned.begin(),owned.end(),pointer),owned.end());
 }
 void discard_owned(const environment* env) noexcept {
     try {
@@ -453,10 +467,6 @@ address raw_pointer_argument(const std::vector<std::shared_ptr<variable>>& args,
     if(heap::is_object_storage(pointer))throw std::runtime_error(std::string(name)+" cannot access object storage; use typed member access");
     return pointer;
 }
-std::shared_ptr<environment> transfer_parent(const std::shared_ptr<environment>& env) {
-    if(auto caller=env->caller.lock())return caller;
-    return env->parent.lock();
-}
 }
 int f_heepalloc::return_type(){return ADDRESS_VALUE;}
 int f_object_alloc::return_type(){return ADDRESS_VALUE;}
@@ -483,13 +493,16 @@ std::shared_ptr<variable> f_free::invoke(std::shared_ptr<environment> env,std::v
     // The owner must be reachable from the current scope through lexical
     // parents and callers. A re-entrant host call or a foreign scope cannot
     // release an allocation that another live scope will release itself.
-    std::shared_ptr<environment> holder;
-    for(auto e=env;e;e=transfer_parent(e)) if(e->ownership_id()==owner){holder=e;break;}
-    if(!holder) throw std::runtime_error("Allocation "+std::to_string(p.value)+
+    bool reachable=false;
+    for(auto id=env?env->ownership_id():ownership::ScopeId{};id;id=ownership::transfer_parent(id))
+        if(id==owner){reachable=true;break;}
+    if(!reachable) throw std::runtime_error("Allocation "+std::to_string(p.value)+
         " is scheduled for automatic release by another active scope and cannot be freed here");
     bool released=heap::free(p);
-    if(released) holder->owned_pointer.erase(
-        std::remove(holder->owned_pointer.begin(),holder->owned_pointer.end(),p),holder->owned_pointer.end());
+    if(released) {
+        auto& owned=ownership::find(owner)->owned;
+        owned.erase(std::remove(owned.begin(),owned.end(),p),owned.end());
+    }
     return std::make_shared<variable>(released);
 }
 std::shared_ptr<variable> f_make_free::invoke(std::shared_ptr<environment> env,std::vector<std::shared_ptr<variable>> args) {
@@ -502,12 +515,13 @@ std::shared_ptr<variable> f_make_free::invoke(std::shared_ptr<environment> env,s
 std::shared_ptr<variable> f_send_up::invoke(std::shared_ptr<environment> env,std::vector<std::shared_ptr<variable>> args) {
     address p=raw_pointer_argument(args,"mem_send_up");
     if(!env)throw std::invalid_argument("Missing allocation scope");
-    auto parent=transfer_parent(env);
+    const auto parent=ownership::transfer_parent(env->ownership_id());
     if(!parent)throw std::runtime_error("Allocation scope has no parent");
     auto it=std::find(env->owned_pointer.begin(),env->owned_pointer.end(),p);
     if(it==env->owned_pointer.end())throw std::runtime_error("Allocation is not owned by current scope");
-    parent->owned_pointer.push_back(p);
-    try {heap::set_owner(p,parent.get());}catch(...){parent->owned_pointer.pop_back();throw;}
+    auto& target=*ownership::find(parent);
+    target.owned.push_back(p);
+    try {heap::set_owner(p,parent,target);}catch(...){target.owned.pop_back();throw;}
     env->owned_pointer.erase(it);
     return std::make_shared<variable>(nullptr);
 }

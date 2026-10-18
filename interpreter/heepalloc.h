@@ -62,6 +62,7 @@ void discard_script_objects(const azertian::script* script_owner) noexcept;
 // accepted from that owner's execution chain, so a scope can never keep a
 // stale entry for an address that was freed and reused elsewhere.
 void set_owner(address startpos,const environment* owner);
+void set_owner(address startpos,ownership::ScopeId owner,const ownership::ScopeRecord& record);
 ownership::ScopeId owner_of(address startpos);
 }
 }
