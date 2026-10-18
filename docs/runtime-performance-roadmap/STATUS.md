@@ -81,6 +81,26 @@ Release 性能诊断在普通验证结束后、最终 sanitizer 开始前单独�
 
 本次使用 50 ms 短批次和中/大规模子集，工具的 `score_eligible=false`，没有计算采用分数；未完成既定 250 ms 采用采样及 callgrind 逐指令门禁（本环境未安装 callgrind）。因此这里只关闭功能验证，不能宣布 R11b 性能验收完成。下一步仍是生命周期状态机、VM 原生对象帧和循环内析构调度。
 
+## 执行器解耦首批：S0.2、S1.1–S1.5、S3.1–S3.3（2026-10-17）
+
+依 [ENGINE_SPLIT.md](ENGINE_SPLIT.md) 顺序执行；S3.1–S3.3 是不依赖 R11b 的纯重构，提前完成。每步都以冻结参考 F0（`97968ba` 运行时，`build/runtime-perf/f0-source/`）回放：候选树和候选 VM 分别对 F0 逐字段比较（scalar 399、calls 426、objects 1485 个候选进程，全部一致），并对上一提交或 F0 的 Release 构建做 callgrind 每调用指令对照。各提交还通过了普通与 ASan/UBSan 全量验证。
+
+| 步骤 | 提交 | 内容 | 验证要点 |
+| --- | --- | --- | --- |
+| S0.2 | `ab83ab1` | 观察协议 2：`tests/observation_host.cpp` 引擎中立（`--engine tree\|vm`、`--stack-bytes`、`--thread-stack-bytes`），回调 5 在运行中记录 `active_calls`、`remaining_steps` 和已发布 trace；状态含对象登记、owned 列表、下一个块 ID 与 first-fit 探针 | F0 三组参考记录一次后回放 |
+| S1.1 | `3c6da58` | `core/trace`：两个引擎共用的 trace 帧记录与发布 | F0 回放；callgrind 发现 `FunctionRecord` 缩小使每条指令多一次乘法，由 S1.5 修正 |
+| S1.2 | `b055525` | VM 修正：嵌套帧精确复现树每个入口的 trace 状态（进入时清空、成功清除已发布、失败发布副本、逐层重新发布） | t1–t8 探针程序（嵌套失败、宿主重入、析构失败）树与 VM 一致 |
+| S1.3 | `777cceb` | `core/admission`：唯一的调用准入（逻辑深度、原生栈、计数）与实参检查；`core/types` 类型名 | F0 回放、limits 套件 |
+| S1.4 | `8148d7b` | `core/ids`、`core/limits`：函数 ID 布局、内建表、槽上限（原有 4 处定义、3 处重复） | F0 回放 |
+| S1.5 | `43a1b6b` | VM 每条指令不再索引函数表（`FrameRecord::end`） | callgrind 回到 F0 以下 |
+| S3.1 | `cc87336` | `core/value_ops`：值运算、转换、返回转换、格式化只有一份；树的字符串键分派等变为薄包装 | 9 个套件双跑 623 次调用 0 差异；callgrind 树 −4%～−13%，VM −0.4%～−1.2% |
+| S3.2 | `3be0d65` | `core/exec`：唯一的校验型 exec v10 读取器输出中立模型，检查及其顺序、消息与树装载器相同；树从模型建树（装载时核对补丁表与 `exec::references`），VM 从同一模型 lowering；删除 `vm/source_decode` | `exec-model-tests` 408 项；compact_exec 415 次调用 |
+| S3.3 | `99330ce` | `core/link`：唯一的链接计划（假定命名空间、外部签名、引用、onload 顺序），树与 VM 应用同一计划；`function_signature` 移入 `core/signature.h` | hint_linking、extern、generics、compact_exec 499 次调用 0 差异 |
+| — | `58a8546` | `Value` 标量拷贝与析构保持内联 | callgrind 对 F0：VM −2.7%～−3.7%，树 −4.2%～−13.0% |
+| — | `816a67a` | 代数身份的存储原语（`StorageId`、`SegmentedPool`、`WorkspaceBudget`、`WorkspaceVector`）移入 `core/storage.h`、`core/workspace.h`，供 S2.1 的所有权记录使用 | ctest 15/15、VM 的 F0 回放 |
+
+`core/` 现有 `trace`、`admission`、`types`、`ids`、`limits`、`value`、`value_ops`、`exec`、`format`、`signature`、`link`、`storage`、`workspace`。安装的 detail 头新增 `core/{debug,errors,format,limits,signature,types,value}.h`，`vm/value.h` 不再安装；属于未发布的运行时 ABI 1 内部变动。
+
 ## 执行器重叠审查与解耦决策（2026-10-17）
 
 起点 `97968ba`。六个分区（loader、对象存储、内建/插件、VM、公开 API、构建/发行）逐文件核对后，结论是新 VM 与树执行器**不是**两个独立项目：同一源码清单编进同一个库，二者双向包含；VM 依赖树的校验、链接、入口和对象所有权记录，析构仍经树入口重入；值运算、exec 解码、签名检查、准入、trace 记录等存在重复实现；公开头文件暴露树内部结构，插件和发行写死 `libabdInvoker-1`。
