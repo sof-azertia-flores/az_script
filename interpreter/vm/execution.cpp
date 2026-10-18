@@ -4,6 +4,7 @@
 #include "session.h"
 #include "../blocks.h"
 #include "../core/statement.h"
+#include "../core/lifecycle.h"
 #include "../heepalloc.h"
 #include "../core/ids.h"
 #include "../core/trace.h"
@@ -91,14 +92,37 @@ struct ScalarExecutor::State {
         std::uint32_t cell=no_index;
         bool reference=false;
     };
-    // Ownership records of one object frame. They are the tree runtime's own
-    // structures, so blocks/heap ownership, temporaries and scope cleanup keep
-    // their exact semantics. Locals live in frame->slots.
+    // Ownership records of one object frame. Locals and temporaries live in
+    // the function frame, which the host edge shares; each lexical scope is a
+    // core ownership record with the local slots it declared, in declaration
+    // order (a hand-written exec can declare a slot twice). Members end in
+    // order: the scopes' leftovers, then the frame's temporaries and locals.
     struct Control {bool scope=false;statement::Mark temporaries;};
+    struct ObjectScope {
+        ownership::Scope ownership;
+        std::vector<std::size_t> declared;
+        ObjectScope(std::shared_ptr<ownership::Arena> arena,ownership::Scope::Links links):ownership(std::move(arena),links) {}
+    };
     struct ObjectFrame {
         std::shared_ptr<function_frame> frame;
-        std::vector<std::shared_ptr<environment>> scopes; // [0] is the function root.
-        std::vector<Control> controls;                    // Innermost last.
+        std::vector<ObjectScope> scopes; // [0] is the function root.
+        std::vector<Control> controls;   // Innermost last.
+    };
+    // A closing scope's locals, as the tree's environment::cleanup sees them.
+    class ObjectLocals final:public lifecycle::ScopeLocals {
+        function_frame& frame_;ObjectScope& scope_;bool root_;
+    public:
+        ObjectLocals(function_frame& frame,ObjectScope& scope,bool root) noexcept:frame_(frame),scope_(scope),root_(root) {}
+        std::vector<std::shared_ptr<variable>> leftovers() const override {
+            std::vector<std::shared_ptr<variable>> result;
+            if(root_)for(std::size_t i=0;i<frame_.param_count&&i<frame_.slots.size();++i)result.push_back(frame_.slots[i]);
+            for(auto index:scope_.declared)result.push_back(frame_.slots[index]);
+            return result;
+        }
+        void undeclare() noexcept override {
+            for(auto index:scope_.declared)frame_.slots[index].reset();
+            scope_.declared.clear();
+        }
     };
     const ExecutableProgram& program;
     SlotPool& pool;
@@ -251,7 +275,33 @@ struct ScalarExecutor::State {
         return locals[frame.locals.begin+index];
     }
     ObjectFrame& objects(const FrameRecord& frame) {return object_frames[frame.object];}
-    const std::shared_ptr<environment>& scope_of(const FrameRecord& frame) {return objects(frame).scopes.back();}
+    static ownership::Site scope_site(ObjectFrame& record,ObjectScope& scope) noexcept {
+        return {&scope.ownership.record(),&record.frame->temporary_record()};
+    }
+    ownership::Site site(const FrameRecord& frame) {auto& record=objects(frame);return scope_site(record,record.scopes.back());}
+    // Ends a scope as environment::cleanup does: once, and without a driver
+    // when nothing can run or be released.
+    static void close_scope(ObjectFrame& record,ObjectScope& scope,bool root) {
+        auto& own=scope.ownership.record();
+        if(own.closing)return;
+        auto& frame=*record.frame;
+        ObjectLocals locals(frame,scope,root);
+        const auto owning=[&](std::size_t index){const auto& slot=frame.slots[index];return slot&&blocks::owns(*slot);};
+        bool idle=own.owned.empty()&&!(root&&!frame.temporaries.empty());
+        if(idle&&root)for(std::size_t i=0;i<frame.param_count&&i<frame.slots.size();++i)if(owning(i)){idle=false;break;}
+        if(idle)for(auto index:scope.declared)if(owning(index)){idle=false;break;}
+        if(idle){own.closing=true;locals.undeclare();return;}
+        std::lock_guard<std::recursive_mutex> lock(runtime_mutex());
+        lifecycle::ScopeFinalizer cleanup(scope.ownership.id(),root?frame.temporary_id():ownership::TempListId{},locals);
+        lifecycle::drive(cleanup,scope_site(record,scope));
+        cleanup.finish();
+    }
+    // The host's view of the current scope for a host function's environment.
+    std::shared_ptr<environment> host_scope(const FrameRecord& frame,const ExecutionOptions& options) {
+        auto& record=objects(frame);
+        return std::make_shared<environment>(record.scopes.back().ownership,host_of(options).owner()->baseEnv,
+                                             record.frame,record.scopes.size()==1);
+    }
     static ObjectHost& host_of(const ExecutionOptions& options) {
         auto* host=options.callbacks?options.callbacks->objects():nullptr;
         if(!host)throw std::invalid_argument("Scalar VM object frames require a script object host");
@@ -312,8 +362,8 @@ struct ScalarExecutor::State {
             // Assignment can copy, replace or finalize objects (destructors).
             auto storage=reg.host;auto value=variable_of(frame,source);
             if(value->type_tag()==OBJECT_VALUE||storage->type_tag()==OBJECT_VALUE)
-                runtime(options,[&]{blocks::store(storage,value,scope_of(frame));});
-            else blocks::store(storage,value,scope_of(frame));
+                runtime(options,[&]{blocks::store(storage,value,site(frame));});
+            else blocks::store(storage,value,site(frame));
             this->value(frame,destination,value_access::read(*storage));
             // The operands end with the assignment, value first, as the tree's
             // do: a target whose container is already freed abandons the
@@ -354,12 +404,12 @@ struct ScalarExecutor::State {
             try {
                 if(control.scope) {
                     auto scope=std::move(record.scopes.back());record.scopes.pop_back();
-                    scope->cleanup(scope);
-                } else statement::finish(control.temporaries,record.scopes.back()->site());
+                    close_scope(record,scope,false);
+                } else statement::finish(control.temporaries,scope_site(record,record.scopes.back()));
             } catch(...) {failure.capture_current();}
             level_ended();
         }
-        if(whole)try{auto root=record.scopes.front();root->cleanup(root);}catch(...){failure.capture_current();}
+        if(whole)try{close_scope(record,record.scopes.front(),true);}catch(...){failure.capture_current();}
         if(host)try{host->leave_runtime(runtime_mark);}catch(...){failure.capture_current();}
         try{failure.rethrow();}catch(...){}
     }
@@ -377,7 +427,7 @@ struct ScalarExecutor::State {
     ownership::Site calling_scope(FrameId caller,const ExecutionOptions& options) {
         if(!caller)return options.caller;
         auto& record=frames.resolve(caller);
-        return record.object==no_index?ownership::Site{}:scope_of(record)->site();
+        return record.object==no_index?ownership::Site{}:site(record);
     }
     // Object frames are entered out of line, which keeps the scalar
     // dispatch loop's inlining independent of the object model.
@@ -394,14 +444,15 @@ struct ScalarExecutor::State {
         auto& tree=*record.frame;
         tree.global_offset=function.global_offset;tree.global_count=function.global_count;tree.param_count=count;
         tree.slots.resize(function.param_types.size()+static_cast<std::size_t>(function.local_count));
-        auto root=std::make_shared<environment>(host.ownership_arena(),owner->baseEnv,calling.scope(),record.frame,true);
-        root->script=owner;
-        record.scopes.push_back(root);
+        record.scopes.emplace_back(host.ownership_arena(),
+                                   ownership::Scope::Links{owner->baseEnv->ownership_id(),calling.scope(),tree.temporary_id()});
+        record.scopes.back().ownership.record().script=owner;
+        const auto root=scope_site(record,record.scopes.back());
         for(std::size_t i=0;i<count;++i) {
             auto storage=std::make_shared<variable>();auto value=wrap(argument(i));
             if(value->type_tag()==OBJECT_VALUE)runtime(options,[&]{blocks::store(storage,value,calling);});
             else blocks::store(storage,value,calling);
-            statement::bind_parameter(storage,i,root);
+            tree.slots[i]=storage;blocks::bind_local(storage,root);
         }
         registers.append_default(layout.registers);scopes.append_default(layout.scope_marks);
         object_frames.push_back(std::move(record));frame.object=static_cast<std::uint32_t>(object_frames.size()-1);
@@ -491,15 +542,17 @@ struct ScalarExecutor::State {
                     const auto slot=instruction.operand;
                     if(frame.object!=no_index) {
                         auto storage=std::make_shared<variable>();
-                        const auto& scope=scope_of(frame);
+                        const auto here=site(frame);
                         if(instruction.left!=no_index) {
                             auto initial=variable_of(frame,instruction.left);
-                            if(initial->type_tag()==OBJECT_VALUE)runtime(options,[&]{blocks::store(storage,initial,scope);});
-                            else blocks::store(storage,initial,scope);
+                            if(initial->type_tag()==OBJECT_VALUE)runtime(options,[&]{blocks::store(storage,initial,here);});
+                            else blocks::store(storage,initial,here);
                         }
                         // A hand-written initializer may have declared this
                         // slot meanwhile; the tree executor replaces it too.
-                        statement::declare_local(storage,slot,scope);
+                        auto& record=objects(frame);
+                        record.scopes.back().declared.push_back(slot);record.frame->slots[slot]=storage;
+                        blocks::bind_local(storage,here);
                         break;
                     }
                     // A hand-written initializer may declare this slot after
@@ -518,7 +571,7 @@ struct ScalarExecutor::State {
                     const auto& current=read(frame,instruction.left);
                     if(frame.object==no_index||current.type_tag()!=OBJECT_VALUE){value(frame,instruction.result,current);break;}
                     auto source=variable_of(frame,instruction.left);std::shared_ptr<variable> result;
-                    runtime(options,[&]{result=blocks::materialize(source,scope_of(frame));});
+                    runtime(options,[&]{result=blocks::materialize(source,site(frame));});
                     value(frame,instruction.result,value_access::read(*result));break;
                 }
                 case Opcode::copy_reference:copy(frame,instruction.result,instruction.left);break;
@@ -535,10 +588,12 @@ struct ScalarExecutor::State {
                     if(frame.object!=no_index) {
                         auto& record=objects(frame);
                         record.controls.reserve(record.controls.size()+1);
-                        auto scope=std::make_shared<environment>(host_of(options).ownership_arena(),
-                                                                 record.scopes.back(),ownership::ScopeId{},record.frame);
-                        scope->script=record.scopes.back()->script;
-                        record.scopes.push_back(std::move(scope));record.controls.push_back({true,{}});
+                        const auto parent=record.scopes.back().ownership.id();
+                        auto script=record.scopes.back().ownership.record().script;
+                        record.scopes.emplace_back(host_of(options).ownership_arena(),
+                                                   ownership::Scope::Links{parent,{},record.frame->temporary_id()});
+                        record.scopes.back().ownership.record().script=std::move(script);
+                        record.controls.push_back({true,{}});
                     }
                     scopes[frame.scope_marks.begin+frame.scope_count++]=static_cast<std::uint32_t>(frame.declared_count);break;
                 case Opcode::scope_leave:
@@ -548,7 +603,7 @@ struct ScalarExecutor::State {
                         if(record.controls.empty()||!record.controls.back().scope)throw std::logic_error("Scalar VM object scope records are unbalanced");
                         record.controls.pop_back();
                         auto scope=std::move(record.scopes.back());record.scopes.pop_back();
-                        runtime(options,[&]{scope->cleanup(scope);});
+                        runtime(options,[&]{close_scope(record,scope,false);});
                     }
                     break;
                 case Opcode::statement_enter:
@@ -562,7 +617,7 @@ struct ScalarExecutor::State {
                         if(record.controls.empty()||record.controls.back().scope)throw std::logic_error("Scalar VM object statement records are unbalanced");
                         const auto mark=record.controls.back().temporaries;record.controls.pop_back();
                         if(record.frame->temporaries.size()>mark.count)
-                            runtime(options,[&]{statement::finish(mark,record.scopes.back()->site());});
+                            runtime(options,[&]{statement::finish(mark,scope_site(record,record.scopes.back()));});
                     }
                     break;
                 case Opcode::loop_enter:++frame.loop_depth;break;
@@ -594,10 +649,10 @@ struct ScalarExecutor::State {
                         if(frame.object!=no_index) {
                             // The result is the returned variable itself, as in
                             // the tree executor; mem_get yields a heap slot.
-                            const auto scope=scope_of(frame);
+                            const auto scope=host_scope(frame,options);
                             trace_touched=true;
                             auto output=options.callbacks->invoke_external_in(target,snapshots.span(),position,scope);
-                            blocks::adopt_result(output,scope);
+                            blocks::adopt_result(output,site(frame));
                             reference(frame,instruction.result,std::move(output));
                             break;
                         }
@@ -613,7 +668,7 @@ struct ScalarExecutor::State {
                     }
                     // Object results leave the frame now: a local moves to the
                     // caller, anything else is copied into its temporaries.
-                    const auto& scope=scope_of(frame);
+                    const auto scope=site(frame);
                     auto source=variable_of(frame,instruction.left);Value result;
                     if(source->type_tag()==OBJECT_VALUE) {
                         std::shared_ptr<variable> exported;
@@ -667,18 +722,18 @@ struct ScalarExecutor::State {
                     const auto& operation=function_of(frame).operations[instruction.operand];
                     std::optional<int> destructor;
                     if(operation.target)destructor=program.targets[*operation.target].function_id;
-                    heap::register_object(object,destructor,operation.manual,scope_of(frame));
+                    heap::register_object(object,destructor,operation.manual,site(frame));
                     value(frame,instruction.result,Value{});break;
                 }
                 case Opcode::object_delete: {
                     const auto object=pointer(read(frame,instruction.left),"Object pointer requires address type");
-                    runtime(options,[&]{heap::delete_object(object,scope_of(frame));});
+                    runtime(options,[&]{heap::delete_object(object,site(frame));});
                     value(frame,instruction.result,Value{});break;
                 }
                 case Opcode::move_out: {
                     const auto slot=std::bit_cast<int>(instruction.operand);
                     if(slot<0){value(frame,instruction.result,pool.resolve(global_slot(slot,frame,globals)));break;}
-                    auto moved=blocks::move_out(object_local(frame,slot),scope_of(frame));
+                    auto moved=blocks::move_out(object_local(frame,slot),site(frame));
                     value(frame,instruction.result,value_access::read(*moved));break;
                 }
                 case Opcode::drop: {
@@ -686,7 +741,7 @@ struct ScalarExecutor::State {
                     auto& target=registers[frame.registers.begin+instruction.left];
                     if(target.reference&&target.host) {
                         auto storage=target.host;
-                        runtime(options,[&]{blocks::drop(storage,scope_of(frame));});
+                        runtime(options,[&]{blocks::drop(storage,site(frame));});
                     }
                     value(frame,instruction.result,Value{});break;
                 }
@@ -719,8 +774,8 @@ struct ScalarExecutor::State {
                     if(frame.object!=no_index) {
                         // The root scope ends after return conversion, as the
                         // tree executor's with_cleanup does.
-                        const auto root=objects(frame).scopes.front();
-                        runtime(options,[&]{root->cleanup(root);});
+                        auto& record=objects(frame);
+                        runtime(options,[&]{close_scope(record,record.scopes.front(),true);});
                     }
                     const auto caller=frame.caller;const auto destination=frame.return_register;
                     const bool check=frame.check_return;const int expected=frame.checked_return_type;
@@ -729,7 +784,7 @@ struct ScalarExecutor::State {
                     if(trace_touched){clear_error_trace();trace_touched=false;}
                     auto& resumed_frame=frames.resolve(caller);
                     if(resumed_frame.object!=no_index&&output.type_tag()==OBJECT_VALUE)
-                        blocks::adopt_result(wrap(output),scope_of(resumed_frame));
+                        blocks::adopt_result(wrap(output),site(resumed_frame));
                     const auto got=output.type_tag();
                     value(resumed_frame,destination,std::move(output));
                     if(check&&expected!=ANY_VALUE&&got!=expected)

@@ -1350,6 +1350,10 @@ environment::environment(std::shared_ptr<ownership::Arena> arena,const std::shar
                                   frame?frame->temporary_id():ownership::TempListId{}}),
      owned_pointer(ownership_.record().owned),parent(parent),script(ownership_.record().script),frame(std::move(frame)),
      closing(ownership_.record().closing),frame_root(frame_root) {}
+environment::environment(const ownership::Scope& shared,const std::shared_ptr<environment>& parent,
+                         std::shared_ptr<function_frame> frame,bool frame_root)
+    :ownership_(shared,ownership::Scope::view_t{}),owned_pointer(ownership_.record().owned),parent(parent),
+     script(ownership_.record().script),frame(std::move(frame)),closing(ownership_.record().closing),frame_root(frame_root) {}
 // What the scope still owns ends before its frame's temporaries do.
 environment::~environment() {ownership_.abandon();}
 namespace {

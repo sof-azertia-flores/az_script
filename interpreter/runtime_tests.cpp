@@ -420,6 +420,23 @@ void ownership_identity_tests() {
     budget.reset();arena.reset();
     check(!lifetime.expired()&&ownership::find(scope_id),"a retained host scope keeps its arena and budget alive");
     scope.reset();check(lifetime.expired()&&!ownership::find(scope_id),"last scope releases its arena and budget");
+    {
+        // An engine scope viewed by a host environment: the view keeps the
+        // record alive and never ends what the scope owns.
+        auto shared_arena=ownership::Arena::create();
+        auto engine=std::make_unique<ownership::Scope>(shared_arena);const auto engine_id=engine->id();
+        auto owned=blocks::create(1,{});auto holder=std::make_shared<variable>();holder->setValue(owned);owned->owner=holder.get();
+        blocks::bind_local(holder,ownership::Site{&engine->record(),nullptr});
+        auto view=std::make_shared<environment>(*engine,nullptr,nullptr,false);
+        check(view->ownership_id()==engine_id&&&view->owned_pointer==&engine->record().owned,"a scope view shares the scope record");
+        view.reset();
+        check(owned->state==slot_block::status::live&&engine->record().owned.size()==1,"a scope view never abandons the scope's objects");
+        view=std::make_shared<environment>(*engine,nullptr,nullptr,false);
+        engine->record().owned.clear();owned->owner_scope={};engine.reset();
+        check(ownership::find(engine_id)&&view->ownership_id()==engine_id,"a scope view keeps the record after the scope ends");
+        view.reset();check(!ownership::find(engine_id),"the last lease on a shared scope record retires it");
+        holder->setValue(nullptr);
+    }
     arena=ownership::Arena::create();
     auto frame=std::make_shared<function_frame>(arena);const auto temporary_id=frame->temporary_id();
     auto temporary=blocks::create(0,{});blocks::adopt_temporary(temporary,frame.get());

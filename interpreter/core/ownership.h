@@ -25,6 +25,8 @@ struct ScopeRecord {
     TempListId temporaries;
     ScopeId parent,caller;
     bool closing=false;
+    // Leases on this record; the last one to end retires it.
+    std::uint32_t holders=1;
 };
 struct TemporaryRecord {std::vector<std::shared_ptr<slot_block>> values;};
 // The scope an object-model operation runs in, with its frame's temporaries
@@ -50,6 +52,10 @@ public:
     TempListId create_temporaries();
     void retire(ScopeId id) noexcept;
     void retire(TempListId id) noexcept;
+    // A shared scope record is retired by its last lease.
+    void share(ScopeId id) noexcept;
+    void release(ScopeId id) noexcept;
+    void release(TempListId id) noexcept{retire(id);}
     ScopeRecord* find(ScopeId id) noexcept{return scopes_.try_resolve(id);}
     TemporaryRecord* find(TempListId id) noexcept{return temporaries_.try_resolve(id);}
     bool issues(ScopeId id) const noexcept{return scopes_.arena_id()==id.arena;}
@@ -79,12 +85,19 @@ public:
         else id_=arena_->create_temporaries();
         record_=arena_->find(id_);
     }
-    ~Lease(){arena_->retire(id_);}
+    struct share_t {};
+    // A second lease on the same scope record.
+    Lease(const Lease& other,share_t) requires std::is_same_v<Id,ScopeId>
+        :arena_(other.arena_),id_(other.id_),record_(other.record_) {arena_->share(id_);}
+    Lease(Lease&& other) noexcept:arena_(std::move(other.arena_)),id_(other.id_),record_(other.record_) {other.record_=nullptr;}
+    ~Lease(){if(record_)arena_->release(id_);}
     Lease(const Lease&)=delete;
     Lease& operator=(const Lease&)=delete;
+    Lease& operator=(Lease&&)=delete;
     Id id() const noexcept{return id_;}
     auto& record() const noexcept{return *record_;}
     const std::shared_ptr<Arena>& arena() const noexcept{return arena_;}
+    bool valid() const noexcept{return record_!=nullptr;}
 };
 
 // The ownership side of a lexical scope: its record, linked when it is
@@ -92,12 +105,19 @@ public:
 // scope still owns when it is abandoned or destroyed ends without scripts.
 class Scope {
     Lease<ScopeId> lease_;
+    bool abandons_=true;
 public:
     struct Links {ScopeId parent,caller;TempListId temporaries;};
     explicit Scope(std::shared_ptr<Arena> arena={},Links links={});
+    // A view of another scope's record for the host edge: it keeps the
+    // record alive but never abandons what the scope owns.
+    struct view_t {};
+    Scope(const Scope& origin,view_t):lease_(origin.lease_,Lease<ScopeId>::share_t{}),abandons_(false) {}
+    Scope(Scope&& other) noexcept=default;
     ~Scope(){abandon();}
     Scope(const Scope&)=delete;
     Scope& operator=(const Scope&)=delete;
+    Scope& operator=(Scope&&)=delete;
     ScopeId id() const noexcept{return lease_.id();}
     ScopeRecord& record() const noexcept{return lease_.record();}
     const std::shared_ptr<Arena>& arena() const noexcept{return lease_.arena();}

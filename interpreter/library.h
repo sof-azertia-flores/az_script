@@ -323,6 +323,10 @@ public:
     // names the frame's temporaries from then on.
     explicit environment(std::shared_ptr<ownership::Arena> arena={},const std::shared_ptr<environment>& parent={},
                          ownership::ScopeId caller={},std::shared_ptr<function_frame> frame={},bool frame_root=false);
+    // The host's view of an engine scope: it shares the scope's record and
+    // frame, writes no links, and never ends what the scope owns.
+    environment(const ownership::Scope& shared,const std::shared_ptr<environment>& parent,
+                std::shared_ptr<function_frame> frame,bool frame_root);
     environment(const environment&)=delete;
     environment& operator=(const environment&)=delete;
     const std::shared_ptr<ownership::Arena>& ownership_arena() const noexcept{return ownership_.arena();}

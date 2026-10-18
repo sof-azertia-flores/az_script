@@ -70,7 +70,16 @@ TemporaryRecord* find(TempListId id) noexcept {return lookup(id);}
 Scope::Scope(std::shared_ptr<Arena> arena,Links links):lease_(std::move(arena)) {
     auto& own=record();own.id=id();own.parent=links.parent;own.caller=links.caller;own.temporaries=links.temporaries;
 }
-void Scope::abandon() noexcept {if(!record().owned.empty())heap::discard_owned(id(),record());}
+void Scope::abandon() noexcept {
+    if(abandons_&&lease_.valid()&&!record().owned.empty())heap::discard_owned(id(),record());
+}
+void Arena::share(ScopeId id) noexcept {
+    std::lock_guard<std::recursive_mutex> lock(runtime_mutex());++scopes_.try_resolve(id)->holders;
+}
+void Arena::release(ScopeId id) noexcept {
+    std::lock_guard<std::recursive_mutex> lock(runtime_mutex());
+    if(auto* record=scopes_.try_resolve(id);record&&--record->holders==0)scopes_.retire(id);
+}
 ScopeId frame_root(ScopeId scope) noexcept {
     const auto* start=find(scope);
     if(!start)return {};
