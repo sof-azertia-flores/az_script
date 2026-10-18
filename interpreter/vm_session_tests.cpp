@@ -113,12 +113,14 @@ void preflight_and_selection() {
     rejects([&]{vm::require_scalar_host_targets(host_program);},"generic or object host call contexts");
     host_program.targets[0].entry_kind=0;host_program.targets[0].return_type=OBJECT_VALUE;
     rejects([&]{vm::require_scalar_host_targets(host_program);},"object callback signatures");
+    // A preparation failure (here the workspace limit) leaves the script as
+    // it was before the flush.
     auto source=module({hook(0,block({store(-1,99)})),
         function(10,VOID_VALUE,block({op(41,{integer(0),constant(1),raw({})})}))},1);
     auto script=load(source);script->baseEnv->variables[0]->setValue(3);
     rejects([&]{vm::select_backend(*script,0);},"workspace limit must be positive");
-    vm::select_backend(*script,workspace);
-    rejects([&]{script->flush();},"VM backend does not support");
+    vm::select_backend(*script,1);
+    rejects([&]{script->flush();},"VM workspace limit exceeded");
     check(script->baseEnv->variables[0]->get<int>()==3,"unsupported program ran onload before refusal");
     check(!script->setup&&!script->faulted&&!script->module_manifest()[0].initialized,
         "preflight failure partially initialized the module");
@@ -126,13 +128,15 @@ void preflight_and_selection() {
         "preflight failure published tree relocation");
     script->destroy();
 
-    // A generic function (hidden contexts) is prepared and initialized.
+    // A generic function (hidden contexts) and a buffer operation are
+    // prepared and initialized.
     script=load(module({hook(0,block({store(-1,99)})),
         function(10,VOID_VALUE,block({constant(1)}),{ADDRESS_VALUE},false,0,0,1)},1));
+    insert(script,module({function(20,VOID_VALUE,block({op(41,{integer(0),constant(1),raw({})})}))},1));
     script->baseEnv->variables[0]->setValue(3);
     vm::select_backend(*script,workspace);script->flush();
     check(script->baseEnv->variables[0]->get<int>()==99&&script->setup&&!script->faulted,
-        "generic function was not prepared and initialized");
+        "generic function or buffer operation was not prepared and initialized");
     script->destroy();
 
     script=load(module({hook(0,block({store(-1,8)})),
@@ -170,8 +174,8 @@ void teardown_with_unprepared_insert() {
             hook(1,block({store(-1,99)}))},1));
         vm::select_backend(*script,workspace);script->flush();
         auto retained=script->baseEnv->variables[0];
-        insert(script,module({function(20,VOID_VALUE,block({op(41,{integer(0),constant(1),raw({})})}))},1));
-        if(attempt_flush)rejects([&]{script->flush();},"VM backend does not support");
+        insert(script,module({hook(0,block({op(15,{constant(1),constant(0)})}))},1));
+        if(attempt_flush)rejects([&]{script->flush();},"Division by zero");
         script->destroy();
         check(retained->get<int>()==99,"pending insertion prevented an initialized module's pre_destroy");
     }

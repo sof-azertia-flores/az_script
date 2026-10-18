@@ -2,56 +2,6 @@
   "version": 1,
   "entries": [
     {
-      "id": "vm-buffer-zero-capacity-copy",
-      "kind": "transitional_vm_refusal",
-      "engine": "vm",
-      "cases": [
-        "own-c9c-zero-capacity-buffer-copy-free-at-exhausted-budget"
-      ],
-      "message": "VM backend does not support: buffer_new",
-      "removed_by": "S4.3",
-      "reason": "Buffers run in the VM from R12b."
-    },
-    {
-      "id": "vm-buffer-assignment",
-      "kind": "transitional_vm_refusal",
-      "engine": "vm",
-      "cases": [
-        "own-c11-buffer-assignment-replaces-elements",
-        "own-c3g-copy-rollback-runs-completed-nested-destructors",
-        "own-c13-partial-assignment-kept-after-buffer-field-error",
-        "own-c13b-nested-buffer-field-assignment-charges-capacity",
-        "own-c13c-assign-into-destroying-buffer-unavailable"
-      ],
-      "message": "VM backend does not support: buffer_new buffer_operation",
-      "removed_by": "S4.3",
-      "reason": "Buffers run in the VM from R12b."
-    },
-    {
-      "id": "vm-buffer-lifecycle",
-      "kind": "transitional_vm_refusal",
-      "engine": "vm",
-      "cases": [
-        "own-l5c-literal-with-buffer-returned-to-host-never-destroyed",
-        "own-m1a-buffer-elements-last-first",
-        "own-m1b-buffer-field-elements-after-container",
-        "own-m1c-buffer-parameter-copy-destroyed-at-callee-exit",
-        "own-m1d-buffer-in-manual-object-discarded-at-destroy",
-        "own-m1e-buffer-in-base-owned-object-destroyed-at-destroy",
-        "own-m2a-shrinking-resize-destroys-every-element",
-        "own-m2b-shrinking-resize-length-reduced-first-error-type",
-        "own-m2c-resize-growth-rollback-last-first",
-        "own-m3a-buffer-assignment-old-elements-after-copy",
-        "own-m3b-old-element-error-after-assignment-published",
-        "own-m3c-buffer-owner-ended-during-assignment",
-        "own-m4-owner-deleted-during-element-construction",
-        "own-m5-reserve-expires-views-without-lifecycle"
-      ],
-      "message": "VM backend does not support: buffer_new buffer_operation",
-      "removed_by": "S4.3",
-      "reason": "Buffer element lifecycles (construction, resize, assignment, teardown) run in the VM from R12b."
-    },
-    {
       "id": "vm-object-host-callbacks",
       "kind": "transitional_vm_refusal",
       "engine": "vm",
@@ -83,21 +33,15 @@
   "suite_refusals": [
     {
       "suite": "containers_library",
-      "message": "AzScript error: VM backend does not support: buffer_new buffer_operation value_compare",
-      "count": 11,
-      "removed_by": "S4.3"
-    },
-    {
-      "suite": "generics_end_to_end",
       "message": "AzScript error: Scalar VM does not support reflection or plugin-loading builtins",
-      "count": 28,
+      "count": 11,
       "removed_by": "S4.5"
     },
     {
       "suite": "generics_end_to_end",
-      "message": "AzScript error: VM backend does not support: buffer_new",
-      "count": 1,
-      "removed_by": "S4.3"
+      "message": "AzScript error: Scalar VM does not support reflection or plugin-loading builtins",
+      "count": 29,
+      "removed_by": "S4.5"
     },
     {
       "suite": "generics_end_to_end",
@@ -107,93 +51,33 @@
     },
     {
       "suite": "buffers_end_to_end",
-      "message": "AzScript error: VM backend does not support: buffer_new buffer_operation",
-      "count": 29,
-      "removed_by": "S4.3"
-    },
-    {
-      "suite": "buffers_end_to_end",
-      "message": "AzScript error: VM backend does not support: buffer_operation",
-      "count": 1,
-      "removed_by": "S4.3"
-    },
-    {
-      "suite": "buffers_end_to_end",
-      "message": "AzScript error: VM backend does not support: value_compare",
-      "count": 4,
-      "removed_by": "S4.4"
-    },
-    {
-      "suite": "buffers_end_to_end",
-      "message": "VM backend does not support: buffer_new buffer_operation",
-      "count": 2,
-      "removed_by": "S4.3"
-    },
-    {
-      "suite": "virtual_methods_end_to_end",
-      "message": "AzScript error: VM backend does not support: buffer_new buffer_operation",
-      "count": 1,
-      "removed_by": "S4.3"
-    },
-    {
-      "suite": "virtual_methods_end_to_end",
-      "message": "AzScript error: VM backend does not support: buffer_new buffer_operation value_compare",
-      "count": 1,
-      "removed_by": "S4.3"
-    },
-    {
-      "suite": "virtual_methods_end_to_end",
-      "message": "VM backend does not support: buffer_new buffer_operation",
-      "count": 1,
-      "removed_by": "S4.3"
-    },
-    {
-      "suite": "virtual_methods_end_to_end",
-      "message": "VM backend does not support: buffer_new buffer_operation value_compare",
-      "count": 1,
-      "removed_by": "S4.3"
-    },
-    {
-      "suite": "limits_end_to_end",
       "message": "AzScript error: Scalar VM does not support reflection or plugin-loading builtins",
-      "count": 8,
+      "count": 2,
+      "removed_by": "S4.5"
+    },
+    {
+      "suite": "virtual_methods_end_to_end",
+      "message": "AzScript error: Scalar VM does not support reflection or plugin-loading builtins",
+      "count": 1,
+      "removed_by": "S4.5"
+    },
+    {
+      "suite": "virtual_methods_end_to_end",
+      "message": "Scalar VM does not support reflection or plugin-loading builtins",
+      "count": 1,
       "removed_by": "S4.5"
     },
     {
       "suite": "limits_end_to_end",
-      "message": "AzScript error: VM backend does not support: buffer_new buffer_operation",
-      "count": 14,
-      "removed_by": "S4.3"
-    },
-    {
-      "suite": "limits_end_to_end",
-      "message": "AzScript error: VM backend does not support: buffer_new buffer_operation value_compare",
-      "count": 8,
-      "removed_by": "S4.3"
-    },
-    {
-      "suite": "limits_end_to_end",
-      "message": "AzScript error: VM backend does not support: value_compare",
-      "count": 3,
-      "removed_by": "S4.4"
-    },
-    {
-      "suite": "language_ops_end_to_end",
-      "message": "AzScript error: VM backend does not support: buffer_new buffer_operation",
-      "count": 1,
-      "removed_by": "S4.3"
+      "message": "AzScript error: Scalar VM does not support reflection or plugin-loading builtins",
+      "count": 16,
+      "removed_by": "S4.5"
     },
     {
       "suite": "compact_exec_end_to_end",
       "message": "AzScript error: Scalar VM does not support reflection or plugin-loading builtins",
       "count": 1,
       "removed_by": "S4.5"
-    },
-    {
-      "suite": "compact_exec_end_to_end",
-      "message": "AzScript error: VM backend does not support: buffer_new",
-      "count": 2,
-      "removed_by": "S4.3"
     },
     {
       "suite": "extern_library_end_to_end",

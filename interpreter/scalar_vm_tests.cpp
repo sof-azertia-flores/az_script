@@ -2,6 +2,7 @@
 #include "vm/execution.h"
 #include "vm/lowering.h"
 #include "core/value_ops.h"
+#include <algorithm>
 #include <array>
 #include <bit>
 #include <cstdlib>
@@ -356,13 +357,19 @@ void call_cases() {
     differential("dynamic-call-after-side-effect",function(call(0x76540001,{store(-1,literal(8))})),{Value(0)});
 }
 void refusal_and_resources() {
-    // A valid buffer opcode is rejected while preparing, before the first store.
+    // A program its backend cannot run is rejected while preparing, before
+    // the first store: every opcode is admitted, so a backend admitting fewer
+    // stands in for one.
     auto source=function(block({store(-1,literal(99)),op(41,{literal(1)})}));
     const auto unsupported=lower_program(SourceProgram{{source},{}});
     WorkspaceBudget budget(1024*1024);SlotPool pool(budget);
     auto global=pool.emplace(Value(0));bool rejected=false;
-    try{ScalarExecutor executor(unsupported,pool,budget);}catch(const std::invalid_argument&){rejected=true;}
-    check(rejected&&pool.resolve(global).get<int>()==0,"unsupported opcode reached execution");
+    const auto all=scalar_capabilities();
+    check(std::find(all.begin(),all.end(),Opcode::buffer_operation)!=all.end(),"buffer operations are not admitted");
+    std::vector<Opcode> fewer;for(const auto opcode:all)if(opcode!=Opcode::buffer_operation)fewer.push_back(opcode);
+    try{require_capabilities(unsupported,fewer);}
+    catch(const std::invalid_argument& error){rejected=std::string(error.what())=="VM backend does not support: buffer_operation";}
+    check(rejected&&pool.resolve(global).get<int>()==0,"unsupported opcode was admitted");
     // An owned return makes an object frame. It is admitted while preparing,
     // but entering it needs the script's ownership records.
     auto owned=lower_program(SourceProgram{{function(op(8,{literal(address{0})}),ADDRESS_VALUE)},{}});

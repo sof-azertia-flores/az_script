@@ -37,7 +37,7 @@ constexpr std::array supported{
     Opcode::new_block,Opcode::block_address,Opcode::move_out,Opcode::drop,
     Opcode::check_method_receiver,Opcode::set_methods,Opcode::call_virtual,
     Opcode::bind_context,Opcode::context_abi,Opcode::context_default,Opcode::return_typed,
-    Opcode::check_type,Opcode::check_object
+    Opcode::check_type,Opcode::check_object,Opcode::buffer_new,Opcode::buffer_operation,Opcode::value_compare
 };
 
 void require_scalar_value(const Value& value) {
@@ -1307,6 +1307,24 @@ struct ScalarExecutor::State {
                     frame.result=std::move(result);frame.returned=true;frame.return_location=frame.location;
                     value(frame,instruction.result,Value{});break;
                 }
+                case Opcode::buffer_new: {
+                    auto result=std::make_shared<variable>(blocks::create_buffer(bound(frame,instruction.left),host_of(options).owner()));
+                    blocks::adopt_result(result,site(frame));reference(frame,instruction.result,std::move(result));break;
+                }
+                case Opcode::buffer_operation: {
+                    // Element constructors and destructors run natively from
+                    // the host's view of this scope, as host functions do.
+                    const auto& operation=function_of(frame).operations[instruction.operand];
+                    auto buffer=blocks::of(variable_of(frame,instruction.left));
+                    std::vector<std::shared_ptr<variable>> arguments;arguments.reserve(operation.arguments.size());
+                    for(const auto argument:operation.arguments)arguments.push_back(variable_of(frame,argument));
+                    std::shared_ptr<variable> result;
+                    runtime(options,[&]{result=blocks::buffer_operation(static_cast<int>(operation.immediate),buffer,arguments,host_scope(frame,options));});
+                    reference(frame,instruction.result,std::move(result));break;
+                }
+                case Opcode::value_compare:
+                    value(frame,instruction.result,Value(blocks::compare_value(bound(frame,instruction.operand),
+                        variable_of(frame,instruction.left),variable_of(frame,instruction.right),nullptr)));break;
                 case Opcode::check_object:
                     check_object(frame,instruction.left,bound(frame,instruction.right),
                         function_of(frame).operations[instruction.operand].slot_types);
