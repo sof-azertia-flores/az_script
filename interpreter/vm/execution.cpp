@@ -35,7 +35,9 @@ constexpr std::array supported{
     Opcode::cleanup_enter,Opcode::cleanup_leave,Opcode::cleanup_end,
     Opcode::member_get,Opcode::object_address,Opcode::object_register,Opcode::object_delete,
     Opcode::new_block,Opcode::block_address,Opcode::move_out,Opcode::drop,
-    Opcode::check_method_receiver,Opcode::set_methods,Opcode::call_virtual
+    Opcode::check_method_receiver,Opcode::set_methods,Opcode::call_virtual,
+    Opcode::bind_context,Opcode::context_abi,Opcode::context_default,Opcode::return_typed,
+    Opcode::check_type,Opcode::check_object
 };
 
 void require_scalar_value(const Value& value) {
@@ -175,6 +177,7 @@ struct ScalarExecutor::State {
         std::vector<ObjectScope> scopes; // [0] is the function root.
         std::vector<Control> controls;   // Innermost last.
         Cleanup* cleanup=nullptr;
+        type_contexts bound;             // bind_context results
     };
     const ExecutableProgram& program;
     SlotPool& pool;
@@ -225,21 +228,17 @@ struct ScalarExecutor::State {
         std::vector<std::vector<std::uint32_t>> callers(count);
         for(std::uint32_t index=0;index<count;++index) {
             const auto& function=program.functions[index];
-            if(function.hidden_count||function.bound_context_count)
-                throw std::invalid_argument("Scalar VM does not support generic or object function contexts");
-            bool objects=(function.entry_kind&&!function.lifecycle)||object_signature(function.return_type,function.param_types);
+            // Generic functions keep their hidden and bound contexts in an
+            // object frame.
+            bool objects=(function.entry_kind&&!function.lifecycle)||object_signature(function.return_type,function.param_types)||
+                function.hidden_count||function.bound_context_count;
             for(auto pc=function.begin;pc<function.end;++pc) {
                 const auto& instruction=program.instructions[pc];
                 if(object_opcode(instruction.opcode)||(instruction.opcode==Opcode::set_return&&instruction.operand!=0))objects=true;
-                if(instruction.opcode==Opcode::object_register&&!function.operations[instruction.operand].contexts.empty())
-                    throw std::invalid_argument("Scalar VM does not support generic object destructors");
-                if(instruction.opcode==Opcode::set_methods)
-                    for(const auto& method:function.operations[instruction.operand].methods)
-                        if(!method.contexts.empty())throw std::invalid_argument("Scalar VM does not support generic virtual methods");
                 if(instruction.opcode==Opcode::call) {
                     const auto& operation=function.operations[instruction.operand];
                     const auto& target=program.targets[*operation.target];
-                    if(target.hidden_count||!operation.contexts.empty())
+                    if(target.kind!=TargetKind::script&&(target.hidden_count||!operation.contexts.empty()))
                         throw std::invalid_argument("Scalar VM does not support generic or object call contexts");
                     if(object_signature(target.return_type,target.param_types))objects=true;
                     if(target.kind==TargetKind::script) {
@@ -476,7 +475,7 @@ struct ScalarExecutor::State {
                         [](std::size_t){return std::optional<int>(ADDRESS_VALUE);},true);
                     const Value argument(call.object);const auto region_mark=regions.size();
                     entered=true;
-                    ContinuationEntry continuation{std::move(admitted),pending.site};
+                    ContinuationEntry continuation{std::move(admitted),pending.site,call.contexts};
                     auto read=[&](std::size_t)->const Value&{return argument;};
                     enter_frame<true>(target->second,1,read,below,no_index,position,options,false,&continuation);
                     pending.region_mark=region_mark;
@@ -792,7 +791,8 @@ struct ScalarExecutor::State {
     // Object frames are entered out of line, which keeps the scalar
     // dispatch loop's inlining independent of the object model.
     template<class Argument> [[gnu::noinline]] void enter_object_frame(std::uint32_t index,std::size_t count,Argument& argument,
-            FrameRecord& frame,const FrameLayout& layout,const ExecutionOptions& options,ownership::Site caller_site) {
+            FrameRecord& frame,const FrameLayout& layout,const ExecutionOptions& options,ownership::Site caller_site,
+            const type_contexts* contexts) {
         const auto& function=program.functions[index];
         // Same order as the tree executor: parameters are stored from
         // the calling scope, then bound to the new function root.
@@ -808,6 +808,8 @@ struct ScalarExecutor::State {
         auto& tree=*record.frame;
         tree.global_offset=function.global_offset;tree.global_count=function.global_count;tree.param_count=count;
         tree.slots.resize(function.param_types.size()+static_cast<std::size_t>(function.local_count));
+        if(contexts)tree.hidden_contexts=*contexts;
+        record.bound.resize(function.bound_context_count);
         record.scopes.emplace_back(host.ownership_arena(),
                                    ownership::Scope::Links{owner->baseEnv->ownership_id(),calling.scope(),tree.temporary_id()});
         record.scopes.back().ownership.record().script=owner;
@@ -825,21 +827,32 @@ struct ScalarExecutor::State {
     }
     // A continuation frame arrives with its admission and the calling site
     // of its native dispatch; its entries publish its failures.
-    struct ContinuationEntry {admission::accounting::ticket admitted;ownership::Site caller;};
+    struct ContinuationEntry {admission::accounting::ticket admitted;ownership::Site caller;const type_contexts* contexts;};
+    // contexts are the callee's hidden contexts. A script call checks them
+    // before its admission, as ofunction::invoke_bound does; a public entry
+    // and a continuation have checked them already.
     template<class Argument> void enter(std::uint32_t index,std::size_t count,Argument argument,
-            FrameId caller,Register destination,ExecutionPosition& position,const ExecutionOptions& options,bool admit) {
-        enter_frame<false>(index,count,argument,caller,destination,position,options,admit,nullptr);
+            FrameId caller,Register destination,ExecutionPosition& position,const ExecutionOptions& options,bool admit,
+            const type_contexts* contexts=nullptr) {
+        enter_frame<false>(index,count,argument,caller,destination,position,options,admit,nullptr,contexts);
     }
     template<bool Continuation,class Argument> void enter_frame(std::uint32_t index,std::size_t count,Argument& argument,
             FrameId caller,Register destination,ExecutionPosition& position,const ExecutionOptions& options,bool admit,
-            ContinuationEntry* continuation) {
+            ContinuationEntry* continuation,const type_contexts* contexts=nullptr) {
         const ExecutionPosition entry{index,0,0,0,no_index};
         try {
             if(caller&&trace_touched)trace::discard_active();
             FrameRecord frame;frame.function=index;frame.caller=caller;frame.return_register=destination;
-            if constexpr(Continuation)frame.admission=std::move(continuation->admitted);
-            else if(admit&&options.calls)frame.admission=options.calls->enter();
             const auto& function=program.functions[index];
+            if constexpr(Continuation) {
+                frame.admission=std::move(continuation->admitted);contexts=continuation->contexts;
+            } else {
+                if(caller) {
+                    if((contexts?contexts->size():0)!=function.hidden_count)throw std::runtime_error("Generic context count mismatch");
+                    if(contexts&&!contexts->empty())validate_type_contexts(*contexts,host_of(options).owner());
+                }
+                if(admit&&options.calls)frame.admission=options.calls->enter();
+            }
             const bool objects=object_function[index];
             validate_arguments(function,count,argument,objects);
             const auto layout=layouts[index];
@@ -852,8 +865,8 @@ struct ScalarExecutor::State {
             declared.prepare_append(layout.locals);scopes.prepare_append(layout.scope_marks);
             regions.prepare(layout.cleanups);
             if(objects) {
-                if constexpr(Continuation)enter_object_frame(index,count,argument,frame,layout,options,continuation->caller);
-                else enter_object_frame(index,count,argument,frame,layout,options,ownership::Site{});
+                if constexpr(Continuation)enter_object_frame(index,count,argument,frame,layout,options,continuation->caller,contexts);
+                else enter_object_frame(index,count,argument,frame,layout,options,ownership::Site{},contexts);
                 return;
             }
             registers.append_default(layout.registers);locals.append_default(layout.locals);
@@ -870,15 +883,111 @@ struct ScalarExecutor::State {
             throw;
         }
     }
-    std::shared_ptr<const method_table> methods(std::uint32_t function,std::uint32_t operand) {
-        auto& cached=method_tables[function][operand];
-        if(!cached) {
-            const auto& operation=program.functions[function].operations[operand];
-            auto table=std::make_shared<method_table>();table->reserve(operation.methods.size());
-            for(const auto& method:operation.methods)table->push_back({program.targets[method.target].function_id,{}});
-            cached=std::move(table);
+    // A context as the tree's bind_context builds it: a reference names one of
+    // the frame's hidden contexts, any other context is bound anew.
+    std::shared_ptr<const type_context> bind(const FrameRecord& frame,std::uint32_t index,std::size_t depth=0) {
+        if(depth>=128)throw std::runtime_error("Generic context nesting exceeds 128 levels");
+        const auto& spec=function_of(frame).contexts[index];
+        if(spec.reference) {
+            if(frame.object==no_index||*spec.reference>=objects(frame).frame->hidden_contexts.size())
+                throw std::runtime_error("Generic context reference is unavailable");
+            return objects(frame).frame->hidden_contexts[*spec.reference];
         }
-        return cached;
+        auto result=std::make_shared<type_context>();
+        result->abi=spec.abi;result->kind=spec.kind;result->width=static_cast<int>(spec.width);
+        if(spec.factory)result->factory_id=program.targets[*spec.factory].function_id;
+        if(spec.placement)result->placement_id=program.targets[*spec.placement].function_id;
+        for(const auto child:spec.contexts)result->contexts.push_back(bind(frame,child,depth+1));
+        for(const auto child:spec.placement_contexts)result->placement_contexts.push_back(bind(frame,child,depth+1));
+        if(spec.element)result->element=bind(frame,*spec.element,depth+1);
+        return result;
+    }
+    type_contexts bind_all(const FrameRecord& frame,const std::vector<std::uint32_t>& indices) {
+        type_contexts result;result.reserve(indices.size());
+        for(const auto index:indices)result.push_back(bind(frame,index));
+        return result;
+    }
+    bool constant_context(const FunctionRecord& function,std::uint32_t index) const {
+        const auto& spec=function.contexts[index];
+        if(spec.reference)return false;
+        for(const auto child:spec.contexts)if(!constant_context(function,child))return false;
+        for(const auto child:spec.placement_contexts)if(!constant_context(function,child))return false;
+        return !spec.element||constant_context(function,*spec.element);
+    }
+    const std::shared_ptr<const type_context>& bound(const FrameRecord& frame,Register index) {
+        const auto& result=objects(frame).bound[index];
+        if(!result)throw std::logic_error("Scalar VM generic context was not bound");
+        return result;
+    }
+    // A generic default as the tree's context node makes it. A class default
+    // runs its factory as a script call from this site; its result joins the
+    // frame's temporaries before the factory's result is checked.
+    void context_default(const FrameRecord& frame,Register destination,const std::shared_ptr<const type_context>& context,
+            const ExecutionOptions& options) {
+        if(context->kind==4) {
+            auto result=std::make_shared<variable>(blocks::create_buffer(context->element,host_of(options).owner()));
+            blocks::adopt_result(result,site(frame));reference(frame,destination,std::move(result));return;
+        }
+        if(context->kind==3) {
+            if(!context->factory_id)throw std::runtime_error("Generic type has no default constructor");
+            std::shared_ptr<variable> result;
+            runtime(options,[&]{result=invoke_bound_function(host_of(options).owner(),*context->factory_id,site(frame),{},context->contexts);});
+            blocks::adopt_result(result,site(frame));
+            auto block=blocks::of(result);
+            if(!block||block->buffer||block->slots.size()!=static_cast<std::size_t>(context->width))
+                throw std::runtime_error("Generic default factory must return a class with the declared slot width");
+            reference(frame,destination,std::move(result));return;
+        }
+        switch(context->abi) {
+        case INT_VALUE:value(frame,destination,Value(0));return;
+        case STRING_VALUE:value(frame,destination,Value(std::string()));return;
+        case FLOAT_VALUE:value(frame,destination,Value(0.0f));return;
+        case DOUBLE_VALUE:value(frame,destination,Value(0.0));return;
+        case BOOLEAN_VALUE:value(frame,destination,Value(false));return;
+        case ADDRESS_VALUE:value(frame,destination,Value(address{}));return;
+        default:throw std::runtime_error("Generic type cannot be default initialized");
+        }
+    }
+    static bool same_context_layout(const std::shared_ptr<const type_context>& a,const std::shared_ptr<const type_context>& b,std::size_t depth=0) {
+        if(!a||!b||depth>=128)return false;
+        return a->abi==b->abi&&a->kind==b->kind&&a->width==b->width&&
+            (a->kind!=4||same_context_layout(a->element,b->element,depth+1));
+    }
+    // The tree's check_object node, after its value and context.
+    void check_object(const FrameRecord& frame,Register source,const std::shared_ptr<const type_context>& context,
+            const std::vector<int>& slot_types) {
+        const auto& checked=read(frame,source);
+        if(checked.type_tag()!=context->abi)throw std::runtime_error("Object check failed: value has an incompatible type");
+        if(context->kind==2){heap::check_object(checked.get<address>(),slot_types);return;}
+        if(context->kind!=3&&context->kind!=4)return;
+        auto block=blocks::of(variable_of(frame,source));
+        if(!block||block->state!=slot_block::status::live)throw std::runtime_error("Object check failed: value object has expired");
+        if(context->kind==4) {
+            if(!block->buffer||!same_context_layout(context->element,block->buffer->element))
+                throw std::runtime_error("Object check failed: buffer element context mismatch");
+            return;
+        }
+        if(block->buffer||block->slots.size()!=static_cast<std::size_t>(context->width)||
+           (!slot_types.empty()&&block->slots.size()!=slot_types.size()))
+            throw std::runtime_error("Object check failed: class value width mismatch");
+        for(std::size_t i=0;i<slot_types.size();++i)
+            if(slot_types[i]!=ANY_VALUE&&(!block->slots[i]||block->slots[i]->type_tag()!=slot_types[i]))
+                throw std::runtime_error("Object check failed: slot "+std::to_string(i)+" has an incompatible type");
+    }
+    // A table whose contexts are all constant is bound once, as the tree's
+    // set_methods node caches it.
+    std::shared_ptr<const method_table> methods(const FrameRecord& frame,std::uint32_t operand) {
+        auto& cached=method_tables[frame.function][operand];
+        if(cached)return cached;
+        const auto& function=function_of(frame);const auto& operation=function.operations[operand];
+        auto table=std::make_shared<method_table>();table->reserve(operation.methods.size());
+        bool context_free=true;
+        for(const auto& method:operation.methods) {
+            for(const auto context:method.contexts)if(!constant_context(function,context))context_free=false;
+            table->push_back({program.targets[method.target].function_id,bind_all(frame,method.contexts)});
+        }
+        if(context_free)cached=table;
+        return table;
     }
     static address pointer(const Value& value,const char* message) {
         if(value.type_tag()!=ADDRESS_VALUE)throw std::runtime_error(message);
@@ -896,7 +1005,7 @@ struct ScalarExecutor::State {
         const auto region_mark=regions.size();
         // Entry failures leave no frame of this root; enter reports them.
         enter(index,arguments.size(),[&](std::size_t i)->const Value&{return arguments[i];},
-            {},no_index,position,options,options.admit_entry);
+            {},no_index,position,options,options.admit_entry,options.contexts);
         // A failure resumed after its finalizer is raised again inside the
         // dispatch try, so outer regions handle it without native recursion.
         pending_error resumed;
@@ -1021,9 +1130,14 @@ struct ScalarExecutor::State {
                     const auto& operation=function_of(frame).operations[instruction.operand];
                     const auto& target=program.targets[*operation.target];
                     if(target.kind==TargetKind::script) {
-                        enter(target.function,operation.arguments.size(),
-                            [&](std::size_t i)->const Value&{return read(frame,operation.arguments[i]);},
-                            frames.top_id(),instruction.result,position,options,true);
+                        auto read_argument=[&](std::size_t i)->const Value&{return read(frame,operation.arguments[i]);};
+                        if(operation.contexts.empty()&&!target.hidden_count)
+                            enter(target.function,operation.arguments.size(),read_argument,frames.top_id(),instruction.result,position,options,true);
+                        else {
+                            // Bound after the arguments, as the tree's call node binds them.
+                            const auto contexts=bind_all(frame,operation.contexts);
+                            enter(target.function,operation.arguments.size(),read_argument,frames.top_id(),instruction.result,position,options,true,&contexts);
+                        }
                     } else {
                         // Resolve only after all preceding materialize/argument
                         // instructions have completed, preserving side effects.
@@ -1108,7 +1222,7 @@ struct ScalarExecutor::State {
                     const auto& operation=function_of(frame).operations[instruction.operand];
                     std::optional<int> destructor;
                     if(operation.target)destructor=program.targets[*operation.target].function_id;
-                    heap::register_object(object,destructor,operation.manual,site(frame));
+                    heap::register_object(object,destructor,operation.manual,site(frame),bind_all(frame,operation.contexts));
                     value(frame,instruction.result,Value{});break;
                 }
                 case Opcode::object_delete: {
@@ -1146,7 +1260,7 @@ struct ScalarExecutor::State {
                     pointer(read(frame,instruction.left),"Virtual method receiver must be address");break;
                 case Opcode::set_methods:
                     heap::set_methods(pointer(read(frame,instruction.left),"Virtual method receiver must be address"),
-                        methods(frame.function,instruction.operand),host_of(options).owner());
+                        methods(frame,instruction.operand),host_of(options).owner());
                     value(frame,instruction.result,Value{});break;
                 case Opcode::call_virtual: {
                     const auto& operation=function_of(frame).operations[instruction.operand];
@@ -1156,15 +1270,47 @@ struct ScalarExecutor::State {
                     const auto slot=static_cast<std::size_t>(static_cast<std::uint32_t>(operation.immediate));
                     if(slot>=table->size())throw std::runtime_error("Virtual method slot is out of range");
                     const auto& method=(*table)[slot];
-                    if(!method.contexts.empty())throw std::invalid_argument("Scalar VM does not support generic virtual methods");
                     const auto found=script_functions.find(method.function_id);
                     if(found==script_functions.end())throw std::runtime_error("Unknown function id: "+function_id_text(method.function_id));
                     enter(found->second,operation.arguments.size(),
                         [&](std::size_t i)->const Value&{return read(frame,operation.arguments[i]);},
-                        frames.top_id(),instruction.result,position,options,true);
+                        frames.top_id(),instruction.result,position,options,true,&method.contexts);
                     auto& callee=frames.top();callee.check_return=true;callee.checked_return_type=operation.return_type;
                     break;
                 }
+                case Opcode::bind_context:
+                    objects(frame).bound[instruction.result]=bind(frame,instruction.operand);break;
+                case Opcode::context_abi:
+                    value(frame,instruction.result,Value(bound(frame,instruction.left)->abi));break;
+                case Opcode::context_default:
+                    context_default(frame,instruction.result,bound(frame,instruction.left),options);break;
+                case Opcode::check_type: {
+                    // The checked value itself, as the tree's node returns it.
+                    if(read(frame,instruction.left).type_tag()!=bound(frame,instruction.right)->abi)
+                        throw std::runtime_error("Generic value type mismatch");
+                    copy(frame,instruction.result,instruction.left);break;
+                }
+                case Opcode::return_typed: {
+                    const auto context=bound(frame,instruction.right);
+                    auto source=variable_of(frame,instruction.left);Value result;
+                    if(source->type_tag()!=context->abi)throw std::runtime_error("Generic value type mismatch");
+                    const auto scope=site(frame);
+                    if(source->type_tag()==OBJECT_VALUE) {
+                        std::shared_ptr<variable> exported;
+                        if(with_rollback(frame,position,options,[&](blocks::copy_rollback* deferred){exported=blocks::export_result(source,scope,deferred);}))
+                            break;
+                        result=value_access::read(*exported);
+                    } else {
+                        result=value_access::read(*source);
+                        if(context->kind==2)heap::return_object(result.get<address>(),scope);
+                    }
+                    frame.result=std::move(result);frame.returned=true;frame.return_location=frame.location;
+                    value(frame,instruction.result,Value{});break;
+                }
+                case Opcode::check_object:
+                    check_object(frame,instruction.left,bound(frame,instruction.right),
+                        function_of(frame).operations[instruction.operand].slot_types);
+                    copy(frame,instruction.result,instruction.left);break;
                 case Opcode::function_end: {
                     frame.location=frame.return_location;position=position_of(frame);
                     auto output=value_ops::convert_return(frame.result,function_of(frame).return_type);

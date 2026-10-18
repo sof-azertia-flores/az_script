@@ -7,7 +7,10 @@
 #include <memory>
 #include <span>
 
-namespace azertian {class environment; class script; class variable; namespace ownership {class Arena;}}
+namespace azertian {
+class environment; class script; class variable; struct type_context; namespace ownership {class Arena;}
+using type_contexts=std::vector<std::shared_ptr<const type_context>>;
+}
 namespace azertian::vm {
 // Object frames keep core ownership records (scope records, function_frame
 // temporaries and variable-backed locals), so object, heap and destructor
@@ -61,6 +64,8 @@ struct ExecutionOptions {
     // The calling scope of a public entry into an object frame. Its function
     // frame receives exported object results and ownership transfers.
     ownership::Site caller;
+    // A public entry's hidden contexts, already checked by its caller.
+    const type_contexts* contexts=nullptr;
 };
 
 std::span<const Opcode> scalar_capabilities() noexcept;

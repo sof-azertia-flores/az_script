@@ -1168,7 +1168,7 @@ V ofunction::invoke_bound(ownership::Site caller,std::vector<V> args,type_contex
         // while importing globals or reserving arguments. Do not append a
         // duplicate tree frame when it propagates the original exception.
         vm_trace=true;
-        return bound->vm_session_->invoke(vm_function_index_,args,&position,caller);
+        return bound->vm_session_->invoke(vm_function_index_,args,&position,caller,contexts);
     }
     const auto& arena=guard.s->baseEnv->ownership_arena();
     auto env=std::make_shared<environment>(arena,guard.s->baseEnv,caller.scope(),std::make_shared<function_frame>(arena),true);

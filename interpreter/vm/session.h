@@ -36,7 +36,7 @@ public:
     // results and transfer ownership into it, as the tree executor does.
     std::shared_ptr<variable> invoke(std::uint32_t function,
         std::span<const std::shared_ptr<variable>> arguments,ExecutionPosition* position,
-        ownership::Site caller);
+        ownership::Site caller,const type_contexts& contexts={});
     std::size_t workspace_bytes() const noexcept;
     std::size_t workspace_peak_bytes() const noexcept;
     std::size_t workspace_limit() const noexcept{return workspace_limit_;}

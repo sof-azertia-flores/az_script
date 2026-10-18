@@ -197,7 +197,7 @@ const CompiledScript& Session::compiled() const {
 }
 std::shared_ptr<variable> Session::invoke(std::uint32_t function,
         std::span<const std::shared_ptr<variable>> arguments,ExecutionPosition* position,
-        ownership::Site caller) {
+        ownership::Site caller,const type_contexts& contexts) {
     if(!prepared_)throw std::logic_error("VM program has not been prepared");
     auto& state=*prepared_;
     ExecutionPosition local_position;
@@ -231,7 +231,7 @@ std::shared_ptr<variable> Session::invoke(std::uint32_t function,
     try {
         result=state.executor.invoke(function,state.arguments.span().subspan(begin),
             state.globals.span(),owner_.remaining_steps,position,
-            ExecutionOptions{&calls,&callbacks,false,caller});
+            ExecutionOptions{&calls,&callbacks,false,caller,&contexts});
     } catch(...) {
         state.export_globals(owner_);throw;
     }

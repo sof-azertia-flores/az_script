@@ -126,15 +126,13 @@ void preflight_and_selection() {
         "preflight failure published tree relocation");
     script->destroy();
 
-    // A generic function (hidden contexts) is still refused while preparing,
-    // before onload changes the global.
+    // A generic function (hidden contexts) is prepared and initialized.
     script=load(module({hook(0,block({store(-1,99)})),
         function(10,VOID_VALUE,block({constant(1)}),{ADDRESS_VALUE},false,0,0,1)},1));
     script->baseEnv->variables[0]->setValue(3);
-    vm::select_backend(*script,workspace);
-    rejects([&]{script->flush();},"generic or object function contexts");
-    check(script->baseEnv->variables[0]->get<int>()==3&&!script->setup&&!script->faulted,
-        "generic function refusal ran onload or partially initialized the module");
+    vm::select_backend(*script,workspace);script->flush();
+    check(script->baseEnv->variables[0]->get<int>()==99&&script->setup&&!script->faulted,
+        "generic function was not prepared and initialized");
     script->destroy();
 
     script=load(module({hook(0,block({store(-1,8)})),
