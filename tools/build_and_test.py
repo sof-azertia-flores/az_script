@@ -219,6 +219,11 @@ def main():
     vm_work.parent.mkdir(parents=True,exist_ok=True)
     run([sys.executable, ROOT/'tests/runtime_differential.py', '--self-test'])
     run([sys.executable, ROOT/'tests/runtime_differences.py', '--self-test'])
+    fuzz_work=BUILD/'runtime-perf'/('fuzz-selftest-sanitize' if args.sanitize else 'fuzz-selftest')
+    if fuzz_work.exists():shutil.rmtree(fuzz_work)
+    run([sys.executable, ROOT/'tests/lifecycle_fuzz.py', '--self-test', '--classpath', classpath,
+         '--reference-host', native/'interpreter/observation-host',
+         '--candidate-host', native/'interpreter/observation-host', '--candidate-engine', 'vm', '--work', fuzz_work])
     run([sys.executable, ROOT/'tests/vm_execution_end_to_end.py', '--classpath', classpath,
          '--reference-host', native/'interpreter/observation-host', '--reference-engine', 'tree',
          '--candidate-host', native/'interpreter/observation-host', '--candidate-engine', 'vm', '--work', vm_work])
