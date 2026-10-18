@@ -5,7 +5,6 @@
 #include "../library.h"
 #include "../core/trace.h"
 #include "../core/ids.h"
-#include <algorithm>
 #include <stdexcept>
 
 namespace azertian::vm {
@@ -14,9 +13,6 @@ void require_scalar_host_targets(const ExecutableProgram& program) {
         if(target.kind!=TargetKind::script&&(target.hidden_count||target.entry_kind))
             throw std::invalid_argument("Scalar VM does not support generic or object host call contexts");
         if(target.kind==TargetKind::script)continue;
-        if(target.return_type==OBJECT_VALUE||
-                std::find(target.param_types.begin(),target.param_types.end(),OBJECT_VALUE)!=target.param_types.end())
-            throw std::invalid_argument("Scalar VM does not support object callback signatures");
     }
 }
 std::shared_ptr<script> HostBridge::owner() {return owner_.shared_from_this();}
@@ -83,8 +79,6 @@ std::shared_ptr<variable> HostBridge::invoke_external_in(const CallTarget& targe
     try {boundary_.refresh_globals(owner_);}catch(...) {failure.capture_current();}
     if(failure)failure.rethrow();
     if(!result)throw std::runtime_error("Host function returned a null pointer");
-    if(result->type_tag()==OBJECT_VALUE)
-        throw std::invalid_argument("Scalar VM does not support object callback results");
     return result;
 }
 void HostBridge::note_script_error(const ExecutionPosition& position) noexcept {

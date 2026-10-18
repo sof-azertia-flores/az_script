@@ -1,41 +1,5 @@
 {
   "version": 1,
-  "entries": [
-    {
-      "id": "vm-object-host-callbacks",
-      "kind": "transitional_vm_refusal",
-      "engine": "vm",
-      "cases": [
-        "own-b34-host-result-member-of-adopted-temporary",
-        "own-b34b-host-result-moves-into-parameter",
-        "own-b34c-host-result-moves-into-local",
-        "own-b34d-discarded-host-result-dies-at-statement-end",
-        "own-b35-host-call-arguments-destroyed-after-host-failure",
-        "own-b35b-host-call-object-arguments-copied-and-shared"
-      ],
-      "message": "Scalar VM does not support object callback signatures",
-      "removed_by": "S2.4",
-      "reason": "Host callbacks with object signatures need the VM-native object records and host views of S2.4."
-    }
-  ],
-  "suite_refusals": [
-    {
-      "suite": "generics_end_to_end",
-      "message": "AzScript error: Scalar VM does not support object callback results",
-      "count": 4,
-      "removed_by": "S4.6"
-    },
-    {
-      "suite": "buffers_end_to_end",
-      "message": "AzScript error: Scalar VM does not support object callback results",
-      "count": 1,
-      "removed_by": "S4.6"
-    },
-    {
-      "suite": "limits_end_to_end",
-      "message": "AzScript error: Scalar VM does not support object callback results",
-      "count": 8,
-      "removed_by": "S4.6"
-    }
-  ]
+  "entries": [],
+  "suite_refusals": []
 }

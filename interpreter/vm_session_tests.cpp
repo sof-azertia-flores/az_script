@@ -111,8 +111,9 @@ void preflight_and_selection() {
     rejects([&]{vm::require_scalar_host_targets(host_program);},"generic or object host call contexts");
     host_program.targets[0].hidden_count=0;host_program.targets[0].entry_kind=1;
     rejects([&]{vm::require_scalar_host_targets(host_program);},"generic or object host call contexts");
+    // Object parameters and results pass through object frames.
     host_program.targets[0].entry_kind=0;host_program.targets[0].return_type=OBJECT_VALUE;
-    rejects([&]{vm::require_scalar_host_targets(host_program);},"object callback signatures");
+    vm::require_scalar_host_targets(host_program);
     // A preparation failure (here the workspace limit) leaves the script as
     // it was before the flush.
     auto source=module({hook(0,block({store(-1,99)})),
