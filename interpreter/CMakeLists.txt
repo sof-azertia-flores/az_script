@@ -8,7 +8,7 @@ find_package(Threads REQUIRED)
 if(NOT TARGET azertianBinaryData)
     add_subdirectory(../abdC "${CMAKE_CURRENT_BINARY_DIR}/abdC")
 endif()
-set(AZSCRIPT_RUNTIME_SOURCES core/trace.cpp core/admission.cpp core/types.cpp core/value_ops.cpp core/storage.cpp core/ownership.cpp core/statement.cpp core/exec.cpp core/link.cpp library.cpp internelFunctions.cpp heepalloc.cpp blocks.cpp p256.cpp extern_library.cpp runtime_abi.cpp
+set(AZSCRIPT_RUNTIME_SOURCES core/trace.cpp core/admission.cpp core/types.cpp core/value_ops.cpp core/storage.cpp core/ownership.cpp core/statement.cpp core/lifecycle.cpp core/exec.cpp core/link.cpp library.cpp internelFunctions.cpp heepalloc.cpp blocks.cpp p256.cpp extern_library.cpp runtime_abi.cpp
     vm/frames.cpp vm/program.cpp vm/lowering.cpp vm/loader.cpp
     vm/execution.cpp vm/session.cpp vm/host_bridge.cpp vm/cleanup.cpp)
 add_library(abdInvoker SHARED ${AZSCRIPT_RUNTIME_SOURCES})
@@ -90,6 +90,7 @@ if(BUILD_TESTING)
             "vm-frame-tests:../tests/vm_frame_tests.cpp"
             "vm-program-tests:vm/program_tests.cpp"
             "exec-model-tests:core/exec_tests.cpp"
+            "lifecycle-tests:core/lifecycle_tests.cpp"
             "operations-tests:operations_tests.cpp"
             "scalar-vm-tests:scalar_vm_tests.cpp"
             "vm-call-tests:../tests/vm_call_tests.cpp"
