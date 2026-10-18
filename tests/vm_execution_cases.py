@@ -89,6 +89,13 @@ def object_cases():
                 'int main(){total=1;{R a(5);} return total;}\n', 6, globals=[typed(0, 6)],
                 raw_events=[{'callback': 4, 'arguments': [typed(0, 268369937), typed(0, 5)]},
                             {'reentry_return': typed(0, 6)}]),
+        # A member assignment's operands end with it: a target whose container
+        # the value's call deleted abandons the stored object, so its result
+        # has expired when the declaration copies it.
+        objects('assignment-into-deleted-container', MARK + 'class H { Mark f(1); }\n'
+                'Mark kill(H* x):0011{delete x;Mark m(7);return m;}\n'
+                'int main(){H* h=new H();Mark x=(h.f=kill(h));return x.n;}\n',
+                error='Object value has expired', events=(1, -1, 7), trace=('main',)),
         objects('method-on-local', 'class Counter { int n; Counter(){n=0;} void add(int v){n=n+v;} int get(){return n;} }\n'
                 'int main(){Counter c;int i=0;while(i<3){c.add(i);i=i+1;}return c.get();}\n', 3),
     ]

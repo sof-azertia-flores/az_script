@@ -314,7 +314,13 @@ struct ScalarExecutor::State {
             if(value->type_tag()==OBJECT_VALUE||storage->type_tag()==OBJECT_VALUE)
                 runtime(options,[&]{blocks::store(storage,value,scope_of(frame));});
             else blocks::store(storage,value,scope_of(frame));
-            this->value(frame,destination,value_access::read(*storage));return;
+            this->value(frame,destination,value_access::read(*storage));
+            // The operands end with the assignment, value first, as the tree's
+            // do: a target whose container is already freed abandons the
+            // stored object here, so the result reads as expired. Lowering
+            // never reads a store's operand registers again.
+            clear(registers[frame.registers.begin+source]);clear(reg);
+            return;
         }
         Value next=read(frame,source);
         if(next.type_tag()==OBJECT_VALUE)
