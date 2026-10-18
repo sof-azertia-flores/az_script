@@ -1,5 +1,7 @@
 #include "heepalloc.h"
 #include "blocks.h"
+#include "core/lifecycle.h"
+#include "core/object_access.h"
 #include <algorithm>
 #include <map>
 #include <set>
@@ -349,39 +351,24 @@ void register_object(address pointer,std::optional<int> destructor_id,bool manua
     // Manual objects become unowned only after construction has fully succeeded.
     if(manual)detach_owner(pointer);
 }
+namespace detail {
+bool registered(address pointer) {return objects.contains(pointer);}
+void begin_destroy(address pointer,std::optional<int>& destructor,std::weak_ptr<azertian::script>& owner,
+                   type_contexts& contexts) {
+    auto it=objects.find(pointer);
+    check_not_destroying(pointer);
+    const auto& record=it->second.value;
+    contexts=record.destructor_contexts;destructor=record.destructor_id;owner=record.script_owner;
+    it->second.destroying=true;
+}
+std::vector<std::shared_ptr<variable>> allocation_slots(address pointer) {return heap::allocation_slots(pointer);}
+void end_destroy(address pointer) {objects.erase(pointer);free(pointer);}
+}
 namespace {
 void destroy_registered(address pointer,const std::shared_ptr<environment>& env) {
-    auto it=objects.find(pointer);
-    if(it==objects.end()) {
-        // A failed construction still destroys its completed value members.
-        pending_error failure;blocks::finalize_storage(allocation_slots(pointer),env,true,failure);
-        free(pointer);
-        if(failure)failure.rethrow();
-        return;
-    }
-    check_not_destroying(pointer);
-    const object_record record=it->second.value;
-    it->second.destroying=true;
-    pending_error failure;
-    try {
-        if(record.destructor_id) {
-            auto script=record.script_owner.lock();
-            if(!script||script->closed)throw std::runtime_error("Object destructor script is unavailable");
-            auto context=env;
-            if(!context||context->script.lock()!=script) {
-                context=std::make_shared<environment>(script->baseEnv->ownership_arena());context->script=script;
-                context->parent=script->baseEnv;context->caller=env;
-            }
-            invoke_bound_function(script,*record.destructor_id,context,{std::make_shared<variable>(pointer)},record.destructor_contexts);
-        }
-    } catch(...) {failure.capture_current();}
-    // Value members end after the destructor body, while the object is still
-    // marked as destroying so they cannot delete or free their container.
-    blocks::finalize_storage(allocation_slots(pointer),env,true,failure);
-    // No registry iterator survives the script callback: it may delete other objects.
-    objects.erase(pointer);
-    free(pointer);
-    if(failure)failure.rethrow();
+    lifecycle::HeapDestroyer destroyer(pointer);
+    lifecycle::drive(destroyer,env);
+    destroyer.finish();
 }
 }
 void delete_object(address pointer,const std::shared_ptr<environment>& env) {

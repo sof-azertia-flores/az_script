@@ -1,6 +1,7 @@
 #include "library.h"
 #include "blocks.h"
 #include "core/statement.h"
+#include "core/lifecycle.h"
 #include "heepalloc.h"
 #include "internelFunctions.h"
 #include "vm/session.h"
@@ -1334,27 +1335,46 @@ environment::environment(std::shared_ptr<ownership::Arena> arena)
     :ownership_(std::move(arena)),owned_pointer(ownership_.record().owned),
      script(ownership_.record().script),closing(ownership_.record().closing) {}
 environment::~environment() {heap::discard_owned(this);}
+namespace {
+// The tree's view of a closing scope's locals for lifecycle::ScopeFinalizer.
+class closing_locals final:public lifecycle::ScopeLocals {
+    environment& scope_;
+public:
+    explicit closing_locals(environment& scope) noexcept:scope_(scope) {}
+    std::vector<V> leftovers() const override {
+        std::vector<V> result;
+        const auto& frame=scope_.frame;
+        if(!frame)return result;
+        if(scope_.frame_root)for(std::size_t i=0;i<frame->param_count&&i<frame->slots.size();++i)result.push_back(frame->slots[i]);
+        for(auto index:scope_.declared_slots)result.push_back(frame->slots[index]);
+        return result;
+    }
+    void undeclare() noexcept override {
+        if(scope_.frame)for(auto index:scope_.declared_slots)scope_.frame->slots[index].reset();
+        scope_.declared_slots.clear();
+    }
+};
+// True when cleanup could run no code and release nothing: it then only
+// closes the scope and undeclares its locals.
+bool nothing_to_release(const environment& scope) noexcept {
+    if(!scope.owned_pointer.empty())return false;
+    const auto& frame=scope.frame;
+    if(!frame)return true;
+    if(scope.frame_root&&!frame->temporaries.empty())return false;
+    const auto owning=[&](std::size_t index){const auto& slot=frame->slots[index];return slot&&blocks::owns(*slot);};
+    if(scope.frame_root)for(std::size_t i=0;i<frame->param_count&&i<frame->slots.size();++i)if(owning(i))return false;
+    for(auto index:scope.declared_slots)if(owning(index))return false;
+    return true;
+}
+}
 void environment::cleanup(const std::shared_ptr<environment>& self) {
     if(closing)return;
-    closing=true;
-    pending_error failure;
-    if(frame_root&&frame)try{blocks::finalize_temporaries(*frame,0,self);}catch(...){failure.capture_current();}
-    while(!owned_pointer.empty()) {
-        address pointer=owned_pointer.back();owned_pointer.pop_back();
-        try {heap::release_owned(pointer,self);}catch(...){failure.capture_current();}
-    }
-    // Objects that a dynamic variable acquired after its declaration end here.
-    if(frame) {
-        std::vector<V> leftovers;
-        for(auto index:declared_slots)leftovers.push_back(frame->slots[index]);
-        if(frame_root)for(std::size_t i=0;i<frame->param_count&&i<frame->slots.size();++i)leftovers.insert(leftovers.begin()+static_cast<std::ptrdiff_t>(i),frame->slots[i]);
-        blocks::finalize_storage(leftovers,self,true,failure);
-    }
-    // Destructors may still observe the current block through host callbacks;
-    // retire its locals only after every owned allocation has been cleaned.
-    if(frame)for(auto index:declared_slots)frame->slots[index].reset();
-    declared_slots.clear();
-    if(failure)failure.rethrow();
+    closing_locals locals(*this);
+    if(nothing_to_release(*this)){closing=true;locals.undeclare();return;}
+    std::lock_guard<std::recursive_mutex> lock(runtime_mutex());
+    lifecycle::ScopeFinalizer cleanup(ownership_.id(),frame_root&&frame?frame->temporary_id():ownership::TempListId{},locals);
+    lifecycle::drive(cleanup,self);
+    cleanup.finish();
 }
 V environment::getVariable(std::string name) {
     for(auto& v:variables) if(v->name==name)return v;

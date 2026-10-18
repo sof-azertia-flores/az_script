@@ -36,27 +36,27 @@ MUTANTS = [
         block.state=slot_block::status::dead;block.owner=nullptr;block.owner_scope={};block.methods.reset();"""),
     ]),
     ('temporaries-first-in-first-out', [
-        ('interpreter/blocks.cpp',
+        ('interpreter/core/lifecycle.cpp',
          'auto block=std::move(record->values.back());record->values.pop_back();',
-         'auto block=std::move(record->values[mark]);'
-         'record->values.erase(record->values.begin()+static_cast<std::ptrdiff_t>(mark));'),
+         'auto block=std::move(record->values[mark_]);'
+         'record->values.erase(record->values.begin()+static_cast<std::ptrdiff_t>(mark_));'),
     ]),
     ('owned-first-in-first-out', [
-        ('interpreter/library.cpp',
-         'address pointer=owned_pointer.back();owned_pointer.pop_back();',
-         'address pointer=owned_pointer.front();owned_pointer.erase(owned_pointer.begin());'),
+        ('interpreter/core/lifecycle.cpp',
+         'const address pointer=record->owned.back();record->owned.pop_back();',
+         'const address pointer=record->owned.front();record->owned.erase(record->owned.begin());'),
     ]),
     ('destructor-caller-always-synthesized', [
         ('interpreter/core/lifecycle.cpp',
-         """            auto context=env;
-            if(!context||context->script.lock()!=script) {""",
-         """            auto context=env;
-            if(true) {"""),
+         """    auto context=env;
+    if(!context||context->script.lock()!=script) {""",
+         """    auto context=env;
+    if(true) {"""),
     ]),
     ('step-reset-per-destructor', [
         ('interpreter/core/lifecycle.cpp',
-         '            invoke_bound_function(script,*call->destructor,context,',
-         '            script->remaining_steps=script->max_steps;\n            invoke_bound_function(script,*call->destructor,context,'),
+         '    invoke_bound_function(script,call.function_id,context,',
+         '    script->remaining_steps=script->max_steps;\n    invoke_bound_function(script,call.function_id,context,'),
     ]),
     ('last-error-wins', [
         ('interpreter/core/trace.cpp',
@@ -70,15 +70,25 @@ MUTANTS = [
          'if(auto script=block->script_owner.lock();script&&script->active_calls) {',
          'if(auto script=block->script_owner.lock();false&&script&&script->active_calls) {'),
     ]),
+    # Members end first and the destructor body runs on the emptied object.
     ('heap-members-before-destructor', [
-        ('interpreter/heepalloc.cpp',
-         """    pending_error failure;
-    try {
-        if(record.destructor_id) {""",
-         """    pending_error failure;
-    blocks::finalize_storage(allocation_slots(pointer),env,true,failure);
-    try {
-        if(record.destructor_id) {"""),
+        ('interpreter/core/lifecycle.cpp',
+         """        registered_=true;phase_=Phase::destructor;
+        if(destructor_){call_={&owner_,*destructor_,object_,&contexts_};return &call_;}
+        continue;""",
+         """        registered_=true;members_.emplace(heap::detail::allocation_slots(object_),true,failure_);
+        phase_=Phase::members;continue;"""),
+        ('interpreter/core/lifecycle.cpp',
+         """        members_.reset();phase_=Phase::done;""",
+         """        members_.reset();
+        if(registered_&&destructor_){phase_=Phase::destructor;call_={&owner_,*destructor_,object_,&contexts_};return &call_;}
+        phase_=Phase::done;"""),
+        ('interpreter/core/lifecycle.cpp',
+         """        // still marked as destroying so they cannot delete or free it.
+        members_.emplace(heap::detail::allocation_slots(object_),true,failure_);
+        phase_=Phase::members;continue;""",
+         """        phase_=Phase::done;heap::detail::end_destroy(object_);
+        return nullptr;"""),
     ]),
     ('return-copies-locals', [
         ('interpreter/blocks.cpp',
@@ -92,13 +102,6 @@ MUTANTS = [
         for(auto hook=on_destory.rbegin();hook!=on_destory.rend();++hook) {""",
          """    try {
         for(auto hook=on_destory.rbegin();hook!=on_destory.rend();++hook) {"""),
-    ]),
-    ('heap-destructor-caller-always-synthesized', [
-        ('interpreter/heepalloc.cpp',
-         """            auto context=env;
-            if(!context||context->script.lock()!=script) {""",
-         """            auto context=env;
-            if(true) {"""),
     ]),
     ('depth-counts-callers', [
         ('interpreter/internelFunctions.cpp',

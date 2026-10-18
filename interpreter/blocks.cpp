@@ -1,4 +1,5 @@
 #include "blocks.h"
+#include "core/object_access.h"
 #include "core/lifecycle.h"
 #include <algorithm>
 #include <cmath>
@@ -103,14 +104,7 @@ bool encloses(const slot_block* ancestor,const variable& storage) noexcept {
 }
 using lifecycle::release_temporary;
 using lifecycle::finalize_block;
-void detach_owner_scope(slot_block& block) noexcept {
-    if(!block.owner_scope)return;
-    if(auto* record=ownership::find(block.owner_scope)) {
-        auto& list=record->owned;
-        list.erase(std::remove(list.begin(),list.end(),raw_address(block)),list.end());
-    }
-    block.owner_scope={};
-}
+using lifecycle::detach_owner_scope;
 void abandon_contents(const B& block) noexcept;
 B make_buffer(std::shared_ptr<const type_context> element,std::weak_ptr<script> owner,std::size_t capacity) {
     if(!element||element->abi==VOID_VALUE||element->width<1||
@@ -235,6 +229,7 @@ void abandon_contents(const B& block) noexcept {
 }
 }
 bool is_block_address(address pointer) noexcept {return (pointer.value&address_tag)!=0;}
+std::shared_ptr<slot_block> detail::lookup(address pointer) {return blocks::lookup(pointer);}
 std::shared_ptr<slot_block> create(std::size_t size,std::weak_ptr<script> owner) {
     std::lock_guard<std::recursive_mutex> lock(runtime_mutex());
     return make_block(size,std::move(owner));
@@ -653,28 +648,16 @@ void finalize_temporaries(function_frame& frame,std::size_t mark,const std::shar
 }
 void finalize_temporaries(ownership::TempListId list,std::size_t mark,const std::shared_ptr<environment>& env) {
     std::lock_guard<std::recursive_mutex> lock(runtime_mutex());
-    pending_error failure;
-    for(;;) {
-        // Destructors can reenter script/host code: resolve the identity again
-        // before touching the next entry rather than retaining a record pointer.
-        auto* record=ownership::find(list);
-        if(!record||record->values.size()<=mark)break;
-        auto block=std::move(record->values.back());record->values.pop_back();
-        if(!block)continue;
-        block->temporary_list={};
-        if(!block->owner)finalize_block(block,env,true,failure);
-    }
-    if(failure)failure.rethrow();
+    lifecycle::TemporariesFinalizer cleanup(list,mark);
+    lifecycle::drive(cleanup,env);
+    cleanup.finish();
 }
 void finalize_storage(const std::vector<std::shared_ptr<variable>>& storage,const std::shared_ptr<environment>& env,
                       bool run_destructor,pending_error& failure) {
     std::lock_guard<std::recursive_mutex> lock(runtime_mutex());
-    for(auto i=storage.size();i-->0;) {
-        auto& slot=storage[i];
-        if(!slot||!owns(*slot))continue;
-        auto block=handle_of(*slot);detach_owner_scope(*block);
-        finalize_block(block,env,run_destructor,failure);
-    }
+    if(std::none_of(storage.begin(),storage.end(),[](const V& slot){return slot&&owns(*slot);}))return;
+    lifecycle::StorageFinalizer cleanup(storage,run_destructor,failure);
+    lifecycle::drive(cleanup,env);
 }
 void release_owned(address pointer,const std::shared_ptr<environment>& env) {
     std::lock_guard<std::recursive_mutex> lock(runtime_mutex());

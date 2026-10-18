@@ -1,7 +1,11 @@
 #include "lifecycle.h"
+#include <algorithm>
 #include <array>
+#include <string>
+#include <vector>
 #include <cstdlib>
 #include <iostream>
+#include <functional>
 #include <new>
 #include <stdexcept>
 
@@ -116,10 +120,88 @@ void native_call_allocation_failure() {
     }
 }
 }
+// Plays the engine for a composed driver: records each requested destructor
+// and fails those listed, inside the call's catch.
+template<class Driver> std::vector<int> drive_calls(Driver& driver,std::vector<int> failing={},
+                                                     const std::function<void(int)>& during={}) {
+    std::vector<int> calls;
+    while(const auto* call=driver.advance()) {
+        calls.push_back(call->function_id);
+        try {
+            if(during)during(call->function_id);
+            if(std::find(failing.begin(),failing.end(),call->function_id)!=failing.end())
+                throw std::runtime_error("fail "+std::to_string(call->function_id));
+            driver.call_returned();
+        } catch(...){driver.call_failed();}
+    }
+    return calls;
+}
+template<class F> std::string thrown(F&& body) {
+    try{body();}catch(const std::exception& error){return error.what();}
+    return {};
+}
+std::shared_ptr<variable> holding(const std::shared_ptr<slot_block>& block) {
+    auto storage=std::make_shared<variable>(nullptr);storage->setValue(block);block->owner=storage.get();return storage;
+}
+std::shared_ptr<slot_block> object(int destructor) {auto block=blocks::create(1);block->destructor=destructor;return block;}
+void temporaries_driver() {
+    auto frame=std::make_shared<function_frame>();
+    auto kept=object(1),bound=object(2),last=object(3);child(last,0,4);
+    for(const auto& block:{kept,bound,last})blocks::adopt_temporary(block,frame.get());
+    auto storage=holding(bound);
+    lifecycle::TemporariesFinalizer cleanup(frame->temporary_id(),1);
+    require(drive_calls(cleanup,{3})==std::vector<int>({3,4}),"temporaries end newest first; a failure keeps the members");
+    require(frame->temporaries.size()==1&&bound->state==slot_block::status::live&&!bound->temporary_list&&
+            last->state==slot_block::status::dead&&kept->state==slot_block::status::live,
+            "only temporaries above the mark end; bound ones are only removed");
+    require(thrown([&]{cleanup.finish();})=="fail 3","temporaries rethrow their first failure");
+    const auto old=frame->temporary_id();frame=std::make_shared<function_frame>();
+    lifecycle::TemporariesFinalizer stale(old,0);
+    require(!stale.advance(),"a retired list's id ends nothing");stale.finish();
+}
+void storage_driver() {
+    auto arena=ownership::Arena::create();ownership::Lease<ownership::ScopeId> scope(arena);
+    auto first=object(5),second=object(6),plain=blocks::create(1);
+    first->owner_scope=scope.id();scope.record().owned.push_back(blocks::address_of(first));
+    std::vector<std::shared_ptr<variable>> slots{holding(first),nullptr,holding(second),std::make_shared<variable>(2),holding(plain)};
+    pending_error seed;try{throw std::runtime_error("seed");}catch(...){seed.capture_current();}
+    lifecycle::StorageFinalizer cleanup(slots,true,seed);
+    require(drive_calls(cleanup,{6})==std::vector<int>({6,5}),"storage ends its owned blocks last first");
+    require(scope.record().owned.empty()&&!first->owner_scope&&plain->state==slot_block::status::dead,
+            "each block leaves its owner scope before it ends");
+    require(thrown([&]{seed.rethrow();})=="seed","storage keeps the caller's first error");
+}
+struct recorded_locals final:lifecycle::ScopeLocals {
+    std::vector<std::shared_ptr<variable>> left;
+    bool undeclared=false;
+    std::vector<std::shared_ptr<variable>> leftovers() const override {return left;}
+    void undeclare() noexcept override {undeclared=true;}
+};
+void scope_driver() {
+    auto arena=ownership::Arena::create();
+    ownership::Lease<ownership::ScopeId> scope(arena);
+    auto frame=std::make_shared<function_frame>(arena);
+    auto temporary=object(10);blocks::adopt_temporary(temporary,frame.get());
+    auto older=object(7),newer=object(8),moved=object(11),leftover=object(9);
+    for(const auto& block:{older,newer,moved}) {
+        block->owner_scope=scope.id();scope.record().owned.push_back(blocks::address_of(block));
+    }
+    moved->owner_scope={};
+    recorded_locals locals;locals.left={holding(leftover)};
+    lifecycle::ScopeFinalizer cleanup(scope.id(),frame->temporary_id(),locals);
+    const auto calls=drive_calls(cleanup,{10,8},[&](int){require(!locals.undeclared,"locals stay declared during every destructor");});
+    require(calls==std::vector<int>({10,8,7,9}),"temporaries, then owned objects newest first, then leftovers; stale entries skipped");
+    require(scope.record().closing&&scope.record().owned.empty()&&locals.undeclared&&moved->state==slot_block::status::live,
+            "the scope closes, releases its list and undeclares its locals");
+    require(thrown([&]{cleanup.finish();})=="fail 10","the scope rethrows the first failure after every release");
+    recorded_locals again;lifecycle::ScopeFinalizer twice(scope.id(),{},again);
+    require(!twice.advance()&&!again.undeclared,"a closing scope is not cleaned again");twice.finish();
+}
 int main() {
     try {
         std::lock_guard<std::recursive_mutex> lock(runtime_mutex());
         suspended_order();failures_and_abandon();native_call_allocation_failure();bounded_no_allocation();
+        temporaries_driver();storage_driver();scope_driver();
         std::cout<<"Lifecycle checks passed: "<<checks<<"; traversal allocation attempts: "<<allocations<<'\n';
     }catch(const std::exception& e){reject_allocations=false;std::cerr<<e.what()<<'\n';return 1;}
 }
