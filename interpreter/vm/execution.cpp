@@ -183,7 +183,7 @@ struct ScalarExecutor::State {
             method_tables[index].resize(program.functions[index].operations.size());
         }
     }
-    void release(std::uint32_t cell) noexcept {
+    [[gnu::always_inline]] void release(std::uint32_t cell) noexcept {
         auto& binding=cells[cell];
         if(--binding.references)return;
         if(!pool.retire(binding.slot))std::terminate();
@@ -210,13 +210,13 @@ struct ScalarExecutor::State {
         if(reg.reference)drop_reference(reg);
         reg.value=std::move(next);
     }
-    void reference(const FrameRecord& frame,Register destination,SlotId global,std::uint32_t cell) noexcept {
+    [[gnu::always_inline]] void reference(const FrameRecord& frame,Register destination,SlotId global,std::uint32_t cell) noexcept {
         // Retain before clearing: copy_reference may overwrite its own input.
         if(cell!=no_index)++cells[cell].references;
         auto& reg=registers[frame.registers.begin+destination];clear(reg);
         reg.reference=true;reg.global=global;reg.cell=cell;
     }
-    void reference(const FrameRecord& frame,Register destination,std::shared_ptr<variable> host) noexcept {
+    [[gnu::always_inline]] void reference(const FrameRecord& frame,Register destination,std::shared_ptr<variable> host) noexcept {
         auto& reg=registers[frame.registers.begin+destination];clear(reg);
         reg.reference=true;reg.host=std::move(host);
     }
@@ -295,7 +295,7 @@ struct ScalarExecutor::State {
         if(!result)throw std::runtime_error("Variable slot is not declared in this scope: "+std::to_string(index));
         return result;
     }
-    void load(const FrameRecord& frame,Register destination,int index,std::span<const SlotId> globals) {
+    [[gnu::always_inline]] void load(const FrameRecord& frame,Register destination,int index,std::span<const SlotId> globals) {
         if(index<0) {reference(frame,destination,global_slot(index,frame,globals),no_index);return;}
         if(frame.object!=no_index){reference(frame,destination,object_local(frame,index));return;}
         if(static_cast<std::size_t>(index)>=frame.locals.count)
@@ -355,7 +355,7 @@ struct ScalarExecutor::State {
                 if(control.scope) {
                     auto scope=std::move(record.scopes.back());record.scopes.pop_back();
                     scope->cleanup(scope);
-                } else statement::finish(control.temporaries,record.scopes.back());
+                } else statement::finish(control.temporaries,record.scopes.back()->site());
             } catch(...) {failure.capture_current();}
             level_ended();
         }
@@ -374,10 +374,38 @@ struct ScalarExecutor::State {
             object_frames.pop_back();frame.object=no_index;
         }
     }
-    std::shared_ptr<environment> calling_scope(FrameId caller,const ExecutionOptions& options) {
+    ownership::Site calling_scope(FrameId caller,const ExecutionOptions& options) {
         if(!caller)return options.caller;
         auto& record=frames.resolve(caller);
-        return record.object==no_index?nullptr:scope_of(record);
+        return record.object==no_index?ownership::Site{}:scope_of(record)->site();
+    }
+    // Object frames are entered out of line, which keeps the scalar
+    // dispatch loop's inlining independent of the object model.
+    template<class Argument> [[gnu::noinline]] void enter_object_frame(std::uint32_t index,std::size_t count,Argument& argument,
+            FrameRecord& frame,const FrameLayout& layout,const ExecutionOptions& options) {
+        const auto& function=program.functions[index];
+        // Same order as the tree executor: parameters are stored from
+        // the calling scope, then bound to the new function root.
+        auto& host=host_of(options);
+        const auto calling=calling_scope(frame.caller,options);
+        if(!calling.record)throw std::logic_error("Scalar VM object frame has no calling scope");
+        const auto owner=host.owner();
+        ObjectFrame record;record.frame=std::make_shared<function_frame>(host.ownership_arena());
+        auto& tree=*record.frame;
+        tree.global_offset=function.global_offset;tree.global_count=function.global_count;tree.param_count=count;
+        tree.slots.resize(function.param_types.size()+static_cast<std::size_t>(function.local_count));
+        auto root=std::make_shared<environment>(host.ownership_arena(),owner->baseEnv,calling.scope(),record.frame,true);
+        root->script=owner;
+        record.scopes.push_back(root);
+        for(std::size_t i=0;i<count;++i) {
+            auto storage=std::make_shared<variable>();auto value=wrap(argument(i));
+            if(value->type_tag()==OBJECT_VALUE)runtime(options,[&]{blocks::store(storage,value,calling);});
+            else blocks::store(storage,value,calling);
+            statement::bind_parameter(storage,i,root);
+        }
+        registers.append_default(layout.registers);scopes.append_default(layout.scope_marks);
+        object_frames.push_back(std::move(record));frame.object=static_cast<std::uint32_t>(object_frames.size()-1);
+        try{frames.push(std::move(frame));}catch(...){cleanup(frame);throw;}
     }
     template<class Argument> void enter(std::uint32_t index,std::size_t count,Argument argument,
             FrameId caller,Register destination,ExecutionPosition& position,const ExecutionOptions& options,bool admit) {
@@ -398,31 +426,7 @@ struct ScalarExecutor::State {
             registers.prepare_append(layout.registers);locals.prepare_append(layout.locals);
             declared.prepare_append(layout.locals);scopes.prepare_append(layout.scope_marks);
             regions.prepare(layout.cleanups);
-            if(objects) {
-                // Same order as the tree executor: parameters are stored from
-                // the calling scope, then bound to the new function root.
-                auto& host=host_of(options);
-                const auto calling=calling_scope(caller,options);
-                if(!calling)throw std::logic_error("Scalar VM object frame has no calling scope");
-                const auto owner=host.owner();
-                ObjectFrame record;record.frame=std::make_shared<function_frame>(host.ownership_arena());
-                auto& tree=*record.frame;
-                tree.global_offset=function.global_offset;tree.global_count=function.global_count;tree.param_count=count;
-                tree.slots.resize(function.param_types.size()+static_cast<std::size_t>(function.local_count));
-                auto root=std::make_shared<environment>(host.ownership_arena(),owner->baseEnv,calling,record.frame,true);
-                root->script=owner;
-                record.scopes.push_back(root);
-                for(std::size_t i=0;i<count;++i) {
-                    auto storage=std::make_shared<variable>();auto value=wrap(argument(i));
-                    if(value->type_tag()==OBJECT_VALUE)runtime(options,[&]{blocks::store(storage,value,calling);});
-                    else blocks::store(storage,value,calling);
-                    statement::bind_parameter(storage,i,root);
-                }
-                registers.append_default(layout.registers);scopes.append_default(layout.scope_marks);
-                object_frames.push_back(std::move(record));frame.object=static_cast<std::uint32_t>(object_frames.size()-1);
-                try{frames.push(std::move(frame));}catch(...){cleanup(frame);throw;}
-                return;
-            }
+            if(objects){enter_object_frame(index,count,argument,frame,layout,options);return;}
             registers.append_default(layout.registers);locals.append_default(layout.locals);
             declared.append_default(layout.locals);scopes.append_default(layout.scope_marks);
             for(std::size_t i=0;i<layout.locals;++i)local(frame,i)=no_index;
@@ -532,7 +536,7 @@ struct ScalarExecutor::State {
                         auto& record=objects(frame);
                         record.controls.reserve(record.controls.size()+1);
                         auto scope=std::make_shared<environment>(host_of(options).ownership_arena(),
-                                                                 record.scopes.back(),nullptr,record.frame);
+                                                                 record.scopes.back(),ownership::ScopeId{},record.frame);
                         scope->script=record.scopes.back()->script;
                         record.scopes.push_back(std::move(scope));record.controls.push_back({true,{}});
                     }
@@ -558,7 +562,7 @@ struct ScalarExecutor::State {
                         if(record.controls.empty()||record.controls.back().scope)throw std::logic_error("Scalar VM object statement records are unbalanced");
                         const auto mark=record.controls.back().temporaries;record.controls.pop_back();
                         if(record.frame->temporaries.size()>mark.count)
-                            runtime(options,[&]{statement::finish(mark,record.scopes.back());});
+                            runtime(options,[&]{statement::finish(mark,record.scopes.back()->site());});
                     }
                     break;
                 case Opcode::loop_enter:++frame.loop_depth;break;

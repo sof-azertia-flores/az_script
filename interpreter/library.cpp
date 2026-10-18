@@ -251,7 +251,9 @@ struct call_guard {
     std::shared_ptr<script> s;
     admission::accounting calls;
     admission::accounting::ticket admitted;
-    explicit call_guard(E env):s(owner(env)),calls(s->active_calls,s->max_call_depth,s->remaining_steps,s->max_steps) {
+    explicit call_guard(E env):call_guard(owner(env)) {}
+    explicit call_guard(std::shared_ptr<script> owner)
+        :s(std::move(owner)),calls(s->active_calls,s->max_call_depth,s->remaining_steps,s->max_steps) {
         calls.check_can_enter();
         admission::enter_native_stack(s->max_stack_bytes);
         admitted=calls.admit();
@@ -312,7 +314,7 @@ template<class Body> V statement_scope(const E& env,Body body) {
     const auto mark=statement::begin(frame?frame->temporary_id():ownership::TempListId{},frame?frame->temporaries.size():0);
     V result;pending_error failure;
     try {result=body();}catch(...){failure.capture_current();}
-    if(frame&&frame->temporaries.size()>mark.count)try{statement::finish(mark,env);}catch(...){failure.capture_current();}
+    if(frame&&frame->temporaries.size()>mark.count)try{statement::finish(mark,site_of(env));}catch(...){failure.capture_current();}
     if(failure)failure.rethrow();
     return result;
 }
@@ -327,7 +329,7 @@ template<class Body> V with_cleanup(const E& scope,Body body) {
 V scoped_execute(const std::shared_ptr<expression>& body,E env) {
     at_location location(env,body->location);
     if(std::dynamic_pointer_cast<complex_expression>(body)) return run(body,env);
-    auto scope=std::make_shared<environment>(env->ownership_arena(),env,nullptr,env->frame);
+    auto scope=std::make_shared<environment>(env->ownership_arena(),env,ownership::ScopeId{},env->frame);
     scope->script=env->script;
     return with_cleanup(scope,[&]{return statement_scope(scope,[&]{return run(body,scope);});});
 }
@@ -852,6 +854,14 @@ V invoke_bound_function(const std::shared_ptr<script>& script,int id,const E& en
     return target->invoke(env,std::move(args));
     });
 }
+V invoke_bound_function(const std::shared_ptr<script>& script,int id,ownership::Site caller,std::vector<V> args,type_contexts contexts) {
+    entry_scope entry;return entry.run([&]() -> V {
+    auto fn=std::dynamic_pointer_cast<ofunction>(script->getFunction(id));
+    // Destructors are validated as script functions when they are bound.
+    if(!fn)throw std::runtime_error("Object destructor must be a script function void(address)");
+    return fn->invoke_bound(caller,std::move(args),std::move(contexts));
+    });
+}
 std::shared_ptr<script> load_script(const unsigned char* bytes,std::size_t length) {
     entry_scope entry;return entry.run([&]() -> std::shared_ptr<script> {
     std::lock_guard<std::recursive_mutex> lock(runtime_mutex());
@@ -1131,18 +1141,21 @@ V ofunction::invoke(E ev,std::vector<V> args) {
     });
 }
 V ofunction::invoke_bound(E ev,std::vector<V> args,type_contexts contexts) {
+    return invoke_bound(site_of(ev),std::move(args),std::move(contexts));
+}
+V ofunction::invoke_bound(ownership::Site caller,std::vector<V> args,type_contexts contexts) {
     entry_scope entry;return entry.run([&]() -> V {
     std::shared_ptr<function_frame> frame;
     bool vm_trace=false;
     try {
     std::lock_guard<std::recursive_mutex> lock(runtime_mutex());
     auto bound=script_owner.lock();
-    if(!bound||!ev||ev->script.lock()!=bound)throw std::runtime_error("Function belongs to another or unavailable script");
+    if(!bound||!caller.record||caller.record->script.lock()!=bound)throw std::runtime_error("Function belongs to another or unavailable script");
     bound->require_execution();
     if(!linked)throw std::runtime_error("Function module has not been linked");
     if(contexts.size()!=static_cast<std::size_t>(hidden_count))throw std::runtime_error("Generic context count mismatch");
     validate_type_contexts(contexts,bound);
-    call_guard guard(ev);
+    call_guard guard(bound);
     admission::check_arguments("Script function",function_id,param_types,args.size(),
         [&](std::size_t i){return argument_tag(args[i]);},true);
     if(bound->vm_session_) {
@@ -1152,10 +1165,10 @@ V ofunction::invoke_bound(E ev,std::vector<V> args,type_contexts contexts) {
         // while importing globals or reserving arguments. Do not append a
         // duplicate tree frame when it propagates the original exception.
         vm_trace=true;
-        return bound->vm_session_->invoke(vm_function_index_,args,&position,ev);
+        return bound->vm_session_->invoke(vm_function_index_,args,&position,caller);
     }
     const auto& arena=guard.s->baseEnv->ownership_arena();
-    auto env=std::make_shared<environment>(arena,guard.s->baseEnv,ev,std::make_shared<function_frame>(arena),true);
+    auto env=std::make_shared<environment>(arena,guard.s->baseEnv,caller.scope(),std::make_shared<function_frame>(arena),true);
     env->script=guard.s;
     frame=env->frame;
     env->frame->hidden_contexts=std::move(contexts);
@@ -1166,7 +1179,7 @@ V ofunction::invoke_bound(E ev,std::vector<V> args,type_contexts contexts) {
         if(!args[i]) throw std::invalid_argument("Null argument pointer; use variable(nullptr)");
         // Object arguments move from caller temporaries or are copied; parameters
         // are destroyed after every local of the call.
-        auto storage=std::make_shared<variable>(nullptr);blocks::store(storage,args[i],ev);
+        auto storage=std::make_shared<variable>(nullptr);blocks::store(storage,args[i],caller);
         statement::bind_parameter(storage,i,env);
     }
     return with_cleanup(env,[&] {
@@ -1191,7 +1204,7 @@ V complex_expression::execute_body(E env) {
     return nil();
 }
 V complex_expression::execute(E env) {
-    auto scope=std::make_shared<environment>(env->ownership_arena(),env,nullptr,env->frame);scope->script=env->script;
+    auto scope=std::make_shared<environment>(env->ownership_arena(),env,ownership::ScopeId{},env->frame);scope->script=env->script;
     return with_cleanup(scope,[&]{at_location location(scope,this->location);return execute_body(scope);});
 }
 V functionInvocationExpression::execute(E env) {
@@ -1332,8 +1345,8 @@ V variable::deepCopy(){auto v=std::make_shared<variable>(*this);v->name.clear();
 function_frame::function_frame(std::shared_ptr<ownership::Arena> arena)
     :temporary_storage_(std::move(arena)),temporaries(temporary_storage_.record().values) {}
 environment::environment(std::shared_ptr<ownership::Arena> arena,const std::shared_ptr<environment>& parent,
-                         const std::shared_ptr<environment>& caller,std::shared_ptr<function_frame> frame,bool frame_root)
-    :ownership_(std::move(arena),{parent?parent->ownership_id():ownership::ScopeId{},caller?caller->ownership_id():ownership::ScopeId{},
+                         ownership::ScopeId caller,std::shared_ptr<function_frame> frame,bool frame_root)
+    :ownership_(std::move(arena),{parent?parent->ownership_id():ownership::ScopeId{},caller,
                                   frame?frame->temporary_id():ownership::TempListId{}}),
      owned_pointer(ownership_.record().owned),parent(parent),script(ownership_.record().script),frame(std::move(frame)),
      closing(ownership_.record().closing),frame_root(frame_root) {}
@@ -1377,7 +1390,7 @@ void environment::cleanup(const std::shared_ptr<environment>& self) {
     if(nothing_to_release(*this)){closing=true;locals.undeclare();return;}
     std::lock_guard<std::recursive_mutex> lock(runtime_mutex());
     lifecycle::ScopeFinalizer cleanup(ownership_.id(),frame_root&&frame?frame->temporary_id():ownership::TempListId{},locals);
-    lifecycle::drive(cleanup,self);
+    lifecycle::drive(cleanup,site());
     cleanup.finish();
 }
 V environment::getVariable(std::string name) {

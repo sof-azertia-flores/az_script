@@ -146,6 +146,8 @@ public:
         std::vector<std::shared_ptr<variable>> arguments={}) override;
     std::shared_ptr<variable> invoke_bound(std::shared_ptr<environment> env,
         std::vector<std::shared_ptr<variable>> arguments,type_contexts contexts);
+    std::shared_ptr<variable> invoke_bound(ownership::Site caller,
+        std::vector<std::shared_ptr<variable>> arguments,type_contexts contexts);
     std::shared_ptr<expression> code;
 private:
     friend class script;
@@ -309,6 +311,7 @@ public:
     std::vector<std::shared_ptr<slot_block>>& temporaries;
     explicit function_frame(std::shared_ptr<ownership::Arena> arena={});
     ownership::TempListId temporary_id() const noexcept{return temporary_storage_.id();}
+    ownership::TemporaryRecord& temporary_record() const noexcept{return temporary_storage_.record();}
     function_frame(const function_frame&)=delete;
     function_frame& operator=(const function_frame&)=delete;
     ~function_frame();
@@ -319,12 +322,14 @@ public:
     // A scope's links are fixed when it is created; its ownership record
     // names the frame's temporaries from then on.
     explicit environment(std::shared_ptr<ownership::Arena> arena={},const std::shared_ptr<environment>& parent={},
-                         const std::shared_ptr<environment>& caller={},std::shared_ptr<function_frame> frame={},
-                         bool frame_root=false);
+                         ownership::ScopeId caller={},std::shared_ptr<function_frame> frame={},bool frame_root=false);
     environment(const environment&)=delete;
     environment& operator=(const environment&)=delete;
     const std::shared_ptr<ownership::Arena>& ownership_arena() const noexcept{return ownership_.arena();}
     ownership::ScopeId ownership_id() const noexcept{return ownership_.id();}
+    ownership::Site site() const noexcept {
+        return {&ownership_.record(),frame?&frame->temporary_record():nullptr};
+    }
     std::vector<address>& owned_pointer;
     // The caller (kept in the ownership record) is separate from the lexical
     // parent: functions cannot see locals in their callers, while explicit
@@ -348,6 +353,10 @@ std::string value_to_string(const std::shared_ptr<variable>& value);
 bool script_namespace_in_use(int namespace_id);
 std::shared_ptr<variable> invoke_bound_function(const std::shared_ptr<script>& script,int id,
     const std::shared_ptr<environment>& env,std::vector<std::shared_ptr<variable>> arguments,type_contexts contexts);
+// A script function called from a site, as object destructors are.
+std::shared_ptr<variable> invoke_bound_function(const std::shared_ptr<script>& script,int id,
+    ownership::Site caller,std::vector<std::shared_ptr<variable>> arguments,type_contexts contexts);
+inline ownership::Site site_of(const std::shared_ptr<environment>& env) noexcept {return env?env->site():ownership::Site{};}
 void validate_type_contexts(const type_contexts& contexts,const std::shared_ptr<script>& script);
 }
 #endif

@@ -95,17 +95,21 @@ DestructorCall destructor_call(const slot_block& block) noexcept {
     return {&block.script_owner,*block.destructor,address{blocks::address_tag|(block.id<<blocks::offset_bits)},
             &block.destructor_contexts};
 }
-void dispatch(const DestructorCall& call,const std::shared_ptr<environment>& env) {
+void dispatch(const DestructorCall& call,ownership::Site caller) {
     auto script=call.owner->lock();
     if(!script||script->closed)throw std::runtime_error("Object destructor script is unavailable");
-    auto context=env;
-    if(!context||context->script.lock()!=script) {
-        context=std::make_shared<environment>(script->baseEnv->ownership_arena(),script->baseEnv,env);
-        context->script=script;
-    }
-    invoke_bound_function(script,call.function_id,context,{std::make_shared<variable>(call.object)},*call.contexts);
+    const auto invoke=[&](ownership::Site context) {
+        invoke_bound_function(script,call.function_id,context,{std::make_shared<variable>(call.object)},*call.contexts);
+    };
+    if(caller.record&&caller.record->script.lock()==script){invoke(caller);return;}
+    // Another script's or no caller: the destructor runs from a scope of its
+    // own script whose leftovers end, without scripts, after the call.
+    const auto& base=*script->baseEnv;
+    ownership::Scope context(base.ownership_arena(),{base.ownership_id(),caller.scope(),{}});
+    context.record().script=script;
+    invoke({&context.record(),nullptr});
 }
-void finalize_block(const std::shared_ptr<slot_block>& block,const std::shared_ptr<environment>& env,
+void finalize_block(const std::shared_ptr<slot_block>& block,ownership::Site env,
                     bool run_destructor,pending_error& failure) {
     BlockFinalizer cleanup(block,run_destructor,failure);
     for(;;) {

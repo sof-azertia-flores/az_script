@@ -424,7 +424,7 @@ void ownership_identity_tests() {
     auto frame=std::make_shared<function_frame>(arena);const auto temporary_id=frame->temporary_id();
     auto temporary=blocks::create(0,{});blocks::adopt_temporary(temporary,frame.get());
     auto owner=std::make_shared<variable>();auto value=std::make_shared<variable>(temporary);
-    blocks::store(owner,value,{});
+    blocks::store(owner,value,ownership::Site{});
     check(!frame->temporaries[0]&&!temporary->temporary_list,"moving a temporary leaves its statement-mark hole");
     auto later=blocks::create(0,{});blocks::adopt_temporary(later,frame.get());
     check(later->temporary_index==1,"new temporaries do not reuse an earlier statement-mark hole");
@@ -432,10 +432,10 @@ void ownership_identity_tests() {
     check(!ownership::find(temporary_id)&&frame->temporary_id().generation!=temporary_id.generation,
           "temporary records reject an expired frame identity");
     check(later->state==slot_block::status::dead,"frame disposal abandons its remaining temporaries");
-    blocks::drop(owner,{});
-    auto unowned=blocks::create(0,{});blocks::release_owned(blocks::address_of(unowned),{});
+    blocks::drop(owner,ownership::Site{});
+    auto unowned=blocks::create(0,{});blocks::release_owned(blocks::address_of(unowned),ownership::Site{});
     check(unowned->state==slot_block::status::dead,"null-scope cleanup retains the unowned literal behavior");
-    auto raw=heap::alloc(1);heap::release_owned(raw,{});
+    auto raw=heap::alloc(1);heap::release_owned(raw,ownership::Site{});
     rejects([&]{heap::getAt(raw);},"null-scope cleanup retains the unowned heap behavior");
 }
 
@@ -446,7 +446,7 @@ void statement_protocol_tests() {
     auto a=blocks::create(0,{});blocks::adopt_temporary(a,frame.get());
     auto inner=statement::begin(frame->temporary_id(),frame->temporaries.size());
     auto b=blocks::create(0,{});blocks::adopt_temporary(b,frame.get());
-    auto owner=std::make_shared<variable>();blocks::store(owner,std::make_shared<variable>(b),{});
+    auto owner=std::make_shared<variable>();blocks::store(owner,std::make_shared<variable>(b),ownership::Site{});
     auto c=blocks::create(0,{});blocks::adopt_temporary(c,frame.get());
     check(statement::pending(inner),"inner statement records moved holes and live temporaries");
     statement::finish(inner,{});
@@ -454,7 +454,7 @@ void statement_protocol_tests() {
           "inner statement preserves the outer value and the moved value");
     statement::finish(outer,{});
     check(a->state==slot_block::status::dead&&!statement::pending(outer),"outer statement ends the remaining temporary");
-    blocks::drop(owner,{});
+    blocks::drop(owner,ownership::Site{});
     auto retired=statement::begin(frame->temporary_id(),frame->temporaries.size());frame.reset();frame=std::make_shared<function_frame>(arena);
     auto later=blocks::create(0,{});blocks::adopt_temporary(later,frame.get());
     statement::finish(retired,{});

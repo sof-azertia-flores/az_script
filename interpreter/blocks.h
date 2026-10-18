@@ -61,25 +61,52 @@ bool owns(const variable& storage) noexcept;
 std::shared_ptr<slot_block> resolve(address pointer);
 std::shared_ptr<variable> slot(address pointer);
 address member_address(address pointer,int offset);
-void set_destructor(address pointer,std::optional<int> destructor,bool manual,const std::shared_ptr<environment>& env,type_contexts contexts={});
+void set_destructor(address pointer,std::optional<int> destructor,bool manual,ownership::Site env,type_contexts contexts={});
 // Execution support used by the interpreter and heap.
 std::shared_ptr<slot_block> copy(const std::shared_ptr<slot_block>& source);
-void store(const std::shared_ptr<variable>& target,const std::shared_ptr<variable>& value,const std::shared_ptr<environment>& env);
-void bind_local(const std::shared_ptr<variable>& storage,const std::shared_ptr<environment>& env);
-std::shared_ptr<variable> materialize(const std::shared_ptr<variable>& value,const std::shared_ptr<environment>& env);
-void adopt_result(const std::shared_ptr<variable>& value,const std::shared_ptr<environment>& env);
-std::shared_ptr<variable> export_result(const std::shared_ptr<variable>& value,const std::shared_ptr<environment>& env);
-std::shared_ptr<variable> move_out(const std::shared_ptr<variable>& storage,const std::shared_ptr<environment>& env);
-void drop(const std::shared_ptr<variable>& storage,const std::shared_ptr<environment>& env);
+// Object-model operations run in a site: the scope that owns new locals and
+// the frame whose temporaries receive new values.
+void store(const std::shared_ptr<variable>& target,const std::shared_ptr<variable>& value,ownership::Site env);
+void bind_local(const std::shared_ptr<variable>& storage,ownership::Site env);
+std::shared_ptr<variable> materialize(const std::shared_ptr<variable>& value,ownership::Site env);
+void adopt_result(const std::shared_ptr<variable>& value,ownership::Site env);
+std::shared_ptr<variable> export_result(const std::shared_ptr<variable>& value,ownership::Site env);
+std::shared_ptr<variable> move_out(const std::shared_ptr<variable>& storage,ownership::Site env);
+void drop(const std::shared_ptr<variable>& storage,ownership::Site env);
 void adopt_temporary(const std::shared_ptr<slot_block>& block,function_frame* frame);
 void adopt_temporary(const std::shared_ptr<slot_block>& block,ownership::TempListId list);
-void finalize(const std::shared_ptr<slot_block>& block,const std::shared_ptr<environment>& env,bool run_destructor);
-void finalize_temporaries(function_frame& frame,std::size_t mark,const std::shared_ptr<environment>& env);
-void finalize_temporaries(ownership::TempListId list,std::size_t mark,const std::shared_ptr<environment>& env);
+void finalize(const std::shared_ptr<slot_block>& block,ownership::Site env,bool run_destructor);
+void finalize_temporaries(function_frame& frame,std::size_t mark,ownership::Site env);
+void finalize_temporaries(ownership::TempListId list,std::size_t mark,ownership::Site env);
 // Finalizes blocks owned by these storage variables, last first; keeps the first error.
-void finalize_storage(const std::vector<std::shared_ptr<variable>>& storage,const std::shared_ptr<environment>& env,
+void finalize_storage(const std::vector<std::shared_ptr<variable>>& storage,ownership::Site env,
                       bool run_destructor,pending_error& failure);
-void release_owned(address pointer,const std::shared_ptr<environment>& env);
+void release_owned(address pointer,ownership::Site env);
+// Tree adapters: an environment runs these operations as its own site.
+using environment_ref=const std::shared_ptr<environment>&;
+inline void set_destructor(address pointer,std::optional<int> destructor,bool manual,environment_ref env,type_contexts contexts={})
+    {set_destructor(pointer,destructor,manual,site_of(env),std::move(contexts));}
+inline void store(const std::shared_ptr<variable>& target,const std::shared_ptr<variable>& value,environment_ref env)
+    {store(target,value,site_of(env));}
+inline void bind_local(const std::shared_ptr<variable>& storage,environment_ref env){bind_local(storage,site_of(env));}
+inline std::shared_ptr<variable> materialize(const std::shared_ptr<variable>& value,environment_ref env)
+    {return materialize(value,site_of(env));}
+inline void adopt_result(const std::shared_ptr<variable>& value,environment_ref env){adopt_result(value,site_of(env));}
+inline std::shared_ptr<variable> export_result(const std::shared_ptr<variable>& value,environment_ref env)
+    {return export_result(value,site_of(env));}
+inline std::shared_ptr<variable> move_out(const std::shared_ptr<variable>& storage,environment_ref env)
+    {return move_out(storage,site_of(env));}
+inline void drop(const std::shared_ptr<variable>& storage,environment_ref env){drop(storage,site_of(env));}
+inline void finalize(const std::shared_ptr<slot_block>& block,environment_ref env,bool run_destructor)
+    {finalize(block,site_of(env),run_destructor);}
+inline void finalize_temporaries(function_frame& frame,std::size_t mark,environment_ref env)
+    {finalize_temporaries(frame,mark,site_of(env));}
+inline void finalize_temporaries(ownership::TempListId list,std::size_t mark,environment_ref env)
+    {finalize_temporaries(list,mark,site_of(env));}
+inline void finalize_storage(const std::vector<std::shared_ptr<variable>>& storage,environment_ref env,
+                             bool run_destructor,pending_error& failure)
+    {finalize_storage(storage,site_of(env),run_destructor,failure);}
+inline void release_owned(address pointer,environment_ref env){release_owned(pointer,site_of(env));}
 void discard_owned(address pointer,ownership::ScopeId scope) noexcept;
 // Marks an owned block dead without running user code; used when storage dies.
 void abandon(const std::shared_ptr<slot_block>& block) noexcept;

@@ -349,12 +349,12 @@ address object_address(address pointer,int offset) {
     }
     throw std::out_of_range("Invalid or freed object address: "+std::to_string(pointer.value));
 }
-void register_object(address pointer,std::optional<int> destructor_id,bool manual,const std::shared_ptr<environment>& env,type_contexts contexts) {
+void register_object(address pointer,std::optional<int> destructor_id,bool manual,ownership::Site env,type_contexts contexts) {
     std::lock_guard<std::recursive_mutex> lock(runtime_mutex());
     if(blocks::is_block_address(pointer)){blocks::set_destructor(pointer,destructor_id,manual,env,std::move(contexts));return;}
-    if(!env||env->closing||owner_of(pointer)!=env->ownership_id()||!is_allocation_start(pointer)||!object_allocations.contains(pointer))
+    if(!env.record||env.record->closing||owner_of(pointer)!=env.scope()||!is_allocation_start(pointer)||!object_allocations.contains(pointer))
         throw std::runtime_error("Object construction must finish in its allocation scope");
-    object_record record{pointer,destructor_id,manual,env->script,std::move(contexts)};validate_object(record);
+    object_record record{pointer,destructor_id,manual,env.record->script,std::move(contexts)};validate_object(record);
     if(!objects.emplace(pointer,registered_object{record}).second)throw std::runtime_error("Object is already registered");
     // Manual objects become unowned only after construction has fully succeeded.
     if(manual)detach_owner(pointer);
@@ -373,13 +373,13 @@ std::vector<std::shared_ptr<variable>> allocation_slots(address pointer) {return
 void end_destroy(address pointer) {objects.erase(pointer);free(pointer);}
 }
 namespace {
-void destroy_registered(address pointer,const std::shared_ptr<environment>& env) {
+void destroy_registered(address pointer,ownership::Site env) {
     lifecycle::HeapDestroyer destroyer(pointer);
     lifecycle::drive(destroyer,env);
     destroyer.finish();
 }
 }
-void delete_object(address pointer,const std::shared_ptr<environment>& env) {
+void delete_object(address pointer,ownership::Site env) {
     std::lock_guard<std::recursive_mutex> lock(runtime_mutex());
     if(pointer.value==0)return;
     if(blocks::is_block_address(pointer))throw std::runtime_error("delete requires a manual object; a literal object ends with its variable");
@@ -389,13 +389,13 @@ void delete_object(address pointer,const std::shared_ptr<environment>& env) {
     if(!it->second.value.manual)throw std::runtime_error("Cannot delete an automatic object");
     destroy_registered(pointer,env);
 }
-void release_owned(address pointer,const std::shared_ptr<environment>& env) {
+void release_owned(address pointer,ownership::Site env) {
     std::lock_guard<std::recursive_mutex> lock(runtime_mutex());
     if(blocks::is_block_address(pointer)){blocks::release_owned(pointer,env);return;}
-    if(owner_of(pointer)!=(env?env->ownership_id():ownership::ScopeId{}))return;
+    if(owner_of(pointer)!=env.scope())return;
     destroy_registered(pointer,env);
 }
-void return_object(address pointer,const std::shared_ptr<environment>& env) {
+void return_object(address pointer,ownership::Site env) {
     std::lock_guard<std::recursive_mutex> lock(runtime_mutex());
     // A literal object's this pointer never transfers ownership.
     if(pointer.value==0||blocks::is_block_address(pointer))return;
@@ -403,8 +403,8 @@ void return_object(address pointer,const std::shared_ptr<environment>& env) {
     if(!is_allocation_start(pointer))throw std::runtime_error("Object return requires a live allocation");
     const auto owner=owner_of(pointer);
     // The scopes of this call: the parent chain while it shares the frame.
-    const auto start=env->ownership_id();
-    const auto frame=ownership::find(start)->temporaries;
+    const auto start=env.scope();
+    const auto frame=env.record->temporaries;
     ownership::ScopeId holder,root=start;
     for(auto id=start;const auto* record=ownership::find(id);id=record->parent) {
         if(record->temporaries!=frame)break;

@@ -51,7 +51,7 @@ Value HostBridge::invoke_external(const CallTarget& target,std::span<const Value
     scopes.reserve(lexical_depth-1);
     auto parent=owner_.baseEnv;
     for(std::size_t depth=1;depth<lexical_depth;++depth) {
-        auto scope=std::make_shared<environment>(boundary_.ownership_arena(),parent,nullptr,frame,depth==1);
+        auto scope=std::make_shared<environment>(boundary_.ownership_arena(),parent,ownership::ScopeId{},frame,depth==1);
         scope->script=owner_.weak_from_this();
         scopes.emplace_back(scope);parent=std::move(scope);
     }

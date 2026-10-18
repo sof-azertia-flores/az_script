@@ -196,7 +196,7 @@ const CompiledScript& Session::compiled() const {
 }
 std::shared_ptr<variable> Session::invoke(std::uint32_t function,
         std::span<const std::shared_ptr<variable>> arguments,ExecutionPosition* position,
-        const std::shared_ptr<environment>& caller) {
+        ownership::Site caller) {
     if(!prepared_)throw std::logic_error("VM program has not been prepared");
     auto& state=*prepared_;
     ExecutionPosition local_position;

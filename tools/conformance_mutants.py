@@ -48,10 +48,8 @@ MUTANTS = [
     ]),
     ('destructor-caller-always-synthesized', [
         ('interpreter/core/lifecycle.cpp',
-         """    auto context=env;
-    if(!context||context->script.lock()!=script) {""",
-         """    auto context=env;
-    if(true) {"""),
+         'if(caller.record&&caller.record->script.lock()==script){invoke(caller);return;}',
+         'if(false){invoke(caller);return;}'),
     ]),
     ('step-reset-per-destructor', [
         ('interpreter/core/lifecycle.cpp',
@@ -92,8 +90,8 @@ MUTANTS = [
     ]),
     ('return-copies-locals', [
         ('interpreter/blocks.cpp',
-         'block->owner&&owning&&owning->temporaries==frame->temporary_id()) {',
-         'false&&block->owner&&owning&&owning->temporaries==frame->temporary_id()) {'),
+         'block->owner&&owning&&owning->temporaries==frame) {',
+         'false&&block->owner&&owning&&owning->temporaries==frame) {'),
     ]),
     ('teardown-without-guard', [
         ('interpreter/library.cpp',

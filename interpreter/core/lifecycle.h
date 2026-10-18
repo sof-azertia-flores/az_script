@@ -48,7 +48,7 @@ public:
 // Transitional native driver. Script dispatch retains the existing entry,
 // admission, argument validation and trace behavior for either engine.
 void finalize_block(const std::shared_ptr<slot_block>& block,
-                    const std::shared_ptr<environment>& context,bool run_destructor,pending_error& failure);
+                    ownership::Site context,bool run_destructor,pending_error& failure);
 
 // The drivers below compose the block traversal into the recursive cleanup
 // functions they replace (finalize_temporaries, finalize_storage,
@@ -193,9 +193,9 @@ public:
 
 // Runs a destructor call through the existing dispatch: an object of another
 // script runs from a scope of that script whose caller is context.
-void dispatch(const DestructorCall& call,const std::shared_ptr<environment>& context);
+void dispatch(const DestructorCall& call,ownership::Site context);
 // The transitional native driver of every composed driver.
-template<class Driver> void drive(Driver& driver,const std::shared_ptr<environment>& context) {
+template<class Driver> void drive(Driver& driver,ownership::Site context) {
     while(const auto* call=driver.advance()) {
         try {dispatch(*call,context);driver.call_returned();}
         catch(...) {driver.call_failed();}

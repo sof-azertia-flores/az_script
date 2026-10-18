@@ -48,7 +48,7 @@ void suspended_order() {
     rejects([&]{cleanup.call_failed();},"call_failed must require an active exception");
     // A second cleanup of the active object must neither call it again nor
     // destroy members before the suspended traversal regains control.
-    blocks::finalize(root,{},true);
+    blocks::finalize(root,ownership::Site{},true);
     require(left->state==slot_block::status::live,"reentrant cleanup must leave active members alone");
     cleanup.call_returned();
     require(cleanup.advance()==right.get(),"members must start in reverse slot order");
@@ -83,7 +83,7 @@ void failures_and_abandon() {
     {BlockFinalizer deferred(pinned,true,ignored);require(!deferred.advance(),"active buffer must defer cleanup");deferred.finish();}
     require(pinned->pending_finalize&&pinned->pending_destructor&&pinned->state==slot_block::status::live,
             "deferred buffer must retain storage and destructor intent");
-    pinned->active_operations=0;blocks::finalize(pinned,{},false);
+    pinned->active_operations=0;blocks::finalize(pinned,ownership::Site{},false);
     require(pinned->state==slot_block::status::dead,"unpinned buffer must release normally");
 }
 void bounded_no_allocation() {
@@ -110,7 +110,7 @@ void native_call_allocation_failure() {
         auto root=blocks::create(1,script);root->destructor=1;
         auto nested=child(root,0,2);nested->script_owner=script;
         pending_error failure;allocations=0;reject_allocations=true;
-        lifecycle::finalize_block(root,foreign_context?nullptr:script->baseEnv,true,failure);
+        lifecycle::finalize_block(root,foreign_context?ownership::Site{}:script->baseEnv->site(),true,failure);
         reject_allocations=false;
         require(allocations>=2,"each failed destructor setup must still attempt the next member");
         require(root->state==slot_block::status::dead&&nested->state==slot_block::status::dead,

@@ -3,6 +3,7 @@
 
 #include "program.h"
 #include "frames.h"
+#include "../core/ownership.h"
 #include <memory>
 #include <span>
 
@@ -52,7 +53,7 @@ struct ExecutionOptions {
     bool admit_entry=true;
     // The calling scope of a public entry into an object frame. Its function
     // frame receives exported object results and ownership transfers.
-    std::shared_ptr<environment> caller;
+    ownership::Site caller;
 };
 
 std::span<const Opcode> scalar_capabilities() noexcept;

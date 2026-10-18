@@ -17,6 +17,7 @@ using TempListId=StorageId<TemporaryTag>;
 // Records own their storage; neither the registry nor an object contains an
 // engine environment/frame pointer. Engine adapters hold leases on records.
 struct ScopeRecord {
+    ScopeId id;
     std::vector<address> owned;
     std::weak_ptr<azertian::script> script;
     // Links written when the scope is created: its frame's temporaries, its
@@ -26,6 +27,14 @@ struct ScopeRecord {
     bool closing=false;
 };
 struct TemporaryRecord {std::vector<std::shared_ptr<slot_block>> values;};
+// The scope an object-model operation runs in, with its frame's temporaries
+// when it has a frame. Whoever runs the operation keeps the scope alive, so
+// the record pointers stay valid for the operation.
+struct Site {
+    ScopeRecord* record=nullptr;
+    TemporaryRecord* temporaries=nullptr;
+    ScopeId scope() const noexcept{return record?record->id:ScopeId{};}
+};
 
 class Arena {
     std::shared_ptr<WorkspaceBudget> budget_;

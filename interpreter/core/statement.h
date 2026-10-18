@@ -10,7 +10,7 @@ struct Mark {ownership::TempListId list;std::size_t count=0;};
 // The caller holds the list lease and supplies its current waterline.
 inline Mark begin(ownership::TempListId list,std::size_t count) noexcept{return {list,count};}
 bool pending(Mark mark) noexcept;
-void finish(Mark mark,const std::shared_ptr<environment>& context);
+void finish(Mark mark,ownership::Site context);
 
 // Transitional engine adapters: allocation, evaluation and store have already
 // completed. Both engines commit the same declaration/ownership sequence.
