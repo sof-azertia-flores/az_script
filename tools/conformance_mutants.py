@@ -19,10 +19,12 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 
 # The unmodified runtime runs first and must pass, so a broken harness or an
-# empty corpus cannot count as catching every mutant.
+# empty corpus cannot count as catching every mutant; once per engine used.
 CONTROL = ('control', [])
-# Each mutant is (name, [(path, old, new), ...]); every old text must occur
-# exactly once, so a mutant whose anchors moved with the code fails loudly.
+VM_CONTROL = ('control-vm', [], 'vm')
+# Each mutant is (name, [(path, old, new), ...][, engine]); every old text must
+# occur exactly once, so a mutant whose anchors moved with the code fails
+# loudly. The engine (default tree) runs both the expectations and the replay.
 MUTANTS = [
     # The traversal yields the destructor only after the members have ended.
     ('destructor-after-fields', [
@@ -101,6 +103,37 @@ MUTANTS = [
          """    try {
         for(auto hook=on_destory.rbegin();hook!=on_destory.rend();++hook) {"""),
     ]),
+    # The VM's destructor continuations and its unwinding walk.
+    ('continuation-without-admission', [
+        ('interpreter/vm/execution.cpp',
+         'auto admitted=options.calls?options.calls->enter():admission::accounting::ticket{};',
+         'admission::accounting::ticket admitted{};'),
+    ], 'vm'),
+    ('continuation-entries-succeed-on-failure', [
+        ('interpreter/vm/execution.cpp',
+         'pending.waiting=false;pending.function.fail();pending.dispatch.fail();',
+         'pending.waiting=false;pending.function.succeed();pending.dispatch.succeed();'),
+    ], 'vm'),
+    ('continuation-failure-reaches-caller', [
+        ('interpreter/vm/execution.cpp',
+         '            if(continuation(id)) {',
+         '            if(false&&continuation(id)) {'),
+    ], 'vm'),
+    ('continuation-calls-from-current-scope', [
+        ('interpreter/vm/execution.cpp',
+         'if constexpr(Continuation)enter_object_frame(index,count,argument,frame,layout,options,continuation->caller);',
+         'if constexpr(Continuation)enter_object_frame(index,count,argument,frame,layout,options,ownership::Site{});'),
+    ], 'vm'),
+    ('unwinding-levels-not-republished', [
+        ('interpreter/vm/execution.cpp',
+         'try{unwind.failure.rethrow();}catch(...){unwind.failure=pending_error{};unwind.failure.capture_current();}',
+         '(void)unwind;'),
+    ], 'vm'),
+    ('unwinding-loses-error-position', [
+        ('interpreter/vm/execution.cpp',
+         'if(!unwind.republished){try{unwind.failure.rethrow();}catch(...){}}\n                position=unwind.position;',
+         'if(!unwind.republished){try{unwind.failure.rethrow();}catch(...){}}'),
+    ], 'vm'),
     ('depth-counts-callers', [
         ('interpreter/core/ownership.cpp',
          'for(auto id=scope;const auto* record=find(id);id=record->parent)++result;',
@@ -126,10 +159,12 @@ def main():
     env = os.environ.copy()
     for key in ('JAVA_TOOL_OPTIONS', 'JDK_JAVA_OPTIONS', '_JAVA_OPTIONS', 'AZSCRIPT_EXPERIMENTAL_VM_BACKEND'):
         env.pop(key, None)
-    selected = [CONTROL] + [m for m in MUTANTS if not args.only or m[0] in args.only.split(',')]
+    chosen = [m for m in MUTANTS if not args.only or m[0] in args.only.split(',')]
+    selected = [CONTROL] + ([VM_CONTROL] if any(len(m) > 2 for m in chosen) else []) + chosen
     report = {'mutants': {}}
     survivors = []
-    for name, patches in selected:
+    for name, patches, *rest in selected:
+        engine = rest[0] if rest else 'tree'
         folder = work / name; source = folder / 'source'; source.mkdir(parents=True)
         archive = subprocess.run(['git', 'archive', 'HEAD'], cwd=ROOT, capture_output=True, check=True).stdout
         subprocess.run(['tar', '-x', '-C', source], input=archive, check=True)
@@ -149,25 +184,29 @@ def main():
         host = build / 'interpreter/observation-host'
         checks = {}
         own = run([sys.executable, ROOT / 'tests/vm_execution_end_to_end.py', '--classpath', args.classpath,
-                   '--reference-host', host, '--reference-engine', 'tree', '--stage', 'ownership',
+                   '--reference-host', host, '--reference-engine', engine, '--stage', 'ownership',
                    '--work', folder / 'expectations'], cwd=ROOT, env=env, capture_output=True, text=True)
         checks['expectations'] = 'caught' if own.returncode else 'missed'
         if args.f0_work:
             replay = run([sys.executable, ROOT / 'tests/vm_execution_end_to_end.py', '--reference-work', args.f0_work,
-                          '--candidate-host', host, '--candidate-engine', 'tree', '--stage', 'ownership',
+                          '--candidate-host', host, '--candidate-engine', engine, '--stage', 'ownership',
                           '--work', folder / 'f0-replay'], cwd=ROOT, env=env, capture_output=True, text=True)
             checks['f0_replay'] = 'caught' if replay.returncode else 'missed'
         report['mutants'][name] = checks
         if not patches:
             if 'caught' in checks.values():
                 raise SystemExit(f'control runtime fails the corpus: {checks}; see {folder}')
+            shutil.rmtree(folder, ignore_errors=True)
             continue
         if 'missed' in checks.values():
             survivors.append(name)
+            shutil.rmtree(build / 'abdC', ignore_errors=True)
+        else:
+            # A caught mutant's build and observations are not needed again.
+            shutil.rmtree(folder, ignore_errors=True)
         print(f'{name}: {checks}', flush=True)
-        shutil.rmtree(build / 'abdC', ignore_errors=True)
     (work / 'report.json').write_text(json.dumps(report, indent=2) + '\n', encoding='utf-8')
-    print(f'Conformance mutants: {len(selected) - 1 - len(survivors)}/{len(selected) - 1} caught; report {work / "report.json"}')
+    print(f'Conformance mutants: {len(chosen) - len(survivors)}/{len(chosen)} caught; report {work / "report.json"}')
     if survivors:
         print(f'SURVIVED: {survivors}', file=sys.stderr)
         return 1
