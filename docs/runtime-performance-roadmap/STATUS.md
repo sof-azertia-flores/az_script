@@ -13,9 +13,52 @@
 | R06–R08 | 标量 VM 已接入构建并通过定向及独立进程差分 | VM 源码与 9 个定向测试、2 个 host 已加入 CMake；见下文“恢复后的集成”。生产 `blocks/heepalloc` 所有权身份迁移见下方 S2.1 记录 |
 | R09 | 标量 CALL/宿主桥/Session 通过；默认 workspace 定为 128 MiB | 37 案例 / 825 对独立进程观察（冻结 `019c440` 参考及同构建树后端）全部字段一致；workspace 边界见 [STORAGE_DESIGN.md](STORAGE_DESIGN.md) 第 9 节。宿主可配置项待 VM 成为宿主可选后端时加入 |
 | R10 | 编译器 cleanup 节点已接入标量执行循环 | 见下文“R10 编译器清理接入”。CleanupActions 析构 continuation、语句临时量仍依赖 R11 对象模型 |
-| R11 | R11a 完成：非泛型对象、heap、继承、虚调用由 VM 执行；析构仍经新调用根重入 | 见下文“R11a 对象帧”。R11b 按 [ENGINE_SPLIT.md](ENGINE_SPLIT.md) 的 S0–S2 进行（证据工具 → trace/准入提取 → 身份、语句协议、生命周期状态机、VM continuation），未完成前不能标为 R11 完成 |
+| R11 | R11a 完成：非泛型对象、heap、继承、虚调用由 VM 执行；R11b 的 S2.1–S2.7 完成：本脚本析构在调度循环内作为 continuation 运行 | 见下文“R11a 对象帧”。R11b 按 [ENGINE_SPLIT.md](ENGINE_SPLIT.md) 的 S0–S2 进行（证据工具 → trace/准入提取 → 身份、语句协议、生命周期状态机、VM continuation），未完成前不能标为 R11 完成 |
 | 执行器解耦 | 已决定，进行中 | 目标是树组件可整体删除：`core/`、`tree/`、`vm/` 组件及边界检查、无树构建门禁、宿主 API 去除树类型（ABI 2）；不做多库拆分。见下文“执行器重叠审查与解耦决策” |
 | R12–R28 | 尚未完成 | R12 在 S3 核心整理之后进行；泛型、buffer、反射、插件在 VM 准备阶段明确拒绝 |
+
+## S2.5–S2.7：VM 在调度循环内运行析构（2026-10-18）
+
+目标是让 VM 对象帧中本脚本的析构函数不再经原生嵌套调用根运行，而是作为调度循环内的 continuation 帧，与树执行器的入口检查、trace 状态、准入和错误次序一致。
+
+| 提交 | 内容 |
+| --- | --- |
+| `feat(core): trace entries that stay open across engine steps` | `trace::open_entry`（begin/succeed/fail）：与 `entry_scope` 相同的计数与发布，但可跨引擎步骤保持打开；新增等价性检查 |
+| `feat(vm): run scope, statement and root destructors in the dispatch loop` | 作用域、语句临时值与函数根作用域结束时，帧的待处理驱动（`ScopeFinalizer`/`TemporariesFinalizer`）由循环推进；本脚本析构成为等待帧之上的 continuation 帧，入口顺序与原生分派相同（分派入口、`getFunction` 及检查、函数入口、脚本/链接/上下文检查、调用准入〔不检查原生栈，即登记的 native_stack 差异〕、实参检查、执行器入口）；失败时 continuation 帧及其上方的帧按原生调用根展开，不做嵌套帧发布，两个入口发布后由等待的驱动捕获；宿主桥“已报告”状态在之后恢复 |
+| `feat(vm): unwind object frames through the dispatch loop` | 错误离开对象帧时，在调度循环的 catch 中自顶向下逐帧展开：先捕获错误（区域恢复时在区域捕获之后），再逐层结束语句与作用域层（每层丢弃后续错误，结束后重新发布首个错误），无区域时再结束根作用域；需要运行析构的层离开 catch，由循环运行 continuation，完成后错误从原最内位置重新进入展开，或由区域恢复 |
+| `perf(vm): keep cleanup state out of object frames` | 待处理清理与展开状态放入池化 `Cleanup` 记录，帧只在清理进行时借用；无需释放的作用域直接关闭；continuation 入口是帧入口的编译期变体 |
+| `test: negative controls for the VM's continuations and unwinding` | 变异工具支持 VM 变异体，新增 6 个 VM 变异体及 VM 对照 |
+| `feat(vm): run drop and delete destructors in the dispatch loop` | `blocks::begin_drop`、`heap::begin_delete` 把首步移入核心，帧驱动以 `ReleaseFinalizer`/`HeapDestroyer` 结束对象；drop 在抛出首个错误前清空存储 |
+| `feat(vm): run copy-rollback destructors in the dispatch loop` | 复制中途失败时，`blocks::store`/`materialize`/`export_result` 可把部分副本交给 `copy_rollback`（最内先、保留各层上下文）；VM 的赋值、声明初始化、实参快照与对象返回由帧驱动结束部分副本，各层之间重新发布错误，最后在指令处抛出；无法延迟的复制（buffer、宿主入口参数）仍原地结束 |
+| `test: judge VM mutants by the F0 replay alone` | VM 对照不能通过语料自身期望（含对象回调签名的案例是登记的 VM 差异，收集期望时不应用差异登记） |
+| `refactor(vm): drop the unused cleanup-action skeleton` | 删除无调用者的 `CleanupActions` 骨架及其测试；`ObjectHost` 发布括号只保留在仍可能原生运行脚本的路径 |
+| `perf(vm): keep failed-copy bookkeeping off the store path` | 执行器复用一个回滚列表；重置只在持有错误时清除错误（VM object_fields/object_copy 由 +0.6%/+0.7% 降到 +0.35%/+0.39%） |
+| `perf: keep call-path allocations and lookups inlined` | 帧解析与寄存器预留在调度循环内联；树的参数存储分配保持内联（树 call_16 相对 S2.3 由 +0.72% 降到 +0.36%） |
+| `test: catch VM unwinding faults against the live tree engine` | 新增 own-g13k（错误先后离开内层块与根作用域，各有探测析构，根的析构仍看到重新发布的被调者帧）；VM 变异体改为与本构建的树引擎在当前语料上实时比较；不可观察的“丢失最内位置”变异体换为“区域恢复时仍结束根作用域”（own-ce3 捕获） |
+
+覆盖：满预算下，所有权语料中 continuation 覆盖函数根与 delete（275）、作用域退出（173）、语句结束（78）、展开（138）、drop（171）与复制回滚（2）；没有析构经原生分派。临时计数器（统计运行时括号打开期间的 `Session::invoke`）在 F0 语料（objects 1,485、calls 426、ownership 52,822 次进程）和生命周期模糊种子 0–199（17,570 次进程）中均未发现嵌套根；其余进入均是宿主回调重入（773 与 6,250 次）。
+
+`ObjectHost` 发布括号没有删除（ENGINE_SPLIT 原计划删除）：另一脚本的析构（可能回调本脚本）、buffer 复制与宿主入口参数复制仍可能原生运行脚本，这些路径必须先发布 VM 全局量。
+
+验证：每个功能提交：Debug ctest 15/15；F0 回放两引擎一致（scalar 399、calls 426、objects 1,485、ownership 52,822 次进程）；生命周期模糊种子 0–199 两引擎一致。VM 变异体 6/6 被实时树对比捕获（5 个也被 F0 回放捕获），VM 对照通过两者。整组：完整离线普通验证与 sanitizer 验证通过。
+
+callgrind（Release，每调用指令数）：
+
+| 案例 | 树（对 S2.5） | VM（对 S2.5） | 树（对 S2.3） | VM（对 S2.3） |
+| --- | ---: | ---: | ---: | ---: |
+| integer_loop | +0.02% | +0.07% | +0.15% | +0.07% |
+| branch_loop | +0.02% | +0.05% | +0.16% | +0.13% |
+| call_0 | +0.03% | +0.08% | −0.02% | +0.83% |
+| call_1 | −0.04% | +0.06% | +0.07% | +0.78% |
+| call_16 | −0.28% | −0.02% | +0.36% | +0.05% |
+| object_fields | −0.06% | +0.24% | −0.72% | −1.76% |
+| object_copy | −0.04% | +0.32% | −0.76% | −1.40% |
+| virtual_monomorphic | −0.09% | −0.28% | +0.12% | −3.21% |
+| virtual_alternating | −0.05% | −0.24% | +0.14% | −2.93% |
+
+参考为 S2.5（`12f5850`）与 S2.3（`46910fd`）运行时。VM call_0/call_1 相对 S2.3 的 +0.8% 来自帧进出时的少量值复制，各步分别在门限内（S2.4 +0.37%/+0.47%，S2.5–S2.7 +0.07%）。
+
+仍未完成：VM 帧的函数帧仍是树类型 `function_frame`；泛型、buffer、比较器、反射、对象回调与对象全局量仍在 VM 准备阶段拒绝（R12）。
 
 ## S2.4：对象模型的中立场所与 VM 自有作用域记录（2026-10-18）
 
