@@ -32,9 +32,10 @@ struct Session::Prepared final:HostBoundary {
     ScalarExecutor executor;
     std::size_t active_invocations=0,minimum_globals=0;
     // Counts invocation starts; a runtime helper refreshes globals only if a
-    // nested invocation (a destructor) started while it ran. Nested roots
-    // share these slots, so script writes are already visible; the refresh
-    // rebinds host-side changes and re-enables this invocation's publication.
+    // nested invocation (a natively run destructor) started while it ran.
+    // Nested roots share these slots, so script writes are already visible;
+    // the refresh rebinds host-side changes and re-enables this invocation's
+    // publication.
     std::uint64_t invocations=0;
     bool export_allowed=false,publication_deferred=false;
 

@@ -3,7 +3,6 @@
 
 #include "frames.h"
 #include "../library.h"
-#include <array>
 
 namespace azertian::vm {
 // These are execution-watermarks, not addresses into movable workspace arrays.
@@ -11,7 +10,7 @@ namespace azertian::vm {
 // this boundary before acknowledging an unwind request.
 struct CleanupWatermark {
     ScopeId scope;
-    std::size_t scopes=0,temporaries=0,actions=0;
+    std::size_t scopes=0,temporaries=0;
     std::uint32_t statements=0,loops=0;
     // Object frames: scope/statement ownership records to unwind.
     std::size_t controls=0;
@@ -79,91 +78,6 @@ public:
     // Emergency teardown of an invocation root whose frames are being
     // discarded: drops continuations above mark without running finalizers.
     void discard(std::size_t mark) noexcept{if(records_.size()>mark)records_.truncate(mark);}
-};
-
-// A cleanup call needs zero arguments (factory), one (destructor/placement),
-// or two (comparison). Normal arbitrary-arity CALL uses the frame dispatcher.
-// Contexts use an aliasing shared_ptr into immutable, already-owned bindings;
-// copying this request never allocates. No pointer refers into a movable arena.
-struct CleanupScriptCall {
-    int function_id=0;
-    std::array<Value,2> arguments;
-    std::uint8_t argument_count=0;
-    std::shared_ptr<const type_contexts> contexts;
-};
-struct CleanupActionState {
-    FrameId frame;
-    ScopeId scope;
-    std::uint64_t identity=0;
-    std::size_t cursor=0;
-    std::uint32_t phase=0;
-    Value hold;
-};
-struct CleanupActionStep {
-    enum class Kind { finished,script } kind=Kind::finished;
-    CleanupScriptCall call;
-};
-class CleanupDriver {
-public:
-    virtual ~CleanupDriver()=default;
-    // A driver walks its prepared cursor state and yields every script call.
-    // It must not invoke script code or recursively walk object trees itself.
-    virtual CleanupActionStep advance(CleanupActionState& state)=0;
-    virtual void returned(CleanupActionState& state,const Value& result)=0;
-    // After a failed advance/call/result check, advance the failed cursor and
-    // return true to continue remaining work, or false to perform final native
-    // release. This method and release must not allocate or run script code.
-    virtual bool failed(CleanupActionState& state) noexcept=0;
-    virtual void release(CleanupActionState& state) noexcept=0;
-};
-struct CleanupPoll {
-    enum class Kind { complete,script } kind=Kind::complete;
-    FrameId frame;
-    CleanupScriptCall call;
-    pending_error failure;
-    CleanupPoll() noexcept=default;
-    CleanupPoll(CleanupPoll&&) noexcept=default;
-    CleanupPoll& operator=(CleanupPoll&&) noexcept=default;
-    CleanupPoll(const CleanupPoll&)=delete;
-    CleanupPoll& operator=(const CleanupPoll&)=delete;
-};
-
-// Scope/temporary ownership registers actions before publishing the object.
-// Reverse-order cleanup may pause for explicit script frames and may itself
-// be reentered by those frames. Each nested unwind has a preallocated session.
-// Object traversal drivers are supplied by the lifecycle implementation; this
-// class neither calls the legacy executor nor provides a recursive fallback.
-class CleanupActions {
-    struct Action {CleanupDriver* driver=nullptr;CleanupActionState state;};
-    struct Session {
-        std::size_t mark=0,waiting_index=0;
-        bool waiting=false;
-        pending_error failure;
-    };
-    WorkspaceVector<Action> actions_;
-    WorkspaceVector<Session> sessions_;
-    Session& session();
-    Action& waiting_action();
-    void finish_action() noexcept;
-    void action_failed() noexcept;
-public:
-    explicit CleanupActions(WorkspaceBudget& workspace,
-        std::pmr::memory_resource* resource=std::pmr::get_default_resource());
-    ~CleanupActions();
-    CleanupActions(const CleanupActions&)=delete;
-    CleanupActions& operator=(const CleanupActions&)=delete;
-    std::size_t size() const noexcept{return actions_.size();}
-    std::size_t unwind_depth() const noexcept{return sessions_.size();}
-    std::size_t backing_bytes() const noexcept{return actions_.backing_bytes()+sessions_.backing_bytes();}
-    void prepare_actions(std::size_t additional=1){actions_.prepare_append(additional);}
-    void prepare_unwinds(std::size_t additional=1){sessions_.prepare_append(additional);}
-    // Both calls require prepared capacity and perform no allocation. Driver
-    // lifetime must cover this stack; state.hold can retain object metadata.
-    void register_action(CleanupDriver& driver,CleanupActionState state);
-    void begin_unwind(std::size_t mark,pending_error&& failure={});
-    CleanupPoll poll();
-    void returned(const Value& result);
-    void failed(); // Call from the catch of the yielded script call/admission.
 };
 }
 #endif

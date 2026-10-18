@@ -9,10 +9,12 @@
 
 namespace azertian {class environment; class script; class variable; namespace ownership {class Arena;}}
 namespace azertian::vm {
-// Object frames keep the tree runtime's ownership records (environments,
-// function_frame temporaries and variable-backed locals), so object, heap and
-// destructor semantics are shared with the tree executor. blocks/heap helpers
-// can run destructors, which reenter the script through a new invocation root.
+// Object frames keep core ownership records (scope records, function_frame
+// temporaries and variable-backed locals), so object, heap and destructor
+// semantics are shared with the tree executor. Destructors of this script run
+// as frames of the dispatch loop; a helper that still runs script code natively
+// (another script's destructor, which may call back into this one; a copy that
+// cannot defer its rollback) starts a new invocation root.
 class ObjectHost {
 public:
     virtual ~ObjectHost()=default;

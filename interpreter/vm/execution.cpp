@@ -675,7 +675,7 @@ struct ScalarExecutor::State {
         if(!host)throw std::invalid_argument("Scalar VM object frames require a script object host");
         return *host;
     }
-    // Brackets tree-runtime helpers that may run destructors (script code).
+    // Brackets object-model helpers that may run script code natively.
     template<class Body> void runtime(const ExecutionOptions& options,Body body) {
         auto& host=host_of(options);const auto mark=host.enter_runtime();
         trace_touched=true;
@@ -1067,7 +1067,7 @@ struct ScalarExecutor::State {
                 }
                 case Opcode::cleanup_enter:
                     regions.enter(frames.top_id(),function_of(frame).cleanups[instruction.operand],
-                        CleanupWatermark{{},frame.scope_count,0,0,frame.statement_depth,frame.loop_depth,
+                        CleanupWatermark{{},frame.scope_count,0,frame.statement_depth,frame.loop_depth,
                             frame.object==no_index?0:objects(frame).controls.size()});break;
                 case Opcode::cleanup_leave: {
                     const auto id=frames.top_id();regions.body_finished(id);
