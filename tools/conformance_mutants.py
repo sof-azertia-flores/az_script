@@ -6,7 +6,9 @@ built into its own observation host and run through the corpus as the
 reference. Its own expectations must fail (the corpus states expected
 behaviour independently of any engine). With --f0-work, the mutant is also
 replayed against a recorded F0 reference collection and must differ there. A
-mutant that passes is a gap in the corpus and fails this tool.
+mutant that passes is a gap in the corpus and fails this tool. A VM mutant is
+judged by the replay alone: the VM does not run every corpus case (registered
+differences), and only the replay applies the difference registry.
 """
 import argparse
 import json
@@ -24,7 +26,7 @@ CONTROL = ('control', [])
 VM_CONTROL = ('control-vm', [], 'vm')
 # Each mutant is (name, [(path, old, new), ...][, engine]); every old text must
 # occur exactly once, so a mutant whose anchors moved with the code fails
-# loudly. The engine (default tree) runs both the expectations and the replay.
+# loudly. The engine (default tree) runs the checks; 'vm' requires --f0-work.
 MUTANTS = [
     # The traversal yields the destructor only after the members have ended.
     ('destructor-after-fields', [
@@ -160,7 +162,10 @@ def main():
     for key in ('JAVA_TOOL_OPTIONS', 'JDK_JAVA_OPTIONS', '_JAVA_OPTIONS', 'AZSCRIPT_EXPERIMENTAL_VM_BACKEND'):
         env.pop(key, None)
     chosen = [m for m in MUTANTS if not args.only or m[0] in args.only.split(',')]
-    selected = [CONTROL] + ([VM_CONTROL] if any(len(m) > 2 for m in chosen) else []) + chosen
+    vm_chosen = any(len(m) > 2 for m in chosen)
+    if vm_chosen and not args.f0_work:
+        raise SystemExit('VM mutants are judged by the F0 replay: pass --f0-work')
+    selected = [CONTROL] + ([VM_CONTROL] if vm_chosen else []) + chosen
     report = {'mutants': {}}
     survivors = []
     for name, patches, *rest in selected:
@@ -183,10 +188,11 @@ def main():
             raise SystemExit(f'{name}: mutant does not build')
         host = build / 'interpreter/observation-host'
         checks = {}
-        own = run([sys.executable, ROOT / 'tests/vm_execution_end_to_end.py', '--classpath', args.classpath,
-                   '--reference-host', host, '--reference-engine', engine, '--stage', 'ownership',
-                   '--work', folder / 'expectations'], cwd=ROOT, env=env, capture_output=True, text=True)
-        checks['expectations'] = 'caught' if own.returncode else 'missed'
+        if engine == 'tree':
+            own = run([sys.executable, ROOT / 'tests/vm_execution_end_to_end.py', '--classpath', args.classpath,
+                       '--reference-host', host, '--reference-engine', engine, '--stage', 'ownership',
+                       '--work', folder / 'expectations'], cwd=ROOT, env=env, capture_output=True, text=True)
+            checks['expectations'] = 'caught' if own.returncode else 'missed'
         if args.f0_work:
             replay = run([sys.executable, ROOT / 'tests/vm_execution_end_to_end.py', '--reference-work', args.f0_work,
                           '--candidate-host', host, '--candidate-engine', engine, '--stage', 'ownership',
