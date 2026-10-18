@@ -197,6 +197,7 @@ struct ScalarExecutor::State {
     std::deque<Cleanup> cleanups;
     std::vector<Cleanup*> free_cleanups;
     blocks::copy_rollback partial_copies;  // with_rollback's, kept for its capacity
+    type_contexts bound_call;              // call_contexts'
     // A frame whose pending cleanup resumes at the next loop start, after
     // its continuation failed inside the dispatch catch.
     FrameId drive_pending;
@@ -772,7 +773,12 @@ struct ScalarExecutor::State {
         }
     }
     void cleanup(FrameRecord& frame) noexcept {
-        for(std::size_t i=0;i<frame.registers.count;++i)clear(registers[frame.registers.begin+i]);
+        // clear's body, kept inline here whatever the inliner does with clear.
+        for(std::size_t i=0;i<frame.registers.count;++i) {
+            auto& reg=registers[frame.registers.begin+i];
+            if(reg.reference)drop_reference(reg);
+            reg.value=Value{};
+        }
         for(std::size_t i=0;i<frame.locals.count;++i)if(local(frame,i)!=no_index)release(local(frame,i));
         registers.truncate(frame.registers.begin);locals.truncate(frame.locals.begin);
         declared.truncate(frame.declared.begin);scopes.truncate(frame.scope_marks.begin);
@@ -808,8 +814,8 @@ struct ScalarExecutor::State {
         auto& tree=*record.frame;
         tree.global_offset=function.global_offset;tree.global_count=function.global_count;tree.param_count=count;
         tree.slots.resize(function.param_types.size()+static_cast<std::size_t>(function.local_count));
-        if(contexts)tree.hidden_contexts=*contexts;
-        record.bound.resize(function.bound_context_count);
+        if(contexts&&!contexts->empty())tree.hidden_contexts=*contexts;
+        if(function.bound_context_count)record.bound.resize(function.bound_context_count);
         record.scopes.emplace_back(host.ownership_arena(),
                                    ownership::Scope::Links{owner->baseEnv->ownership_id(),calling.scope(),tree.temporary_id()});
         record.scopes.back().ownership.record().script=owner;
@@ -906,6 +912,13 @@ struct ScalarExecutor::State {
         type_contexts result;result.reserve(indices.size());
         for(const auto index:indices)result.push_back(bind(frame,index));
         return result;
+    }
+    // A call's contexts, bound into a reused list; the callee's frame copies
+    // them before anything can bind again.
+    [[gnu::noinline]] const type_contexts& call_contexts(const FrameRecord& frame,const std::vector<std::uint32_t>& indices) {
+        bound_call.clear();bound_call.reserve(indices.size());
+        for(const auto index:indices)bound_call.push_back(bind(frame,index));
+        return bound_call;
     }
     bool constant_context(const FunctionRecord& function,std::uint32_t index) const {
         const auto& spec=function.contexts[index];
@@ -1130,14 +1143,12 @@ struct ScalarExecutor::State {
                     const auto& operation=function_of(frame).operations[instruction.operand];
                     const auto& target=program.targets[*operation.target];
                     if(target.kind==TargetKind::script) {
-                        auto read_argument=[&](std::size_t i)->const Value&{return read(frame,operation.arguments[i]);};
-                        if(operation.contexts.empty()&&!target.hidden_count)
-                            enter(target.function,operation.arguments.size(),read_argument,frames.top_id(),instruction.result,position,options,true);
-                        else {
-                            // Bound after the arguments, as the tree's call node binds them.
-                            const auto contexts=bind_all(frame,operation.contexts);
-                            enter(target.function,operation.arguments.size(),read_argument,frames.top_id(),instruction.result,position,options,true,&contexts);
-                        }
+                        // Bound after the arguments, as the tree's call node binds them.
+                        const type_contexts* contexts=nullptr;
+                        if(!operation.contexts.empty()||target.hidden_count)[[unlikely]]contexts=&call_contexts(frame,operation.contexts);
+                        enter(target.function,operation.arguments.size(),
+                            [&](std::size_t i)->const Value&{return read(frame,operation.arguments[i]);},
+                            frames.top_id(),instruction.result,position,options,true,contexts);
                     } else {
                         // Resolve only after all preceding materialize/argument
                         // instructions have completed, preserving side effects.
