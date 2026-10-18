@@ -55,7 +55,7 @@ void register_object(address pointer,std::optional<int> destructor_id,bool manua
 void delete_object(address pointer,const std::shared_ptr<environment>& env);
 void release_owned(address pointer,const std::shared_ptr<environment>& env);
 void return_object(address pointer,const std::shared_ptr<environment>& env);
-void discard_owned(const environment* env) noexcept;
+void discard_owned(ownership::ScopeId scope,ownership::ScopeRecord& record) noexcept;
 void discard_script_objects(const azertian::script* script_owner) noexcept;
 // Automatic-release bookkeeping. An active allocation has at most one owning
 // environment (the scope whose exit frees it). Explicit frees are only

@@ -314,7 +314,7 @@ public:
     ~function_frame();
 };
 class environment {
-    ownership::Lease<ownership::ScopeId> ownership_;
+    ownership::Scope ownership_;
 public:
     // A scope's links are fixed when it is created; its ownership record
     // names the frame's temporaries from then on.

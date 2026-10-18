@@ -77,6 +77,23 @@ public:
     auto& record() const noexcept{return *record_;}
     const std::shared_ptr<Arena>& arena() const noexcept{return arena_;}
 };
+
+// The ownership side of a lexical scope: its record, linked when it is
+// created. An orderly end runs lifecycle::ScopeFinalizer first; whatever the
+// scope still owns when it is abandoned or destroyed ends without scripts.
+class Scope {
+    Lease<ScopeId> lease_;
+public:
+    struct Links {ScopeId parent,caller;TempListId temporaries;};
+    explicit Scope(std::shared_ptr<Arena> arena={},Links links={});
+    ~Scope(){abandon();}
+    Scope(const Scope&)=delete;
+    Scope& operator=(const Scope&)=delete;
+    ScopeId id() const noexcept{return lease_.id();}
+    ScopeRecord& record() const noexcept{return lease_.record();}
+    const std::shared_ptr<Arena>& arena() const noexcept{return lease_.arena();}
+    void abandon() noexcept;
+};
 }
 }
 #endif

@@ -675,11 +675,11 @@ void release_owned(address pointer,const std::shared_ptr<environment>& env) {
     pending_error failure;finalize_block(block,env,true,failure);
     if(failure)failure.rethrow();
 }
-void discard_owned(address pointer,const environment* env) noexcept {
+void discard_owned(address pointer,ownership::ScopeId scope) noexcept {
     try {
         std::lock_guard<std::recursive_mutex> lock(runtime_mutex());
         auto block=lookup(pointer);
-        if(block&&block->state==slot_block::status::live&&block->owner_scope==env->ownership_id())abandon(block);
+        if(block&&block->state==slot_block::status::live&&block->owner_scope==scope)abandon(block);
     } catch(...) {}
 }
 void abandon(const std::shared_ptr<slot_block>& block) noexcept {

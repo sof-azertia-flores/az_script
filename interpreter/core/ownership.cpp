@@ -1,4 +1,5 @@
 #include "ownership.h"
+#include "../heepalloc.h"
 #include <atomic>
 #include <map>
 #include <mutex>
@@ -66,6 +67,10 @@ void Arena::retire(TempListId id) noexcept {
 }
 ScopeRecord* find(ScopeId id) noexcept {return lookup(id);}
 TemporaryRecord* find(TempListId id) noexcept {return lookup(id);}
+Scope::Scope(std::shared_ptr<Arena> arena,Links links):lease_(std::move(arena)) {
+    auto& own=record();own.parent=links.parent;own.caller=links.caller;own.temporaries=links.temporaries;
+}
+void Scope::abandon() noexcept {if(!record().owned.empty())heap::discard_owned(id(),record());}
 ScopeId frame_root(ScopeId scope) noexcept {
     const auto* start=find(scope);
     if(!start)return {};

@@ -80,7 +80,7 @@ void finalize_temporaries(ownership::TempListId list,std::size_t mark,const std:
 void finalize_storage(const std::vector<std::shared_ptr<variable>>& storage,const std::shared_ptr<environment>& env,
                       bool run_destructor,pending_error& failure);
 void release_owned(address pointer,const std::shared_ptr<environment>& env);
-void discard_owned(address pointer,const environment* env) noexcept;
+void discard_owned(address pointer,ownership::ScopeId scope) noexcept;
 // Marks an owned block dead without running user code; used when storage dies.
 void abandon(const std::shared_ptr<slot_block>& block) noexcept;
 // Snapshot restore keeps the bits of a saved address whose object no longer

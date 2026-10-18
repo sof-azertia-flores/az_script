@@ -1333,14 +1333,12 @@ function_frame::function_frame(std::shared_ptr<ownership::Arena> arena)
     :temporary_storage_(std::move(arena)),temporaries(temporary_storage_.record().values) {}
 environment::environment(std::shared_ptr<ownership::Arena> arena,const std::shared_ptr<environment>& parent,
                          const std::shared_ptr<environment>& caller,std::shared_ptr<function_frame> frame,bool frame_root)
-    :ownership_(std::move(arena)),owned_pointer(ownership_.record().owned),parent(parent),
-     script(ownership_.record().script),frame(std::move(frame)),closing(ownership_.record().closing),frame_root(frame_root) {
-    auto& record=ownership_.record();
-    if(this->frame)record.temporaries=this->frame->temporary_id();
-    if(parent)record.parent=parent->ownership_id();
-    if(caller)record.caller=caller->ownership_id();
-}
-environment::~environment() {heap::discard_owned(this);}
+    :ownership_(std::move(arena),{parent?parent->ownership_id():ownership::ScopeId{},caller?caller->ownership_id():ownership::ScopeId{},
+                                  frame?frame->temporary_id():ownership::TempListId{}}),
+     owned_pointer(ownership_.record().owned),parent(parent),script(ownership_.record().script),frame(std::move(frame)),
+     closing(ownership_.record().closing),frame_root(frame_root) {}
+// What the scope still owns ends before its frame's temporaries do.
+environment::~environment() {ownership_.abandon();}
 namespace {
 // The tree's view of a closing scope's locals for lifecycle::ScopeFinalizer.
 class closing_locals final:public lifecycle::ScopeLocals {

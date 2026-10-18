@@ -427,14 +427,14 @@ void return_object(address pointer,const std::shared_ptr<environment>& env) {
     auto& owned=ownership::find(holder)->owned;
     owned.erase(std::remove(owned.begin(),owned.end(),pointer),owned.end());
 }
-void discard_owned(const environment* env) noexcept {
+void discard_owned(ownership::ScopeId scope,ownership::ScopeRecord& record) noexcept {
     try {
         std::lock_guard<std::recursive_mutex> lock(runtime_mutex());
-        auto& list=const_cast<environment*>(env)->owned_pointer;
+        auto& list=record.owned;
         while(!list.empty()) {
             address pointer=list.back();list.pop_back();
-            if(blocks::is_block_address(pointer)){blocks::discard_owned(pointer,env);continue;}
-            if(owner_of(pointer)!=env->ownership_id())continue;
+            if(blocks::is_block_address(pointer)){blocks::discard_owned(pointer,scope);continue;}
+            if(owner_of(pointer)!=scope)continue;
             objects.erase(pointer);free(pointer);
         }
     }catch(...) {}
