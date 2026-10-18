@@ -31,6 +31,7 @@ std::uint32_t checked_slot_index(std::uint64_t index,std::uint64_t slot_count) {
     return static_cast<std::uint32_t>(index);
 }
 namespace detail {
+void expired_storage() {throw std::runtime_error("Invalid or expired VM storage identity");}
 std::uint64_t next_storage_arena() {
     static std::atomic<std::uint64_t> next{1};
     auto current=next.load(std::memory_order_relaxed);

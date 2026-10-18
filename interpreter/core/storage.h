@@ -66,6 +66,8 @@ namespace detail {
 // Process-wide, monotonically issued domains prevent equal indexes/generations
 // in independent pools from accidentally authorizing access to each other.
 std::uint64_t next_storage_arena();
+// Out of line so the identity checks stay small enough to inline.
+[[noreturn,gnu::cold]] void expired_storage();
 }
 
 // Stable addresses, explicit generation checks, and no allocation on retire.
@@ -203,12 +205,12 @@ public:
     }
     T& resolve(id_type id) {
         auto* value=try_resolve(id);
-        if(!value)throw std::runtime_error("Invalid or expired VM storage identity");
+        if(!value)[[unlikely]]detail::expired_storage();
         return *value;
     }
     const T& resolve(id_type id) const {
         const auto* value=try_resolve(id);
-        if(!value)throw std::runtime_error("Invalid or expired VM storage identity");
+        if(!value)[[unlikely]]detail::expired_storage();
         return *value;
     }
     bool retire(id_type id) noexcept {
