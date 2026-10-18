@@ -150,12 +150,14 @@ struct ScalarExecutor::State {
         ExecutionPosition position;      // its innermost position
         CleanupTransition transition;    // the region's capture
     };
+    // A frame's cleanup in progress. Pooled: an object frame borrows one
+    // only while a cleanup or an unwind is under way.
+    struct Cleanup {Pending pending;Unwind unwind;};
     struct ObjectFrame {
         std::shared_ptr<function_frame> frame;
         std::vector<ObjectScope> scopes; // [0] is the function root.
         std::vector<Control> controls;   // Innermost last.
-        Pending pending;
-        Unwind unwind;
+        Cleanup* cleanup=nullptr;
     };
     const ExecutableProgram& program;
     SlotPool& pool;
@@ -172,6 +174,8 @@ struct ScalarExecutor::State {
     // Stack-ordered with the object frames on FrameStack. A deque keeps the
     // records in place while reentrant roots push and pop above them.
     std::deque<ObjectFrame> object_frames;
+    std::deque<Cleanup> cleanups;
+    std::vector<Cleanup*> free_cleanups;
     // A frame whose pending cleanup resumes at the next loop start, after
     // its continuation failed inside the dispatch catch.
     FrameId drive_pending;
@@ -334,16 +338,56 @@ struct ScalarExecutor::State {
     }
     // Starts ending a scope as close_scope does. True when it has
     // destructors to run: the frame's pending driver then holds them.
-    static bool begin_close(ObjectFrame& record,ObjectScope& scope,bool root,Tail tail) {
-        auto& own=scope.ownership.record();
-        if(own.closing)return false;
-        auto& frame=*record.frame;auto& pending=record.pending;
-        if(idle(frame,scope,root)) {
-            own.closing=true;ObjectLocals(frame,scope,root).undeclare();return false;
+    Cleanup& cleanup_of(ObjectFrame& record) {
+        if(!record.cleanup) {
+            if(free_cleanups.empty())record.cleanup=&cleanups.emplace_back();
+            else {record.cleanup=free_cleanups.back();free_cleanups.pop_back();}
         }
+        return *record.cleanup;
+    }
+    // Returns an idle cleanup (its driver reset, no unwind) to the pool.
+    void release_cleanup(ObjectFrame& record) noexcept {
+        auto* cleanup=record.cleanup;
+        if(!cleanup||cleanup->pending.active()||cleanup->pending.waiting||cleanup->unwind.mode!=Unwind::Mode::none)return;
+        try{free_cleanups.push_back(cleanup);}catch(...){return;}
+        record.cleanup=nullptr;
+    }
+    // A leaving frame returns whatever its cleanup still holds.
+    void discard_cleanup(ObjectFrame& record) noexcept {
+        auto* cleanup=record.cleanup;
+        if(!cleanup)return;
+        reset_pending(cleanup->pending);cleanup->pending.waiting=false;cleanup->unwind=Unwind{};
+        try{free_cleanups.push_back(cleanup);}catch(...){}
+        record.cleanup=nullptr;
+    }
+    static void start_driver(ObjectFrame& record,Pending& pending,ObjectScope& scope,bool root,Tail tail) {
+        auto& frame=*record.frame;
         pending.locals.emplace(frame,scope,root);
         pending.scope.emplace(scope.ownership.id(),root?frame.temporary_id():ownership::TempListId{},*pending.locals);
-        pending.site=scope_site(record,scope);pending.tail=tail;return true;
+        pending.site=scope_site(record,scope);pending.tail=tail;
+    }
+    // Starts ending a scope that stays in place (the root) as
+    // environment::cleanup does. True when it has destructors to run: the
+    // frame's pending driver then holds them.
+    bool begin_close(ObjectFrame& record,ObjectScope& scope,bool root,Tail tail) {
+        auto& own=scope.ownership.record();
+        if(own.closing)return false;
+        auto& frame=*record.frame;
+        if(idle(frame,scope,root)){own.closing=true;ObjectLocals(frame,scope,root).undeclare();return false;}
+        start_driver(record,cleanup_of(record).pending,scope,root,tail);return true;
+    }
+    // Ends the innermost scope and pops it: at once when nothing can run,
+    // otherwise through the pending driver, which keeps the scope until done.
+    bool close_innermost(ObjectFrame& record,Tail tail) {
+        auto& scope=record.scopes.back();
+        auto& own=scope.ownership.record();auto& frame=*record.frame;
+        if(own.closing||idle(frame,scope,false)) {
+            if(!own.closing){own.closing=true;ObjectLocals(frame,scope,false).undeclare();}
+            record.scopes.pop_back();return false;
+        }
+        auto& pending=cleanup_of(record).pending;
+        pending.closing.emplace(std::move(scope));record.scopes.pop_back();
+        start_driver(record,pending,*pending.closing,false,tail);return true;
     }
     static void reset_pending(Pending& pending) noexcept {
         pending.scope.reset();pending.temporaries.reset();pending.locals.reset();pending.closing.reset();
@@ -366,7 +410,7 @@ struct ScalarExecutor::State {
         if(call.owner->lock()!=owner)return Entry::native;
         const auto target=script_functions.find(call.function_id);
         if(target==script_functions.end())return Entry::native;
-        auto& pending=objects(frames.resolve(below)).pending;
+        auto& pending=objects(frames.resolve(below)).cleanup->pending;
         const bool reported=options.callbacks&&options.callbacks->error_reported();
         auto dispatch=trace::open_entry::begin();
         try {
@@ -389,8 +433,9 @@ struct ScalarExecutor::State {
                         [](std::size_t){return std::optional<int>(ADDRESS_VALUE);},true);
                     const Value argument(call.object);const auto region_mark=regions.size();
                     entered=true;
-                    enter(target->second,1,[&](std::size_t)->const Value&{return argument;},below,no_index,position,options,
-                          false,true,std::move(admitted),pending.site);
+                    ContinuationEntry continuation{std::move(admitted),pending.site};
+                    auto read=[&](std::size_t)->const Value&{return argument;};
+                    enter_frame<true>(target->second,1,read,below,no_index,position,options,false,&continuation);
                     pending.region_mark=region_mark;
                 } catch(...) {
                     // Before its entry into the executor the function notes its header.
@@ -411,17 +456,18 @@ struct ScalarExecutor::State {
     // (true) or completes (false); its first error then leaves at the waiting
     // instruction, as the native cleanup's did.
     bool drive(FrameId id,ExecutionPosition& position,const ExecutionOptions& options) {
-        auto& pending=objects(frames.resolve(id)).pending;
+        // Frame records keep their address while continuations push others.
+        auto& frame=frames.resolve(id);auto& record=objects(frame);auto& pending=record.cleanup->pending;
         try {
             for(;;) {
-                position=position_of(frames.resolve(id));
+                position=position_of(frame);
                 const auto* call=pending.scope?pending.scope->advance():pending.temporaries->advance();
                 if(!call) {
                     if(pending.tail==Tail::unwinding) {
                         try {if(pending.scope)pending.scope->finish();else pending.temporaries->finish();}
-                        catch(...) {objects(frames.resolve(id)).unwind.failure.capture_current();}
+                        catch(...) {record.cleanup->unwind.failure.capture_current();}
                     } else if(pending.scope)pending.scope->finish();else pending.temporaries->finish();
-                    reset_pending(pending);return false;
+                    reset_pending(pending);release_cleanup(record);return false;
                 }
                 const auto entry=enter_continuation(id,*call,position,options);
                 if(entry==Entry::pushed)return true;
@@ -431,14 +477,14 @@ struct ScalarExecutor::State {
             }
         } catch(...) {
             const bool unwinding=pending.tail==Tail::unwinding;reset_pending(pending);
-            if(!unwinding){position=position_of(frames.resolve(id));throw;}
-            objects(frames.resolve(id)).unwind.failure.capture_current();return false;
+            if(!unwinding){position=position_of(frame);release_cleanup(record);throw;}
+            record.cleanup->unwind.failure.capture_current();return false;
         }
     }
     // The continuation of a waiting frame returned: end its entries as their
     // scopes would, then resume the driver.
     void continuation_returned(FrameId id,ExecutionPosition& position,const ExecutionOptions& options) {
-        auto& pending=objects(frames.resolve(id)).pending;
+        auto& pending=objects(frames.resolve(id)).cleanup->pending;
         pending.waiting=false;pending.function.succeed();pending.dispatch.succeed();
         if(options.callbacks)options.callbacks->restore_error_reported(pending.reported);
         call_returned(pending);
@@ -450,8 +496,8 @@ struct ScalarExecutor::State {
         if(!frame.caller)return false;
         const auto& below=frames.resolve(frame.caller);
         if(below.object==no_index)return false;
-        const auto& pending=objects(below).pending;
-        return pending.waiting&&pending.callee==id;
+        const auto* cleanup=objects(below).cleanup;
+        return cleanup&&cleanup->pending.waiting&&cleanup->pending.callee==id;
     }
     static void level_ended(Unwind& unwind) noexcept {
         try{unwind.failure.rethrow();}catch(...){unwind.failure=pending_error{};unwind.failure.capture_current();}
@@ -460,7 +506,7 @@ struct ScalarExecutor::State {
     // destructor runs as a continuation first; false when all are done.
     bool advance_unwind(FrameId id,ExecutionPosition& position,const ExecutionOptions& options) {
         for(;;) {
-            auto& record=objects(frames.resolve(id));auto& unwind=record.unwind;auto& pending=record.pending;
+            auto& record=objects(frames.resolve(id));auto& unwind=record.cleanup->unwind;auto& pending=record.cleanup->pending;
             if(pending.active()) {
                 const bool root=unwind.mode==Unwind::Mode::root;
                 if(drive(id,position,options))return true;
@@ -471,9 +517,7 @@ struct ScalarExecutor::State {
                 const auto control=record.controls.back();record.controls.pop_back();
                 try {
                     if(control.scope) {
-                        pending.closing.emplace(std::move(record.scopes.back()));record.scopes.pop_back();
-                        if(begin_close(record,*pending.closing,false,Tail::unwinding))continue;
-                        pending.closing.reset();
+                        if(close_innermost(record,Tail::unwinding))continue;
                     } else if(record.frame->temporaries.size()>control.temporaries.count) {
                         pending.temporaries.emplace(control.temporaries.list,control.temporaries.count);
                         pending.site=scope_site(record,record.scopes.back());pending.tail=Tail::unwinding;continue;
@@ -503,11 +547,11 @@ struct ScalarExecutor::State {
     // An unwinding frame's levels ended after continuations: the error leaves
     // again (re-entering the failure walk) or its region recovers.
     void finish_unwind(FrameId id,ExecutionPosition& position,pending_error& resumed) {
-        auto& frame=frames.resolve(id);auto& unwind=objects(frame).unwind;
+        auto& frame=frames.resolve(id);auto& record=objects(frame);auto& unwind=record.cleanup->unwind;
         position=unwind.position;
         if(unwind.region) {
             try{unwind.failure.rethrow();}catch(...){}
-            auto transition=std::move(unwind.transition);unwind=Unwind{};
+            auto transition=std::move(unwind.transition);unwind=Unwind{};release_cleanup(record);
             recover_region(frame,std::move(transition),position,resumed);return;
         }
         unwind.republished=true;unwind.failure.rethrow();
@@ -517,7 +561,7 @@ struct ScalarExecutor::State {
     // recovery inside the dispatch catch.
     void resume(FrameId id,ExecutionPosition& position,const ExecutionOptions& options) {
         auto& record=objects(frames.resolve(id));
-        if(record.unwind.mode==Unwind::Mode::none){drive(id,position,options);return;}
+        if(record.cleanup->unwind.mode==Unwind::Mode::none){drive(id,position,options);return;}
         if(advance_unwind(id,position,options))return;
         pending_error again;finish_unwind(id,position,again);
         if(again)again.rethrow();
@@ -534,7 +578,7 @@ struct ScalarExecutor::State {
             const auto id=frames.top_id();auto& frame=frames.top();
             const bool region=regions.size()>region_mark&&regions.owner()==id;
             if(frame.object!=no_index) {
-                auto& unwind=objects(frame).unwind;
+                auto& record=objects(frame);auto& unwind=cleanup_of(record).unwind;
                 if(unwind.mode==Unwind::Mode::none) {
                     unwind.region=region;
                     if(region){unwind.transition=regions.failed(id,frame,&position);unwind.target=unwind.transition.watermark.controls;}
@@ -545,10 +589,10 @@ struct ScalarExecutor::State {
                 if(!unwind.republished){try{unwind.failure.rethrow();}catch(...){}}
                 position=unwind.position;
                 if(unwind.region) {
-                    auto transition=std::move(unwind.transition);unwind=Unwind{};
+                    auto transition=std::move(unwind.transition);unwind=Unwind{};release_cleanup(record);
                     recover_region(frame,std::move(transition),position,resumed);return true;
                 }
-                unwind=Unwind{};
+                unwind=Unwind{};release_cleanup(record);
             } else if(region) {
                 recover_region(frame,regions.failed(id,frame,&position),position,resumed);return true;
             }
@@ -559,7 +603,7 @@ struct ScalarExecutor::State {
                 // driver captures the error.
                 const auto below=frame.caller;
                 cleanup(frame);frames.pop();
-                auto& pending=objects(frames.resolve(below)).pending;
+                auto& pending=objects(frames.resolve(below)).cleanup->pending;
                 regions.discard(pending.region_mark);
                 pending.waiting=false;pending.function.fail();pending.dispatch.fail();
                 if(options.callbacks)options.callbacks->restore_error_reported(pending.reported);
@@ -661,6 +705,7 @@ struct ScalarExecutor::State {
         if(frame.object!=no_index) {
             // Normal and error exits have already run every scope cleanup.
             if(frame.object+1!=object_frames.size())std::terminate();
+            discard_cleanup(object_frames.back());
             object_frames.pop_back();frame.object=no_index;
         }
     }
@@ -705,15 +750,20 @@ struct ScalarExecutor::State {
     }
     // A continuation frame arrives with its admission and the calling site
     // of its native dispatch; its entries publish its failures.
+    struct ContinuationEntry {admission::accounting::ticket admitted;ownership::Site caller;};
     template<class Argument> void enter(std::uint32_t index,std::size_t count,Argument argument,
+            FrameId caller,Register destination,ExecutionPosition& position,const ExecutionOptions& options,bool admit) {
+        enter_frame<false>(index,count,argument,caller,destination,position,options,admit,nullptr);
+    }
+    template<bool Continuation,class Argument> void enter_frame(std::uint32_t index,std::size_t count,Argument& argument,
             FrameId caller,Register destination,ExecutionPosition& position,const ExecutionOptions& options,bool admit,
-            bool continuation=false,admission::accounting::ticket admitted={},ownership::Site caller_site={}) {
+            ContinuationEntry* continuation) {
         const ExecutionPosition entry{index,0,0,0,no_index};
         try {
             if(caller&&trace_touched)trace::discard_active();
             FrameRecord frame;frame.function=index;frame.caller=caller;frame.return_register=destination;
-            if(admit&&options.calls)frame.admission=options.calls->enter();
-            else if(continuation)frame.admission=std::move(admitted);
+            if constexpr(Continuation)frame.admission=std::move(continuation->admitted);
+            else if(admit&&options.calls)frame.admission=options.calls->enter();
             const auto& function=program.functions[index];
             const bool objects=object_function[index];
             validate_arguments(function,count,argument,objects);
@@ -726,7 +776,11 @@ struct ScalarExecutor::State {
             registers.prepare_append(layout.registers);locals.prepare_append(layout.locals);
             declared.prepare_append(layout.locals);scopes.prepare_append(layout.scope_marks);
             regions.prepare(layout.cleanups);
-            if(objects){enter_object_frame(index,count,argument,frame,layout,options,caller_site);return;}
+            if(objects) {
+                if constexpr(Continuation)enter_object_frame(index,count,argument,frame,layout,options,continuation->caller);
+                else enter_object_frame(index,count,argument,frame,layout,options,ownership::Site{});
+                return;
+            }
             registers.append_default(layout.registers);locals.append_default(layout.locals);
             declared.append_default(layout.locals);scopes.append_default(layout.scope_marks);
             for(std::size_t i=0;i<layout.locals;++i)local(frame,i)=no_index;
@@ -737,7 +791,7 @@ struct ScalarExecutor::State {
         } catch(...) {
             position=entry;
             if(options.callbacks)options.callbacks->note_script_error(entry);
-            if(caller&&!continuation){trace_touched=true;trace::publish_current();}
+            if(!Continuation&&caller){trace_touched=true;trace::publish_current();}
             throw;
         }
     }
@@ -852,10 +906,7 @@ struct ScalarExecutor::State {
                         auto& record=objects(frame);
                         if(record.controls.empty()||!record.controls.back().scope)throw std::logic_error("Scalar VM object scope records are unbalanced");
                         record.controls.pop_back();
-                        auto& pending=record.pending;
-                        pending.closing.emplace(std::move(record.scopes.back()));record.scopes.pop_back();
-                        if(begin_close(record,*pending.closing,false,Tail::scope_closed))drive(frames.top_id(),position,options);
-                        else pending.closing.reset();
+                        if(close_innermost(record,Tail::scope_closed))drive(frames.top_id(),position,options);
                     }
                     break;
                 case Opcode::statement_enter:
@@ -869,7 +920,7 @@ struct ScalarExecutor::State {
                         if(record.controls.empty()||record.controls.back().scope)throw std::logic_error("Scalar VM object statement records are unbalanced");
                         const auto mark=record.controls.back().temporaries;record.controls.pop_back();
                         if(record.frame->temporaries.size()>mark.count) {
-                            auto& pending=record.pending;
+                            auto& pending=cleanup_of(record).pending;
                             pending.temporaries.emplace(mark.list,mark.count);
                             pending.site=scope_site(record,record.scopes.back());pending.tail=Tail::statement_done;
                             drive(frames.top_id(),position,options);
@@ -1040,13 +1091,13 @@ struct ScalarExecutor::State {
                     const auto self=frames.top_id();
                     cleanup(frame);frames.pop();
                     if(!caller)return output;
-                    if(auto& resumed=frames.resolve(caller);resumed.object!=no_index) {
-                        if(const auto& pending=objects(resumed).pending;pending.waiting&&pending.callee==self) {
+                    auto& resumed_frame=frames.resolve(caller);
+                    if(resumed_frame.object!=no_index) {
+                        if(const auto* waiting=objects(resumed_frame).cleanup;waiting&&waiting->pending.waiting&&waiting->pending.callee==self) {
                             continuation_returned(caller,position,options);break;
                         }
                     }
                     if(trace_touched){clear_error_trace();trace_touched=false;}
-                    auto& resumed_frame=frames.resolve(caller);
                     if(resumed_frame.object!=no_index&&output.type_tag()==OBJECT_VALUE)
                         blocks::adopt_result(wrap(output),site(resumed_frame));
                     const auto got=output.type_tag();
