@@ -193,6 +193,7 @@ struct ScalarExecutor::State {
     std::deque<ObjectFrame> object_frames;
     std::deque<Cleanup> cleanups;
     std::vector<Cleanup*> free_cleanups;
+    blocks::copy_rollback partial_copies;  // with_rollback's, kept for its capacity
     // A frame whose pending cleanup resumes at the next loop start, after
     // its continuation failed inside the dispatch catch.
     FrameId drive_pending;
@@ -408,7 +409,7 @@ struct ScalarExecutor::State {
     }
     static void reset_pending(Pending& pending) noexcept {
         pending.scope.reset();pending.temporaries.reset();pending.release.reset();pending.heap.reset();
-        pending.block.reset();pending.rollback.clear();pending.failure=pending_error{};
+        pending.block.reset();pending.rollback.clear();if(pending.failure)pending.failure=pending_error{};
         pending.locals.reset();pending.closing.reset();pending.storage.reset();
         pending.site={};pending.tail=Tail::none;
     }
@@ -431,7 +432,7 @@ struct ScalarExecutor::State {
     bool begin_rollback(const FrameRecord& frame,blocks::copy_rollback& rollback) {
         if(rollback.partial.empty())return false;
         auto& pending=cleanup_of(objects(frame)).pending;
-        pending.rollback=std::move(rollback.partial);pending.next=0;
+        pending.rollback=std::move(rollback.partial);rollback.partial.clear();pending.next=0;
         pending.failure=pending_error{};pending.failure.capture_current();
         start_partial(pending);pending.tail=Tail::rollback;return true;
     }
@@ -728,10 +729,13 @@ struct ScalarExecutor::State {
     // the frame now waits for them.
     template<class Operation> bool with_rollback(const FrameRecord& frame,ExecutionPosition& position,
             const ExecutionOptions& options,Operation operation) {
-        blocks::copy_rollback rollback;
+        // Empty between uses: a nested root can only start while it is.
+        auto& rollback=partial_copies;
         try {runtime(options,[&]{operation(&rollback);});}
         catch(...) {
-            if(!begin_rollback(frame,rollback))throw;
+            bool waits;
+            try{waits=begin_rollback(frame,rollback);}catch(...){rollback.partial.clear();throw;}
+            if(!waits)throw;
             drive(frames.top_id(),position,options);return true;
         }
         return false;
