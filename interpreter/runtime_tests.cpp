@@ -359,7 +359,17 @@ void ownership_identity_tests() {
           "a retired ownership ID cannot resolve a reused scope slot");
     auto other=ownership::Arena::create();const auto foreign=other->create_scope();
     check(!arena->find(foreign)&&!other->find(reused),"ownership IDs reject foreign arenas");
-    other.reset();check(!ownership::find(foreign),"destroying an arena invalidates its domain");
+    // Global lookups alternate between domains; the last resolved arena of a
+    // kind must not answer for another, nor outlive its arena.
+    const auto foreign_list=other->create_temporaries();
+    check(ownership::find(foreign)==other->find(foreign)&&ownership::find(reused)==arena->find(reused)&&
+          ownership::find(foreign)==other->find(foreign)&&ownership::find(foreign_list)==other->find(foreign_list),
+          "global ownership lookups alternate between arenas");
+    other.reset();check(!ownership::find(foreign)&&!ownership::find(foreign_list),"destroying an arena invalidates its domain");
+    auto successor=ownership::Arena::create();const auto successor_scope=successor->create_scope();
+    check(!ownership::find(foreign)&&ownership::find(successor_scope)==successor->find(successor_scope),
+          "a later arena does not answer for a destroyed one");
+    successor->retire(successor_scope);successor.reset();
     for(auto id:live)arena->retire(id);
     arena->retire(reused);arena.reset();
     check(budget->used_bytes()==0,"ownership arena releases charged pages and directory");

@@ -40,6 +40,8 @@ public:
     void retire(TempListId id) noexcept;
     ScopeRecord* find(ScopeId id) noexcept{return scopes_.try_resolve(id);}
     TemporaryRecord* find(TempListId id) noexcept{return temporaries_.try_resolve(id);}
+    bool issues(ScopeId id) const noexcept{return scopes_.arena_id()==id.arena;}
+    bool issues(TempListId id) const noexcept{return temporaries_.arena_id()==id.arena;}
 };
 
 // The runtime lock serializes these lookups with retirement. Re-resolve an ID
