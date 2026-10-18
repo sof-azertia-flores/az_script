@@ -96,7 +96,7 @@ public:
     }
     // Register/cell/index ranges use non-throwing default initialization. All
     // growth checks finish before any new live element is published.
-    std::size_t append_default(std::size_t count) {
+    [[gnu::always_inline]] std::size_t append_default(std::size_t count) {
         static_assert(std::is_nothrow_default_constructible_v<T>);
         const auto begin=size_;prepare_append(count);
         for(std::size_t i=0;i<count;++i)std::construct_at(data_+size_++);

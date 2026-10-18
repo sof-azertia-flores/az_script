@@ -76,7 +76,12 @@ public:
     FrameId top_id() const noexcept{return stack_.empty()?FrameId{}:stack_.back();}
     FrameRecord& top();
     const FrameRecord& top() const;
-    FrameRecord& resolve(FrameId id){return frames_.resolve(id);}
+    // Inlined into the dispatch loop; the pool's resolve is shared and is not.
+    [[gnu::always_inline]] FrameRecord& resolve(FrameId id) {
+        auto* frame=frames_.try_resolve(id);
+        if(!frame)[[unlikely]]azertian::detail::expired_storage();
+        return *frame;
+    }
     const FrameRecord& resolve(FrameId id) const{return frames_.resolve(id);}
     FrameRecord* try_resolve(FrameId id) noexcept{return frames_.try_resolve(id);}
     const FrameRecord* try_resolve(FrameId id) const noexcept{return frames_.try_resolve(id);}

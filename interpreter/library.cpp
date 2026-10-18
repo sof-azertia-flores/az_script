@@ -65,6 +65,9 @@ using V=std::shared_ptr<variable>;
 using E=std::shared_ptr<environment>;
 using M=std::shared_ptr<AbdMap>;
 V nil() { return std::make_shared<variable>(nullptr); }
+// A parameter's storage. Its allocation stays inlined here: the site entry's
+// parameter loop is too large for GCC to inline it there (call_16 +0.7%).
+[[gnu::flatten]] V parameter_storage() { return std::make_shared<variable>(nullptr); }
 // Runtime messages spell IDs like source and the CLI do: 0x plus the full
 // 32-bit pattern, so negative and high-bit IDs read the same everywhere.
 std::string hex_text(std::uint32_t value,int digits) {
@@ -1179,7 +1182,7 @@ V ofunction::invoke_bound(ownership::Site caller,std::vector<V> args,type_contex
         if(!args[i]) throw std::invalid_argument("Null argument pointer; use variable(nullptr)");
         // Object arguments move from caller temporaries or are copied; parameters
         // are destroyed after every local of the call.
-        auto storage=std::make_shared<variable>(nullptr);blocks::store(storage,args[i],caller);
+        auto storage=parameter_storage();blocks::store(storage,args[i],caller);
         statement::bind_parameter(storage,i,env);
     }
     return with_cleanup(env,[&] {
