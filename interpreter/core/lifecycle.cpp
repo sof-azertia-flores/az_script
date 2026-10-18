@@ -100,8 +100,8 @@ void dispatch(const DestructorCall& call,const std::shared_ptr<environment>& env
     if(!script||script->closed)throw std::runtime_error("Object destructor script is unavailable");
     auto context=env;
     if(!context||context->script.lock()!=script) {
-        context=std::make_shared<environment>(script->baseEnv->ownership_arena());context->script=script;
-        context->parent=script->baseEnv;context->caller=env;
+        context=std::make_shared<environment>(script->baseEnv->ownership_arena(),script->baseEnv,env);
+        context->script=script;
     }
     invoke_bound_function(script,call.function_id,context,{std::make_shared<variable>(call.object)},*call.contexts);
 }

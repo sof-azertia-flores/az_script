@@ -327,8 +327,8 @@ template<class Body> V with_cleanup(const E& scope,Body body) {
 V scoped_execute(const std::shared_ptr<expression>& body,E env) {
     at_location location(env,body->location);
     if(std::dynamic_pointer_cast<complex_expression>(body)) return run(body,env);
-    auto scope=std::make_shared<environment>(env->ownership_arena());
-    scope->parent=env;scope->script=env->script;scope->frame=env->frame;
+    auto scope=std::make_shared<environment>(env->ownership_arena(),env,nullptr,env->frame);
+    scope->script=env->script;
     return with_cleanup(scope,[&]{return statement_scope(scope,[&]{return run(body,scope);});});
 }
 // Compiler-generated base cleanup. It does not encode classes or object layouts:
@@ -1154,9 +1154,9 @@ V ofunction::invoke_bound(E ev,std::vector<V> args,type_contexts contexts) {
         vm_trace=true;
         return bound->vm_session_->invoke(vm_function_index_,args,&position,ev);
     }
-    auto env=std::make_shared<environment>(guard.s->baseEnv->ownership_arena());
-    env->script=guard.s;env->parent=guard.s->baseEnv;env->caller=ev;env->frame_root=true;
-    env->frame=std::make_shared<function_frame>(env->ownership_arena());
+    const auto& arena=guard.s->baseEnv->ownership_arena();
+    auto env=std::make_shared<environment>(arena,guard.s->baseEnv,ev,std::make_shared<function_frame>(arena),true);
+    env->script=guard.s;
     frame=env->frame;
     env->frame->hidden_contexts=std::move(contexts);
     env->frame->global_offset=global_offset;env->frame->global_count=global_count;
@@ -1191,7 +1191,7 @@ V complex_expression::execute_body(E env) {
     return nil();
 }
 V complex_expression::execute(E env) {
-    auto scope=std::make_shared<environment>(env->ownership_arena());scope->parent=env;scope->script=env->script;scope->frame=env->frame;
+    auto scope=std::make_shared<environment>(env->ownership_arena(),env,nullptr,env->frame);scope->script=env->script;
     return with_cleanup(scope,[&]{at_location location(scope,this->location);return execute_body(scope);});
 }
 V functionInvocationExpression::execute(E env) {
@@ -1331,9 +1331,12 @@ void variable::copy_from(V v){if(!v)throw std::invalid_argument("Null variable")
 V variable::deepCopy(){auto v=std::make_shared<variable>(*this);v->name.clear();return v;}
 function_frame::function_frame(std::shared_ptr<ownership::Arena> arena)
     :temporary_storage_(std::move(arena)),temporaries(temporary_storage_.record().values) {}
-environment::environment(std::shared_ptr<ownership::Arena> arena)
-    :ownership_(std::move(arena)),owned_pointer(ownership_.record().owned),
-     script(ownership_.record().script),closing(ownership_.record().closing) {}
+environment::environment(std::shared_ptr<ownership::Arena> arena,const std::shared_ptr<environment>& parent,
+                         const std::shared_ptr<environment>& caller,std::shared_ptr<function_frame> frame,bool frame_root)
+    :ownership_(std::move(arena)),owned_pointer(ownership_.record().owned),parent(parent),caller(caller),
+     script(ownership_.record().script),frame(std::move(frame)),closing(ownership_.record().closing),frame_root(frame_root) {
+    if(this->frame)ownership_.record().temporaries=this->frame->temporary_id();
+}
 environment::~environment() {heap::discard_owned(this);}
 namespace {
 // The tree's view of a closing scope's locals for lifecycle::ScopeFinalizer.

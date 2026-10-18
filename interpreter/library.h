@@ -316,26 +316,27 @@ public:
 class environment {
     ownership::Lease<ownership::ScopeId> ownership_;
 public:
-    explicit environment(std::shared_ptr<ownership::Arena> arena={});
+    // A scope's links are fixed when it is created; its ownership record
+    // names the frame's temporaries from then on.
+    explicit environment(std::shared_ptr<ownership::Arena> arena={},const std::shared_ptr<environment>& parent={},
+                         const std::shared_ptr<environment>& caller={},std::shared_ptr<function_frame> frame={},
+                         bool frame_root=false);
     environment(const environment&)=delete;
     environment& operator=(const environment&)=delete;
     const std::shared_ptr<ownership::Arena>& ownership_arena() const noexcept{return ownership_.arena();}
-    ownership::ScopeId ownership_id() const noexcept {
-        ownership_.record().temporaries=frame?frame->temporary_id():ownership::TempListId{};
-        return ownership_.id();
-    }
+    ownership::ScopeId ownership_id() const noexcept{return ownership_.id();}
     std::vector<address>& owned_pointer;
-    std::weak_ptr<environment> parent;
+    const std::weak_ptr<environment> parent;
     // Caller is separate from the lexical parent: functions cannot see locals
     // in their callers, while explicit allocation transfer still can.
-    std::weak_ptr<environment> caller;
+    const std::weak_ptr<environment> caller;
     std::vector<std::shared_ptr<variable>> variables;
     std::weak_ptr<azertian::script>& script;
-    std::shared_ptr<function_frame> frame;
+    const std::shared_ptr<function_frame> frame;
     std::vector<std::size_t> declared_slots;
     bool& closing;
     // The function-level scope of a frame also finalizes parameters and temporaries.
-    bool frame_root=false;
+    const bool frame_root;
     void cleanup(const std::shared_ptr<environment>& self);
     ~environment();
     std::shared_ptr<variable> getVariable(std::string name);

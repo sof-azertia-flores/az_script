@@ -409,8 +409,8 @@ struct ScalarExecutor::State {
                 auto& tree=*record.frame;
                 tree.global_offset=function.global_offset;tree.global_count=function.global_count;tree.param_count=count;
                 tree.slots.resize(function.param_types.size()+static_cast<std::size_t>(function.local_count));
-                auto root=std::make_shared<environment>(host.ownership_arena());
-                root->script=owner;root->parent=owner->baseEnv;root->caller=calling;root->frame_root=true;root->frame=record.frame;
+                auto root=std::make_shared<environment>(host.ownership_arena(),owner->baseEnv,calling,record.frame,true);
+                root->script=owner;
                 record.scopes.push_back(root);
                 for(std::size_t i=0;i<count;++i) {
                     auto storage=std::make_shared<variable>();auto value=wrap(argument(i));
@@ -531,8 +531,9 @@ struct ScalarExecutor::State {
                     if(frame.object!=no_index) {
                         auto& record=objects(frame);
                         record.controls.reserve(record.controls.size()+1);
-                        auto scope=std::make_shared<environment>(host_of(options).ownership_arena());
-                        scope->parent=record.scopes.back();scope->script=record.scopes.back()->script;scope->frame=record.frame;
+                        auto scope=std::make_shared<environment>(host_of(options).ownership_arena(),
+                                                                 record.scopes.back(),nullptr,record.frame);
+                        scope->script=record.scopes.back()->script;
                         record.scopes.push_back(std::move(scope));record.controls.push_back({true,{}});
                     }
                     scopes[frame.scope_marks.begin+frame.scope_count++]=static_cast<std::uint32_t>(frame.declared_count);break;
