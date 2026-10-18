@@ -61,17 +61,20 @@ int depth(ScopeId scope) noexcept;
 template<class Id> class Lease {
     std::shared_ptr<Arena> arena_;
     Id id_;
+    // Pool records keep their address until the id is retired.
+    std::remove_reference_t<decltype(*std::declval<Arena&>().find(Id{}))>* record_;
 public:
     explicit Lease(std::shared_ptr<Arena> arena={})
         :arena_(arena?std::move(arena):Arena::create()) {
         if constexpr(std::is_same_v<Id,ScopeId>)id_=arena_->create_scope();
         else id_=arena_->create_temporaries();
+        record_=arena_->find(id_);
     }
     ~Lease(){arena_->retire(id_);}
     Lease(const Lease&)=delete;
     Lease& operator=(const Lease&)=delete;
     Id id() const noexcept{return id_;}
-    auto& record() const noexcept{return *arena_->find(id_);}
+    auto& record() const noexcept{return *record_;}
     const std::shared_ptr<Arena>& arena() const noexcept{return arena_;}
 };
 }
