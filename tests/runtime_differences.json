@@ -16,74 +16,26 @@
       "message": "Scalar VM does not support object callback signatures",
       "removed_by": "S2.4",
       "reason": "Host callbacks with object signatures need the VM-native object records and host views of S2.4."
-    },
-    {
-      "id": "vm-reflection",
-      "kind": "transitional_vm_refusal",
-      "engine": "vm",
-      "cases": [
-        "own-dst15c-heap-check-object-sees-destroying-container",
-        "own-dst15d-literal-check-object-sees-destroying-container"
-      ],
-      "message": "Scalar VM does not support reflection or plugin-loading builtins",
-      "removed_by": "S4.5",
-      "reason": "These cases destroy their container through a reflected call; the VM refuses reflection until S4.5."
     }
   ],
   "suite_refusals": [
     {
-      "suite": "containers_library",
-      "message": "AzScript error: Scalar VM does not support reflection or plugin-loading builtins",
-      "count": 11,
-      "removed_by": "S4.5"
-    },
-    {
       "suite": "generics_end_to_end",
-      "message": "AzScript error: Scalar VM does not support reflection or plugin-loading builtins",
-      "count": 29,
-      "removed_by": "S4.5"
-    },
-    {
-      "suite": "generics_end_to_end",
-      "message": "Scalar VM does not support reflection or plugin-loading builtins",
-      "count": 5,
-      "removed_by": "S4.5"
+      "message": "AzScript error: Scalar VM does not support object callback results",
+      "count": 4,
+      "removed_by": "S4.6"
     },
     {
       "suite": "buffers_end_to_end",
-      "message": "AzScript error: Scalar VM does not support reflection or plugin-loading builtins",
-      "count": 2,
-      "removed_by": "S4.5"
-    },
-    {
-      "suite": "virtual_methods_end_to_end",
-      "message": "AzScript error: Scalar VM does not support reflection or plugin-loading builtins",
+      "message": "AzScript error: Scalar VM does not support object callback results",
       "count": 1,
-      "removed_by": "S4.5"
-    },
-    {
-      "suite": "virtual_methods_end_to_end",
-      "message": "Scalar VM does not support reflection or plugin-loading builtins",
-      "count": 1,
-      "removed_by": "S4.5"
+      "removed_by": "S4.6"
     },
     {
       "suite": "limits_end_to_end",
-      "message": "AzScript error: Scalar VM does not support reflection or plugin-loading builtins",
-      "count": 16,
-      "removed_by": "S4.5"
-    },
-    {
-      "suite": "compact_exec_end_to_end",
-      "message": "AzScript error: Scalar VM does not support reflection or plugin-loading builtins",
-      "count": 1,
-      "removed_by": "S4.5"
-    },
-    {
-      "suite": "extern_library_end_to_end",
-      "message": "AzScript error: Scalar VM does not support reflection or plugin-loading builtins",
-      "count": 5,
-      "removed_by": "S4.5"
+      "message": "AzScript error: Scalar VM does not support object callback results",
+      "count": 8,
+      "removed_by": "S4.6"
     }
   ]
 }

@@ -9,18 +9,11 @@
 #include <stdexcept>
 
 namespace azertian::vm {
-namespace {
-void require_scalar_host_target(int function_id) {
-    if(function_id==ids::id(ids::builtin::load_extern_library)||function_id==ids::id(ids::builtin::reflect_invoke_function))
-        throw std::invalid_argument("Scalar VM does not support reflection or plugin-loading builtins");
-}
-}
 void require_scalar_host_targets(const ExecutableProgram& program) {
     for(const auto& target:program.targets) {
         if(target.kind!=TargetKind::script&&(target.hidden_count||target.entry_kind))
             throw std::invalid_argument("Scalar VM does not support generic or object host call contexts");
         if(target.kind==TargetKind::script)continue;
-        require_scalar_host_target(target.function_id);
         if(target.return_type==OBJECT_VALUE||
                 std::find(target.param_types.begin(),target.param_types.end(),OBJECT_VALUE)!=target.param_types.end())
             throw std::invalid_argument("Scalar VM does not support object callback signatures");
@@ -29,7 +22,6 @@ void require_scalar_host_targets(const ExecutableProgram& program) {
 std::shared_ptr<script> HostBridge::owner() {return owner_.shared_from_this();}
 Value HostBridge::invoke_external(const CallTarget& target,std::span<const Value> arguments,
         const ExecutionPosition& caller,std::size_t lexical_depth) {
-    require_scalar_host_target(target.function_id);
     // Heap builtins act on scope ownership; their callers are object frames.
     if(ids::is_heap_builtin(target.function_id))throw std::logic_error("VM heap builtin called from a scalar frame");
     if(caller.function>=program_.functions.size()||lexical_depth<2)
@@ -72,7 +64,6 @@ Value HostBridge::invoke_external(const CallTarget& target,std::span<const Value
 }
 std::shared_ptr<variable> HostBridge::invoke_external_in(const CallTarget& target,std::span<const Value> arguments,
         const ExecutionPosition& caller,const std::shared_ptr<environment>& scope) {
-    require_scalar_host_target(target.function_id);
     if(caller.function>=program_.functions.size()||!scope)throw std::logic_error("VM host boundary has an invalid caller");
     boundary_.publish_globals(owner_);
     std::vector<std::shared_ptr<variable>> host_arguments;
