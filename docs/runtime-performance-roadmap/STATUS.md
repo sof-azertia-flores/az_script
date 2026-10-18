@@ -15,7 +15,30 @@
 | R10 | 编译器 cleanup 节点已接入标量执行循环 | 见下文“R10 编译器清理接入”。CleanupActions 析构 continuation、语句临时量仍依赖 R11 对象模型 |
 | R11 | R11a 完成：非泛型对象、heap、继承、虚调用由 VM 执行；R11b 的 S2.1–S2.7 完成：本脚本析构在调度循环内作为 continuation 运行 | 见下文“R11a 对象帧”。R11b 按 [ENGINE_SPLIT.md](ENGINE_SPLIT.md) 的 S0–S2 进行（证据工具 → trace/准入提取 → 身份、语句协议、生命周期状态机、VM continuation），未完成前不能标为 R11 完成 |
 | 执行器解耦 | 已决定，进行中 | 目标是树组件可整体删除：`core/`、`tree/`、`vm/` 组件及边界检查、无树构建门禁、宿主 API 去除树类型（ABI 2）；不做多库拆分。见下文“执行器重叠审查与解耦决策” |
-| R12–R28 | 尚未完成 | R12 在 S3 核心整理之后进行；泛型、buffer、反射、插件在 VM 准备阶段明确拒绝 |
+| R12 | 完成（S4.1–S4.5） | 见下文“R12：VM 运行全部语言功能”。全部 19 个端到端套件 1,365/1,365 次调用两引擎逐字节一致，差异登记表无条目；buffer 与默认工厂仍经原生嵌套根运行脚本 |
+| R13–R28 | 尚未完成 | 默认引擎切换前还需 S3.4 组件拆分、S5.1/S5.2 |
+
+## R12：VM 运行全部语言功能（2026-10-18）
+
+用户要求先修复未通过项（S2.5–S2.7 已推送），再实现其余功能。R12 之前 VM 在准备阶段拒绝泛型、buffer、比较、反射/插件与对象宿主回调：全部套件 1,365 次调用中 214 次被拒绝，所有权语料 29 个案例登记为过渡拒绝。
+
+| 提交 | 内容 |
+| --- | --- |
+| `feat(vm): run generic functions and their context operations` | 有隐藏或绑定上下文的函数作为对象帧运行，帧保存隐藏上下文与绑定上下文寄存器；脚本调用在实参之后绑定上下文，在准入之前检查数量与有效性（失败记录被调者头部，同 `ofunction::invoke_bound`）；公开入口、析构 continuation 与虚调用传入上下文；泛型对象登记与方法表按树的节点绑定（常量表只绑定一次）。`bind_context`、`context_abi`、`context_default`、`check_type`、`return_typed`、`check_object` 的检查、顺序与消息同树节点；类默认值从帧的场所调用工厂并先登记结果再检查宽度 |
+| `feat(vm): run buffers and value comparisons` | `buffer_new` 结果进入帧临时值；`buffer_operation` 以当前作用域的宿主视图在运行时括号内调用 `blocks::buffer_operation`，元素构造与析构以原生嵌套根运行（与树相同的路径，后续可改为 continuation）；`value_compare` 在绑定上下文下比较已物化的操作数 |
+| `feat(vm): allow reflection and plugin loading from VM code` | 删除不必要的拒绝：宿主桥在调用前发布、调用后刷新全局量，反射调用的脚本函数从桥的作用域作为嵌套根运行，插件注册的函数在调用时解析 |
+| `feat(vm): pass objects through host callbacks in object frames` | 对象帧接受宿主函数的对象结果，登记进帧临时值并保留返回的变量本身；对象参数照常传递 |
+| `perf(vm): keep generic call support off the ordinary call path` | CALL 只有一个入口调用点，仅在有上下文时绑定（复用列表，被调者帧在任何再次绑定前复制）；帧清理内联寄存器清除；空上下文列表不复制 |
+
+各步测试更新：`scalar-vm-tests` 与 `vm-session-tests` 中断言旧拒绝的检查改为断言新行为；准备失败不留部分初始化状态的检查改用 workspace 上限触发，插入模块的 flush 失败改用 onload 错误触发（宿主调用携带上下文属于无效 exec，加载器先拒绝，VM 的对应拒绝不可达）。
+
+结果：全部 19 个套件 1,365/1,365 次调用两引擎逐字节一致（泛型 55/55、buffer 44/44、容器 12/12、extern 库 5/5），无拒绝、无差异；差异登记表的 `entries` 与 `suite_refusals` 均为空；所有权语料 404 个案例（52,913 次进程/引擎）树与 VM 实时对比一致。
+
+callgrind（Release，每调用指令数，参考为 S2.7 `9ee589f`）：树全部不变（0.001% 以内）；VM integer/branch 循环 −0.47%/−0.26%，调用 −0.15%～−0.25%，对象字段/复制 +0.37%/+0.24%，虚调用 +0.17%/+0.23%。
+
+验证：每步 Debug ctest 15/15（测试更新随其行为变化的提交）、全部套件对齐与所有权语料实时对比；整组完整离线普通验证与 sanitizer 验证通过（两者的后端对齐均为 1,365/1,365），生命周期模糊种子 0–199 两引擎一致；11 个树变异体全部被捕获。
+
+仍未覆盖（语料与套件都不触及）：宿主目标携带泛型上下文或内部入口种类（加载器已拒绝绝大多数形式）、宿主写入全局的对象值（语言不允许类值与 buffer 全局）、手写 exec 中无签名宿主函数向标量帧返回对象。buffer 元素与默认工厂的脚本调用仍是原生嵌套根，计入 D1 原生栈差异的适用范围。
 
 ## S2.5–S2.7：VM 在调度循环内运行析构（2026-10-18）
 

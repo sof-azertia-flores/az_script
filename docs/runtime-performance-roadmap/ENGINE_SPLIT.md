@@ -56,7 +56,7 @@ VM 重建的是“怎样执行代码”。exec 格式、链接器、对象/堆�
 - **语句协议**：上表中的核心函数由两个引擎按相同顺序调用，块 ID、复制/移动判定和步数扣费只有一个来源。
 - **生命周期状态机**：每种状态机逐阶段转写现有代码（`finalize_block`、`destroy_heap_object`、`finalize_storage`、`finalize_temporaries`、`end_scope`、`copy_rollback`、`store_replace`、`drop`、`release_owned`、`delete_object`，R12 再加 buffer 操作），用有界显式工作栈，不在 C++ 栈上递归对象图。接口为 `advance()`→完成或请求调用、`call_returned`、在 catch 内调用的 `call_failed`（保留首错及 trace）、`finish` 和不执行脚本的 `abandon`。块的强引用持有区间与现有递归代码相同。
 - **树原生驱动**：每次请求的调用走与今天 `invoke_bound_function` 完全相同的核心分派（两层 entry、`getFunction`、`invoke_bound` 前缀、带原生栈检查的准入、实参校验），递归和每入口 trace 行为不变。
-- **VM 循环内驱动**：会执行脚本的指令在帧内预留的槽位启动状态机；同脚本请求成为循环内帧，执行与树相同的入口检查和 trace 状态（`entries`/`sequence`/`published_sequence`），不检查原生栈；外脚本请求仍作为原生嵌套根。三个 continuation 提交完成后，调试计数器须证明语料中没有同脚本嵌套根，再删除 `ObjectHost` 发布括号和未使用的 `CleanupActions` 骨架。
+- **VM 循环内驱动**：会执行脚本的指令在帧内预留的槽位启动状态机；同脚本请求成为循环内帧，执行与树相同的入口检查和 trace 状态（`entries`/`sequence`/`published_sequence`），不检查原生栈；外脚本请求仍作为原生嵌套根。三个 continuation 提交完成后，调试计数器须证明语料中没有同脚本嵌套根，再删除未使用的 `CleanupActions` 骨架。（S2.7 实施：计数器在语料与模糊种子中为零，骨架已删；`ObjectHost` 发布括号保留在仍可能原生运行脚本的路径上——另一脚本的析构、无法延迟回滚的复制、R12 的 buffer 元素构造与析构及泛型默认工厂，这些原生嵌套根须先发布 VM 全局量。）
 - **宿主发起的清理**：`destroy` 持有 `call_guard(baseEnv)`，其析构在 `active_calls>=2` 运行且不重置步数；JNI 字面量结果 finalize 与宿主 `blocks::finalize` 无锚点，深度 0 准入的每个析构都会重置预算。两种情况都用夹具固定。
 - **普通同脚本 VM CALL 不增加检查**，只保留深度准入；trace 清理位只在冷路径置位，并入 `function_end` 已测试的帧标志。
 
