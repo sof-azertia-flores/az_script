@@ -1,5 +1,6 @@
 #include "library.h"
 #include "blocks.h"
+#include "core/statement.h"
 #include "heepalloc.h"
 #include "internelFunctions.h"
 #include "p256.h"
@@ -344,6 +345,115 @@ void hint_name_tests() {
     }
     check(cases>=250,"every hint-name case is checked");
 }
+void ownership_identity_tests() {
+    std::lock_guard<std::recursive_mutex> lock(runtime_mutex());
+    auto budget=std::make_shared<WorkspaceBudget>(1024*1024);
+    auto arena=ownership::Arena::create(budget);
+    const auto first=arena->create_scope();
+    auto* stable=ownership::find(first);
+    std::vector<ownership::ScopeId> live;
+    for(int i=0;i<200;++i)live.push_back(arena->create_scope());
+    check(ownership::find(first)==stable,"ownership records keep their address across page growth");
+    arena->retire(first);const auto reused=arena->create_scope();
+    check(first.index==reused.index&&first.generation!=reused.generation&&!ownership::find(first),
+          "a retired ownership ID cannot resolve a reused scope slot");
+    auto other=ownership::Arena::create();const auto foreign=other->create_scope();
+    check(!arena->find(foreign)&&!other->find(reused),"ownership IDs reject foreign arenas");
+    other.reset();check(!ownership::find(foreign),"destroying an arena invalidates its domain");
+    for(auto id:live)arena->retire(id);
+    arena->retire(reused);arena.reset();
+    check(budget->used_bytes()==0,"ownership arena releases charged pages and directory");
+    // Fail each actual pool backing allocation (directory, page), both cold
+    // and while growing past the first page. A failed growth must preserve
+    // existing IDs and roll back its budget reservation before a retry.
+    struct failing_resource final:std::pmr::memory_resource {
+        int remaining=-1;
+        void* do_allocate(std::size_t bytes,std::size_t alignment) override {
+            if(remaining==0)throw std::bad_alloc();
+            if(remaining>0)--remaining;
+            return std::pmr::new_delete_resource()->allocate(bytes,alignment);
+        }
+        void do_deallocate(void* p,std::size_t bytes,std::size_t alignment) override {
+            std::pmr::new_delete_resource()->deallocate(p,bytes,alignment);
+        }
+        bool do_is_equal(const std::pmr::memory_resource& other) const noexcept override{return this==&other;}
+    } resource;
+    for(bool temporary:{false,true})for(int initial:{0,64})for(int failure:{0,1}) {
+        auto* previous=std::pmr::set_default_resource(&resource);
+        std::shared_ptr<ownership::Arena> fault_arena;
+        try {fault_arena=ownership::Arena::create(budget);}
+        catch(...) {std::pmr::set_default_resource(previous);throw;}
+        std::pmr::set_default_resource(previous);
+        const auto exercise=[&](auto create) {
+            using Id=decltype(create());
+            std::vector<Id> ids;
+            for(int i=0;i<initial;++i)ids.push_back(create());
+            const auto before=budget->used_bytes();
+            resource.remaining=failure;bool failed=false;
+            try {create();}catch(const std::bad_alloc&){failed=true;}
+            resource.remaining=-1;
+            check(failed&&budget->used_bytes()==before,"failed ownership backing growth rolls back its charge");
+            for(auto id:ids)check(ownership::find(id)!=nullptr,"failed ownership growth preserves live records");
+            const auto retry=create();check(ownership::find(retry)!=nullptr,"ownership growth can retry after allocation failure");
+            fault_arena->retire(retry);for(auto id:ids)fault_arena->retire(id);
+        };
+        if(temporary)exercise([&]{return fault_arena->create_temporaries();});
+        else exercise([&]{return fault_arena->create_scope();});
+        fault_arena.reset();check(budget->used_bytes()==0,"fault-injected ownership arena releases all backing");
+    }
+    auto tiny=std::make_shared<WorkspaceBudget>(1);auto limited=ownership::Arena::create(tiny);
+    rejects_containing([&]{environment scope(limited);},"workspace limit","scope allocation observes its VM workspace budget");
+    check(tiny->used_bytes()==0,"failed scope construction does not publish or charge a record");
+    std::weak_ptr<WorkspaceBudget> lifetime=budget;
+    arena=ownership::Arena::create(budget);
+    auto scope=std::make_shared<environment>(arena);const auto scope_id=scope->ownership_id();
+    budget.reset();arena.reset();
+    check(!lifetime.expired()&&ownership::find(scope_id),"a retained host scope keeps its arena and budget alive");
+    scope.reset();check(lifetime.expired()&&!ownership::find(scope_id),"last scope releases its arena and budget");
+    arena=ownership::Arena::create();
+    auto frame=std::make_shared<function_frame>(arena);const auto temporary_id=frame->temporary_id();
+    auto temporary=blocks::create(0,{});blocks::adopt_temporary(temporary,frame.get());
+    auto owner=std::make_shared<variable>();auto value=std::make_shared<variable>(temporary);
+    blocks::store(owner,value,{});
+    check(!frame->temporaries[0]&&!temporary->temporary_list,"moving a temporary leaves its statement-mark hole");
+    auto later=blocks::create(0,{});blocks::adopt_temporary(later,frame.get());
+    check(later->temporary_index==1,"new temporaries do not reuse an earlier statement-mark hole");
+    frame.reset();frame=std::make_shared<function_frame>(arena);
+    check(!ownership::find(temporary_id)&&frame->temporary_id().generation!=temporary_id.generation,
+          "temporary records reject an expired frame identity");
+    check(later->state==slot_block::status::dead,"frame disposal abandons its remaining temporaries");
+    blocks::drop(owner,{});
+    auto unowned=blocks::create(0,{});blocks::release_owned(blocks::address_of(unowned),{});
+    check(unowned->state==slot_block::status::dead,"null-scope cleanup retains the unowned literal behavior");
+    auto raw=heap::alloc(1);heap::release_owned(raw,{});
+    rejects([&]{heap::getAt(raw);},"null-scope cleanup retains the unowned heap behavior");
+}
+
+void statement_protocol_tests() {
+    std::lock_guard<std::recursive_mutex> lock(runtime_mutex());
+    auto arena=ownership::Arena::create();auto frame=std::make_shared<function_frame>(arena);
+    auto outer=statement::begin(frame->temporary_id(),frame->temporaries.size());
+    auto a=blocks::create(0,{});blocks::adopt_temporary(a,frame.get());
+    auto inner=statement::begin(frame->temporary_id(),frame->temporaries.size());
+    auto b=blocks::create(0,{});blocks::adopt_temporary(b,frame.get());
+    auto owner=std::make_shared<variable>();blocks::store(owner,std::make_shared<variable>(b),{});
+    auto c=blocks::create(0,{});blocks::adopt_temporary(c,frame.get());
+    check(statement::pending(inner),"inner statement records moved holes and live temporaries");
+    statement::finish(inner,{});
+    check(!statement::pending(inner)&&a->state==slot_block::status::live&&b->state==slot_block::status::live&&c->state==slot_block::status::dead,
+          "inner statement preserves the outer value and the moved value");
+    statement::finish(outer,{});
+    check(a->state==slot_block::status::dead&&!statement::pending(outer),"outer statement ends the remaining temporary");
+    blocks::drop(owner,{});
+    auto retired=statement::begin(frame->temporary_id(),frame->temporaries.size());frame.reset();frame=std::make_shared<function_frame>(arena);
+    auto later=blocks::create(0,{});blocks::adopt_temporary(later,frame.get());
+    statement::finish(retired,{});
+    check(!statement::pending(retired)&&later->state==slot_block::status::live&&frame->temporaries.size()==1,
+          "an expired statement cannot finalize values in a reused frame slot");
+    statement::finish({frame->temporary_id(),0},{});
+    check(later->state==slot_block::status::dead,"the current frame's own statement can finalize its value");
+}
+
 void buffer_tests() {
     auto ci=cfixed(INT_VALUE,0);auto cb=buffer_context(ci);auto cc=class_context(2,500);
     auto slot_at=[](R base,int offset){return rcall(0x0abd0006,{rx(9,{base,ri(offset)})});};
@@ -480,6 +590,8 @@ void buffer_tests() {
         constexpr int callback_id=0x6cdf0002;
         auto callback=std::make_shared<test_executor>(0x6cdf);
         V destination,source_value,enclosing_storage;std::shared_ptr<slot_block> old;
+        std::shared_ptr<environment> ending_scope,reused_scope;
+        ownership::ScopeId ending_id;
         int mode=0,callbacks=0;bool inspect=false;address heap_parent;
         callback->functions[callback_id]=std::make_shared<test_function>(VOID_VALUE,[&](const std::vector<V>&) {
             ++callbacks;
@@ -491,14 +603,19 @@ void buffer_tests() {
                                    "buffer assignment cannot reenter an old value being destroyed");
                 rejects_containing([&]{blocks::copy(old);},"unavailable",
                                    "buffer assignment cleanup cannot copy a partly destroyed old value");
-                if(mode>=2) {
+                if(mode>=7) {
+                    ending_scope.reset();
+                    reused_scope=std::make_shared<environment>(env->ownership_arena());
+                    check(!ownership::find(ending_id)&&reused_scope->ownership_id()!=ending_id,
+                          "a destructor callback can retire and reuse its buffer owner's scope slot");
+                } else if(mode>=2) {
                     if(mode<4)blocks::drop(enclosing_storage,env);
                     else if(mode==5)heap::free(heap_parent);
                     else heap::delete_object(heap_parent,env);
                     check(old->state==slot_block::status::destroying&&old->slots.size()==2,
                           "ending an enclosing owner leaves the active old-value cleanup intact");
                 }
-                if(mode==1||mode==3||mode==6)throw std::runtime_error("replacement destructor error");
+                if(mode==1||mode==3||mode==6||mode==8)throw std::runtime_error("replacement destructor error");
             }
             return std::make_shared<variable>(nullptr);
         });
@@ -507,11 +624,15 @@ void buffer_tests() {
             gfn(708,VOID_VALUE,rblock({assign(slot_at(rvar(0),0),rc(n(17))),
                 assign(slot_at(rvar(0),1),rc(s("replace"))),bind(707)}),0,0,{ADDRESS_VALUE},1)}));
         auto replacement_type=std::make_shared<type_context>(*type);replacement_type->placement_id=708;
-        for(mode=0;mode<7;++mode) {
+        for(mode=0;mode<9;++mode) {
             old=blocks::create_buffer(replacement_type,program);operation(2,old,{number(2)});operation(6,old,{number(2)});
             auto source=blocks::create_buffer(replacement_type,program);operation(2,source,{number(1)});operation(6,source,{number(1)});
             source_value=std::make_shared<variable>(source);
-            if(mode>=4) {
+            if(mode>=7) {
+                ending_scope=std::make_shared<environment>(env->ownership_arena());
+                ending_id=ending_scope->ownership_id();destination=std::make_shared<variable>(old);
+                old->owner=destination.get();blocks::bind_local(destination,ending_scope);
+            } else if(mode>=4) {
                 heap_parent=heap::object_alloc(1);heap::set_owner(heap_parent,env.get());env->owned_pointer.push_back(heap_parent);
                 heap::register_object(heap_parent,std::nullopt,true,env);destination=heap::getAt(heap_parent);destination->setValue(old);
             } else if(mode>=2) {
@@ -522,15 +643,20 @@ void buffer_tests() {
             const int before_callbacks=callbacks;inspect=true;
             if(mode==0)blocks::store(destination,source_value,env);
             else rejects_containing([&]{blocks::store(destination,source_value,env);},
-                                    mode==2||mode==4||mode==5?"owner ended":"replacement destructor error",
+                                    mode==2||mode==4||mode==5||mode==7?"owner ended":"replacement destructor error",
                                     "buffer replacement preserves cleanup failures and detects a destroyed owner");
             if(mode<2) {
                 auto installed=blocks::of(destination);
                 check(installed&&installed!=old&&installed->buffer->length==1&&old->state==slot_block::status::dead,
                       "buffer replacement installs its candidate after all old destructors, even when one throws");
-                check(callbacks==before_callbacks+2&&installed->owner_env==env.get(),
+                check(callbacks==before_callbacks+2&&installed->owner_scope==env->ownership_id(),
                       "buffer replacement retains the scope cleanup registration and finishes every old destructor");
                 blocks::drop(destination,env);
+            } else if(mode>=7) {
+                check(blocks::of(destination)==old&&old->state==slot_block::status::dead&&
+                      reused_scope->owned_pointer.empty()&&callbacks==before_callbacks+3,
+                      "retired scope receives no replacement, candidate cleanup finishes, and reused scope is untouched");
+                destination->setValue(nullptr);reused_scope.reset();
             } else {
                 check(destination->type_tag()==VOID_VALUE&&(mode>=4||enclosing_storage->type_tag()==VOID_VALUE)&&callbacks==before_callbacks+3,
                       "a destroyed assignment owner receives no replacement and candidate elements are finalized");
@@ -1192,7 +1318,7 @@ void object_storage_tests() {
         const address at{object.value+static_cast<unsigned>(offset)};
         check(heap::is_object_storage(at),"the whole object range is tagged before registration");reject_raw(at);
     }
-    check(heap::owner_of(object)==env.get()&&integer(heap::getAt(object))==11,"rejected construction-time raw access preserves owner and data");
+    check(heap::owner_of(object)==env->ownership_id()&&integer(heap::getAt(object))==11,"rejected construction-time raw access preserves owner and data");
     check(integer(program->invoke(800,{pointer_value(object)}))==22,"decoder member access works during construction");
     program->invoke(801,{pointer_value(object),number(42)});
     check(integer(program->invoke(800,{pointer_value(object)}))==42,"decoder member access is a writable mov target");
@@ -1200,10 +1326,10 @@ void object_storage_tests() {
     rejects([&]{heap::object_address(object,3);},"oa bounds checks tagged ranges");
     rejects([&]{heap::object_address(address{object.value+1},0);},"oa requires an object start");
     rejects([&]{heap::register_object(object,800,true,env);},"invalid destructor prevents registration");
-    check(heap::owner_of(object)==env.get()&&std::find(env->owned_pointer.begin(),env->owned_pointer.end(),object)!=env->owned_pointer.end(),
+    check(heap::owner_of(object)==env->ownership_id()&&std::find(env->owned_pointer.begin(),env->owned_pointer.end(),object)!=env->owned_pointer.end(),
           "failed manual registration preserves construction ownership");
     heap::register_object(object,std::nullopt,true,env);
-    check(heap::owner_of(object)==nullptr&&std::find(env->owned_pointer.begin(),env->owned_pointer.end(),object)==env->owned_pointer.end(),
+    check(!heap::owner_of(object)&&std::find(env->owned_pointer.begin(),env->owned_pointer.end(),object)==env->owned_pointer.end(),
           "successful manual registration detaches automatic ownership itself");
     reject_raw(object);reject_raw(address{object.value+2});
     std::vector<V> saved_slots;for(int i=0;i<heap::lenHeap();++i)saved_slots.push_back(heap::getSlot(i));
@@ -2038,6 +2164,8 @@ void native_stack_tests() {
     deep->destroy();
 }
 int main(){try{
+    ownership_identity_tests();
+    statement_protocol_tests();
     native_stack_tests();
     virtual_tests();
     checked_object_tests();
@@ -2727,7 +2855,7 @@ int main(){try{
         rejects_containing([&]{objects->invoke(15,{std::make_shared<variable>(automatic)});},"automatic object","delete rejects automatic objects");
         check(heap::lenAlloc()==1&&integer(log)==0,"rejected automatic delete preserves object");
         address manual=pointer(objects->invoke(14));
-        check(heap::owner_of(manual)==nullptr&&heap::lenAlloc()==2,"new remains manual after object returns");
+        check(!heap::owner_of(manual)&&heap::lenAlloc()==2,"new remains manual after object returns");
         objects->invoke(15,{std::make_shared<variable>(manual)});
         check(integer(log)==4&&heap::lenAlloc()==1,"delete runs manual destructor and releases slots");
         objects->invoke(15,{std::make_shared<variable>(address{})});
@@ -3014,7 +3142,7 @@ int main(){try{
         check(owner_script->invoke(14)->get<bool>(),"callee may free an allocation owned by its caller chain");
         check(owner_script->invoke(16)->get<bool>(),"make_free detaches ownership so any scope may free");
         check(heap::lenAlloc()==1,"only the global allocation remains");
-        auto host_block=heap::alloc(1);check(heap::owner_of(host_block)==nullptr,"host allocations are untracked");
+        auto host_block=heap::alloc(1);check(!heap::owner_of(host_block),"host allocations are untracked");
         rejects([&]{heap::set_owner(address{host_block.value+7},owner_script->baseEnv.get());},"owner requires an allocation start");
         heap::free(host_block);
         owner_script->destroy();check(heap::lenAlloc()==0,"base scope releases its allocation on destroy");

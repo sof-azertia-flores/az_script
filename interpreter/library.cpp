@@ -1,5 +1,6 @@
 #include "library.h"
 #include "blocks.h"
+#include "core/statement.h"
 #include "heepalloc.h"
 #include "internelFunctions.h"
 #include "vm/session.h"
@@ -307,10 +308,10 @@ public:
 // ends, including on errors; the first error wins.
 template<class Body> V statement_scope(const E& env,Body body) {
     auto frame=env?env->frame:nullptr;
-    const auto mark=frame?frame->temporaries.size():0;
+    const auto mark=statement::begin(frame?frame->temporary_id():ownership::TempListId{},frame?frame->temporaries.size():0);
     V result;pending_error failure;
     try {result=body();}catch(...){failure.capture_current();}
-    if(frame)try{blocks::finalize_temporaries(*frame,mark,env);}catch(...){failure.capture_current();}
+    if(frame&&frame->temporaries.size()>mark.count)try{statement::finish(mark,env);}catch(...){failure.capture_current();}
     if(failure)failure.rethrow();
     return result;
 }
@@ -325,7 +326,7 @@ template<class Body> V with_cleanup(const E& scope,Body body) {
 V scoped_execute(const std::shared_ptr<expression>& body,E env) {
     at_location location(env,body->location);
     if(std::dynamic_pointer_cast<complex_expression>(body)) return run(body,env);
-    auto scope=std::make_shared<environment>();
+    auto scope=std::make_shared<environment>(env->ownership_arena());
     scope->parent=env;scope->script=env->script;scope->frame=env->frame;
     return with_cleanup(scope,[&]{return statement_scope(scope,[&]{return run(body,scope);});});
 }
@@ -1152,9 +1153,9 @@ V ofunction::invoke_bound(E ev,std::vector<V> args,type_contexts contexts) {
         vm_trace=true;
         return bound->vm_session_->invoke(vm_function_index_,args,&position,ev);
     }
-    auto env=std::make_shared<environment>();
+    auto env=std::make_shared<environment>(guard.s->baseEnv->ownership_arena());
     env->script=guard.s;env->parent=guard.s->baseEnv;env->caller=ev;env->frame_root=true;
-    env->frame=std::make_shared<function_frame>();
+    env->frame=std::make_shared<function_frame>(env->ownership_arena());
     frame=env->frame;
     env->frame->hidden_contexts=std::move(contexts);
     env->frame->global_offset=global_offset;env->frame->global_count=global_count;
@@ -1165,7 +1166,7 @@ V ofunction::invoke_bound(E ev,std::vector<V> args,type_contexts contexts) {
         // Object arguments move from caller temporaries or are copied; parameters
         // are destroyed after every local of the call.
         auto storage=std::make_shared<variable>(nullptr);blocks::store(storage,args[i],ev);
-        env->frame->slots[i]=storage;blocks::bind_local(storage,env);
+        statement::bind_parameter(storage,i,env);
     }
     return with_cleanup(env,[&] {
         {
@@ -1189,7 +1190,7 @@ V complex_expression::execute_body(E env) {
     return nil();
 }
 V complex_expression::execute(E env) {
-    auto scope=std::make_shared<environment>();scope->parent=env;scope->script=env->script;scope->frame=env->frame;
+    auto scope=std::make_shared<environment>(env->ownership_arena());scope->parent=env;scope->script=env->script;scope->frame=env->frame;
     return with_cleanup(scope,[&]{at_location location(scope,this->location);return execute_body(scope);});
 }
 V functionInvocationExpression::execute(E env) {
@@ -1211,8 +1212,7 @@ V varDefineExpression::execute(E env) {
     if(slot)throw std::runtime_error("Duplicate variable slot: "+std::to_string(varindex));
     auto storage=nil();
     if(initializer)blocks::store(storage,run(initializer,env),env);
-    env->declared_slots.push_back(static_cast<std::size_t>(varindex));
-    env->frame->slots[static_cast<std::size_t>(varindex)]=storage;blocks::bind_local(storage,env);return nil();
+    statement::declare_local(storage,static_cast<std::size_t>(varindex),env);return nil();
 }
 V varSetExpression::execute(E env) {
     tick(env);auto v=env->getVariable(varindex);
@@ -1328,6 +1328,11 @@ variable& variable::operator=(const variable& v){
 }
 void variable::copy_from(V v){if(!v)throw std::invalid_argument("Null variable");if(v.get()!=this)copy_value(*v);}
 V variable::deepCopy(){auto v=std::make_shared<variable>(*this);v->name.clear();return v;}
+function_frame::function_frame(std::shared_ptr<ownership::Arena> arena)
+    :temporary_storage_(std::move(arena)),temporaries(temporary_storage_.record().values) {}
+environment::environment(std::shared_ptr<ownership::Arena> arena)
+    :ownership_(std::move(arena)),owned_pointer(ownership_.record().owned),
+     script(ownership_.record().script),closing(ownership_.record().closing) {}
 environment::~environment() {heap::discard_owned(this);}
 void environment::cleanup(const std::shared_ptr<environment>& self) {
     if(closing)return;

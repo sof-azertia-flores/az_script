@@ -9,6 +9,7 @@ class HostBoundary {
 public:
     virtual ~HostBoundary()=default;
     virtual WorkspaceBudget& workspace() noexcept=0;
+    virtual std::shared_ptr<ownership::Arena> ownership_arena()=0;
     virtual void publish_globals(script& owner) noexcept=0;
     virtual void refresh_globals(const script& owner)=0;
     // Around runtime helpers that may run script code, publication is deferred
@@ -37,6 +38,7 @@ public:
     bool reported_error() const noexcept{return reported_;}
 private:
     std::shared_ptr<script> owner() override;
+    std::shared_ptr<ownership::Arena> ownership_arena() override{return boundary_.ownership_arena();}
     std::uint64_t enter_runtime() noexcept override{return boundary_.defer_publication();}
     void leave_runtime(std::uint64_t mark) override{boundary_.end_deferred_publication(owner_,mark);}
 };

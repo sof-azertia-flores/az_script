@@ -1,6 +1,6 @@
 # 运行时性能重构实施记录
 
-基线：`c2b572d6b36ca521c5faf2658adc296e403f47f1`。原实施分支：`codex/runtime-performance`；暂停检查点分支：`codex/runtime-performance-handoff`（`ad26db9`）；恢复后的继续分支：`claude/runtime-performance-handoff-5mdt6h`。本文件记录实际完成和待验证内容；完整目标见 [PLAN.md](PLAN.md)。
+基线：`c2b572d6b36ca521c5faf2658adc296e403f47f1`。原实施分支：`codex/runtime-performance`；暂停检查点分支：`codex/runtime-performance-handoff`（`ad26db9`）；Claude 接续分支：`claude/runtime-performance-handoff-5mdt6h`；本次从其 `816a67a` 恢复到 `codex/runtime-performance-continue`。本文件记录实际完成和待验证内容；完整目标见 [PLAN.md](PLAN.md)。
 
 | 阶段 | 当前状态 | 证据或下一步 |
 | --- | --- | --- |
@@ -10,12 +10,54 @@
 | R03 | 基础设施验证通过 | 23 案例 / 145 对独立进程观察，5 组完整预算扫描；故意错误候选被拒绝并缩小。54 opcode 已登记，28 静态出现，不代表完整 VM 覆盖 |
 | R04 | 普通验收通过 | 类型化访问与消费者迁移、运行时 ABI 1、插件预注册检查完成；ABI 29 项检查通过，发行搬迁待运行 |
 | R05 | 普通完整验收通过 | Value 内联标量，145 对差分与全量普通验证通过；完整 sanitizer 和发行验证仍待闭合 |
-| R06–R08 | 标量 VM 已接入构建并通过定向及独立进程差分 | VM 源码与 9 个定向测试、2 个 host 已加入 CMake；见下文“恢复后的集成”。R06 的生产 `blocks/heepalloc` 身份迁移仍未开始 |
+| R06–R08 | 标量 VM 已接入构建并通过定向及独立进程差分 | VM 源码与 9 个定向测试、2 个 host 已加入 CMake；见下文“恢复后的集成”。生产 `blocks/heepalloc` 所有权身份迁移见下方 S2.1 记录 |
 | R09 | 标量 CALL/宿主桥/Session 通过；默认 workspace 定为 128 MiB | 37 案例 / 825 对独立进程观察（冻结 `019c440` 参考及同构建树后端）全部字段一致；workspace 边界见 [STORAGE_DESIGN.md](STORAGE_DESIGN.md) 第 9 节。宿主可配置项待 VM 成为宿主可选后端时加入 |
 | R10 | 编译器 cleanup 节点已接入标量执行循环 | 见下文“R10 编译器清理接入”。CleanupActions 析构 continuation、语句临时量仍依赖 R11 对象模型 |
 | R11 | R11a 完成：非泛型对象、heap、继承、虚调用由 VM 执行；析构仍经新调用根重入 | 见下文“R11a 对象帧”。R11b 按 [ENGINE_SPLIT.md](ENGINE_SPLIT.md) 的 S0–S2 进行（证据工具 → trace/准入提取 → 身份、语句协议、生命周期状态机、VM continuation），未完成前不能标为 R11 完成 |
 | 执行器解耦 | 已决定，进行中 | 目标是树组件可整体删除：`core/`、`tree/`、`vm/` 组件及边界检查、无树构建门禁、宿主 API 去除树类型（ABI 2）；不做多库拆分。见下文“执行器重叠审查与解耦决策” |
 | R12–R28 | 尚未完成 | R12 在 S3 核心整理之后进行；泛型、buffer、反射、插件在 VM 准备阶段明确拒绝 |
+
+## S2.1：作用域与临时值的所有权身份（2026-10-18）
+
+从 GitHub 的实际分支 `claude/runtime-performance-handoff-5mdt6h` 拉取到 `816a67a`。新环境重建 Temurin 21.0.12.1+1、CMake 3.31.10，使用 GCC 14.2；后续证据均为本机重新运行，未沿用 Claude 的构建产物。
+
+- 新增 `core/ownership`：分段、稳定地址的 `ScopeRecord` / `TemporaryRecord`，以域、槽下标、代数组成的 ID 解析。环境与函数帧持有 RAII lease，退休后旧 ID 无法解析；复用槽位不能重新授权旧所有者。
+- `slot_block::owner_env`、`temp_frame` 与 `heap::owners` 的环境指针已分别替换成 `ScopeId`、`TempListId + index`、`address → ScopeId`。临时值移出按条目下标留下空洞，保留语句水位，免去逆向线性查找。JNI 的自动释放权限和快照恢复所有者同步迁移。
+- 树引擎使用每脚本 arena；VM 对象帧和宿主边界适配作用域使用每 Session arena，记录页及目录计入现有 workspace。预算由共享所有者持有，宿主保留环境超过 Session 生命周期时不会留下预算悬空引用。
+- `defect_fix / buffer-owner-retired`：缓冲区替换的析构回调可以释放原作用域并立即复用其槽位。发布替换值前重新解析捕获的 ID；原作用域已退休时清理候选并报告 `Buffer owner ended during assignment`；已有析构错误仍优先。回归覆盖正常退休与先前错误两条路径。
+
+本步仍使用 `environment` / `function_frame` 适配器和 `variable*` 的直接存储所有者；所有权列表的 `std::vector` backing 尚未纳入 VM workspace，须随 S2.4 的原生对象记录迁移。记录页计费不代表对象执行的全部原生内存已受限。S2.2 的首批共享协议见下一节；S2.3 可恢复生命周期状态机和 S2.4–S2.7 VM continuation 尚未完成；同脚本析构仍会建立嵌套根，不能标记 R11b 完成。
+
+已验证：
+
+- 运行时 6,277 项检查通过，包括两类记录的冷分配与跨页增长各两个实际 `bad_alloc` 注入点（共 8 个），预算回滚、旧 ID 保持有效、失败后重试、代数/域隔离、临时值水位及宿主延长预算生命周期。
+- F0 使用 `ab83ab1` 的 `git archive`（运行时等于 `97968ba`），57 案例 / 2,310 份参考观察。候选树、候选 VM 各 2,310 次独立进程回放全部字段一致，路径 `build/resume/f0-observations/`、`f0-vs-tree/`、`f0-vs-vm/`。
+- F0 的原始 `blocks.cpp` 加 ASan 的定向复现报告在 `store` 中访问已释放的作用域（`build/resume/f0-owner-retired.log`）；候选正常完成。另将候选跨回调作用域有效性检查移除，动态库负对照退出 -11，被新增回归检出。
+- CMake 安装后，独立静态/动态 C++ 消费者均编译、运行通过，包含新头文件的传递安装检查；产物 `build/resume/install/`、`consumer-build/`。未执行完整发行导出。
+
+最终整体验收与性能结果见下一节；本步单独的普通、ASan/UBSan 全量也已运行通过（`build/resume/ownership-full.log`、`ownership-sanitize.log`）。
+
+## S2.2 首批共享语句协议（2026-10-18）
+
+新增 `core/statement`，两个引擎共享语句临时值水位、参数绑定与局部声明的提交顺序。水位携带 `TempListId`，临时值清理在每次析构回调后重新解析 ID，过期水位不能清理后来复用的帧。树的正常语句退出与 VM 的正常/异常展开使用同一清理入口；首错与 trace 的逐层重新发布顺序保留。变量声明校验仍在求值前，提交阶段不重新校验，以保留手写 exec 的初始化器重声明行为。
+
+没有对象临时值的语句仍直接比较帧内水位，避免在标量循环里增加注册表查找。已登记对象的虚调用继续直接使用对象记录中的脚本归属，仅在对象登记缺失时查询作用域所有者；保留 F0 的惰性查询路径，避免给虚调用增加无用查找。已有共享的 `blocks::store/materialize/export_result/adopt_result/move_out` 继续承担对象复制、移动和返回规则，尚未改成可暂停操作。`statement` 的登记与清理驱动仍使用环境适配器；这一步不代表核心组件已经摆脱树类型，后续须随 S2.3/S2.4 迁移。
+
+- 新增内外层语句水位、移动后空洞、过期帧槽复用检查，另覆盖空作用域释放未绑定块和堆分配的旧行为；把内层清理水位故意改为零的负对照退出 1，明确报出外层值被提前清理（`build/resume/statement-negative.log`）。
+- 最终候选树、VM 各 57 案例 / 2,310 次 F0 回放通过；证据 `build/resume/validated-f0-vs-tree/`、`validated-f0-vs-vm/`。
+- 最终普通全量通过：330 项 Java 测试、15/15 CTest、6,284 项运行时检查，真实 JVM 3,433 项 JNI 断言、四线程 800 次调用、1,000 模块链接，以及所有跨语言/对象/泛型/缓冲区/继承/虚调用/边界/ABI/exec 套件和 57 案例双引擎差分。日志 `build/resume/final-normal.log`；普通验证在 `build/resume/s22-source/` 副本运行，89 个原生源码/头文件/CMake 文件的 SHA-256 与当前分支一致（`s22-source-manifest.json`），Java 源码未修改。
+- 最终完整 ASan/UBSan 全量通过：14/14 CTest、6,284 项运行时检查、全部跨语言套件，以及 57 案例 / 2,310 参考与 2,310 候选进程的双引擎差分，无 AddressSanitizer 或 UndefinedBehaviorSanitizer 报告。命令 `env -u JAVA_TOOL_OPTIONS -u JDK_JAVA_OPTIONS -u _JAVA_OPTIONS python3 tools/build_and_test.py --offline --sanitize`，日志 `build/resume/s22-sanitize.log`；与普通验证顺序执行，sanitizer 不含 JNI。
+
+Release 性能诊断在普通验证结束后、最终 sanitizer 开始前单独运行，期间没有并行编译或测试：相同 GCC 14.2 Release 配置，10 个案例 × 中/大两种规模，每种引擎 7 轮 × 5 批，交替启动参考/候选独立进程；参考端校准约 50 ms 批次。每引擎 280 次计时进程均满足独立 oracle 和校验和。下表是案例配对比值的组内几何平均，数字为 **F0 耗时 / 候选耗时**，大于 1 表示候选更快：
+
+| 同引擎 F0 对照 | 标量循环 | 函数调用 | 对象 | 虚调用 |
+| --- | ---: | ---: | ---: | ---: |
+| VM | 1.111× | 1.071× | 0.956× | 0.974× |
+| 树 | 1.188× | 1.080× | 1.007× | 1.078× |
+
+这是 F0 至当前候选的累计变化，包含 Claude 此前的 trace/准入、值操作和核心整理，不能全部归因于本轮。VM 对象组耗时仍约增加 4.6%，虚调用组约增加 2.7%，对象性能目标尚未达成。两种引擎所有测量点的峰值 RSS 比率均小于 1.008。完整原始记录位于 `build/resume/final-perf-{vm,tree}/`，汇总 `final-perf-summary.json`。
+
+本次使用 50 ms 短批次和中/大规模子集，工具的 `score_eligible=false`，没有计算采用分数；未完成既定 250 ms 采用采样及 callgrind 逐指令门禁（本环境未安装 callgrind）。因此这里只关闭功能验证，不能宣布 R11b 性能验收完成。下一步仍是生命周期状态机、VM 原生对象帧和循环内析构调度。
 
 ## 执行器重叠审查与解耦决策（2026-10-17）
 

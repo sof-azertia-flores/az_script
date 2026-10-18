@@ -6,7 +6,7 @@
 #include <memory>
 #include <span>
 
-namespace azertian {class environment; class script; class variable;}
+namespace azertian {class environment; class script; class variable; namespace ownership {class Arena;}}
 namespace azertian::vm {
 // Object frames keep the tree runtime's ownership records (environments,
 // function_frame temporaries and variable-backed locals), so object, heap and
@@ -16,6 +16,7 @@ class ObjectHost {
 public:
     virtual ~ObjectHost()=default;
     virtual std::shared_ptr<script> owner()=0;
+    virtual std::shared_ptr<ownership::Arena> ownership_arena()=0;
     // Bracket every helper that may run script code. Reentrant script code
     // must observe the VM's global values, and the suspended invocation must
     // observe host-side changes afterwards. Implementations may defer both

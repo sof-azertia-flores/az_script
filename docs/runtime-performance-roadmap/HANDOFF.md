@@ -1,5 +1,15 @@
 # 运行时性能重构交接
 
+## 最新接续（2026-10-18）
+
+当前本地分支 `codex/runtime-performance-continue`，基于 GitHub `claude/runtime-performance-handoff-5mdt6h` 的 `816a67a`。用户给出的无后缀分支名不存在，已从实际分支恢复。新实现是 R11b / S2.1 所有权身份迁移及 S2.2 首批共享语句协议，详细变更、验证证据和未完成边界见 [STATUS.md](STATUS.md)。下面的旧交接原文不代表当前构建状态。
+
+最终普通全量、ASan/UBSan 全量与 F0 独立进程差分已通过：6,284 项运行时检查，普通构建另含 3,433 项真实 JNI 断言；F0 的 2,310 份观察由最终树与 VM 分别完整回放。Release 短批次诊断中，VM 对象和虚调用组相对 F0 仍约增加 4.6% / 2.7% 耗时；正式性能门禁尚未闭合，不能把本提交当作性能重构完成或默认引擎切换。
+
+下一步沿 [ENGINE_SPLIT.md](ENGINE_SPLIT.md) 推进 S2.3 生命周期状态机与 S2.4–S2.7 VM continuation，并将已有共享语句操作逐项接入可暂停驱动。当前 `ScopeId` / `TempListId` 已替换块和堆登记中的环境/帧指针；适配器和递归析构仍保留，`slot_block::owner` 仍是 `variable*`。不要提前宣称 R11b 完成或移除树执行器。
+
+本机激活工具链：`source /workspace/azscript-toolchain/activate.sh`。Java 验证清除 `JAVA_TOOL_OPTIONS`、`JDK_JAVA_OPTIONS`、`_JAVA_OPTIONS`。本次原始日志和 F0 观察保存在忽略目录 `build/resume/`；源码快照用 `git archive`，没有增加 worktree。
+
 暂停时间：2026-10-17（UTC）。用户要求暂停开发、写交接并提交到新分支。
 
 > 恢复状态：工作已在 `claude/runtime-performance-handoff-5mdt6h` 继续。下文“构建缺口”及恢复顺序第 2–5 步已完成，第 6 步完成了 R10 编译器清理与 R11a 对象帧，实际结果与发现记录在 [STATUS.md](STATUS.md)。R11b 起的顺序及解开两个执行器交织、使树组件可整体删除的决定见 [ENGINE_SPLIT.md](ENGINE_SPLIT.md)。本文件其余内容保留暂停时的交接原文。

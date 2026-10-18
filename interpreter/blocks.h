@@ -20,11 +20,12 @@ struct slot_block {
     std::shared_ptr<const method_table> methods;
     std::weak_ptr<azertian::script> script_owner;
     // Exactly one storage variable owns a live block, unless it is an unbound
-    // temporary of a frame or is held by a host. owner_env orders the cleanup
+    // temporary of a frame or is held by a host. owner_scope orders the cleanup
     // of locals and parameters together with automatic heap objects.
     const variable* owner=nullptr;
-    const environment* owner_env=nullptr;
-    function_frame* temp_frame=nullptr;
+    ownership::ScopeId owner_scope;
+    ownership::TempListId temporary_list;
+    std::size_t temporary_index=0;
     std::size_t depth=0;
     status state=status::live;
     std::shared_ptr<buffer_storage> buffer;
@@ -73,6 +74,7 @@ void drop(const std::shared_ptr<variable>& storage,const std::shared_ptr<environ
 void adopt_temporary(const std::shared_ptr<slot_block>& block,function_frame* frame);
 void finalize(const std::shared_ptr<slot_block>& block,const std::shared_ptr<environment>& env,bool run_destructor);
 void finalize_temporaries(function_frame& frame,std::size_t mark,const std::shared_ptr<environment>& env);
+void finalize_temporaries(ownership::TempListId list,std::size_t mark,const std::shared_ptr<environment>& env);
 // Finalizes blocks owned by these storage variables, last first; keeps the first error.
 void finalize_storage(const std::vector<std::shared_ptr<variable>>& storage,const std::shared_ptr<environment>& env,
                       bool run_destructor,pending_error& failure);

@@ -44,14 +44,14 @@ Value HostBridge::invoke_external(const CallTarget& target,std::span<const Value
         host_arguments.push_back(std::move(argument));
     }
     const auto& function=program_.functions[caller.function];
-    auto frame=std::make_shared<function_frame>();
+    auto frame=std::make_shared<function_frame>(boundary_.ownership_arena());
     frame->global_offset=function.global_offset;frame->global_count=function.global_count;
     frame->location=caller.location;frame->return_location=caller.return_location;
     WorkspaceVector<std::shared_ptr<environment>> scopes(boundary_.workspace());
     scopes.reserve(lexical_depth-1);
     auto parent=owner_.baseEnv;
     for(std::size_t depth=1;depth<lexical_depth;++depth) {
-        auto scope=std::make_shared<environment>();scope->script=owner_.weak_from_this();
+        auto scope=std::make_shared<environment>(boundary_.ownership_arena());scope->script=owner_.weak_from_this();
         scope->parent=parent;scope->frame=frame;scope->frame_root=depth==1;
         scopes.emplace_back(scope);parent=std::move(scope);
     }

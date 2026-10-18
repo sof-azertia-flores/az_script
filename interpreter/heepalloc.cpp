@@ -14,8 +14,8 @@ std::vector<heap_allocation> allocations;
 // Lower bound on the number of leading allocations packed without gaps from
 // slot 1. First-fit allocation can skip them, so appending is O(1).
 std::size_t packed=0;
-// startpos -> environment that releases the allocation when it exits.
-std::map<address,const environment*> owners;
+// startpos -> generation-checked scope responsible for releasing the allocation.
+std::map<address,ownership::ScopeId> owners;
 struct registered_object {object_record value;bool destroying=false;};
 std::map<address,registered_object> objects;
 std::set<address> object_allocations;
@@ -28,8 +28,10 @@ void check_not_destroying(address pointer) {
 void detach_owner(address pointer) {
     auto it=owners.find(pointer);
     if(it==owners.end())return;
-    auto& list=const_cast<environment*>(it->second)->owned_pointer;
-    list.erase(std::remove(list.begin(),list.end(),pointer),list.end());
+    if(auto* owner=ownership::find(it->second)) {
+        auto& list=owner->owned;
+        list.erase(std::remove(list.begin(),list.end(),pointer),list.end());
+    }
     owners.erase(it);
 }
 // The allocation whose range contains pointer, or allocations.end().
@@ -95,11 +97,11 @@ void restore(std::vector<std::shared_ptr<variable>> values,std::vector<heap_allo
     std::lock_guard<std::recursive_mutex> lock(runtime_mutex());
     for(const auto& [pointer,object]:objects)if(object.destroying)throw std::runtime_error("Cannot restore during object destruction");
     validate(values,ranges);
-    std::map<address,const environment*> restored_owners;
+    std::map<address,ownership::ScopeId> restored_owners;
     for(address pointer:owned) {
         if(!restored_owner||restored_owner->closing||
            std::none_of(ranges.begin(),ranges.end(),[&](auto a){return a.startpos==pointer;})||
-           !restored_owners.emplace(pointer,restored_owner.get()).second)
+           !restored_owners.emplace(pointer,restored_owner->ownership_id()).second)
             throw std::invalid_argument("Invalid restored allocation ownership");
     }
     std::map<address,registered_object> restored_objects;
@@ -128,12 +130,12 @@ void set_owner(address pointer,const environment* owner) {
     if(owner&&owner->closing)throw std::runtime_error("Cannot transfer an allocation into a closing scope");
     if(!owner){owners.erase(pointer);return;}
     if(!is_allocation_start(pointer)) throw std::invalid_argument("Pointer is not the start of an active allocation: "+std::to_string(pointer.value));
-    owners[pointer]=owner;
+    owners[pointer]=owner->ownership_id();
 }
-const environment* owner_of(address pointer) {
+ownership::ScopeId owner_of(address pointer) {
     std::lock_guard<std::recursive_mutex> lock(runtime_mutex());
     auto it=owners.find(pointer);
-    return it==owners.end()?nullptr:it->second;
+    return it==owners.end()?ownership::ScopeId{}:it->second;
 }
 std::shared_ptr<variable> getSlot(int index) {
     std::lock_guard<std::recursive_mutex> lock(runtime_mutex());
@@ -264,8 +266,9 @@ void check_method_heap(address pointer,const std::shared_ptr<script>& script) {
     if(!is_allocation_start(pointer)||!object_allocations.contains(pointer))
         throw std::runtime_error("Virtual call requires a live object start");
     auto object=objects.find(pointer);
+    const auto* owner=object==objects.end()?ownership::find(owner_of(pointer)):nullptr;
     const auto owning_script=object!=objects.end()?object->second.value.script_owner.lock():
-        (owner_of(pointer)?owner_of(pointer)->script.lock():nullptr);
+        (owner?owner->script.lock():nullptr);
     if(owning_script!=script)throw std::runtime_error("Object belongs to another script");
 }
 }
@@ -339,7 +342,7 @@ address object_address(address pointer,int offset) {
 void register_object(address pointer,std::optional<int> destructor_id,bool manual,const std::shared_ptr<environment>& env,type_contexts contexts) {
     std::lock_guard<std::recursive_mutex> lock(runtime_mutex());
     if(blocks::is_block_address(pointer)){blocks::set_destructor(pointer,destructor_id,manual,env,std::move(contexts));return;}
-    if(!env||env->closing||owner_of(pointer)!=env.get()||!is_allocation_start(pointer)||!object_allocations.contains(pointer))
+    if(!env||env->closing||owner_of(pointer)!=env->ownership_id()||!is_allocation_start(pointer)||!object_allocations.contains(pointer))
         throw std::runtime_error("Object construction must finish in its allocation scope");
     object_record record{pointer,destructor_id,manual,env->script,std::move(contexts)};validate_object(record);
     if(!objects.emplace(pointer,registered_object{record}).second)throw std::runtime_error("Object is already registered");
@@ -366,7 +369,7 @@ void destroy_registered(address pointer,const std::shared_ptr<environment>& env)
             if(!script||script->closed)throw std::runtime_error("Object destructor script is unavailable");
             auto context=env;
             if(!context||context->script.lock()!=script) {
-                context=std::make_shared<environment>();context->script=script;
+                context=std::make_shared<environment>(script->baseEnv->ownership_arena());context->script=script;
                 context->parent=script->baseEnv;context->caller=env;
             }
             invoke_bound_function(script,*record.destructor_id,context,{std::make_shared<variable>(pointer)},record.destructor_contexts);
@@ -394,7 +397,7 @@ void delete_object(address pointer,const std::shared_ptr<environment>& env) {
 void release_owned(address pointer,const std::shared_ptr<environment>& env) {
     std::lock_guard<std::recursive_mutex> lock(runtime_mutex());
     if(blocks::is_block_address(pointer)){blocks::release_owned(pointer,env);return;}
-    if(owner_of(pointer)!=env.get())return;
+    if(owner_of(pointer)!=(env?env->ownership_id():ownership::ScopeId{}))return;
     destroy_registered(pointer,env);
 }
 void return_object(address pointer,const std::shared_ptr<environment>& env) {
@@ -403,10 +406,10 @@ void return_object(address pointer,const std::shared_ptr<environment>& env) {
     if(pointer.value==0||blocks::is_block_address(pointer))return;
     auto object=objects.find(pointer);
     if(!is_allocation_start(pointer))throw std::runtime_error("Object return requires a live allocation");
-    const environment* owner=owner_of(pointer);
+    const auto owner=owner_of(pointer);
     std::shared_ptr<environment> holder,root=env;
     for(auto e=env;e&&e->frame==env->frame;e=e->parent.lock()) {
-        root=e;if(e.get()==owner)holder=e;
+        root=e;if(e->ownership_id()==owner)holder=e;
     }
     if(object==objects.end()) {
         // A constructor may call a method returning its borrowed this pointer.
@@ -430,7 +433,7 @@ void discard_owned(const environment* env) noexcept {
         while(!list.empty()) {
             address pointer=list.back();list.pop_back();
             if(blocks::is_block_address(pointer)){blocks::discard_owned(pointer,env);continue;}
-            if(owner_of(pointer)!=env)continue;
+            if(owner_of(pointer)!=env->ownership_id())continue;
             objects.erase(pointer);free(pointer);
         }
     }catch(...) {}
@@ -488,13 +491,13 @@ std::shared_ptr<variable> f_object_alloc::invoke(std::shared_ptr<environment> en
 }
 std::shared_ptr<variable> f_free::invoke(std::shared_ptr<environment> env,std::vector<std::shared_ptr<variable>> args) {
     address p=raw_pointer_argument(args,"mem_free");
-    const environment* owner=heap::owner_of(p);
+    const auto owner=heap::owner_of(p);
     if(!owner) return std::make_shared<variable>(heap::free(p));
     // The owner must be reachable from the current scope through lexical
     // parents and callers. A re-entrant host call or a foreign scope cannot
     // release an allocation that another live scope will release itself.
     std::shared_ptr<environment> holder;
-    for(auto e=env;e;e=transfer_parent(e)) if(e.get()==owner){holder=e;break;}
+    for(auto e=env;e;e=transfer_parent(e)) if(e->ownership_id()==owner){holder=e;break;}
     if(!holder) throw std::runtime_error("Allocation "+std::to_string(p.value)+
         " is scheduled for automatic release by another active scope and cannot be freed here");
     bool released=heap::free(p);

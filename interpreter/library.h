@@ -20,6 +20,7 @@
 #include "core/format.h"
 #include "core/limits.h"
 #include "core/signature.h"
+#include "core/ownership.h"
 
 namespace azertian {
 inline constexpr std::size_t MAX_VARIABLE_SLOTS=limits::max_slots;
@@ -289,6 +290,9 @@ private:
     void copy_value(const variable& other);
 };
 struct function_frame {
+private:
+    ownership::Lease<ownership::TempListId> temporary_storage_;
+public:
     bool returned=false;
     bool break_requested=false;
     bool continue_requested=false;
@@ -302,24 +306,34 @@ struct function_frame {
     type_contexts hidden_contexts;
     std::shared_ptr<variable> result=std::make_shared<variable>(nullptr);
     // Unbound object temporaries; each statement destroys the ones it created.
-    std::vector<std::shared_ptr<slot_block>> temporaries;
-    function_frame()=default;
+    std::vector<std::shared_ptr<slot_block>>& temporaries;
+    explicit function_frame(std::shared_ptr<ownership::Arena> arena={});
+    ownership::TempListId temporary_id() const noexcept{return temporary_storage_.id();}
     function_frame(const function_frame&)=delete;
     function_frame& operator=(const function_frame&)=delete;
     ~function_frame();
 };
 class environment {
+    ownership::Lease<ownership::ScopeId> ownership_;
 public:
-    std::vector<address> owned_pointer;
+    explicit environment(std::shared_ptr<ownership::Arena> arena={});
+    environment(const environment&)=delete;
+    environment& operator=(const environment&)=delete;
+    const std::shared_ptr<ownership::Arena>& ownership_arena() const noexcept{return ownership_.arena();}
+    ownership::ScopeId ownership_id() const noexcept {
+        ownership_.record().temporaries=frame?frame->temporary_id():ownership::TempListId{};
+        return ownership_.id();
+    }
+    std::vector<address>& owned_pointer;
     std::weak_ptr<environment> parent;
     // Caller is separate from the lexical parent: functions cannot see locals
     // in their callers, while explicit allocation transfer still can.
     std::weak_ptr<environment> caller;
     std::vector<std::shared_ptr<variable>> variables;
-    std::weak_ptr<azertian::script> script;
+    std::weak_ptr<azertian::script>& script;
     std::shared_ptr<function_frame> frame;
     std::vector<std::size_t> declared_slots;
-    bool closing=false;
+    bool& closing;
     // The function-level scope of a frame also finalizes parameters and temporaries.
     bool frame_root=false;
     void cleanup(const std::shared_ptr<environment>& self);

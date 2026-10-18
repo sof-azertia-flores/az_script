@@ -3,6 +3,7 @@
 #include "../core/value_ops.h"
 #include "session.h"
 #include "../blocks.h"
+#include "../core/statement.h"
 #include "../heepalloc.h"
 #include "../core/ids.h"
 #include "../core/trace.h"
@@ -93,7 +94,7 @@ struct ScalarExecutor::State {
     // Ownership records of one object frame. They are the tree runtime's own
     // structures, so blocks/heap ownership, temporaries and scope cleanup keep
     // their exact semantics. Locals live in frame->slots.
-    struct Control {bool scope=false;std::size_t temporaries=0;};
+    struct Control {bool scope=false;statement::Mark temporaries;};
     struct ObjectFrame {
         std::shared_ptr<function_frame> frame;
         std::vector<std::shared_ptr<environment>> scopes; // [0] is the function root.
@@ -348,7 +349,7 @@ struct ScalarExecutor::State {
                 if(control.scope) {
                     auto scope=std::move(record.scopes.back());record.scopes.pop_back();
                     scope->cleanup(scope);
-                } else blocks::finalize_temporaries(*record.frame,control.temporaries,record.scopes.back());
+                } else statement::finish(control.temporaries,record.scopes.back());
             } catch(...) {failure.capture_current();}
             level_ended();
         }
@@ -398,18 +399,18 @@ struct ScalarExecutor::State {
                 const auto calling=calling_scope(caller,options);
                 if(!calling)throw std::logic_error("Scalar VM object frame has no calling scope");
                 const auto owner=host.owner();
-                ObjectFrame record;record.frame=std::make_shared<function_frame>();
+                ObjectFrame record;record.frame=std::make_shared<function_frame>(host.ownership_arena());
                 auto& tree=*record.frame;
                 tree.global_offset=function.global_offset;tree.global_count=function.global_count;tree.param_count=count;
                 tree.slots.resize(function.param_types.size()+static_cast<std::size_t>(function.local_count));
-                auto root=std::make_shared<environment>();
+                auto root=std::make_shared<environment>(host.ownership_arena());
                 root->script=owner;root->parent=owner->baseEnv;root->caller=calling;root->frame_root=true;root->frame=record.frame;
                 record.scopes.push_back(root);
                 for(std::size_t i=0;i<count;++i) {
                     auto storage=std::make_shared<variable>();auto value=wrap(argument(i));
                     if(value->type_tag()==OBJECT_VALUE)runtime(options,[&]{blocks::store(storage,value,calling);});
                     else blocks::store(storage,value,calling);
-                    tree.slots[i]=storage;blocks::bind_local(storage,root);
+                    statement::bind_parameter(storage,i,root);
                 }
                 registers.append_default(layout.registers);scopes.append_default(layout.scope_marks);
                 object_frames.push_back(std::move(record));frame.object=static_cast<std::uint32_t>(object_frames.size()-1);
@@ -488,8 +489,7 @@ struct ScalarExecutor::State {
                         }
                         // A hand-written initializer may have declared this
                         // slot meanwhile; the tree executor replaces it too.
-                        scope->declared_slots.push_back(slot);
-                        objects(frame).frame->slots[slot]=storage;blocks::bind_local(storage,scope);
+                        statement::declare_local(storage,slot,scope);
                         break;
                     }
                     // A hand-written initializer may declare this slot after
@@ -525,9 +525,9 @@ struct ScalarExecutor::State {
                     if(frame.object!=no_index) {
                         auto& record=objects(frame);
                         record.controls.reserve(record.controls.size()+1);
-                        auto scope=std::make_shared<environment>();
+                        auto scope=std::make_shared<environment>(host_of(options).ownership_arena());
                         scope->parent=record.scopes.back();scope->script=record.scopes.back()->script;scope->frame=record.frame;
-                        record.scopes.push_back(std::move(scope));record.controls.push_back({true,0});
+                        record.scopes.push_back(std::move(scope));record.controls.push_back({true,{}});
                     }
                     scopes[frame.scope_marks.begin+frame.scope_count++]=static_cast<std::uint32_t>(frame.declared_count);break;
                 case Opcode::scope_leave:
@@ -542,7 +542,7 @@ struct ScalarExecutor::State {
                     break;
                 case Opcode::statement_enter:
                     ++frame.statement_depth;
-                    if(frame.object!=no_index){auto& record=objects(frame);record.controls.push_back({false,record.frame->temporaries.size()});}
+                    if(frame.object!=no_index){auto& record=objects(frame);record.controls.push_back({false,statement::begin(record.frame->temporary_id(),record.frame->temporaries.size())});}
                     break;
                 case Opcode::statement_leave:
                     --frame.statement_depth;
@@ -550,8 +550,8 @@ struct ScalarExecutor::State {
                         auto& record=objects(frame);
                         if(record.controls.empty()||record.controls.back().scope)throw std::logic_error("Scalar VM object statement records are unbalanced");
                         const auto mark=record.controls.back().temporaries;record.controls.pop_back();
-                        if(record.frame->temporaries.size()>mark)
-                            runtime(options,[&]{blocks::finalize_temporaries(*record.frame,mark,record.scopes.back());});
+                        if(record.frame->temporaries.size()>mark.count)
+                            runtime(options,[&]{statement::finish(mark,record.scopes.back());});
                     }
                     break;
                 case Opcode::loop_enter:++frame.loop_depth;break;

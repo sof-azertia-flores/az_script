@@ -20,7 +20,9 @@ struct Session::Prepared final:HostBoundary {
         std::size_t index=0;
     };
     CompiledScript compiled;
-    WorkspaceBudget budget;
+    std::shared_ptr<WorkspaceBudget> budget_owner;
+    WorkspaceBudget& budget;
+    std::shared_ptr<ownership::Arena> ownership_storage;
     SlotPool slots;
     WorkspaceVector<SlotId> globals;
     WorkspaceVector<Value> arguments;
@@ -37,7 +39,8 @@ struct Session::Prepared final:HostBoundary {
     bool export_allowed=false,publication_deferred=false;
 
     Prepared(CompiledScript source,std::size_t workspace_limit,const script& owner)
-        :compiled(std::move(source)),budget(workspace_limit),slots(budget),
+        :compiled(std::move(source)),budget_owner(std::make_shared<WorkspaceBudget>(workspace_limit)),
+         budget(*budget_owner),ownership_storage(ownership::Arena::create(budget_owner)),slots(budget),
          globals(budget),arguments(budget),bindings(budget),identities(budget),
          incoming(budget),next_globals(budget),executor(compiled.program,slots,budget) {
         require_scalar_host_targets(compiled.program);
@@ -170,6 +173,7 @@ struct Session::Prepared final:HostBoundary {
         std::sort(identities.span().begin(),identities.span().end(),before);
     }
     WorkspaceBudget& workspace() noexcept override{return budget;}
+    std::shared_ptr<ownership::Arena> ownership_arena() override{return ownership_storage;}
     void publish_globals(script& owner) noexcept override{export_globals(owner);}
     void refresh_globals(const script& owner) override{import_globals(owner);}
     std::uint64_t defer_publication() noexcept override{publication_deferred=true;return invocations;}

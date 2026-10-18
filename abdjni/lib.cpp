@@ -871,8 +871,8 @@ JNIEXPORT void JNICALL Java_azertia_jni_Caller20_memFree(JNIEnv* env, jclass, jl
         requireJavaRawMemory(nativePointer);
         // Java may release its own blocks and global (base scope) allocations. A block
         // that a running script scope will release itself must stay with that scope.
-        const environment* owner = heap::owner_of(nativePointer);
-        environment* base = loadedScript && loadedScript->baseEnv ? loadedScript->baseEnv.get() : nullptr;
+        const auto owner = heap::owner_of(nativePointer);
+        const auto base = loadedScript && loadedScript->baseEnv ? loadedScript->baseEnv->ownership_id() : ownership::ScopeId{};
         if (owner && owner != base)
             throw std::invalid_argument("Pointer is scheduled for automatic release by a running script scope and cannot be freed from Java");
         if (!heap::free(nativePointer)) throw std::invalid_argument("Pointer is not the start of an active allocation");
