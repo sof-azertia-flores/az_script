@@ -152,17 +152,31 @@ void move_storage(const V& from,const V& to) noexcept {
     from->swap_storage(*to);
     if(auto nested=handle_of(*to);nested&&nested->owner==from.get())nested->owner=to.get();
 }
-B copy_block(const B& source,std::size_t depth,S env={});
-void copy_fields(const B& source,const B& destination,std::size_t depth,S env={}) {
+B copy_block(const B& source,std::size_t depth,S env={},copy_rollback* deferred=nullptr);
+void copy_fields(const B& source,const B& destination,std::size_t depth,S env={},copy_rollback* deferred=nullptr) {
     for(std::size_t i=0;i<source->slots.size();++i) {
         auto& from=source->slots[i];auto& to=destination->slots[i];
         if(from&&owns(*from)) {
-            auto nested=copy_block(handle_of(*from),depth+1,env);
+            auto nested=copy_block(handle_of(*from),depth+1,env,deferred);
             nested->owner=to.get();to->setValue(std::move(nested));
         } else if(from)to->copy_from(from);
     }
 }
-B copy_block(const B& source,std::size_t depth,S env) {
+// Inside the copy's catch: ends a partial copy (its completed members run
+// their destructors) and raises the copy's error again, or leaves the partial
+// copy to a deferred rollback, innermost first, with the context it would use.
+[[noreturn]] void end_partial(const B& result,const B& source,S env,copy_rollback* deferred) {
+    auto context=env;
+    if(!context.record)if(auto script=source->script_owner.lock())context=site_of(script->baseEnv);
+    if(deferred) {
+        bool deferring=true;
+        try{deferred->partial.emplace_back(result,context);}catch(...){deferring=false;}
+        if(deferring)throw;
+    }
+    auto failure=pending_error::capture();
+    finalize_block(result,context,true,failure);failure.rethrow();
+}
+B copy_block(const B& source,std::size_t depth,S env,copy_rollback* deferred) {
     require_usable(source);depth_limit(depth);
     if(source->buffer)require_buffer(source);
     if(source->buffer&&source->active_operations)throw std::runtime_error("Cannot copy a buffer during an active operation");
@@ -174,30 +188,22 @@ B copy_block(const B& source,std::size_t depth,S env) {
                 auto from=source->slots[i];auto to=result->slots[i];
                 if(source->buffer->element->kind==3) {
                     auto view=create_view(result,i);auto old=handle_of(*from);
-                    view->methods=old->methods;view->destructor_contexts=old->destructor_contexts;copy_fields(old,view,depth+1,env);view->destructor=old->destructor;
+                    view->methods=old->methods;view->destructor_contexts=old->destructor_contexts;copy_fields(old,view,depth+1,env,deferred);view->destructor=old->destructor;
                 } else if(owns(*from)) {
-                    auto child=copy_block(handle_of(*from),depth+1,env);child->owner=to.get();to->setValue(child);
+                    auto child=copy_block(handle_of(*from),depth+1,env,deferred);child->owner=to.get();to->setValue(child);
                 } else to->copy_from(from);
                 ++result->buffer->length;
             }
-        } catch(...) {
-            auto failure=pending_error::capture();auto context=env;
-            if(!context.record)if(auto script=source->script_owner.lock())context=site_of(script->baseEnv);
-            finalize_block(result,context,true,failure);failure.rethrow();
-        }
+        } catch(...) {end_partial(result,source,env,deferred);}
         return result;
     }
     auto result=make_block(source->slots.size(),source->script_owner);result->depth=depth;
-    try {result->destructor_contexts=source->destructor_contexts;copy_fields(source,result,depth,env);}
-    catch(...) {
-        auto failure=pending_error::capture();auto context=env;
-        if(!context.record)if(auto script=source->script_owner.lock())context=site_of(script->baseEnv);
-        finalize_block(result,context,true,failure);failure.rethrow();
-    }
+    try {result->destructor_contexts=source->destructor_contexts;copy_fields(source,result,depth,env,deferred);}
+    catch(...) {end_partial(result,source,env,deferred);}
     result->destructor=source->destructor;result->methods=source->methods;
     return result;
 }
-void assign_block(slot_block& target,const B& source,S env) {
+void assign_block(slot_block& target,const B& source,S env,copy_rollback* deferred=nullptr) {
     require_usable(source);
     if(&target==source.get())return;
     if(target.buffer||source->buffer)throw std::runtime_error("Buffer assignment requires owning storage");
@@ -211,11 +217,11 @@ void assign_block(slot_block& target,const B& source,S env) {
         if(!nested){to->copy_from(from);continue;}
         if(owns(*to)){
             if(handle_of(*to)->buffer||nested->buffer)store(to,from,env);
-            else assign_block(*handle_of(*to),nested,env);
+            else assign_block(*handle_of(*to),nested,env,deferred);
             continue;
         }
         const auto depth=base_depth(*to);depth_limit(depth+height(*nested));
-        auto copy=copy_block(nested,depth,env);copy->owner=to.get();to->setValue(std::move(copy));
+        auto copy=copy_block(nested,depth,env,deferred);copy->owner=to.get();to->setValue(std::move(copy));
     }
 }
 void abandon_contents(const B& block) noexcept {
@@ -514,7 +520,7 @@ std::shared_ptr<slot_block> copy(const std::shared_ptr<slot_block>& source) {
     std::lock_guard<std::recursive_mutex> lock(runtime_mutex());
     return copy_block(source,0);
 }
-void store(const std::shared_ptr<variable>& target,const std::shared_ptr<variable>& value,S env) {
+void store(const std::shared_ptr<variable>& target,const std::shared_ptr<variable>& value,S env,copy_rollback* deferred) {
     std::lock_guard<std::recursive_mutex> lock(runtime_mutex());
     if(!target||!value)throw std::invalid_argument("Null variable");
     if(auto old=handle_of(*target);old&&old->buffer)require_buffer(old);
@@ -561,7 +567,7 @@ void store(const std::shared_ptr<variable>& target,const std::shared_ptr<variabl
                 finalize_block(replacement,env,true,failure);
             }
             if(failure)failure.rethrow();
-        } else assign_block(*existing,source,env);
+        } else assign_block(*existing,source,env,deferred);
         return;
     }
     const auto depth=base_depth(*target);
@@ -569,7 +575,7 @@ void store(const std::shared_ptr<variable>& target,const std::shared_ptr<variabl
     B placed;
     if(source->temporary_list&&!source->owner&&!encloses(source.get(),*target)) {
         release_temporary(*source);placed=source;set_depth(*placed,depth);
-    } else placed=copy_block(source,depth,env);
+    } else placed=copy_block(source,depth,env,deferred);
     placed->owner=target.get();placed->owner_scope={};
     target->setValue(std::move(placed));
 }
@@ -587,14 +593,14 @@ void adopt_into(const B& block,S env) {
     env.temporaries->values.push_back(block);block->temporary_list=env.record->temporaries;block->temporary_index=index;
 }
 }
-std::shared_ptr<variable> materialize(const std::shared_ptr<variable>& value,S env) {
+std::shared_ptr<variable> materialize(const std::shared_ptr<variable>& value,S env,copy_rollback* deferred) {
     std::lock_guard<std::recursive_mutex> lock(runtime_mutex());
     auto block=handle_of(*value);
     if(!block)return value->deepCopy();
     require_usable(block);
     if(!env.temporaries||(!block->owner&&block->temporary_list==env.record->temporaries))return std::make_shared<variable>(block);
     // Snapshot an owned object before the next argument can change it.
-    auto copy=copy_block(block,0,env);adopt_into(copy,env);
+    auto copy=copy_block(block,0,env,deferred);adopt_into(copy,env);
     return std::make_shared<variable>(std::move(copy));
 }
 void adopt_result(const std::shared_ptr<variable>& value,S env) {
@@ -603,7 +609,7 @@ void adopt_result(const std::shared_ptr<variable>& value,S env) {
     if(!block||block->owner||block->temporary_list||block->state!=slot_block::status::live||!env.temporaries)return;
     adopt_into(block,env);
 }
-std::shared_ptr<variable> export_result(const std::shared_ptr<variable>& value,S env) {
+std::shared_ptr<variable> export_result(const std::shared_ptr<variable>& value,S env,copy_rollback* deferred) {
     std::lock_guard<std::recursive_mutex> lock(runtime_mutex());
     auto block=of(value);require_usable(block);
     const auto frame=env.record->temporaries;
@@ -616,7 +622,7 @@ std::shared_ptr<variable> export_result(const std::shared_ptr<variable>& value,S
         detach_owner_scope(*block);block->owner=nullptr;out=block;
     } else if(!block->owner&&block->temporary_list==frame) {
         release_temporary(*block);out=block;
-    } else out=copy_block(block,0,env);
+    } else out=copy_block(block,0,env,deferred);
     set_depth(*out,0);
     // Without a script caller (a host call) the result becomes host-held.
     if(destination)adopt_temporary(out,destination);

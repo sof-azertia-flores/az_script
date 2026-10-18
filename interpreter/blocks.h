@@ -64,13 +64,18 @@ address member_address(address pointer,int offset);
 void set_destructor(address pointer,std::optional<int> destructor,bool manual,ownership::Site env,type_contexts contexts={});
 // Execution support used by the interpreter and heap.
 std::shared_ptr<slot_block> copy(const std::shared_ptr<slot_block>& source);
+// The partial copies a failed copy leaves for its caller to end, innermost
+// first, each with the context its level would have ended it in.
+struct copy_rollback {std::vector<std::pair<std::shared_ptr<slot_block>,ownership::Site>> partial;};
 // Object-model operations run in a site: the scope that owns new locals and
-// the frame whose temporaries receive new values.
-void store(const std::shared_ptr<variable>& target,const std::shared_ptr<variable>& value,ownership::Site env);
+// the frame whose temporaries receive new values. With deferred, a failed
+// copy leaves its partial copies (which may run destructors) to the caller.
+void store(const std::shared_ptr<variable>& target,const std::shared_ptr<variable>& value,ownership::Site env,
+           copy_rollback* deferred=nullptr);
 void bind_local(const std::shared_ptr<variable>& storage,ownership::Site env);
-std::shared_ptr<variable> materialize(const std::shared_ptr<variable>& value,ownership::Site env);
+std::shared_ptr<variable> materialize(const std::shared_ptr<variable>& value,ownership::Site env,copy_rollback* deferred=nullptr);
 void adopt_result(const std::shared_ptr<variable>& value,ownership::Site env);
-std::shared_ptr<variable> export_result(const std::shared_ptr<variable>& value,ownership::Site env);
+std::shared_ptr<variable> export_result(const std::shared_ptr<variable>& value,ownership::Site env,copy_rollback* deferred=nullptr);
 std::shared_ptr<variable> move_out(const std::shared_ptr<variable>& storage,ownership::Site env);
 void drop(const std::shared_ptr<variable>& storage,ownership::Site env);
 // drop's first step for a driving engine: the block to end, detached from its

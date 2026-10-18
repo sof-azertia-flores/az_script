@@ -122,7 +122,7 @@ struct ScalarExecutor::State {
     // A scope or statement cleanup the dispatch loop drives. Destructors of
     // this script run as continuation frames above the waiting frame; others
     // are dispatched natively.
-    enum class Tail : std::uint8_t {none,scope_closed,statement_done,unwinding,dropped};
+    enum class Tail : std::uint8_t {none,scope_closed,statement_done,unwinding,dropped,rollback};
     struct Pending {
         Tail tail=Tail::none;
         std::optional<ObjectScope> closing;              // a popped scope being closed
@@ -132,13 +132,21 @@ struct ScalarExecutor::State {
         std::optional<lifecycle::ReleaseFinalizer> release;  // drop
         std::optional<lifecycle::HeapDestroyer> heap;        // delete
         std::shared_ptr<variable> storage;                   // a drop's storage, cleared at the end
+        // A failed copy's partial copies, ended innermost first in their
+        // contexts and sharing the copy's error, as the copy's catches did.
+        std::vector<std::pair<std::shared_ptr<slot_block>,ownership::Site>> rollback;
+        std::size_t next=0;
+        pending_error failure;
+        std::optional<lifecycle::BlockFinalizer> block;
+        lifecycle::DestructorCall call{};
         ownership::Site site;                            // the dispatch caller
         // The continuation frame of a yielded call and its two entries.
         bool waiting=false,reported=false;
         FrameId callee;
         std::size_t region_mark=0;
         trace::open_entry dispatch,function;
-        bool active() const noexcept{return scope||temporaries||release||heap;}
+        bool active() const noexcept{return scope||temporaries||release||heap||block;}
+        // The driver other than a rollback's block traversal.
         template<class Step> decltype(auto) step(Step step) {
             if(scope)return step(*scope);
             if(temporaries)return step(*temporaries);
@@ -400,11 +408,39 @@ struct ScalarExecutor::State {
     }
     static void reset_pending(Pending& pending) noexcept {
         pending.scope.reset();pending.temporaries.reset();pending.release.reset();pending.heap.reset();
+        pending.block.reset();pending.rollback.clear();pending.failure=pending_error{};
         pending.locals.reset();pending.closing.reset();pending.storage.reset();
         pending.site={};pending.tail=Tail::none;
     }
-    static void call_returned(Pending& pending) {pending.step([](auto& driver){driver.call_returned();});}
-    static void call_failed(Pending& pending) {pending.step([](auto& driver){driver.call_failed();});}
+    // The next call a pending driver needs, or null when it is done. A block
+    // traversal's own failure ends it natively, as finalize_block does.
+    static const lifecycle::DestructorCall* next_call(Pending& pending) {
+        if(!pending.block)return pending.step([](auto& driver){return driver.advance();});
+        try {
+            if(const auto* block=pending.block->advance()){pending.call=lifecycle::destructor_call(*block);return &pending.call;}
+        } catch(...) {pending.failure.capture_current();pending.block->abandon();}
+        return nullptr;
+    }
+    static void start_partial(Pending& pending) {
+        auto& [block,context]=pending.rollback[pending.next];
+        pending.block.emplace(block,true,pending.failure);pending.site=context;
+    }
+    // Inside a failed copy's catch: when it left partial copies, the frame's
+    // driver ends them (their destructors as continuations) and then raises
+    // the copy's error at this instruction. False when there are none.
+    bool begin_rollback(const FrameRecord& frame,blocks::copy_rollback& rollback) {
+        if(rollback.partial.empty())return false;
+        auto& pending=cleanup_of(objects(frame)).pending;
+        pending.rollback=std::move(rollback.partial);pending.next=0;
+        pending.failure=pending_error{};pending.failure.capture_current();
+        start_partial(pending);pending.tail=Tail::rollback;return true;
+    }
+    static void call_returned(Pending& pending) {
+        if(pending.block)pending.block->call_returned();else pending.step([](auto& driver){driver.call_returned();});
+    }
+    static void call_failed(Pending& pending) {
+        if(pending.block)pending.block->call_failed();else pending.step([](auto& driver){driver.call_failed();});
+    }
     enum class Entry {native,pushed,failed};
     // A destructor of this script runs above the waiting frame through the
     // path a native dispatch takes (invoke_bound_function, then
@@ -467,7 +503,17 @@ struct ScalarExecutor::State {
         try {
             for(;;) {
                 position=position_of(frame);
-                const lifecycle::DestructorCall* call=pending.step([](auto& driver){return driver.advance();});
+                const auto* call=next_call(pending);
+                if(!call&&pending.tail==Tail::rollback) {
+                    // Each partial copy ended in its own catch, which raised
+                    // the error again before the next one.
+                    pending.block.reset();
+                    if(++pending.next<pending.rollback.size()) {
+                        try{pending.failure.rethrow();}catch(...){pending.failure=pending_error{};pending.failure.capture_current();}
+                        start_partial(pending);continue;
+                    }
+                    auto failure=std::move(pending.failure);position=position_of(frame);failure.rethrow();
+                }
                 if(!call) {
                     if(pending.tail==Tail::unwinding) {
                         try {pending.step([](auto& driver){driver.finish();});}
@@ -677,15 +723,30 @@ struct ScalarExecutor::State {
             throw std::runtime_error("Variable slot is not declared in this scope: "+std::to_string(index));
         reference(frame,destination,{},cell);
     }
-    void store(const FrameRecord& frame,Register destination,Register target,Register source,const ExecutionOptions& options) {
+    // Runs an object operation whose failed copy may leave partial copies:
+    // their destructors run in the loop before its error is raised. True when
+    // the frame now waits for them.
+    template<class Operation> bool with_rollback(const FrameRecord& frame,ExecutionPosition& position,
+            const ExecutionOptions& options,Operation operation) {
+        blocks::copy_rollback rollback;
+        try {runtime(options,[&]{operation(&rollback);});}
+        catch(...) {
+            if(!begin_rollback(frame,rollback))throw;
+            drive(frames.top_id(),position,options);return true;
+        }
+        return false;
+    }
+    void store(const FrameRecord& frame,Register destination,Register target,Register source,
+               ExecutionPosition& position,const ExecutionOptions& options) {
         auto& reg=registers[frame.registers.begin+target];
         if(!reg.reference)throw std::logic_error("Scalar VM store target is not a slot reference");
         if(reg.host) {
             // Assignment can copy, replace or finalize objects (destructors).
             auto storage=reg.host;auto value=variable_of(frame,source);
-            if(value->type_tag()==OBJECT_VALUE||storage->type_tag()==OBJECT_VALUE)
-                runtime(options,[&]{blocks::store(storage,value,site(frame));});
-            else blocks::store(storage,value,site(frame));
+            if(value->type_tag()==OBJECT_VALUE||storage->type_tag()==OBJECT_VALUE) {
+                if(with_rollback(frame,position,options,[&](blocks::copy_rollback* deferred){blocks::store(storage,value,site(frame),deferred);}))
+                    return;
+            } else blocks::store(storage,value,site(frame));
             this->value(frame,destination,value_access::read(*storage));
             // The operands end with the assignment, value first, as the tree's
             // do: a target whose container is already freed abandons the
@@ -859,8 +920,10 @@ struct ScalarExecutor::State {
                         const auto here=site(frame);
                         if(instruction.left!=no_index) {
                             auto initial=variable_of(frame,instruction.left);
-                            if(initial->type_tag()==OBJECT_VALUE)runtime(options,[&]{blocks::store(storage,initial,here);});
-                            else blocks::store(storage,initial,here);
+                            if(initial->type_tag()==OBJECT_VALUE) {
+                                if(with_rollback(frame,position,options,[&](blocks::copy_rollback* deferred){blocks::store(storage,initial,here,deferred);}))
+                                    break;
+                            } else blocks::store(storage,initial,here);
                         }
                         // A hand-written initializer may have declared this
                         // slot meanwhile; the tree executor replaces it too.
@@ -877,7 +940,7 @@ struct ScalarExecutor::State {
                     else declared[frame.declared.begin+frame.declared_count++]=slot;
                     local(frame,slot)=cell;break;
                 }
-                case Opcode::store:store(frame,instruction.result,instruction.left,instruction.right,options);break;
+                case Opcode::store:store(frame,instruction.result,instruction.left,instruction.right,position,options);break;
                 case Opcode::snapshot:value(frame,instruction.result,read(frame,instruction.left));break;
                 case Opcode::materialize: {
                     // Arguments snapshot an owned object before the next one
@@ -885,7 +948,8 @@ struct ScalarExecutor::State {
                     const auto& current=read(frame,instruction.left);
                     if(frame.object==no_index||current.type_tag()!=OBJECT_VALUE){value(frame,instruction.result,current);break;}
                     auto source=variable_of(frame,instruction.left);std::shared_ptr<variable> result;
-                    runtime(options,[&]{result=blocks::materialize(source,site(frame));});
+                    if(with_rollback(frame,position,options,[&](blocks::copy_rollback* deferred){result=blocks::materialize(source,site(frame),deferred);}))
+                        break;
                     value(frame,instruction.result,value_access::read(*result));break;
                 }
                 case Opcode::copy_reference:copy(frame,instruction.result,instruction.left);break;
@@ -989,7 +1053,8 @@ struct ScalarExecutor::State {
                     auto source=variable_of(frame,instruction.left);Value result;
                     if(source->type_tag()==OBJECT_VALUE) {
                         std::shared_ptr<variable> exported;
-                        runtime(options,[&]{exported=blocks::export_result(source,scope);});
+                        if(with_rollback(frame,position,options,[&](blocks::copy_rollback* deferred){exported=blocks::export_result(source,scope,deferred);}))
+                            break;
                         result=value_access::read(*exported);
                     } else {
                         result=value_access::read(*source);
