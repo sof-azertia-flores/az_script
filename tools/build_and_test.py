@@ -217,9 +217,16 @@ def main():
     vm_work=BUILD/'runtime-perf'/('vm-execution-sanitize' if args.sanitize else 'vm-execution')
     if vm_work.exists():shutil.rmtree(vm_work)
     vm_work.parent.mkdir(parents=True,exist_ok=True)
+    run([sys.executable, ROOT/'tests/runtime_differential.py', '--self-test'])
+    run([sys.executable, ROOT/'tests/runtime_differences.py', '--self-test'])
     run([sys.executable, ROOT/'tests/vm_execution_end_to_end.py', '--classpath', classpath,
          '--reference-host', native/'interpreter/observation-host', '--reference-engine', 'tree',
          '--candidate-host', native/'interpreter/observation-host', '--candidate-engine', 'vm', '--work', vm_work])
+    # Every end-to-end runner invocation, run again with the VM forced: outputs
+    # must be byte-identical or a refusal listed with its exact count.
+    align_work=BUILD/'runtime-perf'/('alignment-sanitize' if args.sanitize else 'alignment')
+    if align_work.exists():shutil.rmtree(align_work)
+    run([sys.executable, ROOT/'tools/backend_alignment.py', '--native', native, '--classpath', classpath, '--work', align_work])
     print('Build and all selected tests passed. Use ./azscript --help.')
 
 if __name__=='__main__':

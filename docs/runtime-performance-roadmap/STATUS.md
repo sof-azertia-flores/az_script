@@ -17,6 +17,17 @@
 | 执行器解耦 | 已决定，进行中 | 目标是树组件可整体删除：`core/`、`tree/`、`vm/` 组件及边界检查、无树构建门禁、宿主 API 去除树类型（ABI 2）；不做多库拆分。见下文“执行器重叠审查与解耦决策” |
 | R12–R28 | 尚未完成 | R12 在 S3 核心整理之后进行；泛型、buffer、反射、插件在 VM 准备阶段明确拒绝 |
 
+## S0.3：所有权/析构一致性语料与差异登记（2026-10-18）
+
+以 R11b 一致性规格（树执行器的析构/所有权语义，经对抗复核）为依据，新增 `tests/conformance/` 七组语料，作为 `vm_execution_end_to_end.py` 的 `ownership` 阶段：作用域 55、临时量 60、赋值 64、析构 43、heap 87、错误与 trace 63、teardown 31，共 403 案例。每个期望值都先从规格和源码推出，再对照 F0，不从观察结果抄录；除 12 个注明理由的案例外都做完整步数预算扫描。比较协议 2 的全部字段，包括事件、`remaining_steps`、探针记录的 `active_calls` 与已发布 trace、trace 帧行号、下一个块 ID、first-fit 起点、owned 列表和 teardown。每组语料由独立审阅者复核期望值和遗漏场景，审阅意见已逐条处理；teardown 组的审阅结论为接受，仅采纳了一条加强区分度的修改，其余建议主要依赖 VM 尚未支持的 buffer，留作后续语料工作。
+
+- **差异登记表** `tests/runtime_differences.{json,py}`：封闭的三类（`native_stack`、`vm_workspace_limit`、`transitional_vm_refusal`），每条登记须被机械证明：原生栈一类用 1 GiB 线程栈重跑参考端，工作区一类用更大工作区重跑 VM，拒绝一类要求 VM 在 flush 时报出登记的原文。没有表现出差异的登记视为过期并使运行失败。当前 6 条 VM 过渡拒绝覆盖 29 个案例（泛型上下文、buffer、`check_object`、对象签名宿主回调），各自注明取消它的步骤；套件级拒绝 49 条记录按消息与次数核对。
+- **逐字节双跑** `tools/backend_alignment.py`：每个端到端套件在强制 VM 时再运行一次，输出须逐字节一致，或为登记表中按次数列出的拒绝；它取代回退到树后端的 `tools/vm_suite_triage.py`（已删除）。`build_and_test.py` 在 VM 差分之后运行它及两个工具的自检。
+- **负对照** `tools/conformance_mutants.py`：每个变异体是当前运行时加一处生命周期错误（成员先于析构体、临时量先进先出、owned 列表先进先出、析构调用者总是合成、每个析构重置步数、后错覆盖首错、复制不计费、heap 成员先于析构体、返回值总是复制、teardown 不持有调用守卫、heap 析构调用者总是合成、`getDepth` 沿调用者计数），各自构建观察 host，语料自身期望及 F0 回放都必须识别它。锚点须在源码中恰好出现一次，代码移动后锚点随之更新。在 `482157d` 上未修改的对照先通过，12 个变异体全部被两者识别（`build/runtime-perf/s03-mutants-1/report.json`）。
+- `tools/callgrind_gate.py`：参考与候选 Release 构建的每调用指令数对照（1 次与 6 次调用之差），用于纯重构步骤的 +0.5% 门禁。
+
+F0 参考记录 403 案例 / 52,822 次独立进程，全部期望通过；当前分支的树与 VM 回放全部一致（各 52,822 次）。语料复核过程中发现并修复一个 VM 缺陷：赋值表达式结束时 VM 没有释放操作数，容器已被删除的目标因此没有放弃新存入的对象（见 `fix(vm): end a store's operands with the assignment`）。
+
 ## S2.3 首批：可暂停的块析构遍历（2026-10-18）
 
 基于 `e8ca1ef`，新增 `core/lifecycle` 的 `BlockFinalizer`，替换 `blocks.cpp` 中递归的 `finalize_into`。`advance()` 在需要脚本析构调用时暂停，调用方用 `call_returned()` 或 catch 内的 `call_failed()` 恢复；完成后 `finish()` 可重新抛出首错，`abandon()` 和状态机析构函数只完成原生释放。原生驱动仍使用原有 `invoke_bound_function` 分派，不改变准入、参数校验、步数和 trace 路径。

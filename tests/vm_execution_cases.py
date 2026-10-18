@@ -13,20 +13,33 @@ from runtime_differential import Case, typed
 class ExecutionCase(Case):
     stage: str = 'scalar'
     trace_names: tuple = ()
+    # Optional source lines of the trace frames, innermost first (0 = header).
+    trace_lines: tuple = ()
     # These are inserted after the primary module in the listed order. The
     # independent reference adapter supports --insert without altering its VM.
     modules: tuple = ()
 
 
+def event_list(values):
+    return [{'callback': 1, 'arguments': [typed(0, value)]} for value in values]
+
+
 def case(name, source, result=None, *, tag=0, stage='scalar', error='', globals=None,
-         trace=(), options=(), sweep=True, modules=(), events=(), raw_events=None):
+         trace=(), options=(), sweep=True, modules=(), events=(), raw_events=None, category='',
+         remaining=None, teardown_events=None, raw_teardown_events=None, teardown_error=None,
+         teardown_heap=None, stdout=None, partial=False, lines=()):
     # events lists the int arguments of each event(int) callback, in order.
     return ExecutionCase(name=name, source=source, expected_return=typed(tag, result),
                          expected_error=error, expected_globals=[] if globals is None else globals,
-                         expected_events=raw_events if raw_events is not None else
-                         [{'callback': 1, 'arguments': [typed(0, value)]} for value in events],
-                         expected_stdout='', stage=stage,
-                         trace_names=trace, options=list(options), sweep=sweep, modules=modules)
+                         expected_events=raw_events if raw_events is not None else event_list(events),
+                         expected_stdout='' if stdout is None else None, expected_stdout_text=stdout,
+                         stage=stage, trace_names=trace, trace_lines=tuple(lines),
+                         options=list(options), sweep=sweep, modules=modules,
+                         expected_error_category=category, expected_remaining=remaining,
+                         expected_teardown_events=raw_teardown_events if raw_teardown_events is not None else
+                         (None if teardown_events is None else event_list(teardown_events)),
+                         expected_teardown_error=teardown_error, expected_teardown_heap=teardown_heap,
+                         partial_events=partial)
 
 
 EVENT = 'extern int event(int):6dff0001;\n'
@@ -164,4 +177,7 @@ def cases(stage='all'):
         result.append(case(f'arity-{count}', f'int target({parameters}):0011{{return {expression};}}\nint main(){{return target({arguments});}}\n',
                            sum(range(1, count + 1)) if count else 42, stage='calls'))
     result.extend(object_cases())
+    if stage in ('ownership', 'all'):
+        from conformance import cases as conformance_cases
+        result.extend(conformance_cases())
     return [item for item in result if stage == 'all' or item.stage == stage]

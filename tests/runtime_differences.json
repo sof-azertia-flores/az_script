@@ -1,0 +1,390 @@
+{
+  "version": 1,
+  "entries": [
+    {
+      "id": "vm-generic-field-contexts",
+      "kind": "transitional_vm_refusal",
+      "engine": "vm",
+      "cases": [
+        "own-dst19-type-parameter-fields-dropped"
+      ],
+      "message": "VM backend does not support: bind_context context_abi context_default",
+      "removed_by": "S4.1",
+      "reason": "Type-parameter fields are dropped through bound generic contexts, which the VM refuses until R12a."
+    },
+    {
+      "id": "vm-buffer-zero-capacity-copy",
+      "kind": "transitional_vm_refusal",
+      "engine": "vm",
+      "cases": [
+        "own-c9c-zero-capacity-buffer-copy-free-at-exhausted-budget"
+      ],
+      "message": "VM backend does not support: bind_context buffer_new",
+      "removed_by": "S4.3",
+      "reason": "Buffers run in the VM from R12b."
+    },
+    {
+      "id": "vm-buffer-assignment",
+      "kind": "transitional_vm_refusal",
+      "engine": "vm",
+      "cases": [
+        "own-c11-buffer-assignment-replaces-elements",
+        "own-c3g-copy-rollback-runs-completed-nested-destructors",
+        "own-c13-partial-assignment-kept-after-buffer-field-error",
+        "own-c13b-nested-buffer-field-assignment-charges-capacity",
+        "own-c13c-assign-into-destroying-buffer-unavailable"
+      ],
+      "message": "VM backend does not support: bind_context buffer_new buffer_operation",
+      "removed_by": "S4.3",
+      "reason": "Buffers run in the VM from R12b."
+    },
+    {
+      "id": "vm-buffer-lifecycle",
+      "kind": "transitional_vm_refusal",
+      "engine": "vm",
+      "cases": [
+        "own-l5c-literal-with-buffer-returned-to-host-never-destroyed",
+        "own-m1a-buffer-elements-last-first",
+        "own-m1b-buffer-field-elements-after-container",
+        "own-m1c-buffer-parameter-copy-destroyed-at-callee-exit",
+        "own-m1d-buffer-in-manual-object-discarded-at-destroy",
+        "own-m1e-buffer-in-base-owned-object-destroyed-at-destroy",
+        "own-m2a-shrinking-resize-destroys-every-element",
+        "own-m2b-shrinking-resize-length-reduced-first-error-type",
+        "own-m2c-resize-growth-rollback-last-first",
+        "own-m3a-buffer-assignment-old-elements-after-copy",
+        "own-m3b-old-element-error-after-assignment-published",
+        "own-m3c-buffer-owner-ended-during-assignment",
+        "own-m4-owner-deleted-during-element-construction",
+        "own-m5-reserve-expires-views-without-lifecycle"
+      ],
+      "message": "VM backend does not support: bind_context buffer_new buffer_operation",
+      "removed_by": "S4.3",
+      "reason": "Buffer element lifecycles (construction, resize, assignment, teardown) run in the VM from R12b."
+    },
+    {
+      "id": "vm-check-object",
+      "kind": "transitional_vm_refusal",
+      "engine": "vm",
+      "cases": [
+        "own-dst15c-heap-check-object-sees-destroying-container",
+        "own-dst15d-literal-check-object-sees-destroying-container"
+      ],
+      "message": "VM backend does not support: bind_context check_object",
+      "removed_by": "S4.4",
+      "reason": "Reflection's check_object runs in the VM from R12c."
+    },
+    {
+      "id": "vm-object-host-callbacks",
+      "kind": "transitional_vm_refusal",
+      "engine": "vm",
+      "cases": [
+        "own-b34-host-result-member-of-adopted-temporary",
+        "own-b34b-host-result-moves-into-parameter",
+        "own-b34c-host-result-moves-into-local",
+        "own-b34d-discarded-host-result-dies-at-statement-end",
+        "own-b35-host-call-arguments-destroyed-after-host-failure",
+        "own-b35b-host-call-object-arguments-copied-and-shared"
+      ],
+      "message": "Scalar VM does not support object callback signatures",
+      "removed_by": "S2.4",
+      "reason": "Host callbacks with object signatures need the VM-native object records and host views of S2.4."
+    }
+  ],
+  "suite_refusals": [
+    {
+      "suite": "containers_library",
+      "message": "AzScript error: VM backend does not support: bind_context buffer_new buffer_operation check_type context_abi context_default return_typed value_compare",
+      "count": 11,
+      "removed_by": "S4.4"
+    },
+    {
+      "suite": "generics_end_to_end",
+      "message": "AzScript error: Scalar VM does not support generic or object function contexts",
+      "count": 2,
+      "removed_by": "S4.1"
+    },
+    {
+      "suite": "generics_end_to_end",
+      "message": "AzScript error: Scalar VM does not support reflection or plugin-loading builtins",
+      "count": 9,
+      "removed_by": "S4.5"
+    },
+    {
+      "suite": "generics_end_to_end",
+      "message": "AzScript error: VM backend does not support: bind_context buffer_new check_object",
+      "count": 1,
+      "removed_by": "S4.4"
+    },
+    {
+      "suite": "generics_end_to_end",
+      "message": "AzScript error: VM backend does not support: bind_context check_object",
+      "count": 9,
+      "removed_by": "S4.4"
+    },
+    {
+      "suite": "generics_end_to_end",
+      "message": "AzScript error: VM backend does not support: bind_context check_object check_type context_abi return_typed",
+      "count": 7,
+      "removed_by": "S4.4"
+    },
+    {
+      "suite": "generics_end_to_end",
+      "message": "AzScript error: VM backend does not support: bind_context check_type context_abi context_default return_typed",
+      "count": 6,
+      "removed_by": "S4.4"
+    },
+    {
+      "suite": "generics_end_to_end",
+      "message": "AzScript error: VM backend does not support: bind_context check_type return_typed",
+      "count": 5,
+      "removed_by": "S4.1"
+    },
+    {
+      "suite": "generics_end_to_end",
+      "message": "AzScript error: VM backend does not support: bind_context context_abi context_default",
+      "count": 5,
+      "removed_by": "S4.4"
+    },
+    {
+      "suite": "generics_end_to_end",
+      "message": "AzScript error: VM backend does not support: bind_context context_abi context_default return_typed",
+      "count": 1,
+      "removed_by": "S4.4"
+    },
+    {
+      "suite": "generics_end_to_end",
+      "message": "AzScript error: VM backend does not support: bind_context return_typed",
+      "count": 1,
+      "removed_by": "S4.1"
+    },
+    {
+      "suite": "generics_end_to_end",
+      "message": "VM backend does not support: bind_context check_object",
+      "count": 5,
+      "removed_by": "S4.4"
+    },
+    {
+      "suite": "generics_end_to_end",
+      "message": "VM backend does not support: bind_context check_type return_typed",
+      "count": 1,
+      "removed_by": "S4.1"
+    },
+    {
+      "suite": "generics_end_to_end",
+      "message": "VM backend does not support: bind_context context_abi context_default",
+      "count": 1,
+      "removed_by": "S4.4"
+    },
+    {
+      "suite": "buffers_end_to_end",
+      "message": "AzScript error: VM backend does not support: bind_context buffer_new buffer_operation",
+      "count": 23,
+      "removed_by": "S4.3"
+    },
+    {
+      "suite": "buffers_end_to_end",
+      "message": "AzScript error: VM backend does not support: bind_context buffer_new buffer_operation check_object",
+      "count": 1,
+      "removed_by": "S4.4"
+    },
+    {
+      "suite": "buffers_end_to_end",
+      "message": "AzScript error: VM backend does not support: bind_context buffer_new buffer_operation check_type context_abi context_default return_typed",
+      "count": 1,
+      "removed_by": "S4.4"
+    },
+    {
+      "suite": "buffers_end_to_end",
+      "message": "AzScript error: VM backend does not support: bind_context buffer_new buffer_operation check_type return_typed",
+      "count": 4,
+      "removed_by": "S4.3"
+    },
+    {
+      "suite": "buffers_end_to_end",
+      "message": "AzScript error: VM backend does not support: bind_context buffer_operation check_type context_abi context_default return_typed",
+      "count": 1,
+      "removed_by": "S4.4"
+    },
+    {
+      "suite": "buffers_end_to_end",
+      "message": "AzScript error: VM backend does not support: bind_context check_type context_abi context_default return_typed",
+      "count": 4,
+      "removed_by": "S4.4"
+    },
+    {
+      "suite": "buffers_end_to_end",
+      "message": "AzScript error: VM backend does not support: bind_context value_compare",
+      "count": 4,
+      "removed_by": "S4.4"
+    },
+    {
+      "suite": "buffers_end_to_end",
+      "message": "VM backend does not support: bind_context buffer_new buffer_operation",
+      "count": 2,
+      "removed_by": "S4.3"
+    },
+    {
+      "suite": "inheritance_end_to_end",
+      "message": "AzScript error: VM backend does not support: bind_context check_type context_abi context_default return_typed",
+      "count": 1,
+      "removed_by": "S4.4"
+    },
+    {
+      "suite": "virtual_methods_end_to_end",
+      "message": "AzScript error: Scalar VM does not support generic or object function contexts",
+      "count": 2,
+      "removed_by": "S4.1"
+    },
+    {
+      "suite": "virtual_methods_end_to_end",
+      "message": "AzScript error: VM backend does not support: bind_context buffer_new buffer_operation",
+      "count": 1,
+      "removed_by": "S4.3"
+    },
+    {
+      "suite": "virtual_methods_end_to_end",
+      "message": "AzScript error: VM backend does not support: bind_context buffer_new buffer_operation check_type context_abi context_default return_typed value_compare",
+      "count": 1,
+      "removed_by": "S4.4"
+    },
+    {
+      "suite": "virtual_methods_end_to_end",
+      "message": "AzScript error: VM backend does not support: bind_context check_type context_abi context_default return_typed",
+      "count": 2,
+      "removed_by": "S4.4"
+    },
+    {
+      "suite": "virtual_methods_end_to_end",
+      "message": "Scalar VM does not support generic or object function contexts",
+      "count": 2,
+      "removed_by": "S4.1"
+    },
+    {
+      "suite": "virtual_methods_end_to_end",
+      "message": "VM backend does not support: bind_context buffer_new buffer_operation",
+      "count": 1,
+      "removed_by": "S4.3"
+    },
+    {
+      "suite": "virtual_methods_end_to_end",
+      "message": "VM backend does not support: bind_context buffer_new buffer_operation check_type context_abi context_default return_typed value_compare",
+      "count": 1,
+      "removed_by": "S4.4"
+    },
+    {
+      "suite": "virtual_methods_end_to_end",
+      "message": "VM backend does not support: bind_context check_type context_abi context_default return_typed",
+      "count": 3,
+      "removed_by": "S4.4"
+    },
+    {
+      "suite": "limits_end_to_end",
+      "message": "AzScript error: VM backend does not support: bind_context buffer_new buffer_operation",
+      "count": 14,
+      "removed_by": "S4.3"
+    },
+    {
+      "suite": "limits_end_to_end",
+      "message": "AzScript error: VM backend does not support: bind_context buffer_new buffer_operation check_type context_abi context_default return_typed value_compare",
+      "count": 8,
+      "removed_by": "S4.4"
+    },
+    {
+      "suite": "limits_end_to_end",
+      "message": "AzScript error: VM backend does not support: bind_context check_object check_type context_abi context_default return_typed",
+      "count": 8,
+      "removed_by": "S4.4"
+    },
+    {
+      "suite": "limits_end_to_end",
+      "message": "AzScript error: VM backend does not support: bind_context check_type context_abi context_default return_typed",
+      "count": 4,
+      "removed_by": "S4.4"
+    },
+    {
+      "suite": "limits_end_to_end",
+      "message": "AzScript error: VM backend does not support: bind_context check_type return_typed value_compare",
+      "count": 2,
+      "removed_by": "S4.4"
+    },
+    {
+      "suite": "limits_end_to_end",
+      "message": "AzScript error: VM backend does not support: bind_context value_compare",
+      "count": 1,
+      "removed_by": "S4.4"
+    },
+    {
+      "suite": "type_safety_end_to_end",
+      "message": "AzScript error: VM backend does not support: bind_context context_abi context_default",
+      "count": 2,
+      "removed_by": "S4.4"
+    },
+    {
+      "suite": "runtime_trace_end_to_end",
+      "message": "AzScript error: VM backend does not support: bind_context check_type return_typed",
+      "count": 1,
+      "removed_by": "S4.1"
+    },
+    {
+      "suite": "language_ops_end_to_end",
+      "message": "AzScript error: VM backend does not support: bind_context buffer_new buffer_operation context_abi context_default",
+      "count": 1,
+      "removed_by": "S4.4"
+    },
+    {
+      "suite": "language_ops_end_to_end",
+      "message": "AzScript error: VM backend does not support: bind_context check_type return_typed",
+      "count": 1,
+      "removed_by": "S4.1"
+    },
+    {
+      "suite": "compact_exec_end_to_end",
+      "message": "AzScript error: Scalar VM does not support generic or object function contexts",
+      "count": 1,
+      "removed_by": "S4.1"
+    },
+    {
+      "suite": "compact_exec_end_to_end",
+      "message": "AzScript error: VM backend does not support: bind_context buffer_new check_object",
+      "count": 2,
+      "removed_by": "S4.4"
+    },
+    {
+      "suite": "compact_exec_end_to_end",
+      "message": "AzScript error: VM backend does not support: bind_context check_object",
+      "count": 11,
+      "removed_by": "S4.4"
+    },
+    {
+      "suite": "compact_exec_end_to_end",
+      "message": "AzScript error: VM backend does not support: bind_context check_type",
+      "count": 26,
+      "removed_by": "S4.1"
+    },
+    {
+      "suite": "compact_exec_end_to_end",
+      "message": "AzScript error: VM backend does not support: bind_context context_abi",
+      "count": 1,
+      "removed_by": "S4.1"
+    },
+    {
+      "suite": "compact_exec_end_to_end",
+      "message": "Scalar VM does not support generic or object function contexts",
+      "count": 6,
+      "removed_by": "S4.1"
+    },
+    {
+      "suite": "compact_exec_end_to_end",
+      "message": "VM backend does not support: bind_context context_abi",
+      "count": 2,
+      "removed_by": "S4.1"
+    },
+    {
+      "suite": "extern_library_end_to_end",
+      "message": "AzScript error: Scalar VM does not support reflection or plugin-loading builtins",
+      "count": 5,
+      "removed_by": "S4.5"
+    }
+  ]
+}

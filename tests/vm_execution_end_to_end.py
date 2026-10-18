@@ -19,6 +19,7 @@ import tempfile
 import time
 
 import compact_exec_end_to_end as wire
+import runtime_differences
 from runtime_differential import (ADAPTER, DEFAULT_STEPS, PROTOCOL, HostFailure, compare_engines, digest, execute,
                                   semantic_checks, write_json)
 from vm_execution_cases import cases
@@ -29,9 +30,14 @@ ROOT = Path(__file__).resolve().parents[1]
 def terminal_shape(observation):
     # Used only to discover the end of a budget sweep in the reference process.
     # Candidate comparisons always include remaining_steps without filtering.
-    result = copy.deepcopy(observation)
-    del result['remaining_steps']
-    return result
+    # Probe callbacks record the budget too, so those copies are dropped here.
+    def strip(value):
+        if isinstance(value, dict):
+            return {key: strip(item) for key, item in value.items() if key != 'remaining_steps'}
+        if isinstance(value, list):
+            return [strip(item) for item in value]
+        return value
+    return strip(copy.deepcopy(observation))
 
 
 def identity(path, revision, library=None):
@@ -92,7 +98,7 @@ def main():
     parser.add_argument('--candidate-revision', default='unspecified')
     parser.add_argument('--candidate-engine', choices=['tree', 'vm'], default='vm')
     parser.add_argument('--candidate-arg', action='append', default=[], help='extra host argument; use = for leading --')
-    parser.add_argument('--stage', choices=['scalar', 'calls', 'objects', 'all'], default='all')
+    parser.add_argument('--stage', choices=['scalar', 'calls', 'objects', 'ownership', 'all'], default='all')
     parser.add_argument('--only', help='select fixture names containing this text during collection')
     parser.add_argument('--work', type=Path, help='new directory, retained on success and failure')
     parser.add_argument('--budget-max', type=int, default=1024, help='positive sweep cap; incomplete sweeps fail')
@@ -117,7 +123,8 @@ def main():
         work.mkdir(parents=True, exist_ok=False)
     report = {'status': 'running', 'reference_only': args.candidate_host is None,
               'independent_candidate_processes': 0, 'independent_reference_processes': 0,
-              'cases': [], 'failures': []}
+              'registered_differences': {}, 'cases': [], 'failures': []}
+    registry = runtime_differences.load()
     manifest = {'protocol': PROTOCOL, 'created_unix': time.time(), 'harness_sha256': digest(__file__),
                 'fixtures_sha256': digest(ROOT / 'tests/vm_execution_cases.py'),
                 'adapter_sha256': digest(ADAPTER), 'cases': []}
@@ -134,8 +141,23 @@ def main():
                              budget, folder / f'{budget}.candidate.json', args.timeout)
         report['independent_candidate_processes'] += 1
         mismatch = compare_engines(reference, candidate, reference_engine, args.candidate_engine)
-        if mismatch:
-            raise AssertionError(json.dumps({'case': record['name'], 'budget': budget, 'differences': mismatch}))
+        entry = registry.lookup(record['name'], args.candidate_engine)
+        if entry is None:
+            if mismatch:
+                raise AssertionError(json.dumps({'case': record['name'], 'budget': budget, 'differences': mismatch}))
+            return
+
+        def rerun(side, extra):
+            host = args.candidate_host if side == 'candidate' else reference_host
+            engine = args.candidate_engine if side == 'candidate' else reference_engine
+            more = args.candidate_arg if side == 'candidate' else []
+            return observed(host, engine, record['binary']['path'], [item['path'] for item in record['inserted']],
+                            record['options'], [*more, *extra], budget, folder / f'{budget}.{side}.validator.json',
+                            args.timeout)
+        if registry.validate(entry, record['name'], reference, candidate, mismatch, rerun,
+                             lambda left, right: compare_engines(left, right, reference_engine, args.candidate_engine)):
+            counts = report['registered_differences']
+            counts[entry['id']] = counts.get(entry['id'], 0) + 1
 
     try:
         if args.reference_work:
@@ -148,6 +170,7 @@ def main():
                                                 'manifest_sha256': digest(reference_root / 'manifest.json')}
             manifest['reference'] = original['reference']
             reference_engine = original['reference'].get('engine', 'tree')
+            reference_host = Path(original['reference']['path'])
             if str(args.candidate_host) == original['reference']['path'] and reference_engine == args.candidate_engine:
                 raise AssertionError('candidate must be a distinct executable or engine')
             for record in original['cases']:
@@ -171,6 +194,7 @@ def main():
             args.reference_host = args.reference_host.resolve()
             manifest['reference'] = identity(args.reference_host, args.reference_revision, args.reference_library)
             manifest['reference']['engine'] = reference_engine = args.reference_engine
+            reference_host = args.reference_host
             manifest['compiler_inputs'] = [{'path': path, 'sha256': digest(path)}
                                           for path in args.classpath.split(os.pathsep) if Path(path).is_file()]
             env = os.environ.copy()
@@ -209,6 +233,10 @@ def main():
                     names = tuple(frame['name'] for frame in full['error']['trace']['frames'])
                     if names != item.trace_names:
                         raise AssertionError((item.name, 'specified error frame order', names, item.trace_names))
+                if item.trace_lines:
+                    lines = tuple(frame['line'] for frame in full['error']['trace']['frames'])
+                    if lines != item.trace_lines:
+                        raise AssertionError((item.name, 'specified error frame lines', lines, item.trace_lines))
                 matched = 0
                 if item.sweep:
                     for budget in range(1, args.budget_max + 1):
@@ -228,6 +256,10 @@ def main():
                 write_json(work / 'report.json', report)
         if not manifest['cases']:
             raise AssertionError('no fixtures selected from reference collection')
+        if args.candidate_host:
+            stale = registry.stale({record['name'] for record in manifest['cases']}, args.candidate_engine)
+            if stale:
+                raise AssertionError(f'stale runtime difference entries (no difference observed): {stale}')
         report['status'] = 'passed' if args.candidate_host else 'reference-collected'
         report['coverage_note'] = 'Independent process observations include every protocol field; static opcode presence is not execution coverage.'
         write_json(work / 'manifest.json', manifest); write_json(work / 'report.json', report)

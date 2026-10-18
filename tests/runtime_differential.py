@@ -144,6 +144,15 @@ class Case:
     sweep: bool = False
     seed: object = None
     recipe: object = None
+    # Optional exact expectations for lifecycle conformance cases. When
+    # partial_events is set, each expected event is compared only on its keys.
+    expected_error_category: str = ''
+    expected_remaining: object = None
+    expected_teardown_events: object = None
+    expected_teardown_error: object = None
+    expected_teardown_heap: object = None
+    expected_stdout_text: object = None
+    partial_events: bool = False
 
 
 def generated(seed, recipe=None):
@@ -237,7 +246,29 @@ def cases(seeds, sources):
     return result
 
 
+def subset_differences(expected, actual, path='$'):
+    """Like differences(), but dictionaries in expected constrain only their own keys."""
+    if isinstance(expected, dict) and isinstance(actual, dict):
+        result = []
+        for key, value in expected.items():
+            if key not in actual:
+                result.append(f'{path}.{key}: missing')
+            else:
+                result.extend(subset_differences(value, actual[key], f'{path}.{key}'))
+        return result
+    if isinstance(expected, list) and isinstance(actual, list):
+        if len(expected) != len(actual):
+            return [f'{path}: length {len(expected)} != {len(actual)}']
+        return [problem for i, (a, b) in enumerate(zip(expected, actual))
+                for problem in subset_differences(a, b, f'{path}[{i}]')]
+    return differences(expected, actual, path)
+
+
 def semantic_checks(case, observation):
+    if case.expected_error_category and (observation['error'] is None or
+                                         observation['error']['category'] != case.expected_error_category):
+        raise AssertionError(f'{case.name}: expected error category {case.expected_error_category!r}, '
+                             f'got {observation["error"]!r}')
     if case.expected_error:
         if observation['error'] is None or observation['error']['message'] != case.expected_error:
             raise AssertionError(f'{case.name}: expected error {case.expected_error!r}, got {observation["error"]!r}')
@@ -248,14 +279,28 @@ def semantic_checks(case, observation):
             raise AssertionError(f'{case.name}: wrong specified return: {observation["return"]!r}')
     if case.expected_globals is not None and differences(case.expected_globals, observation['state']['globals']):
         raise AssertionError(f'{case.name}: wrong specified globals')
-    if case.expected_events is not None and differences(case.expected_events, observation['events']):
+    compare = subset_differences if case.partial_events else differences
+    if case.expected_events is not None and compare(case.expected_events, observation['events']):
         raise AssertionError(f'{case.name}: wrong specified events: {observation["events"]!r}')
+    if case.expected_remaining is not None and observation['remaining_steps'] != case.expected_remaining:
+        raise AssertionError(f'{case.name}: expected remaining_steps {case.expected_remaining}, '
+                             f'got {observation["remaining_steps"]}')
+    if case.expected_stdout_text is not None and bytes.fromhex(observation['stdout_hex']) != case.expected_stdout_text.encode():
+        raise AssertionError(f'{case.name}: wrong specified stdout: {bytes.fromhex(observation["stdout_hex"])!r}')
     if case.expected_stdout is not None and case.expected_stdout != observation['stdout_hex']:
         raise AssertionError(f'{case.name}: wrong specified stdout bytes')
     if case.expected_heap is not None and differences(case.expected_heap, observation['state']['heap']):
         raise AssertionError(f'{case.name}: wrong specified heap: {observation["state"]["heap"]!r}')
-    if observation['teardown']['error'] is not None or observation['teardown']['state']['heap']:
-        raise AssertionError(f'{case.name}: unexpected teardown error or leaked heap')
+    teardown = observation['teardown']
+    if case.expected_teardown_events is not None and compare(case.expected_teardown_events, teardown['events']):
+        raise AssertionError(f'{case.name}: wrong specified teardown events: {teardown["events"]!r}')
+    if case.expected_teardown_error is None:
+        if teardown['error'] is not None:
+            raise AssertionError(f'{case.name}: unexpected teardown error {teardown["error"]!r}')
+    elif teardown['error'] is None or teardown['error']['message'] != case.expected_teardown_error:
+        raise AssertionError(f'{case.name}: expected teardown error {case.expected_teardown_error!r}, got {teardown["error"]!r}')
+    if differences(case.expected_teardown_heap or [], teardown['state']['heap']):
+        raise AssertionError(f'{case.name}: wrong teardown heap {teardown["state"]["heap"]!r}')
 
 
 def self_test():
