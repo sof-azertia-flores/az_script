@@ -1058,6 +1058,32 @@ def probe_cases():
                       partial=True, trace=('f', 'main'),
                       lines=(f_frame['line'], line_of(source, 'int q = f();'))))
 
+    # [AMBIG] cleanup spec 2.2, levels of one frame: the inner block's cleanup
+    # runs ~P(2) at 2 (probe 3), which samples [fail] and clears the record by
+    # returning; the block's catch then raises the first error again
+    # (library.cpp:2131), which publishes [fail] once more, so the root's ~P(1)
+    # samples it too.
+    source = program(
+        PROBE + P_CLASS,
+        'int fail(){',
+        '  int z = 0;',
+        '  return 1 / z;',
+        '}',
+        'int main(){',
+        '  P a(1);',
+        '  {',
+        '    P b(2);',
+        '    int q = fail();',
+        '  }',
+        '  return 0;',
+        '}')
+    fail_frame = frame('fail', line_of(source, 'return 1 / z;'))
+    result.append(own('own-g13k-probe-each-scope-level-sees-republished-error', source,
+                      error='Division by zero', category='runtime_error',
+                      raw_events=[probe(2, 3, published=[fail_frame]), probe(1, 3, published=[fail_frame])],
+                      partial=True, trace=('fail', 'main'),
+                      lines=(fail_frame['line'], line_of(source, 'int q = fail();'))))
+
     # Depth-limit unwinding (ownership 6.5) at decreasing depth (--call-depth
     # 6): rec(k) runs at k+2 and constructs a(k) through <value P> (k+3) and
     # P::P (k+4); in rec(3) P::P's guard fails before its frame exists (P::P at

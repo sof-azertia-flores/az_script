@@ -6,9 +6,12 @@ built into its own observation host and run through the corpus as the
 reference. Its own expectations must fail (the corpus states expected
 behaviour independently of any engine). With --f0-work, the mutant is also
 replayed against a recorded F0 reference collection and must differ there. A
-mutant that passes is a gap in the corpus and fails this tool. A VM mutant is
-judged by the replay alone: the VM does not run every corpus case (registered
-differences), and only the replay applies the difference registry.
+mutant that passes is a gap in the corpus and fails this tool. The VM does not
+run every corpus case (registered differences), so a VM mutant is judged not
+by its expectations but by comparing its own build's tree engine with its VM
+over the current corpus, which applies the difference registry. Its replay is
+reported too; the frozen F0 collection lacks cases added since, so it does not
+decide.
 """
 import argparse
 import json
@@ -26,7 +29,7 @@ CONTROL = ('control', [])
 VM_CONTROL = ('control-vm', [], 'vm')
 # Each mutant is (name, [(path, old, new), ...][, engine]); every old text must
 # occur exactly once, so a mutant whose anchors moved with the code fails
-# loudly. The engine (default tree) runs the checks; 'vm' requires --f0-work.
+# loudly. The engine (default tree) is the one patched; 'vm' requires --f0-work.
 MUTANTS = [
     # The traversal yields the destructor only after the members have ended.
     ('destructor-after-fields', [
@@ -131,10 +134,11 @@ MUTANTS = [
          'try{unwind.failure.rethrow();}catch(...){unwind.failure=pending_error{};unwind.failure.capture_current();}',
          '(void)unwind;'),
     ], 'vm'),
-    ('unwinding-loses-error-position', [
+    # The root scope ends although a region of the frame recovers.
+    ('unwinding-region-ends-root', [
         ('interpreter/vm/execution.cpp',
-         'if(!unwind.republished){try{unwind.failure.rethrow();}catch(...){}}\n                position=unwind.position;',
-         'if(!unwind.republished){try{unwind.failure.rethrow();}catch(...){}}'),
+         'if(unwind.region){unwind.mode=Unwind::Mode::finished;continue;}',
+         ''),
     ], 'vm'),
     ('depth-counts-callers', [
         ('interpreter/core/ownership.cpp',
@@ -193,6 +197,12 @@ def main():
                        '--reference-host', host, '--reference-engine', engine, '--stage', 'ownership',
                        '--work', folder / 'expectations'], cwd=ROOT, env=env, capture_output=True, text=True)
             checks['expectations'] = 'caught' if own.returncode else 'missed'
+        else:
+            live = run([sys.executable, ROOT / 'tests/vm_execution_end_to_end.py', '--classpath', args.classpath,
+                        '--reference-host', host, '--reference-engine', 'tree',
+                        '--candidate-host', host, '--candidate-engine', engine, '--stage', 'ownership',
+                        '--work', folder / 'tree-vs-vm'], cwd=ROOT, env=env, capture_output=True, text=True)
+            checks['tree_vs_vm'] = 'caught' if live.returncode else 'missed'
         if args.f0_work:
             replay = run([sys.executable, ROOT / 'tests/vm_execution_end_to_end.py', '--reference-work', args.f0_work,
                           '--candidate-host', host, '--candidate-engine', engine, '--stage', 'ownership',
@@ -204,7 +214,7 @@ def main():
                 raise SystemExit(f'control runtime fails the corpus: {checks}; see {folder}')
             shutil.rmtree(folder, ignore_errors=True)
             continue
-        if 'missed' in checks.values():
+        if (checks['tree_vs_vm'] == 'missed') if engine == 'vm' else ('missed' in checks.values()):
             survivors.append(name)
             shutil.rmtree(build / 'abdC', ignore_errors=True)
         else:
