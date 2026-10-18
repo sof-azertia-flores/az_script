@@ -36,6 +36,8 @@ public:
     void note_script_error(const ExecutionPosition& position) noexcept override;
     ObjectHost* objects() noexcept override{return this;}
     bool reported_error() const noexcept{return reported_;}
+    bool error_reported() const noexcept override{return reported_;}
+    void restore_error_reported(bool reported) noexcept override{reported_=reported;}
 private:
     std::shared_ptr<script> owner() override;
     std::shared_ptr<ownership::Arena> ownership_arena() override{return boundary_.ownership_arena();}

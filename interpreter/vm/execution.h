@@ -39,6 +39,11 @@ public:
     // Called once per failing script entry, innermost first, including entries
     // which fail admission/argument validation before acquiring a frame.
     virtual void note_script_error(const ExecutionPosition&) noexcept {}
+    // Whether an entry has reported its failure. A destructor continuation
+    // restores it afterwards: a native dispatch would have reported through
+    // its own invocation's callbacks.
+    virtual bool error_reported() const noexcept{return false;}
+    virtual void restore_error_reported(bool) noexcept {}
     // Object frames call externals in their real lexical scope and keep the
     // returned variable itself (mem_get yields a writable heap slot).
     virtual std::shared_ptr<variable> invoke_external_in(const CallTarget& target,std::span<const Value> arguments,
