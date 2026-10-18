@@ -379,15 +379,19 @@ void destroy_registered(address pointer,ownership::Site env) {
     destroyer.finish();
 }
 }
-void delete_object(address pointer,ownership::Site env) {
+bool begin_delete(address pointer) {
     std::lock_guard<std::recursive_mutex> lock(runtime_mutex());
-    if(pointer.value==0)return;
+    if(pointer.value==0)return false;
     if(blocks::is_block_address(pointer))throw std::runtime_error("delete requires a manual object; a literal object ends with its variable");
     auto it=objects.find(pointer);
     if(it==objects.end())throw std::runtime_error("delete requires a live object");
     check_not_destroying(pointer);
     if(!it->second.value.manual)throw std::runtime_error("Cannot delete an automatic object");
-    destroy_registered(pointer,env);
+    return true;
+}
+void delete_object(address pointer,ownership::Site env) {
+    std::lock_guard<std::recursive_mutex> lock(runtime_mutex());
+    if(begin_delete(pointer))destroy_registered(pointer,env);
 }
 void release_owned(address pointer,ownership::Site env) {
     std::lock_guard<std::recursive_mutex> lock(runtime_mutex());

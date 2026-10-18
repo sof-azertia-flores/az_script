@@ -53,6 +53,9 @@ std::vector<object_record> object_records();
 address object_address(address pointer,int offset);
 void register_object(address pointer,std::optional<int> destructor_id,bool manual,ownership::Site env,type_contexts contexts={});
 void delete_object(address pointer,ownership::Site env);
+// delete's checks for a driving engine; true when a lifecycle::HeapDestroyer
+// must then end the object.
+bool begin_delete(address pointer);
 void release_owned(address pointer,ownership::Site env);
 void return_object(address pointer,ownership::Site env);
 // Tree adapters: an environment runs these operations as its own site.

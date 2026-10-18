@@ -122,20 +122,29 @@ struct ScalarExecutor::State {
     // A scope or statement cleanup the dispatch loop drives. Destructors of
     // this script run as continuation frames above the waiting frame; others
     // are dispatched natively.
-    enum class Tail : std::uint8_t {none,scope_closed,statement_done,unwinding};
+    enum class Tail : std::uint8_t {none,scope_closed,statement_done,unwinding,dropped};
     struct Pending {
         Tail tail=Tail::none;
         std::optional<ObjectScope> closing;              // a popped scope being closed
         std::optional<ObjectLocals> locals;
         std::optional<lifecycle::ScopeFinalizer> scope;
         std::optional<lifecycle::TemporariesFinalizer> temporaries;
+        std::optional<lifecycle::ReleaseFinalizer> release;  // drop
+        std::optional<lifecycle::HeapDestroyer> heap;        // delete
+        std::shared_ptr<variable> storage;                   // a drop's storage, cleared at the end
         ownership::Site site;                            // the dispatch caller
         // The continuation frame of a yielded call and its two entries.
         bool waiting=false,reported=false;
         FrameId callee;
         std::size_t region_mark=0;
         trace::open_entry dispatch,function;
-        bool active() const noexcept{return scope||temporaries;}
+        bool active() const noexcept{return scope||temporaries||release||heap;}
+        template<class Step> decltype(auto) step(Step step) {
+            if(scope)return step(*scope);
+            if(temporaries)return step(*temporaries);
+            if(release)return step(*release);
+            return step(*heap);
+        }
     };
     // An error leaving an object frame ends its statement and scope levels
     // one at a time, as the tree's statement and scope levels do: each level
@@ -390,15 +399,12 @@ struct ScalarExecutor::State {
         start_driver(record,pending,*pending.closing,false,tail);return true;
     }
     static void reset_pending(Pending& pending) noexcept {
-        pending.scope.reset();pending.temporaries.reset();pending.locals.reset();pending.closing.reset();
+        pending.scope.reset();pending.temporaries.reset();pending.release.reset();pending.heap.reset();
+        pending.locals.reset();pending.closing.reset();pending.storage.reset();
         pending.site={};pending.tail=Tail::none;
     }
-    static void call_returned(Pending& pending) {
-        if(pending.scope)pending.scope->call_returned();else pending.temporaries->call_returned();
-    }
-    static void call_failed(Pending& pending) {
-        if(pending.scope)pending.scope->call_failed();else pending.temporaries->call_failed();
-    }
+    static void call_returned(Pending& pending) {pending.step([](auto& driver){driver.call_returned();});}
+    static void call_failed(Pending& pending) {pending.step([](auto& driver){driver.call_failed();});}
     enum class Entry {native,pushed,failed};
     // A destructor of this script runs above the waiting frame through the
     // path a native dispatch takes (invoke_bound_function, then
@@ -461,12 +467,16 @@ struct ScalarExecutor::State {
         try {
             for(;;) {
                 position=position_of(frame);
-                const auto* call=pending.scope?pending.scope->advance():pending.temporaries->advance();
+                const lifecycle::DestructorCall* call=pending.step([](auto& driver){return driver.advance();});
                 if(!call) {
                     if(pending.tail==Tail::unwinding) {
-                        try {if(pending.scope)pending.scope->finish();else pending.temporaries->finish();}
+                        try {pending.step([](auto& driver){driver.finish();});}
                         catch(...) {record.cleanup->unwind.failure.capture_current();}
-                    } else if(pending.scope)pending.scope->finish();else pending.temporaries->finish();
+                    } else {
+                        // A drop clears its storage before raising the first error.
+                        if(pending.tail==Tail::dropped)pending.storage->setValue(nullptr);
+                        pending.step([](auto& driver){driver.finish();});
+                    }
                     reset_pending(pending);release_cleanup(record);return false;
                 }
                 const auto entry=enter_continuation(id,*call,position,options);
@@ -1034,8 +1044,13 @@ struct ScalarExecutor::State {
                 }
                 case Opcode::object_delete: {
                     const auto object=pointer(read(frame,instruction.left),"Object pointer requires address type");
-                    runtime(options,[&]{heap::delete_object(object,site(frame));});
-                    value(frame,instruction.result,Value{});break;
+                    value(frame,instruction.result,Value{});
+                    if(heap::begin_delete(object)) {
+                        auto& pending=cleanup_of(objects(frame)).pending;
+                        pending.heap.emplace(object);pending.site=site(frame);pending.tail=Tail::none;
+                        drive(frames.top_id(),position,options);
+                    }
+                    break;
                 }
                 case Opcode::move_out: {
                     const auto slot=std::bit_cast<int>(instruction.operand);
@@ -1046,11 +1061,17 @@ struct ScalarExecutor::State {
                 case Opcode::drop: {
                     // Only object storage can own a value; globals never do.
                     auto& target=registers[frame.registers.begin+instruction.left];
-                    if(target.reference&&target.host) {
-                        auto storage=target.host;
-                        runtime(options,[&]{blocks::drop(storage,site(frame));});
+                    auto storage=target.reference?target.host:nullptr;
+                    value(frame,instruction.result,Value{});
+                    if(storage) {
+                        if(auto block=blocks::begin_drop(storage)) {
+                            auto& pending=cleanup_of(objects(frame)).pending;
+                            pending.release.emplace(std::move(block),true);pending.storage=std::move(storage);
+                            pending.site=site(frame);pending.tail=Tail::dropped;
+                            drive(frames.top_id(),position,options);
+                        }
                     }
-                    value(frame,instruction.result,Value{});break;
+                    break;
                 }
                 case Opcode::check_method_receiver:
                     pointer(read(frame,instruction.left),"Virtual method receiver must be address");break;

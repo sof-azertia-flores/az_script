@@ -632,11 +632,16 @@ std::shared_ptr<variable> move_out(const std::shared_ptr<variable>& storage,S en
     adopt_into(block,env);
     return std::make_shared<variable>(std::move(block));
 }
-void drop(const std::shared_ptr<variable>& storage,S env) {
-    std::lock_guard<std::recursive_mutex> lock(runtime_mutex());
-    if(!storage||!owns(*storage))return;
+std::shared_ptr<slot_block> begin_drop(const std::shared_ptr<variable>& storage) {
+    if(!storage||!owns(*storage))return nullptr;
     auto block=handle_of(*storage);
     detach_owner_scope(*block);
+    return block;
+}
+void drop(const std::shared_ptr<variable>& storage,S env) {
+    std::lock_guard<std::recursive_mutex> lock(runtime_mutex());
+    auto block=begin_drop(storage);
+    if(!block)return;
     pending_error failure;finalize_block(block,env,true,failure);
     storage->setValue(nullptr);
     if(failure)failure.rethrow();

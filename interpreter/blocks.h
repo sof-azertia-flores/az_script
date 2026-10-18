@@ -73,6 +73,10 @@ void adopt_result(const std::shared_ptr<variable>& value,ownership::Site env);
 std::shared_ptr<variable> export_result(const std::shared_ptr<variable>& value,ownership::Site env);
 std::shared_ptr<variable> move_out(const std::shared_ptr<variable>& storage,ownership::Site env);
 void drop(const std::shared_ptr<variable>& storage,ownership::Site env);
+// drop's first step for a driving engine: the block to end, detached from its
+// owner scope (null when storage owns none). The engine ends it (destructors
+// included), then clears storage, then raises the first error.
+std::shared_ptr<slot_block> begin_drop(const std::shared_ptr<variable>& storage);
 void adopt_temporary(const std::shared_ptr<slot_block>& block,function_frame* frame);
 void adopt_temporary(const std::shared_ptr<slot_block>& block,ownership::TempListId list);
 void finalize(const std::shared_ptr<slot_block>& block,ownership::Site env,bool run_destructor);
