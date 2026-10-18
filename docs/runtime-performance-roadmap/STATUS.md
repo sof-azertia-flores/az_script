@@ -17,6 +17,41 @@
 | 执行器解耦 | 已决定，进行中 | 目标是树组件可整体删除：`core/`、`tree/`、`vm/` 组件及边界检查、无树构建门禁、宿主 API 去除树类型（ABI 2）；不做多库拆分。见下文“执行器重叠审查与解耦决策” |
 | R12–R28 | 尚未完成 | R12 在 S3 核心整理之后进行；泛型、buffer、反射、插件在 VM 准备阶段明确拒绝 |
 
+## S2.4：对象模型的中立场所与 VM 自有作用域记录（2026-10-18）
+
+目标是让对象模型（块、heap、语句协议、生命周期驱动）不再依赖树的 `environment`，并让 VM 对象帧不再为函数根和每个词法作用域创建树环境。设计先经独立审阅，按审阅意见调整了顺序（链接在构造时写入、调用者链接对所有作用域无条件记录、临时值列表急切租用、placement 也经引擎回调）。
+
+| 提交 | 内容 |
+| --- | --- |
+| `perf(core): remember the last arena that resolved each id kind` | 注册表按指针保存 arena，每种 ID 记住最近解析它的 arena（原子指针，arena 析构时清除自己）；对象案例树 −1.0%、VM −1.3%～−1.4% |
+| `refactor(runtime): fix a scope's links when it is created` | 环境的 parent、caller、frame、frame_root 成为构造参数与常量成员；`ownership_id()` 不再改写记录 |
+| `refactor(runtime): walk scope links through ownership records` | 作用域记录保存 parent/caller ID；`frame_root`、`transfer_parent`、`depth` 在核心中按 ID 遍历，`export_result`、`return_object`、`mem_free`、`mem_send_up`、`getDepth` 改用它们；环境不再保存 caller 指针；`getDepth` 变异体随之迁移 |
+| `perf(core): leases keep their record's address` | lease 保存记录指针；消除前两步在树标量循环上最多 +2.0% 的开销（构造时的记录写入及更小的环境改变了 malloc 尺寸类） |
+| `refactor(core): the ownership side of a scope is a core type` | `ownership::Scope`：记录 lease、构造时的链接、结束时不运行脚本地放弃剩余所有物；环境持有它，仍先放弃所有物再结束帧临时值；不拥有任何对象的作用域结束时不再取运行时锁 |
+| `refactor(runtime): object-model operations run in a site` | `ownership::Site`（作用域记录与帧临时值记录两个指针）作为块、heap、`statement::finish`、生命周期驱动的上下文；树保留内联环境重载；析构分派不再需要环境：同脚本从调用者场所运行，其他脚本从短期核心 `Scope`（parent 为其基础作用域、caller 为场所）运行；脚本函数从场所进入，检查与准入不变；VM 调度循环的操作数辅助函数保持内联 |
+| `perf(core): keep storage identity checks small` | `SegmentedPool::resolve` 的抛出移到冷路径，使其能内联进 VM 调度循环 |
+| `refactor(vm): object frames keep core scope records` | VM 对象帧的每个作用域是 `ownership::Scope` 加其声明的槽；VM 自己绑定参数与声明，并按 `environment::cleanup` 的方式结束作用域；宿主函数收到共享作用域记录与真实函数帧的视图环境（记录按 lease 计数，最后一个 lease 退休它），视图不写链接、不放弃作用域的对象 |
+
+验证（每步）：Debug 构建 ctest 15/15；F0 回放树与 VM 均一致（scalar 399、calls 426、objects 1,485、ownership 403 案例 / 52,822 次进程）。新增运行时检查：跨 arena 交替解析、销毁的 arena 不再应答、作用域视图共享记录、不放弃对象、作用域结束后保留记录、最后一个 lease 退休记录；去掉 arena 的缓存清除或让视图放弃对象的两个负对照都会失败。整组（`a1070ff..124cb69`）：完整离线普通验证与 sanitizer 验证通过；11 个树所有权变异体全部被语料与 F0 回放捕获；生命周期模糊种子 0–199 树与 VM 均与参考一致（各 17,570 次候选进程）。
+
+callgrind（Release，每调用指令数，参考为 S2.3 `46910fd` 运行时）：
+
+| 案例 | 树 | VM |
+| --- | ---: | ---: |
+| integer_loop | +0.13% | +0.02% |
+| branch_loop | +0.14% | +0.09% |
+| call_0 | −0.05% | +0.37% |
+| call_1 | +0.11% | +0.47% |
+| call_16 | +0.64% | +0.02% |
+| object_fields | −0.66% | −2.33% |
+| object_copy | −0.72% | −2.09% |
+| virtual_monomorphic | +0.20% | −2.05% |
+| virtual_alternating | +0.20% | −1.94% |
+
+树 `call_16` 超出 +0.5%：场所入口的 16 参数循环中 GCC 不再内联 `variable` 的分配。VM 调度循环曾因新代码导致 `load`、`reference`、`release` 和池解析被移出内联（标量最多 +2.6%），现以 `always_inline` 与冷路径抛出固定。相对 `816a67a`（S3）的累计：VM 对象由 +5.3% 收回到 +2.8%～+3.1%，虚调用由 +1.7%～+2.3% 收回到约 −0.3%～+0.2%（两次对照相乘估算）。
+
+仍未完成：VM 帧的函数帧（`function_frame`）仍是树类型，局部量尚未改为池化 `variable` 单元并计入 workspace；析构仍经原生驱动作为嵌套根调用（S2.5–S2.7）；buffer、placement 与 heap 内建仍使用环境（R12、ABI 2）。
+
 ## S2.3 续：heap 析构与作用域清理状态机（2026-10-18）
 
 在块遍历之上，其余递归清理驱动都改为 `core/lifecycle` 中可暂停的状态机，并组合 `BlockFinalizer`：`TemporariesFinalizer`（`finalize_temporaries`）、`StorageFinalizer`（`finalize_storage`）、`ReleaseFinalizer`（`blocks::finalize` 与 `release_owned`）、`HeapDestroyer`（`destroy_registered`）、`ScopeFinalizer`（`environment::cleanup`）。协议与块遍历相同：`advance()` 返回下一个析构调用或完成，调用方应答后继续，`finish()` 在原函数重新抛出首错的位置抛出；子驱动的 `finish()` 在父驱动的 catch 中执行，错误 trace 的每次捕获与重新发布位置不变；每次回调后重新解析记录。块与 heap 对象的析构分派合并为一个函数。树通过 `lifecycle::drive` 原生驱动；没有可释放内容的作用域只关闭并退休局部槽，不创建驱动也不取运行时锁。`core/object_access.h`（不安装）向状态机提供块查找与 heap 登记的阶段操作。
