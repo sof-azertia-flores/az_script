@@ -149,6 +149,17 @@ trace::entry_scope::~entry_scope() noexcept {
     if(state){if(!failed)clear_error_trace();--state->entries;}
 }
 void trace::entry_scope::publish(const std::exception* error) noexcept {publish_trace(error);}
+trace::open_entry trace::open_entry::begin() noexcept {
+    open_entry result;result.state=trace_storage();
+    if(result.state){++result.state->entries;++result.state->sequence;result.state->active={};}
+    return result;
+}
+void trace::open_entry::succeed() noexcept {
+    if(state){clear_error_trace();--state->entries;}
+}
+void trace::open_entry::fail() noexcept {
+    if(state){publish_current();--state->entries;}
+}
 void trace::publish_current() noexcept {
     try {throw;}
     catch(const std::exception& error){publish_trace(&error);}

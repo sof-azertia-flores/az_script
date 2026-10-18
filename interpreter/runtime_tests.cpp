@@ -1,5 +1,6 @@
 #include "library.h"
 #include "blocks.h"
+#include "core/trace.h"
 #include "core/statement.h"
 #include "heepalloc.h"
 #include "internelFunctions.h"
@@ -718,7 +719,47 @@ void buffer_tests() {
     rejects([&]{load_raw(rmodule({rfn(10,VOID_VALUE,bop(5,rc(n(0)),{}))}));},"buffer wire validates operation arity");
     rejects([&]{load_raw(rmodule({rfn(10,VOID_VALUE,bop(7,rc(n(0)),{}))}));},"buffer wire validates operation number");
 }
+void open_entry_tests() {
+    // An open entry reproduces entry_scope exactly: two nested levels where
+    // the inner one fails after noting a frame and the outer one catches,
+    // then a successful level that clears the published trace.
+    const auto frame=[](int id){trace_frame result;result.function_id=id;result.name="f"+std::to_string(id);return result;};
+    const auto observe=[&](bool open) {
+        std::vector<std::string> seen;
+        clear_error_trace();
+        const auto record=[&] {
+            seen.push_back(format_error_trace(last_error_trace())+"|"+std::to_string(last_error_trace().frames.size()));
+        };
+        try {
+            if(open) {
+                auto outer=trace::open_entry::begin();
+                try {
+                    trace::note_frame(frame(1));
+                    auto inner=trace::open_entry::begin();
+                    try {trace::note_frame(frame(2));throw std::runtime_error("inner");}
+                    catch(...){inner.fail();record();throw;}
+                } catch(...){outer.fail();record();throw;}
+            } else {
+                try {
+                    trace::entry_scope outer;outer.run([&] {
+                        trace::note_frame(frame(1));
+                        try {trace::entry_scope inner;inner.run([&]{trace::note_frame(frame(2));throw std::runtime_error("inner");});}
+                        catch(...){record();throw;}
+                    });
+                } catch(...){record();throw;}
+            }
+        } catch(const std::exception& error) {record();seen.push_back(describe_error(error));}
+        if(open){auto ok=trace::open_entry::begin();ok.succeed();}
+        else {trace::entry_scope ok;ok.run([]{});}
+        record();
+        return seen;
+    };
+    const auto scoped=observe(false),opened=observe(true);
+    check(scoped.size()==5&&scoped==opened,"open entries publish and clear as entry scopes do");
+    check(opened[0]!="|0"&&opened[4]=="|0","an open entry's failure publishes and its success clears");
+}
 void runtime_trace_tests() {
+    open_entry_tests();
     // These fixtures use the public exec format and host entry points. Locations
     // name the failing operation and its callers rather than decoder internals.
     auto debug=[](R function,const std::string& name,int line,int column,std::initializer_list<int> locations={}) {

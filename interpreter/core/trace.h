@@ -25,6 +25,16 @@ public:
     }
     static void publish(const std::exception* error) noexcept;
 };
+// An entry that stays open across engine steps, as a VM continuation frame
+// does: begin, succeed and fail have entry_scope's effects. Each opened entry
+// ends exactly once; fail runs inside the handler of the entry's exception.
+class open_entry {
+    detail::trace_state* state=nullptr;
+public:
+    static open_entry begin() noexcept;
+    void succeed() noexcept;
+    void fail() noexcept;
+};
 void discard_active() noexcept;
 // Publishes the exception being handled as a nested entry would; call only
 // inside a catch handler.
