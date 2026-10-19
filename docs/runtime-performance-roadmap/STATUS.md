@@ -16,7 +16,30 @@
 | R11 | R11a 完成：非泛型对象、heap、继承、虚调用由 VM 执行；R11b 的 S2.1–S2.7 完成：本脚本析构在调度循环内作为 continuation 运行 | 见下文“R11a 对象帧”。R11b 按 [ENGINE_SPLIT.md](ENGINE_SPLIT.md) 的 S0–S2 进行（证据工具 → trace/准入提取 → 身份、语句协议、生命周期状态机、VM continuation），未完成前不能标为 R11 完成 |
 | 执行器解耦 | 已决定，进行中 | 目标是树组件可整体删除：`core/`、`tree/`、`vm/` 组件及边界检查、无树构建门禁、宿主 API 去除树类型（ABI 2）；不做多库拆分。见下文“执行器重叠审查与解耦决策” |
 | R12 | 完成（S4.1–S4.5） | 见下文“R12：VM 运行全部语言功能”。全部 19 个端到端套件 1,365/1,365 次调用两引擎逐字节一致，差异登记表无条目；buffer 与默认工厂仍经原生嵌套根运行脚本 |
+| 目录调整 | 完成 | `interpreter/core`、`tree`、`vm` 三个目录，树执行器每个模块一个源文件，`library.cpp` 拆为脚本层源文件；见下文“反射返回对象的修复与执行器目录调整” |
 | R13–R28 | 尚未完成 | 默认引擎切换前还需 S3.4 组件拆分、S5.1/S5.2 |
+
+## 反射返回对象的修复与执行器目录调整（2026-10-19）
+
+用户报告：经 `reflect_invoke_function` 调用、返回自动对象地址的函数（`Item* make(){ Item* value(); return value; }`），其返回对象的析构被遗忘。原因是只调用反射的帧被当作标量帧，反射调用的脚本函数从伪造的宿主作用域运行，返回对象的清理责任没有落到调用者的真实作用域。随后用户要求目录层次更清楚（`interpreter/vm`、`interpreter/tree`、`interpreter/core`），并把仍然过长的 `library.cpp` 按模块拆开，树执行器的每个模块各有自己的源文件。
+
+| 提交 | 内容 |
+| --- | --- |
+| `fix(vm): give reflected calls the caller's real scope` | 调用 `reflect_invoke_function` 的帧与调用堆内建的帧一样按对象帧运行，反射调用的脚本代码从调用者的真实作用域进入，返回对象归该作用域；新增语料 own-a11h（块内与根作用域各反射一次，期望事件 1,−7,2,3,−8，旧 VM 失败）。已于 `187f498` 推送 |
+| `refactor(tree): split library.cpp into tree modules` | 树执行器的构建器、函数入口与存储移入 `interpreter/tree/`；共享的内联辅助函数放在 `tree/internal.h` 的匿名命名空间（内部链接，保持 GCC 内联） |
+| `test: follow the continuation entry's contexts in a VM mutant` | R12 后 `continuation-calls-from-current-scope` 变异体的锚点随调用参数更新 |
+| `refactor(tree): give each tree module its own source` | `tree/expressions.h` 定义全部表达式节点；`values`、`variables`、`control`、`calls`、`objects`、`generics`、`scope` 各一个源文件；`library.h` 只前向声明 `expression` |
+| `refactor: split library.cpp into the script layer's sources` | `script.cpp`、`script_modules.cpp`、`script_link.cpp`、`host_functions.cpp`、`type_contexts.cpp` 与私有头 `script_internal.h`；`library.cpp` 删除 |
+| `test: keep component tests with their components` | 组件测试移到 `core/value_ops_tests.cpp`、`vm/scalar_tests.cpp`、`vm/session_tests.cpp`，ctest 名称不变 |
+| `build: scan the tree engine's sources for raw exception storage` | 目录调整后错误存储检查补上 `interpreter/tree/` |
+
+全部为移动与拆分，行为不变：
+
+- 每个提交单独构建并通过 ctest（15/15）。
+- callgrind（Release，相对拆分前）：树执行器 integer_loop −5.28%、branch_loop −5.51%、call_0 −4.67%、call_1 −4.51%、call_16 −3.79%、object_fields −4.03%、object_copy −4.03%、virtual_monomorphic −4.41%、virtual_alternating −4.66%；VM 各项在 −0.09%～+0.06% 之间。
+- `build_and_test.py --offline` 通过；`--offline --sanitize` 通过（其中 `backend_alignment` 1,365/1,365 次调用两引擎一致）。
+- 生命周期模糊种子 0–199：树与 VM 候选均 200/200 通过，17,570 个预算点。
+- 一致性变异体：17/17 被捕获（树变异体由语料期望判定，VM 变异体由本构建树与 VM 的实时比较判定；冻结 F0 重放作参考，`unwinding-levels-not-republished` 在 F0 重放中未被捕获，与 S2.5–S2.7 时相同）。
 
 ## R12：VM 运行全部语言功能（2026-10-18）
 
