@@ -1,3 +1,13 @@
+# macOS AppleClang 编译修复（2026-10-19）
+
+在 macOS arm64、AppleClang 21.0.0、CMake 4.4.3、Temurin JDK 21.0.5 和 Python 3.14.7 上，复现 `interpreter/core/value_ops.cpp` 中 `strtof_l` / `strtod_l` 未声明导致静态、动态运行库编译失败。Darwin 将声明放在 `<xlocale.h>`，现在仅在 Apple 平台包含该头文件。未改变数值转换、exec 或 JNI 快照契约。
+
+`cmake --build build/native --parallel 8` 已通过，日志为 `build/macos-clang-build.log`。定向 `runtime-tests`、`operations-tests` 均通过；新增共享数值操作回归同时检查 float/double 按 C locale 解析、拒绝逗号小数点，并保持宿主 locale。本机有 `de_DE.UTF-8`，实际覆盖了非 C locale。
+
+完整 `python3 tools/build_and_test.py --offline` 退出码为 0，日志为 `build/macos-clang-validation.log`：330 项 Java 测试、16/16 CTest（含 3,433 项真实 JNI 断言）、全部跨语言套件及 Java/C++ ABD 逐字节比较通过；源码→AST→`compile-json`→ABD 一致性通过。树/VM 的 462 个案例、55,344 对独立进程执行全部一致，最后 19 个端到端套件的 1,365/1,365 次双引擎运行也全部一致，无拒绝。报告分别位于 `build/runtime-perf/vm-execution/report.json` 和 `build/runtime-perf/alignment/report.json`。
+
+本次不涉及内存、析构或清理实现，未运行 sanitizer；未验证 Linux/Windows，未重新导出发行包。
+
 # 可暂停的块析构遍历（2026-10-18）
 
 在 `e8ca1ef` 上迁移 S2.3 的块析构遍历，保留原生脚本调用驱动。定向 16/16 CTest、6,284 项运行时检查通过；新增 161 项生命周期检查包含暂停/重入、原生调用准备分配失败及 65 层遍历零分配。错误成员顺序的负对照被检出。最终树和 VM 分别通过 F0 的 57 案例 / 2,310 次独立进程回放，证据位于 `build/s23/`。

@@ -7,6 +7,10 @@
 #include <cstdlib>
 #include <limits>
 #include <locale.h>
+#if defined(__APPLE__)
+// Darwin declares strtof_l/strtod_l in xlocale.h rather than locale.h.
+#include <xlocale.h>
+#endif
 #include <string_view>
 #include <type_traits>
 

@@ -1,5 +1,6 @@
 #include "core/value_ops.h"
 #include <bit>
+#include <clocale>
 #include <cstdlib>
 #include <iostream>
 #include <limits>
@@ -116,6 +117,20 @@ void type_errors() {
     rejects<std::runtime_error>([&]{binary(Op::add,object,Value("x"));},"Unsupported object value operands for add");
     rejects<std::runtime_error>([&]{to_string(object);},"An object value cannot be converted to a string");
 }
+void conversion_locale() {
+    struct locale_restore {
+        std::string original=std::setlocale(LC_NUMERIC,nullptr);
+        ~locale_restore(){std::setlocale(LC_NUMERIC,original.c_str());}
+    } restore;
+    for(const char* locale:{"de_DE.UTF-8","fr_FR.UTF-8","de_DE","French_France.1252"})
+        if(std::setlocale(LC_NUMERIC,locale))break;
+    const std::string host_locale=std::setlocale(LC_NUMERIC,nullptr);
+    check(convert(Value("1.5"),FLOAT_VALUE).get<float>()==1.5f,"float parsing uses the C numeric locale");
+    check(convert(Value("1.5"),DOUBLE_VALUE).get<double>()==1.5,"double parsing uses the C numeric locale");
+    rejects<std::runtime_error>([]{convert(Value("1,5"),FLOAT_VALUE);},"Cannot convert string \"1,5\" to float: invalid decimal number");
+    rejects<std::runtime_error>([]{convert(Value("1,5"),DOUBLE_VALUE);},"Cannot convert string \"1,5\" to double: invalid decimal number");
+    check(host_locale==std::setlocale(LC_NUMERIC,nullptr),"numeric parsing preserves the host locale");
+}
 void no_scalar_allocations() {
     Value value(0),one(1);allocations=0;counting=true;
     for(int i=0;i<100000;++i) {
@@ -133,7 +148,7 @@ void no_scalar_allocations() {
 }
 int main() {
     try {
-        numeric_operations();address_and_bits();text_and_conversion();type_errors();no_scalar_allocations();
+        numeric_operations();address_and_bits();text_and_conversion();type_errors();conversion_locale();no_scalar_allocations();
         std::cout<<"Value operations checks="<<checks<<'\n';return 0;
     }catch(const std::exception& error) {
         counting=false;std::cerr<<"Value operations failed: "<<error.what()<<'\n';return 1;

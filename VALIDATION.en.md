@@ -1,3 +1,13 @@
+# macOS AppleClang build fix (2026-10-19)
+
+Reproduced undeclared `strtof_l` / `strtod_l` errors in `interpreter/core/value_ops.cpp`, blocking both static and shared runtime builds on macOS arm64 with AppleClang 21.0.0, CMake 4.4.3, Temurin JDK 21.0.5 and Python 3.14.7. Darwin provides these declarations in `<xlocale.h>`, which is now included only on Apple platforms. Numeric conversion, exec and JNI snapshot contracts are unchanged.
+
+`cmake --build build/native --parallel 8` passed; log: `build/macos-clang-build.log`. Targeted `runtime-tests` and `operations-tests` passed. The added shared value-operation regression checks C-locale float/double parsing, rejection of comma decimal separators and preservation of the host locale. This machine provides `de_DE.UTF-8`, so the non-C locale path was exercised.
+
+The complete `python3 tools/build_and_test.py --offline` run exited 0; log: `build/macos-clang-validation.log`. All 330 Java tests, 16/16 CTest tests (including 3,433 real-JVM JNI assertions), cross-language suites and byte-for-byte Java/C++ ABD comparisons passed, including source→AST→`compile-json`→ABD identity checks. All 462 tree/VM cases and 55,344 independent process pairs matched. The final 19 end-to-end suites also matched on 1,365/1,365 dual-engine invocations, with no refusals. Reports: `build/runtime-perf/vm-execution/report.json` and `build/runtime-perf/alignment/report.json`.
+
+No memory, destruction or cleanup implementation changed; sanitizers were not run. Linux/Windows and distribution export were not tested for this fix.
+
 # Merge of main (native stack guard) into the compiler roadmap (2026-10-16)
 
 [中文](VALIDATION.md) | English
