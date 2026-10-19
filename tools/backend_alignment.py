@@ -61,6 +61,10 @@ def collect(records, runner, modes):
     for folder in sorted(records.iterdir()):
         sides = {}
         for side in ('tree', 'vm', *(f'jit{index}' for index in range(len(modes)))):
+            # A run the suite's own timeout interrupted leaves no exit code.
+            if not (folder / f'{side}.rc').exists():
+                sides[side] = {'rc': -1, 'out': b'', 'err': b'(no exit status: the invocation was interrupted)'}
+                continue
             sides[side] = {'rc': int((folder / f'{side}.rc').read_text()),
                            'out': (folder / f'{side}.out').read_bytes(), 'err': (folder / f'{side}.err').read_bytes()}
         arguments = (folder / 'args').read_bytes().split(b'\0')[:-1]

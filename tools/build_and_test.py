@@ -262,10 +262,16 @@ def main():
                   f'{entries} native entries, {sum(item["operations"] for item in sessions)} operations', flush=True)
     # Every end-to-end runner invocation, run again with the VM forced: outputs
     # must be byte-identical or a refusal listed with its exact count.
-    align_work=BUILD/'runtime-perf'/('alignment-sanitize' if args.sanitize else 'alignment')
-    if align_work.exists():shutil.rmtree(align_work)
-    run([sys.executable, ROOT/'tools/backend_alignment.py', '--native', native, '--classpath', classpath, '--work', align_work,
-         '--jit', ','.join(('probe:11', 'eager', 'stress', 'on:2+interp')+(('eager+llvm', 'stress+llvm', 'on:3+llvm') if jit_module.exists() else ()))])
+    # One JIT mode per pass keeps each invocation (tree, VM, JIT) within the
+    # suites' own timeouts. The slower sanitizer build runs stress (every
+    # entry and exit point) and the policy; the replays above cover the rest.
+    align_modes=('stress', 'on:2+interp') if args.sanitize else \
+        ('probe:11', 'eager', 'stress', 'on:2+interp')+(('eager+llvm', 'stress+llvm', 'on:3+llvm') if jit_module.exists() else ())
+    for mode in align_modes:
+        align_work=BUILD/'runtime-perf'/(f'alignment-{mode.replace(":","").replace("+","-")}'+('-sanitize' if args.sanitize else ''))
+        if align_work.exists():shutil.rmtree(align_work)
+        run([sys.executable, ROOT/'tools/backend_alignment.py', '--native', native, '--classpath', classpath, '--work', align_work,
+             '--jit', mode])
     print('Build and all selected tests passed. Use ./azscript --help.')
 
 if __name__=='__main__':
