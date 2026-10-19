@@ -53,6 +53,24 @@ Launchers also accept full CLI commands: `./compile.sh compile-json hello.ast.js
 
 Call bin/azscript-run (Windows bin\azscript-run.exe) directly or through run.sh/run.cmd. An optional second argument is a hex/decimal function ID, for parameterless functions only. Repeated --insert path assembles libraries, then automatically flushes, runs dependency-ordered onload, executes entry, and closes. A rejected library is reported as `AzScript error: Cannot insert <path>: ...`; function IDs in errors are printed in hex, such as `0x0fff0001`. See [hint linking](HINT_LINKING.en.md) for separately compiled ordinary modules that collide in the default namespace.
 
+The runner uses the classic tree interpreter by default. `--backend vm` (short form `--vm`) selects the new register VM, and `--backend tree` (short form `--tree`) selects the tree interpreter explicitly; `--backend=vm` is also accepted. The option may appear anywhere among the arguments, for example:
+
+```sh
+./run.sh examples/hello.exec.abd --vm
+./run.sh examples/multifile/main.exec.abd --insert examples/multifile/point.exec.abd --backend vm
+```
+
+The VM uses a 128 MiB default workspace. A program it cannot run is rejected while it is prepared, with no fallback to the tree interpreter. Unknown values or conflicting options return a nonzero exit status.
+
+By default each top-level entry (onload, the entry function, destructors) may execute at most 1,000,000 steps; exceeding it reports `Script execution step limit exceeded`. `--max-steps N` (or `--max-steps=N`) changes the limit to the positive decimal integer N, and `--max-steps unlimited` removes the practical limit. Both backends honor it:
+
+```sh
+./run.sh long-loop.exec.abd --max-steps 100000000
+./run.sh long-loop.exec.abd --vm --max-steps unlimited
+```
+
+Zero, negative, non-decimal, or out-of-range 64-bit values are rejected. Without a limit, an infinite loop never stops on its own.
+
 ### Runtime errors
 
 Use `./compile.sh -g program.azs` for source locations. Execution errors exit with status 1 and print to stderr:

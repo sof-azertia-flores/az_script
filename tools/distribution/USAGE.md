@@ -55,6 +55,24 @@ AST 包含 extern 优先的名称绑定；普通定义的独立 ID 由 body name
 
 独立程序可直接调用 `bin/azscript-run`（Windows 为 `bin\azscript-run.exe`），也可通过 `run.sh`/`run.cmd` 调用。可选第二个参数是十六进制或十进制函数 ID；该入口只调用无参数函数。可重复使用 `--insert path` 装配库；装配后自动 flush、按依赖顺序执行 onload，再调用入口，最后关闭脚本。库被拒绝时报告 `AzScript error: Cannot insert <path>: ...`；错误中的函数 ID 以十六进制显示，例如 `0x0fff0001`。独立编译的普通模块在默认 namespace 冲突时的处理见 [hint 链接](HINT_LINKING.md)。
 
+运行器默认使用旧的树解释器；`--backend vm`（简写 `--vm`）改用新的寄存器 VM，`--backend tree`（简写 `--tree`）显式选择树解释器，也可写作 `--backend=vm`。该选项可放在任意参数位置，例如：
+
+```sh
+./run.sh examples/hello.exec.abd --vm
+./run.sh examples/multifile/main.exec.abd --insert examples/multifile/point.exec.abd --backend vm
+```
+
+VM 使用 128 MiB 默认工作区；不支持的程序在准备阶段报错，不会回退到树解释器。未知取值或相互冲突的选项返回非零退出码。
+
+默认每次顶层进入（onload、入口函数、析构等）最多执行 1,000,000 步，超出时报告 `Script execution step limit exceeded`。`--max-steps N`（或 `--max-steps=N`）把该上限改为十进制正整数 N，`--max-steps unlimited` 取消实际限制；两种后端均适用：
+
+```sh
+./run.sh long-loop.exec.abd --max-steps 100000000
+./run.sh long-loop.exec.abd --vm --max-steps unlimited
+```
+
+0、负数、非十进制或超出 64 位范围的取值被拒绝。取消限制后，死循环不会自动停止。
+
 ### 运行错误
 
 使用 `./compile.sh -g program.azs` 保留源码位置。执行失败时退出码为 1，标准错误输出为：

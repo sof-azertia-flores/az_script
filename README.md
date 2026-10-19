@@ -47,7 +47,7 @@ cd /path/to/azscript
 ./run.sh examples/hello.exec.abd
 ```
 
-`compile.sh xxx.azs` 默认在源码旁同时生成 `xxx.exec.abd`、`xxx.ast.json` 和 `xxx.exec.json`。指定 `-o out/demo.abd` 或 `-o out/demo.exec.abd` 后，两份 JSON 默认变为 `out/demo.ast.json`、`out/demo.exec.json`，也能通过 `--ast` / `--exec-json` 单独指定。Windows 使用 `compile.cmd` 和 `run.cmd`。
+`compile.sh xxx.azs` 默认在源码旁同时生成 `xxx.exec.abd`、`xxx.ast.json` 和 `xxx.exec.json`。指定 `-o out/demo.abd` 或 `-o out/demo.exec.abd` 后，两份 JSON 默认变为 `out/demo.ast.json`、`out/demo.exec.json`，也能通过 `--ast` / `--exec-json` 单独指定。Windows 使用 `compile.cmd` 和 `run.cmd`。`run.sh` 默认使用树解释器，追加 `--backend vm`（或 `--vm`）改用新的 VM，`--max-steps N` 调整执行步数上限，详见发行包 `docs/USAGE.md`。
 
 发行包包含完整编译器及依赖、由 `jlink` 生成的 Java 运行环境、默认调用 `main`（`0x0fff0000`）的独立解释器、C++ 静态/动态库与公开头文件、可迁移的 `find_package(AzScript CONFIG REQUIRED)` 配置、JNI JAR 和本系统的 `.dylib` / `.so` / `.dll`，以及语法文档、使用文档、数学库和 C++ / Java 接入示例。独立解释器链接共享运行库 `AzScript::RuntimeShared`，因此签名动态库与解释器共用同一份函数注册表；运行 ABD 无需 Java。嵌入式 C++ 宿主可链接 `AzScript::Runtime` 或 `AzScript::RuntimeShared`，只有后者能和 `load_extern_library` 插件共用注册表。
 

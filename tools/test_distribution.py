@@ -347,6 +347,46 @@ def verify(package: Path, java: Optional[Path] = None) -> Dict[str, object]:
                  f"Default main execution produced unexpected output: {result.stdout!r}")
         passed("run wrapper starts main 0x0fff0000")
 
+        for backend in (["--backend", "tree"], ["--tree"], ["--backend", "vm"], ["--vm"], ["--backend=vm"]):
+            result = _run([runner, default_abd, *backend], cwd, environment)
+            _require(result.stdout.splitlines() == ["Hello, AzScript!", "42"],
+                     f"Backend {backend} produced unexpected output: {result.stdout!r}")
+        for backend, message in ((["--backend", "jit"], "Unknown backend: jit"),
+                                 (["--vm", "--tree"], "Conflicting backend options"),
+                                 (["--backend"], "--backend requires tree or vm")):
+            failure = _run([runner, default_abd, *backend], cwd, environment, succeeds=False)
+            _require(message in failure.stderr and not failure.stdout,
+                     f"Backend option {backend} was not rejected: {failure.stderr!r}")
+        passed("run wrapper selects the tree interpreter or VM backend")
+
+        steps_source = cwd / "step limit/long loop.azs"
+        steps_source.parent.mkdir()
+        steps_source.write_text("int main() {\n    int total = 0;\n"
+                                "    for (int i = 0; i < 400000; i++) { total += i % 7; }\n"
+                                "    return total;\n}\n", encoding="utf-8")
+        steps_abd = steps_source.with_name("long loop.exec.abd")
+        _run([compiler, steps_source, "-o", steps_abd], cwd, compiler_environment)
+        for backend in ([], ["--vm"]):
+            failure = _run([runner, steps_abd, *backend], cwd, environment, succeeds=False)
+            _require("Script execution step limit exceeded" in failure.stderr,
+                     f"Default step limit did not stop {backend}: {failure.stderr!r}")
+            for limit in (["--max-steps", "10000000"], ["--max-steps=unlimited"]):
+                result = _run([runner, steps_abd, *backend, *limit], cwd, environment)
+                _require(result.stdout.splitlines() == ["1199997"],
+                         f"Step limit {limit} on {backend} produced: {result.stdout!r}")
+            failure = _run([runner, default_abd, *backend, "--max-steps", "3"], cwd, environment, succeeds=False)
+            _require("Script execution step limit exceeded" in failure.stderr,
+                     f"Lowered step limit did not stop {backend}: {failure.stderr!r}")
+        for limit in ("0", "-5", "0x10", "abc", "99999999999999999999999"):
+            failure = _run([runner, default_abd, "--max-steps", limit], cwd, environment, succeeds=False)
+            _require("Invalid step limit: " + limit in failure.stderr and not failure.stdout,
+                     f"Step limit {limit} was not rejected: {failure.stderr!r}")
+        for options, message in ((["--max-steps"], "--max-steps requires a count"),
+                                 (["--max-steps", "5", "--max-steps", "6"], "Conflicting step limits")):
+            failure = _run([runner, default_abd, *options], cwd, environment, succeeds=False)
+            _require(message in failure.stderr, f"Step options {options} were not rejected: {failure.stderr!r}")
+        passed("run wrapper changes the execution step limit on both backends")
+
         classes_abd = cwd / "class output/classes.exec.abd"
         _run([compiler, package / "examples/classes.azs", "-o", classes_abd], cwd,
              compiler_environment)
@@ -377,6 +417,9 @@ def verify(package: Path, java: Optional[Path] = None) -> Dict[str, object]:
         _require(result.stdout.splitlines() == ["library-load", "main-load", "42", "44",
                                                "point:42", "point:41", "42"],
                  f"Multi-file class library failed: {result.stdout!r}")
+        vm_result = _run([runner, main_abd, "--insert", library_abd, "--backend", "vm"], cwd, environment)
+        _require(vm_result.stdout == result.stdout,
+                 f"Multi-file class library differs on the VM backend: {vm_result.stdout!r}")
         passed("independent class library compilation, hint linking and destructors")
 
         math_output = cwd / "math output"
