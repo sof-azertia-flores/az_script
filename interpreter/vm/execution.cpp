@@ -8,6 +8,7 @@
 #include "../heepalloc.h"
 #include "../core/ids.h"
 #include "../core/trace.h"
+#include "../jit/tier.h"
 #include <algorithm>
 #include <array>
 #include <bit>
@@ -211,10 +212,13 @@ struct ScalarExecutor::State {
     std::unordered_map<int,std::uint32_t> script_functions;
     std::vector<std::vector<std::shared_ptr<const method_table>>> method_tables;
     std::uint32_t free_cell=no_index;
+    // Frames consult the tier only when they reach their bound.
+    jit::Tier tier;
 
-    State(const ExecutableProgram& source,SlotPool& storage,WorkspaceBudget& budget)
+    State(const ExecutableProgram& source,SlotPool& storage,WorkspaceBudget& budget,const jit::Config& tier_config)
         :program(source),pool(storage),workspace(budget),registers(budget),cells(budget,no_index),
-         locals(budget),declared(budget),scopes(budget),frames(budget),layouts(budget),regions(budget) {
+         locals(budget),declared(budget),scopes(budget),frames(budget),layouts(budget),regions(budget),
+         tier(source,tier_config) {
         verify_program(program);
         require_capabilities(program,scalar_capabilities());
         for(const auto& constant:program.constants)require_scalar_value(constant);
@@ -868,7 +872,7 @@ struct ScalarExecutor::State {
             const bool objects=object_function[index];
             validate_arguments(function,count,argument,objects);
             const auto layout=layouts[index];
-            frame.pc=function.begin;frame.end=function.end;
+            frame.pc=function.begin;frame.end=tier.entry_bound(index);
             frame.registers={registers.size(),layout.registers};frame.locals={locals.size(),layout.locals};
             frame.declared={declared.size(),layout.locals};frame.scope_marks={scopes.size(),layout.scope_marks};
             // Preflight every backing array before publishing any live range.
@@ -1012,6 +1016,12 @@ struct ScalarExecutor::State {
         if(value.type_tag()!=ADDRESS_VALUE)throw std::runtime_error(message);
         return value.get<address>();
     }
+    // The frame reached its bound, FrameRecord::end. Only at the function's
+    // real end is that the verified "every function ends" invariant failing.
+    [[gnu::noinline,gnu::cold]] void reach_bound(FrameRecord& frame) {
+        if(frame.pc>=program.functions[frame.function].end)throw std::logic_error("Scalar VM function did not terminate");
+        frame.end=tier.reached(frame.function,frame.pc);
+    }
     Value invoke(std::uint32_t index,std::span<const Value> arguments,std::span<const SlotId> globals,
             std::uint64_t& steps,ExecutionPosition& position,ExecutionOptions options) {
         if(index>=program.functions.size())throw std::out_of_range("Scalar VM function index is outside its program");
@@ -1033,7 +1043,7 @@ struct ScalarExecutor::State {
             if(drive_pending)resume(std::exchange(drive_pending,FrameId{}),position,options);
             while(frames.size()>mark) {
                 auto& frame=frames.top();
-                if(frame.pc>=frame.end)throw std::logic_error("Scalar VM function did not terminate");
+                if(frame.pc>=frame.end)[[unlikely]]reach_bound(frame);
                 const auto& instruction=program.instructions[frame.pc];
                 const auto& source=program.sources[frame.pc];
                 frame.node=source.node;frame.location=source.location;++frame.pc;
@@ -1138,6 +1148,7 @@ struct ScalarExecutor::State {
                 case Opcode::loop_next:
                     if(frame.broken){frame.broken=false;frame.pc=instruction.operand;}
                     else {frame.continued=false;frame.pc=instruction.target;}
+                    if(tier.reports_backedges())[[unlikely]]frame.end=tier.backedge(frame.function,frame.pc,frame.end);
                     break;
                 case Opcode::set_break:
                     if(!frame.loop_depth)throw std::runtime_error("Break outside loop");
@@ -1394,8 +1405,8 @@ struct ScalarExecutor::State {
     }
 };
 
-ScalarExecutor::ScalarExecutor(const ExecutableProgram& program,SlotPool& slots,WorkspaceBudget& workspace)
-    :state_(std::make_unique<State>(program,slots,workspace)) {}
+ScalarExecutor::ScalarExecutor(const ExecutableProgram& program,SlotPool& slots,WorkspaceBudget& workspace,const jit::Config& tier)
+    :state_(std::make_unique<State>(program,slots,workspace,tier)) {}
 ScalarExecutor::~ScalarExecutor()=default;
 Value ScalarExecutor::invoke(std::uint32_t function,std::span<const Value> arguments,
         std::span<const SlotId> globals,std::uint64_t& remaining_steps,ExecutionPosition* position,ExecutionOptions options) {

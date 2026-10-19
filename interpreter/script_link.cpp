@@ -67,7 +67,7 @@ void script::flush() {
         // manifests, so neither tree relocation nor onload can run partially.
         // Keep the prior session until all binding checks and allocations finish:
         // destroy() can still run initialized hooks after a failed insertion.
-        vm_candidate=std::make_shared<vm::Session>(*this,vm_session_->workspace_limit());
+        vm_candidate=std::make_shared<vm::Session>(*this,vm_session_->workspace_limit(),vm_session_->tier());
         vm_candidate->prepare();
         const auto& compiled=vm_candidate->compiled();
         if(compiled.modules.size()!=modules.size())throw std::logic_error("VM module binding differs from validated linkage");

@@ -218,14 +218,21 @@ void differential(const std::string& name,SourceFunction source,std::vector<Valu
     WorkspaceBudget workspace(16*1024*1024);SlotPool pool(workspace);
     std::vector<SlotId> slots;for(const auto& global:globals)slots.push_back(pool.emplace(global));
     ScalarExecutor executor(program,pool,workspace);
+    // Probing tiers move the points where frames consult the JIT tier; they
+    // must not change any observation.
+    ScalarExecutor probe_a(program,pool,workspace,{jit::Mode::probe,1}),probe_b(program,pool,workspace,{jit::Mode::probe,2});
     constexpr std::uint64_t high=100000;
     auto old=old_run(source,globals,arguments,high);
     auto candidate=vm_run(executor,pool,source,slots,globals,arguments,high);same(old,candidate,name,high);
     if(expected)check(old.message.empty()&&equal(old.result,*expected),name+": independent expected result differs");
     const auto consumed=high-old.remaining;
     check(consumed<2000,name+": fixture unexpectedly needs a large budget sweep");
-    for(std::uint64_t budget=0;budget<=consumed+1;++budget)
-        same(old_run(source,globals,arguments,budget),vm_run(executor,pool,source,slots,globals,arguments,budget),name,budget);
+    for(std::uint64_t budget=0;budget<=consumed+1;++budget) {
+        const auto reference=old_run(source,globals,arguments,budget);
+        same(reference,vm_run(executor,pool,source,slots,globals,arguments,budget),name,budget);
+        same(reference,vm_run(probe_a,pool,source,slots,globals,arguments,budget),name+" probe 1",budget);
+        same(reference,vm_run(probe_b,pool,source,slots,globals,arguments,budget),name+" probe 2",budget);
+    }
     for(auto slot:slots)pool.retire(slot);
 }
 Node escaped_local(int value) {

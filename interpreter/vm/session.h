@@ -21,9 +21,11 @@ class Session {
     struct Prepared;
     script& owner_;
     const std::size_t workspace_limit_;
+    const jit::Config tier_;
     std::unique_ptr<Prepared> prepared_;
 public:
-    Session(script& owner,std::size_t workspace_limit);
+    // The JIT tier is configured by AZSCRIPT_JIT when the session is created.
+    Session(script& owner,std::size_t workspace_limit,const jit::Config& tier=jit::environment_config());
     ~Session();
     Session(const Session&)=delete;
     Session& operator=(const Session&)=delete;
@@ -40,6 +42,7 @@ public:
     std::size_t workspace_bytes() const noexcept;
     std::size_t workspace_peak_bytes() const noexcept;
     std::size_t workspace_limit() const noexcept{return workspace_limit_;}
+    const jit::Config& tier() const noexcept{return tier_;}
     void reset() noexcept;
 };
 }

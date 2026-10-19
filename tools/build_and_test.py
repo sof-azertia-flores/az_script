@@ -77,7 +77,7 @@ def check_error_storage():
     # Every runtime source of both engines and the shared core is checked.
     interpreter = ROOT/'interpreter'
     sources = sorted(path for pattern in ('*.h', '*.cpp', 'core/*.h', 'core/*.cpp', 'tree/*.h', 'tree/*.cpp',
-                                          'vm/*.h', 'vm/*.cpp')
+                                          'vm/*.h', 'vm/*.cpp', 'jit/*.h', 'jit/*.cpp')
                      for path in interpreter.glob(pattern) if not path.stem.endswith('_tests'))
     for path in sources:
         text = path.read_text(encoding='utf-8')
@@ -228,11 +228,19 @@ def main():
     run([sys.executable, ROOT/'tests/vm_execution_end_to_end.py', '--classpath', classpath,
          '--reference-host', native/'interpreter/observation-host', '--reference-engine', 'tree',
          '--candidate-host', native/'interpreter/observation-host', '--candidate-engine', 'vm', '--work', vm_work])
+    # The JIT tier's probe moves the points where frames consult the tier;
+    # replayed against the same reference, the VM must observe nothing new.
+    probe_work=BUILD/'runtime-perf'/('vm-execution-probe-sanitize' if args.sanitize else 'vm-execution-probe')
+    if probe_work.exists():shutil.rmtree(probe_work)
+    run([sys.executable, ROOT/'tests/vm_execution_end_to_end.py', '--reference-work', vm_work,
+         '--candidate-host', native/'interpreter/observation-host', '--candidate-engine', 'vm', '--work', probe_work],
+        env={**os.environ, 'AZSCRIPT_JIT': 'probe:7'})
     # Every end-to-end runner invocation, run again with the VM forced: outputs
     # must be byte-identical or a refusal listed with its exact count.
     align_work=BUILD/'runtime-perf'/('alignment-sanitize' if args.sanitize else 'alignment')
     if align_work.exists():shutil.rmtree(align_work)
-    run([sys.executable, ROOT/'tools/backend_alignment.py', '--native', native, '--classpath', classpath, '--work', align_work])
+    run([sys.executable, ROOT/'tools/backend_alignment.py', '--native', native, '--classpath', classpath, '--work', align_work,
+         '--jit', 'probe:11'])
     print('Build and all selected tests passed. Use ./azscript --help.')
 
 if __name__=='__main__':
