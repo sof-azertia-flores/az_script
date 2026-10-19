@@ -8,6 +8,8 @@ namespace azertian::jit {
 Config parse_config(std::string_view text) {
     Config config;
     if(text.empty()||text=="off")return config;
+    if(text=="eager"){config.mode=Mode::eager;return config;}
+    if(text=="stress"){config.mode=Mode::stress;return config;}
     const auto separator=text.find(':');
     const auto mode=text.substr(0,separator);
     if(mode!="probe")throw std::invalid_argument("Unknown AZSCRIPT_JIT mode: "+std::string(text));

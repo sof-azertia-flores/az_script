@@ -221,6 +221,8 @@ void differential(const std::string& name,SourceFunction source,std::vector<Valu
     // Probing tiers move the points where frames consult the JIT tier; they
     // must not change any observation.
     ScalarExecutor probe_a(program,pool,workspace,{jit::Mode::probe,1}),probe_b(program,pool,workspace,{jit::Mode::probe,2});
+    // Native code from the first entry, and one instruction per entry.
+    ScalarExecutor eager(program,pool,workspace,{jit::Mode::eager}),stress(program,pool,workspace,{jit::Mode::stress});
     constexpr std::uint64_t high=100000;
     auto old=old_run(source,globals,arguments,high);
     auto candidate=vm_run(executor,pool,source,slots,globals,arguments,high);same(old,candidate,name,high);
@@ -232,6 +234,8 @@ void differential(const std::string& name,SourceFunction source,std::vector<Valu
         same(reference,vm_run(executor,pool,source,slots,globals,arguments,budget),name,budget);
         same(reference,vm_run(probe_a,pool,source,slots,globals,arguments,budget),name+" probe 1",budget);
         same(reference,vm_run(probe_b,pool,source,slots,globals,arguments,budget),name+" probe 2",budget);
+        same(reference,vm_run(eager,pool,source,slots,globals,arguments,budget),name+" eager",budget);
+        same(reference,vm_run(stress,pool,source,slots,globals,arguments,budget),name+" stress",budget);
     }
     for(auto slot:slots)pool.retire(slot);
 }

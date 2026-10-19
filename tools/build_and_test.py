@@ -228,19 +228,30 @@ def main():
     run([sys.executable, ROOT/'tests/vm_execution_end_to_end.py', '--classpath', classpath,
          '--reference-host', native/'interpreter/observation-host', '--reference-engine', 'tree',
          '--candidate-host', native/'interpreter/observation-host', '--candidate-engine', 'vm', '--work', vm_work])
-    # The JIT tier's probe moves the points where frames consult the tier;
-    # replayed against the same reference, the VM must observe nothing new.
-    probe_work=BUILD/'runtime-perf'/('vm-execution-probe-sanitize' if args.sanitize else 'vm-execution-probe')
-    if probe_work.exists():shutil.rmtree(probe_work)
-    run([sys.executable, ROOT/'tests/vm_execution_end_to_end.py', '--reference-work', vm_work,
-         '--candidate-host', native/'interpreter/observation-host', '--candidate-engine', 'vm', '--work', probe_work],
-        env={**os.environ, 'AZSCRIPT_JIT': 'probe:7'})
+    # The JIT tier, replayed against the same reference: probing moves the
+    # points where frames consult the tier, eager runs eligible functions
+    # natively, stress one instruction per entry. None may change anything.
+    for mode in ('probe:7', 'eager', 'stress'):
+        jit_work=BUILD/'runtime-perf'/(f'vm-execution-jit-{mode.split(":")[0]}'+('-sanitize' if args.sanitize else ''))
+        if jit_work.exists():shutil.rmtree(jit_work)
+        stats=jit_work.with_name(jit_work.name+'.stats')
+        stats.unlink(missing_ok=True)
+        run([sys.executable, ROOT/'tests/vm_execution_end_to_end.py', '--reference-work', vm_work,
+             '--candidate-host', native/'interpreter/observation-host', '--candidate-engine', 'vm', '--work', jit_work],
+            env={**os.environ, 'AZSCRIPT_JIT': mode, 'AZSCRIPT_JIT_STATS': str(stats)})
+        if mode != 'probe:7':
+            # A pass where native code never ran would prove nothing.
+            sessions=[json.loads(line) for line in stats.read_text(encoding='utf-8').splitlines()] if stats.exists() else []
+            entries=sum(item['entries'] for item in sessions)
+            if not entries:raise RuntimeError(f'AZSCRIPT_JIT={mode} ran no native code')
+            print(f'JIT {mode}: {len(sessions)} sessions, {sum(item["compiled"] for item in sessions)} functions compiled, '
+                  f'{entries} native entries, {sum(item["operations"] for item in sessions)} operations', flush=True)
     # Every end-to-end runner invocation, run again with the VM forced: outputs
     # must be byte-identical or a refusal listed with its exact count.
     align_work=BUILD/'runtime-perf'/('alignment-sanitize' if args.sanitize else 'alignment')
     if align_work.exists():shutil.rmtree(align_work)
     run([sys.executable, ROOT/'tools/backend_alignment.py', '--native', native, '--classpath', classpath, '--work', align_work,
-         '--jit', 'probe:11'])
+         '--jit', 'probe:11,eager,stress'])
     print('Build and all selected tests passed. Use ./azscript --help.')
 
 if __name__=='__main__':

@@ -266,6 +266,7 @@ struct ScalarExecutor::State {
             const auto callee=work.back();work.pop_back();
             for(const auto caller:callers[callee])if(!object_function[caller]){object_function[caller]=true;work.push_back(caller);}
         }
+        tier.classify(object_function);
         layouts.reserve(count);
         for(std::uint32_t index=0;index<count;++index) {
             auto layout=frame_layout(program,index);
@@ -1016,11 +1017,113 @@ struct ScalarExecutor::State {
         if(value.type_tag()!=ADDRESS_VALUE)throw std::runtime_error(message);
         return value.get<address>();
     }
+    // A scalar frame as the JIT tier's native code sees it: each operation is
+    // the corresponding instruction's own, with failure reported, not thrown.
+    class TierFrame final:public jit::FrameAccess {
+        State& vm;
+        FrameRecord& frame;
+        std::uint64_t& steps_;
+        std::span<const SlotId> globals;
+        RegisterValue& reg(std::uint32_t index) const noexcept{return vm.registers[frame.registers.begin+index];}
+        std::uint32_t& local(std::uint32_t index) const noexcept{return vm.locals[frame.locals.begin+index];}
+        Value& cell_value(std::uint32_t cell) const noexcept {
+            auto* value=vm.pool.try_resolve(vm.cells[cell].slot);
+            if(!value)std::terminate();
+            return *value;
+        }
+    public:
+        TierFrame(State& state,FrameRecord& record,std::uint64_t& steps,std::span<const SlotId> slots) noexcept
+            :vm(state),frame(record),steps_(steps),globals(slots) {}
+        bool register_value(std::uint32_t index,Value& out) const noexcept override {
+            const auto& value=reg(index);
+            if(value.reference)return false;
+            out=value.value;return true;
+        }
+        void set_register_value(std::uint32_t index,const Value& value) noexcept override {
+            auto& target=reg(index);
+            if(target.reference)std::terminate();
+            target.value=value;
+        }
+        bool local_value(std::uint32_t index,Value& out) const noexcept override {
+            const auto cell=local(index);
+            if(cell==no_index)return false;
+            out=cell_value(cell);return true;
+        }
+        void set_local_value(std::uint32_t index,const Value& value) noexcept override {
+            const auto cell=local(index);
+            if(cell==no_index)std::terminate();
+            cell_value(cell)=value;
+        }
+        std::uint8_t flags() const noexcept override {
+            return static_cast<std::uint8_t>(frame.returned|frame.broken<<1|frame.continued<<2);
+        }
+        void set_flags(std::uint8_t flags) noexcept override {
+            frame.returned=flags&1;frame.broken=flags&2;frame.continued=flags&4;
+        }
+        std::uint64_t steps() const noexcept override{return steps_;}
+        void set_steps(std::uint64_t steps) noexcept override{steps_=steps;}
+        void set_depths(std::uint32_t statement,std::uint32_t loop) noexcept override {
+            frame.statement_depth=statement;frame.loop_depth=loop;
+        }
+        void set_pc(ProgramCounter pc) noexcept override{frame.pc=pc;}
+        bool reference_local(std::uint32_t index,std::uint32_t slot) noexcept override {
+            if(slot>=frame.locals.count||local(slot)==no_index)return false;
+            vm.reference(frame,index,{},local(slot));return true;
+        }
+        bool reference_global(std::uint32_t index,std::uint32_t relative) noexcept override {
+            const auto& function=vm.function_of(frame);
+            if(relative>=function.global_count||function.global_offset>globals.size()||
+               relative>=globals.size()-function.global_offset)return false;
+            vm.reference(frame,index,globals[function.global_offset+relative],no_index);return true;
+        }
+        void copy_reference(std::uint32_t destination,std::uint32_t source) noexcept override {
+            if(!reg(source).reference||reg(source).host)std::terminate();
+            vm.copy(frame,destination,source);
+        }
+        void drop_reference(std::uint32_t index) noexcept override {
+            if(auto& target=reg(index);target.reference)vm.drop_reference(target);
+        }
+        bool read_reference(std::uint32_t index,Value& out) const noexcept override {
+            const auto& source=reg(index);
+            if(!source.reference||source.host)return false;
+            const auto* value=vm.pool.try_resolve(source.cell==no_index?source.global:vm.cells[source.cell].slot);
+            if(!value)return false;
+            out=*value;return true;
+        }
+        bool write_reference(std::uint32_t index,const Value& value) noexcept override {
+            const auto& target=reg(index);
+            if(!target.reference||target.host)return false;
+            auto* storage=vm.pool.try_resolve(target.cell==no_index?target.global:vm.cells[target.cell].slot);
+            if(!storage)return false;
+            *storage=value;return true;
+        }
+        bool declare(std::uint32_t slot,const Value& initial) noexcept override {
+            // Only without growth: an allocation that charges the workspace
+            // (or fails) is the VM's to perform.
+            if((vm.free_cell==no_index&&vm.cells.size()==vm.cells.capacity())||vm.pool.emplace_grows())return false;
+            const auto cell=vm.allocate(initial);
+            if(local(slot)!=no_index)vm.release(local(slot));
+            else vm.declared[frame.declared.begin+frame.declared_count++]=slot;
+            local(slot)=cell;return true;
+        }
+        void enter_scope() noexcept override {
+            if(frame.scope_count==frame.scope_marks.count)std::terminate();
+            vm.scopes[frame.scope_marks.begin+frame.scope_count++]=static_cast<std::uint32_t>(frame.declared_count);
+        }
+        void leave_scope() noexcept override{vm.leave_scope(frame);}
+        bool undeclared(std::uint32_t slot) const noexcept override{return slot<frame.locals.count&&local(slot)==no_index;}
+        void set_result(const Value& value,std::uint32_t location) noexcept override {
+            frame.result=value;frame.return_location=location;
+        }
+    };
     // The frame reached its bound, FrameRecord::end. Only at the function's
     // real end is that the verified "every function ends" invariant failing.
-    [[gnu::noinline,gnu::cold]] void reach_bound(FrameRecord& frame) {
+    // True when native code ran: the frame's pc and bound then changed.
+    [[gnu::noinline,gnu::cold]] bool reach_bound(FrameRecord& frame,std::uint64_t& steps,std::span<const SlotId> globals) {
         if(frame.pc>=program.functions[frame.function].end)throw std::logic_error("Scalar VM function did not terminate");
-        frame.end=tier.reached(frame.function,frame.pc);
+        TierFrame access(*this,frame,steps,globals);
+        const auto reached=tier.reached(frame.function,frame.pc,access);
+        frame.end=reached.bound;return reached.ran;
     }
     Value invoke(std::uint32_t index,std::span<const Value> arguments,std::span<const SlotId> globals,
             std::uint64_t& steps,ExecutionPosition& position,ExecutionOptions options) {
@@ -1043,7 +1146,7 @@ struct ScalarExecutor::State {
             if(drive_pending)resume(std::exchange(drive_pending,FrameId{}),position,options);
             while(frames.size()>mark) {
                 auto& frame=frames.top();
-                if(frame.pc>=frame.end)[[unlikely]]reach_bound(frame);
+                if(frame.pc>=frame.end)[[unlikely]]{if(reach_bound(frame,steps,globals))continue;}
                 const auto& instruction=program.instructions[frame.pc];
                 const auto& source=program.sources[frame.pc];
                 frame.node=source.node;frame.location=source.location;++frame.pc;

@@ -6,7 +6,9 @@
 | --- | --- | --- |
 | J0 | 完成 | 设计、计划与本记录 |
 | J1 | 已提交，完整验证待运行 | 见下文“J1：VM 钩子与探针层” |
-| J2–J8 | 尚未开始 | J2 抽象解释进行中 |
+| J2 | 已提交 | 见下文“J2–J3：分析与可移植原生层” |
+| J3 | 已提交，完整验证待运行 | 全部 463 个端到端案例在 eager 与 stress 下与树执行器一致 |
+| J4–J8 | J5 代码已写，LLVM 构建进行中 | |
 
 ## J0：设计（2026-10-19）
 
@@ -28,3 +30,22 @@
 - `build_and_test.py` 新增两项门禁：以 `AZSCRIPT_JIT=probe:7` 重放树参考的 `vm_execution_end_to_end`；`backend_alignment.py --jit probe:11` 第三次运行每个调用，须与 VM 逐字节一致。
 
 与设计的差异：J1 未加入入口/回边计数器——探针层不需要，计数器随 J6 的 `on` 策略加入。
+
+## J2–J3：分析与可移植原生层（2026-10-19）
+
+| 提交 | 内容 |
+| --- | --- |
+| `feat(jit): analyze scalar functions for the JIT tier` | 对每个已验证标量函数做抽象解释：寄存器为值（及可能标签）、指向局部当前 cell 的引用、global 引用、孤立引用或未知；局部为已声明、未声明或可能已声明（附声明深度）；语句、循环与作用域深度静态已知。结果标签由 `value_ops` 本身对代表值采样得到；不含字符串的寄存器/局部可放入影子字。对象帧、生命周期函数、清理区域、超大函数及汇合点两侧声明深度不同的局部不可编译 |
+| `feat(jit): run scalar functions natively on the portable backend` | MIR 构建器与校验器、退出点、`FrameAccess`（执行器实现，每个结构操作与 VM 指令相同）、`value_ops` 快路径与通用路径、可移植解释后端；`AZSCRIPT_JIT=eager|stress`；统计旁路 `AZSCRIPT_JIT_STATS`；`build_and_test` 以 probe/eager/stress 重放树参考并要求原生代码确实运行，`backend_alignment --jit` 接受多个模式 |
+
+实现中修正的设计假设：声明列表与作用域标记不是静态的——语句可在块内后续声明执行前经 `branch_flow` 离开该块，汇合点两侧声明不同。因此局部改为三态，`declared[]`、作用域标记、`locals[]` 和 cell 的分配/释放由辅助函数在 VM 原指令处直写内存，退出只写回仍有影子的值、标志、步数、语句/循环深度和 pc。影子标签 `absent` 表示该槽以 VM 内存为准。
+
+验证（定向；完整 `build_and_test` 与 sanitizer 待运行）：
+
+- `ctest` 18/18；`jit-analysis-tests` 45 项；`jit-operation-tests` 63,284 项（每个二元/一元运算与转换 × 每对标签 × 边界值，结果位与失败位置均与 `value_ops` 一致）。
+- 标量差分在每个预算扫描点再以 eager 与 stress 执行器对照树：18,856 次原生进入、63,233 个 MIR 操作，0 次标签越界。
+- `vm_execution_end_to_end` 全部阶段（scalar/calls/objects/ownership）：树参考 463 案例 / 55,460 个独立进程；以同一参考重放：
+  - eager：55,460 进程一致；17,323 次函数编译，119,625 次原生进入，4,817,681 个 MIR 操作，111,555 次 STEP、8,070 次 REDO，0 次拒绝，0 次标签越界。
+  - stress：55,460 进程一致；4,169,807 次原生进入（每条指令一次，4,050,182 次 YIELD），9,862,077 个操作，0 次标签越界。
+  - 不可编译原因：对象帧 335,515、生命周期函数 8,153（按会话计）。
+- 解释后端只用于正确性与 sanitizer，不追求速度；性能来自 J5 的 LLVM 后端。

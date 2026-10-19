@@ -11,7 +11,7 @@ endif()
 set(AZSCRIPT_RUNTIME_SOURCES core/trace.cpp core/admission.cpp core/types.cpp core/value_ops.cpp core/storage.cpp core/ownership.cpp core/statement.cpp core/lifecycle.cpp core/exec.cpp core/link.cpp script.cpp script_modules.cpp script_link.cpp host_functions.cpp type_contexts.cpp variable.cpp tree/values.cpp tree/variables.cpp tree/control.cpp tree/calls.cpp tree/objects.cpp tree/generics.cpp tree/builder.cpp tree/function.cpp tree/scope.cpp internelFunctions.cpp heepalloc.cpp blocks.cpp p256.cpp extern_library.cpp runtime_abi.cpp
     vm/frames.cpp vm/program.cpp vm/lowering.cpp vm/loader.cpp
     vm/execution.cpp vm/session.cpp vm/host_bridge.cpp vm/cleanup.cpp
-    jit/config.cpp jit/tier.cpp jit/analysis.cpp)
+    jit/config.cpp jit/tier.cpp jit/analysis.cpp jit/mir_builder.cpp jit/operations.cpp jit/backend.cpp)
 add_library(abdInvoker SHARED ${AZSCRIPT_RUNTIME_SOURCES})
 add_library(abdInvokero STATIC ${AZSCRIPT_RUNTIME_SOURCES})
 foreach(target abdInvoker abdInvokero)
@@ -98,7 +98,8 @@ if(BUILD_TESTING)
             "vm-session-tests:vm/session_tests.cpp"
             "vm-cleanup-tests:vm/cleanup_tests.cpp"
             "jit-tier-tests:jit/tier_tests.cpp"
-            "jit-analysis-tests:jit/analysis_tests.cpp")
+            "jit-analysis-tests:jit/analysis_tests.cpp"
+            "jit-operation-tests:jit/operations_tests.cpp")
         string(REPLACE ":" ";" vm_test_parts "${vm_test}")
         list(GET vm_test_parts 0 vm_test_name)
         list(GET vm_test_parts 1 vm_test_source)

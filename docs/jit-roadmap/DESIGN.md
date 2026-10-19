@@ -30,7 +30,7 @@ uint32_t entry(azjit_frame*);   // 返回 STEP | REDO | DEOPT | REJECT | YIELD
 ```
 
 - **进入：** `exit_map::fill_resume(site)` 从 VM 内存把活跃值装入 `spill[]` 并执行类型守卫；守卫失败返回 `REJECT`，不改变任何状态。原生代码按 `resume` 分支。
-- **退出：** 原生代码把活跃值存入 `spill[]` 后返回；运行时按 `exit_map[site]` 写回寄存器的值与引用字段（含 cell 引用计数）、cell 值、`returned/broken/continued`、`scope_count/declared_count/statement_depth/loop_depth`、`declared[]`、`scope_marks[]`、剩余步数和 pc；原生执行的 `set_return` 还要写 `return_location`。`node/location/position` 不在原生代码中维护，由下一次 VM 序言（`execution.cpp` 调度循环开头）按 pc 重新计算。
+- **退出：** 原生代码把影子值存入 `spill[]` 后返回；运行时写回每个仍有影子的寄存器值与局部 cell 值（影子标签为 `absent` 的槽由 VM 内存负责，不写）、`returned/broken/continued`、静态的 `statement_depth/loop_depth`、剩余步数和 pc。寄存器的引用字段、cell 的分配/保留/释放、`locals[]`、`declared[]`/`declared_count` 与 `scope_marks[]`/`scope_count` 由辅助函数在 VM 原指令处直接写入内存，退出时无需重建；原生执行的 `set_return` 由辅助函数写 `result` 与 `return_location`。`node/location/position` 不在原生代码中维护，由下一次 VM 序言（`execution.cpp` 调度循环开头）按 pc 重新计算。
 - **退出类型：** `STEP`：VM 恰好执行 `exit_pc` 一条指令（调用、宿主调用、`cleanup_*`、`function_end`、慢速声明及任何未实现的操作码），然后在 `pc+1` 重新进入。`REDO/DEOPT/REJECT`：预计出错、预算不足或推测失败，VM 继续解释到下一个恢复点。`YIELD`：压力模式专用。
 - **不缓存运行时可变地址。** 寄存器基址、cell、池页和 global 的 `Value*` 在每次进入时重新取得：宿主重入会让共享 `WorkspaceVector` 重新分配，`HostBridge::refresh_globals` 和 JNI 快照恢复会改变 global 的 SlotId。代码中不嵌入 SlotId、`Value*` 或寄存器基址。
 
@@ -45,16 +45,16 @@ uint32_t entry(azjit_frame*);   // 返回 STEP | REDO | DEOPT | REJECT | YIELD
 
 ## 6. 分析与 MIR
 
-- **控制流与深度。** 基本块取自已验证函数；`verify_flow` 保证每个汇合点的作用域、语句、循环和清理栈相同，因此这些深度在每个 pc 静态已知。
-- **抽象解释覆盖全部操作码**（包括由 VM 执行的指令，以保证恢复点处的状态可靠）：寄存器为 `unset|value|ref_local(i,binding)|ref_global|ref_orphan|top` 加标签集合，局部为 `未声明|已声明(binding)|不确定` 加标签集合。`declare_slot` 和 `scope_leave` 把指向旧绑定的引用标为孤立：寄存器引用会让 cell 在作用域结束后继续存活。
+- **控制流与深度。** 基本块取自已验证函数；`verify_flow` 保证每个汇合点的作用域、语句、循环和清理栈相同，因此这些深度在每个 pc 静态已知。声明列表与作用域标记则不是：语句可以在块内后续声明执行前离开该块（`branch_flow` 跳到块尾），汇合点两侧已声明的局部不同，因此它们留在 VM 内存中。
+- **抽象解释覆盖全部操作码**（包括由 VM 执行的指令，以保证恢复点处的状态可靠）：寄存器为 `value|ref_local(i)|ref_global|ref_orphan|unknown` 加标签集合（`ref_local` 指局部当前的 cell），局部为 `未声明|已声明|可能已声明` 加声明时的作用域深度和标签集合。`declare_slot` 和 `scope_leave` 把指向旧绑定的引用标为孤立：寄存器引用会让 cell 在作用域结束后继续存活，因此释放前把仍可能被引用的局部影子写回 cell。
 - **类型来源。** 常量、形参类型（`ANY` 形参需要守卫）、`value_ops` 的结果规则。宿主调用结果和 global 一律视为 `top` 并加守卫：`HostBridge` 不检查返回标签，global 的标签按 [SEMANTICS.md](../runtime-performance-roadmap/SEMANTICS.md) 的约定是动态的。
 - **状态放置。**
 
 | 类别 | 内容 | 处理 |
 | --- | --- | --- |
 | 影子（SSA） | 标量寄存器值、精确绑定局部的 cell 值、控制标志、剩余步数 | 退出时写回 |
-| 静态 | 各深度、`declared[]`、`scope_marks[]` | 由退出映射常量写入 |
-| 直写 | `locals[]`、cell 的分配/保留/释放 | 在与 VM 完全相同的指令处、按相同次序执行（LIFO 空闲表带代数；`declare_slot` 先分配后释放） |
+| 静态 | 语句与循环深度 | 由退出点常量写入 |
+| 直写 | 寄存器引用字段、`locals[]`、`declared[]`、作用域标记、cell 的分配/保留/释放 | 由辅助函数在与 VM 完全相同的指令处、按相同次序执行（LIFO 空闲表带代数；`declare_slot` 先分配后释放；需要扩容的分配交给 VM） |
 | 常驻内存 | global（两个下标可能指向同一 SlotId）、字符串、孤立引用 | 经 `Value*` 和辅助函数访问 |
 
 - 函数规模和分析时间有上限，超限的函数不编译。

@@ -10,9 +10,9 @@ must be listed with its exact count in tests/runtime_differences.json
 ("suite_refusals"); an unlisted refusal, a changed count or any other
 difference fails. JNI invocations are not dual-run: the JVM loads one engine.
 
-With --jit MODE each invocation also runs a third time on the VM with
-AZSCRIPT_JIT=MODE; that run must be byte-identical to the plain VM run,
-refusals included, since the JIT tier is part of the VM engine.
+With --jit MODE[,MODE...] each invocation also runs on the VM once per mode
+with AZSCRIPT_JIT=MODE; each such run must be byte-identical to the plain VM
+run, refusals included, since the JIT tier is part of the VM engine.
 """
 import argparse
 import json
@@ -33,11 +33,12 @@ SUITES = ('math_library', 'containers_library', 'end_to_end', 'classes_end_to_en
           'compact_exec_end_to_end', 'hint_linking_end_to_end', 'extern_library_end_to_end')
 
 
-def wrapper(real, runner, jit=None):
+def wrapper(real, runner, modes=()):
     # Every run reads /dev/null; the suite receives the tree run's output.
     real = shlex.quote(str(real))
-    third = (f'AZSCRIPT_EXPERIMENTAL_VM_BACKEND=1 AZSCRIPT_JIT={shlex.quote(jit)} {real} "$@" </dev/null '
-             f'>"$d/jit.out" 2>"$d/jit.err"; echo $? > "$d/jit.rc"\n') if jit else ''
+    third = ''.join(f'AZSCRIPT_EXPERIMENTAL_VM_BACKEND=1 AZSCRIPT_JIT={shlex.quote(mode)} {real} "$@" </dev/null '
+                    f'>"$d/jit{index}.out" 2>"$d/jit{index}.err"; echo $? > "$d/jit{index}.rc"\n'
+                    for index, mode in enumerate(modes))
     return f'''#!/bin/bash
 mkdir -p "$AZSCRIPT_ALIGNMENT_RECORDS/{runner}"
 d=$(mktemp -d "$AZSCRIPT_ALIGNMENT_RECORDS/{runner}/run.XXXXXXXX")
@@ -55,11 +56,11 @@ def refusal(stderr):
     return None
 
 
-def collect(records, runner, jit):
+def collect(records, runner, modes):
     result = []
     for folder in sorted(records.iterdir()):
         sides = {}
-        for side in ('tree', 'vm', 'jit') if jit else ('tree', 'vm'):
+        for side in ('tree', 'vm', *(f'jit{index}' for index in range(len(modes)))):
             sides[side] = {'rc': int((folder / f'{side}.rc').read_text()),
                            'out': (folder / f'{side}.out').read_bytes(), 'err': (folder / f'{side}.err').read_bytes()}
         arguments = (folder / 'args').read_bytes().split(b'\0')[:-1]
@@ -75,8 +76,9 @@ def main():
     parser.add_argument('--work', type=Path, required=True, help='new directory for wrappers and records')
     parser.add_argument('--only', help='comma-separated suite names (refusal counts are checked for these only)')
     parser.add_argument('--suggest', type=Path, help='write observed refusals as registry entries for review')
-    parser.add_argument('--jit', help='also run each invocation on the VM with AZSCRIPT_JIT set to this mode')
+    parser.add_argument('--jit', help='also run each invocation on the VM with AZSCRIPT_JIT set to each of these comma-separated modes')
     args = parser.parse_args()
+    modes = args.jit.split(',') if args.jit else []
     native = args.native.resolve()
     work = args.work.resolve()
     work.mkdir(parents=True, exist_ok=False)
@@ -92,7 +94,7 @@ def main():
     runners = ('azscript-run', 'numeric-module-host')
     for name in runners:
         path = interpreter / name
-        path.write_text(wrapper(native / 'interpreter' / name, name, args.jit), encoding='utf-8')
+        path.write_text(wrapper(native / 'interpreter' / name, name, modes), encoding='utf-8')
         path.chmod(0o755)
     signer = native / 'interpreter/azscript-sign-extern'
     run, host = interpreter / 'azscript-run', interpreter / 'numeric-module-host'
@@ -124,13 +126,15 @@ def main():
                                 capture_output=True, text=True)
         (work / f'{name}.out').write_text(result.stdout + '\n--- stderr ---\n' + result.stderr, encoding='utf-8')
         invocations = [item for runner in runners if (suite_records / runner).exists()
-                       for item in collect(suite_records / runner, runner, args.jit)]
+                       for item in collect(suite_records / runner, runner, modes)]
         refused, mismatched = {}, []
         for item in invocations:
             tree, vm = item['tree'], item['vm']
-            if args.jit and (item['jit']['rc'], item['jit']['out'], item['jit']['err']) != (vm['rc'], vm['out'], vm['err']):
-                jit = item['jit']
-                mismatched.append({'runner': item['runner'], 'args': item['args'], 'records': item['folder'],
+            differing = [(mode, item[f'jit{index}']) for index, mode in enumerate(modes)
+                         if (item[f'jit{index}']['rc'], item[f'jit{index}']['out'], item[f'jit{index}']['err']) != (vm['rc'], vm['out'], vm['err'])]
+            if differing:
+                mode, jit = differing[0]
+                mismatched.append({'runner': item['runner'], 'args': item['args'], 'records': item['folder'], 'jit_mode': mode,
                                    'jit_exit': [vm['rc'], jit['rc']], 'stdout_equal': vm['out'] == jit['out'],
                                    'stderr': [vm['err'][:400].decode('utf-8', 'replace'), jit['err'][:400].decode('utf-8', 'replace')]})
                 continue
