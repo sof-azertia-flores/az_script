@@ -1,3 +1,23 @@
+# 编译期优化 C01–C07 最终验收（2026-10-19）
+
+在 `codex/compiler-optimization` 上，从 main `90dc825`（含反射修复 `187f498`）完成保守的类型化 IR、常量/复制传播、死临时值消除、小函数内联、固定标量泛型 identity 专用化和循环外提。O1 显式开启，默认 O0；VM 批量校验最多 64 个预算点，仍精确扣费。默认逻辑深度上限改为 0，正数保留为可选限制，原生栈保护保留；exec/快照仍为 v10。范围与结果见 [实施记录](docs/compiler-optimization/STATUS.md)。
+
+Linux x86_64 上顺序执行普通、sanitizer 全量与发行导出，均退出 0。两套构建各通过 350 项 Java 测试；普通 16/16 CTest 含真实 JNI，sanitizer 15/15 CTest 无 ASan/UBSan 报告。新增 28 个 O0/O1 × tree/VM 案例和 8 项预算终止检查通过；两套全语料各通过 463 案例/1,852 次观察、463 案例/55,460 对预算差分和 1,369 次端到端对齐。跨优化级别仅允许预算余额与预算耗尽位置变化；同一产物的两引擎仍严格比较。源码/AST/ABD 与 Java/C++ 往返通过。
+
+发行包通过 30 项搬迁/消费者检查，包含静态/动态 C++、内置 Java 和真实 JNI；189 个清单文件的大小及 SHA-256 均匹配。日志：`build/compiler-optimization-final-normal.log`、`build/compiler-optimization-final-sanitize.log`、`build/compiler-optimization-distribution.log`。产物：`build/compiler-optimization-distribution`。
+
+随后独立执行 14 负载、7 轮 × 5 批的 Release 对照，共 588 个计时进程。O1 相对同一新运行库的 O0：VM 零参数调用 1.420×、常量循环 1.306×、循环外提 1.094×、标量泛型 identity 3.638×、对象常量初始化 1.087×。其余 9 个标准负载的 O0/O1 ABD 相同，不能宣称有编译收益。新旧运行库同 O0 对照也记录了回退：VM 标准对象/虚调用耗时约增加 2.1%–3.8%，未专用化泛型 identity 约增加 7.3%。1,000 函数编译中位耗时 0.641→0.745 秒（包含 JVM 启动与 I/O），ABD 298,218→166,218 字节。完整表格、体积增长、原始报告及重现命令见实施记录；这是单一规模诊断，不是整体性能评分。
+
+最后改动仅为文档及一处测试注释/输出标签修正，测试行为与生产代码未变；未重复全量验证。
+
+# 编译期优化 C01（2026-10-19）
+
+从 `main` 的 `90dc825`（含反射作用域修复 `187f498`）建立 `codex/compiler-optimization`。新增显式 O0/O1，O1 在语义检查后折叠不产生错误的整数/布尔常量，默认保持 O0；未改原生预算和调用深度实现。计划及结果见 [编译期优化记录](docs/compiler-optimization/STATUS.md)。
+
+Linux x86_64 完整 `python3 tools/build_and_test.py --offline` 退出码为 0；运行前清除三个 Java 选项环境变量。338 项 Java 测试、16/16 CTest（含真实 JNI）、全部跨语言套件及 ABD 往返通过。新增 13 个 O0/O1 案例在 tree/VM 比较完整观察，并验证 8 项预算终止；树/VM 全量差分 463 案例、55,460 对独立进程一致，最后 19 套件的 1,365 次对齐运行无拒绝或差异。日志：`build/compiler-optimization-normal.log`。
+
+测试结束后独立运行 Release 诊断，常量密集循环的 O0/O1 配对加速比为 tree 1.427×、VM 1.355×。现有 10 个标准基准的两级 ABD 逐字节相同，不可推广该收益。1,000 函数的整进程编译耗时中位数为 0.632/0.614 秒，不视为编译加速。详细方法、原始证据路径及局限见上述记录。本批没有修改原生内存或清理实现；未运行 sanitizer，未重新导出发行包。
+
 # macOS AppleClang 编译修复（2026-10-19）
 
 在 macOS arm64、AppleClang 21.0.0、CMake 4.4.3、Temurin JDK 21.0.5 和 Python 3.14.7 上，复现 `interpreter/core/value_ops.cpp` 中 `strtof_l` / `strtod_l` 未声明导致静态、动态运行库编译失败。Darwin 将声明放在 `<xlocale.h>`，现在仅在 Apple 平台包含该头文件。未改变数值转换、exec 或 JNI 快照契约。

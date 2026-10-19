@@ -24,12 +24,12 @@ def main():
             result=subprocess.run(['java','-cp',a.classpath,'azertia.Main',*map(str,args)],capture_output=True,text=True,timeout=20,cwd=ROOT)
             if (result.returncode==0)!=success:raise AssertionError(result.stdout+result.stderr)
             return result
-        def execute(source,expected=None,error=None):
+        def execute(source,expected=None,error=None,options=()):
             nonlocal checks
             src=work/'case.azs';src.write_text(source,encoding='utf-8')
             binary=work/'case.abd'
             compiler('compile',src,'-o',binary)
-            result=subprocess.run([str(a.runner),str(binary)],capture_output=True,text=True,timeout=10)
+            result=subprocess.run([str(a.runner),str(binary),*options],capture_output=True,text=True,timeout=10)
             if error:
                 assert result.returncode!=0 and error in result.stderr,(source,result.stdout,result.stderr)
             else:
@@ -77,7 +77,10 @@ def main():
             execute(zero_division,error='Division by zero')
         execute('int main(){return 2147483647+1;}',error='Integer overflow')
         execute('void main(){while(true){}}',error='step limit')
-        execute('int main(){return main();}',error='depth limit')
+        execute('int main(){return main();}',error='step limit',options=('--max-steps','100','--max-call-depth','0'))
+        execute('int main(){return main();}',error='depth limit',options=('--max-call-depth','8'))
+        for option,value in [('--max-steps','0'),('--max-call-depth','-1'),('--max-stack-bytes','no')]:
+            execute('int main(){return 1;}',error='Invalid execution limit',options=(option,value))
         execute('extern int host():0xfff0009;\nint main(){return host();}',error='Imported script function is missing')
         for source in ['void main(){var x=(1+2;}', 'int main(){return missing;}', 'void main(){@;}',
                        'void main(){var x="unterminated;}', 'int main(){return f(1);}int f(a,b){return a+b;}',

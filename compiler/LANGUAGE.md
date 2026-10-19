@@ -6,6 +6,12 @@
 
 ## 编译与嵌入
 
+`compile` 和 `compile-json` 支持 `-O0`（默认）与 `-O1`，最后一个选项生效。O1 在语义检查后进行整数/布尔常量折叠、保守的标量传播、无错小函数内联、固定标量上下文的泛型内联专用化，以及不会引入提前报错的循环不变量外提。溢出、除零及非法移位仍在运行时报告；浮点、字符串和可观察的对象生命周期不做代数消除。可读 AST 不变；AST 再编译要指定相同优化选项才能得到相同 ABD。debug 编号在优化后生成。
+
+`--no-fold`、`--no-propagation`、`--no-inline`、`--no-loop-motion` 分别关闭对应阶段；传播和内联阶段仍可计算其新产生的常量结果。Java 可使用 `Compiler.Optimization.STANDARD`，或向 `Compiler.compile(ast, diagnostics, debugInfo, Set<Compiler.OptimizationPass>)` 传入精确阶段集合；`CONSTANTS` 仅开启常量折叠，已有重载保持 O0。
+
+优化会减少表达式与预算消耗。`max_steps` 用于阻止失控执行，不保证不同优化级别在同一源码位置耗尽；树与 VM 对同一产物仍按相同工作单位计费。VM 可在无调用、清理和控制转移的标量片段中一次验证最多 64 步的余额，逐步扣费；不足时回到逐点检查。默认 `max_call_depth=0` 关闭逻辑调用层数上限，正数可显式启用；原生栈与 workspace 限制仍生效。O1 可能消除实际调用，因此可选深度上限与资源耗尽位置不构成 O0/O1 等价保证；`getDepth()` 和正常错误的调用栈仍受保护。
+
 在仓库根目录使用统一构建入口：
 
 ```sh

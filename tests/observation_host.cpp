@@ -255,7 +255,7 @@ options parse(int argc, char** argv) {
             result.mutations.emplace_back(std::stoull(value.substr(0, separator)), parse_value(value.substr(separator + 1)));
         } else throw std::invalid_argument("Unknown option: " + flag);
     }
-    if (!result.steps || !result.depth || !result.workspace_bytes) throw std::invalid_argument("Budgets must be positive");
+    if (!result.steps || !result.workspace_bytes) throw std::invalid_argument("Budgets must be positive");
     return result;
 }
 

@@ -72,7 +72,7 @@ Division by zero
 
 每个进程使用一个共享脚本/堆。`AbdInvoker` 串行处理多线程调用，回调可在同一线程再次调用 `invoke`。回调不得等待另一个将调用该运行时的线程，否则会等待自己持有的运行时锁。纯宿主回调重入也有深度上限。多个相互独立的脚本实例尚未实现。
 
-`setMaxSteps(long)`、`setMaxCallDepth(int)` 和 `setMaxStackBytes(long)` 设置执行限制，`getMaxSteps()`、`getMaxCallDepth()` 和 `getMaxStackBytes()` 读取当前值。默认每次顶层调用最多执行 1,000,000 步，同时嵌套的脚本与宿主函数调用最多 256 层；栈预算默认为 `0`，只按调用线程的实际栈限制。限制是进程级设置：立即作用于已加载脚本，也作用于之后加载的脚本（含 `flush` 中的 onload），`destroyScript()` 和 `close()` 不会重置。脚本运行或回调期间修改限制抛出 `IllegalStateException`；步数或深度不为正、栈预算为负时抛出 `IllegalArgumentException`。
+`setMaxSteps(long)`、`setMaxCallDepth(int)` 和 `setMaxStackBytes(long)` 设置执行限制，`getMaxSteps()`、`getMaxCallDepth()` 和 `getMaxStackBytes()` 读取当前值。默认每次顶层调用最多执行 1,000,000 步，逻辑调用深度上限默认为 `0`（关闭），可显式设为正数启用；栈预算默认为 `0`，只按调用线程的实际栈限制。限制是进程级设置：立即作用于已加载脚本，也作用于之后加载的脚本（含 `flush` 中的 onload），`destroyScript()` 和 `close()` 不会重置。脚本运行或回调期间修改限制抛出 `IllegalStateException`；步数不为正、深度或栈预算为负时抛出 `IllegalArgumentException`。 快照不保存这些执行限制；恢复快照仍使用当前宿主配置。
 
 解释器在原生栈上递归执行调用、代码块和表达式。每个线程记录最外层脚本调用开始的位置；执行接近线程栈底，或用量超过 `setMaxStackBytes` 设置的字节数时，抛出 `IllegalStateException`，消息以 `Script native stack limit exceeded` 开头并附带脚本栈跟踪，JVM 不会崩溃，已进入的调用正常展开并完成清理。栈底前保留线程栈大小的四分之一（至少 64 KiB、至多 1 MiB），供异常展开、清理、宿主调用和 JVM 保护页使用。栈较小的线程（例如 `new Thread(null, task, name, 256 * 1024)`）能执行的递归较浅，需要深递归时请为调用线程分配更大的栈。
 

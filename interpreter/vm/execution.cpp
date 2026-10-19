@@ -187,6 +187,8 @@ struct ScalarExecutor::State {
     WorkspaceVector<std::uint32_t> locals,declared,scopes;
     FrameStack frames;
     WorkspaceVector<FrameLayout> layouts;
+    struct BudgetBatch { ProgramCounter end=0; std::uint32_t ticks=0; };
+    WorkspaceVector<BudgetBatch> budget_batches;
     // Compiler cleanup continuations for every active region of every frame,
     // innermost last. Each frame reserves its own bound before publication,
     // so entering a region and recovering from a failure never allocate.
@@ -214,9 +216,25 @@ struct ScalarExecutor::State {
 
     State(const ExecutableProgram& source,SlotPool& storage,WorkspaceBudget& budget)
         :program(source),pool(storage),workspace(budget),registers(budget),cells(budget,no_index),
-         locals(budget),declared(budget),scopes(budget),frames(budget),layouts(budget),regions(budget) {
+         locals(budget),declared(budget),scopes(budget),frames(budget),layouts(budget),budget_batches(budget),regions(budget) {
         verify_program(program);
         require_capabilities(program,scalar_capabilities());
+        budget_batches.append_default(program.instructions.size());
+        // Each segment is straight-line, has no callback/cleanup/control edge,
+        // and contains at most 64 budget points and 256 instructions. Regions
+        // are derived from verified instructions, never trusted input metadata.
+        for (const auto& function : program.functions) {
+            for (auto begin=function.begin; begin<function.end;) {
+                if(program.instructions[begin].opcode!=Opcode::tick){++begin;continue;}
+                auto end=begin;std::uint32_t ticks=0;
+                while(end<function.end && end-begin<256 && batch_opcode(program.instructions[end].opcode)) {
+                    if(program.instructions[end].opcode==Opcode::tick) {if(ticks==64)break;++ticks;}
+                    ++end;
+                }
+                if(ticks>1)budget_batches[begin]={end,ticks};
+                begin=std::max(begin+1,end);
+            }
+        }
         for(const auto& constant:program.constants)require_scalar_value(constant);
         const auto count=program.functions.size();
         object_function.assign(count,false);method_tables.resize(count);
@@ -1012,6 +1030,29 @@ struct ScalarExecutor::State {
         if(value.type_tag()!=ADDRESS_VALUE)throw std::runtime_error(message);
         return value.get<address>();
     }
+    static bool batch_opcode(Opcode opcode) noexcept {
+        switch(opcode) {
+        case Opcode::tick:case Opcode::constant:case Opcode::load_slot:
+        case Opcode::snapshot:case Opcode::copy_reference:case Opcode::truth:
+        case Opcode::unary:case Opcode::binary:case Opcode::convert:return true;
+        default:return false;
+        }
+    }
+    // These operations cannot invoke script code, mutate slots or change the
+    // active frame. Used by both the ordinary and batched dispatch paths.
+    void scalar_instruction(FrameRecord& frame,const Instruction& instruction,std::span<const SlotId> globals) {
+        switch(instruction.opcode) {
+        case Opcode::constant:value(frame,instruction.result,program.constants[instruction.operand]);break;
+        case Opcode::load_slot:load(frame,instruction.result,std::bit_cast<int>(instruction.operand),globals);break;
+        case Opcode::snapshot:value(frame,instruction.result,read(frame,instruction.left));break;
+        case Opcode::copy_reference:copy(frame,instruction.result,instruction.left);break;
+        case Opcode::truth:value(frame,instruction.result,Value(value_ops::truth(read(frame,instruction.left))));break;
+        case Opcode::unary:value(frame,instruction.result,value_ops::unary(static_cast<UnaryOperation>(instruction.operand),read(frame,instruction.left)));break;
+        case Opcode::binary:value(frame,instruction.result,value_ops::binary(static_cast<BinaryOperation>(instruction.operand),read(frame,instruction.left),read(frame,instruction.right)));break;
+        case Opcode::convert:value(frame,instruction.result,value_ops::convert(read(frame,instruction.left),static_cast<int>(instruction.operand)));break;
+        default:throw std::logic_error("Invalid instruction in scalar budget batch");
+        }
+    }
     Value invoke(std::uint32_t index,std::span<const Value> arguments,std::span<const SlotId> globals,
             std::uint64_t& steps,ExecutionPosition& position,ExecutionOptions options) {
         if(index>=program.functions.size())throw std::out_of_range("Scalar VM function index is outside its program");
@@ -1039,11 +1080,27 @@ struct ScalarExecutor::State {
                 frame.node=source.node;frame.location=source.location;++frame.pc;
                 position=position_of(frame);
                 switch(instruction.opcode) {
-                case Opcode::tick:
-                    if(!steps)throw std::runtime_error("Script execution step limit exceeded");
-                    --steps;break;
-                case Opcode::constant:value(frame,instruction.result,program.constants[instruction.operand]);break;
-                case Opcode::load_slot:load(frame,instruction.result,std::bit_cast<int>(instruction.operand),globals);break;
+                case Opcode::tick: {
+                    const auto batch=budget_batches[frame.pc-1];
+                    if(options.batch_budget && frame.object==no_index && batch.ticks>1 && steps>=batch.ticks) {
+                        --steps;
+                        while(frame.pc<batch.end) {
+                            const auto& next=program.instructions[frame.pc];
+                            const auto& next_source=program.sources[frame.pc++];
+                            frame.node=next_source.node;frame.location=next_source.location;
+                            position=position_of(frame);
+                            if(next.opcode==Opcode::tick)--steps;
+                            else scalar_instruction(frame,next,globals);
+                        }
+                    } else {
+                        if(!steps)throw std::runtime_error("Script execution step limit exceeded");
+                        --steps;
+                    }
+                    break;
+                }
+                case Opcode::constant:case Opcode::load_slot:case Opcode::snapshot:
+                case Opcode::copy_reference:case Opcode::truth:case Opcode::unary:
+                case Opcode::binary:case Opcode::convert:scalar_instruction(frame,instruction,globals);break;
                 case Opcode::check_declaration:check_declaration(frame,std::bit_cast<int>(instruction.operand),function_of(frame));break;
                 case Opcode::declare_slot: {
                     const auto slot=instruction.operand;
@@ -1073,7 +1130,6 @@ struct ScalarExecutor::State {
                     local(frame,slot)=cell;break;
                 }
                 case Opcode::store:store(frame,instruction.result,instruction.left,instruction.right,position,options);break;
-                case Opcode::snapshot:value(frame,instruction.result,read(frame,instruction.left));break;
                 case Opcode::materialize: {
                     // Arguments snapshot an owned object before the next one
                     // can change it; scalars are plain value copies.
@@ -1084,11 +1140,6 @@ struct ScalarExecutor::State {
                         break;
                     value(frame,instruction.result,value_access::read(*result));break;
                 }
-                case Opcode::copy_reference:copy(frame,instruction.result,instruction.left);break;
-                case Opcode::truth:value(frame,instruction.result,Value(value_ops::truth(read(frame,instruction.left))));break;
-                case Opcode::unary:value(frame,instruction.result,value_ops::unary(static_cast<UnaryOperation>(instruction.operand),read(frame,instruction.left)));break;
-                case Opcode::binary:value(frame,instruction.result,value_ops::binary(static_cast<BinaryOperation>(instruction.operand),read(frame,instruction.left),read(frame,instruction.right)));break;
-                case Opcode::convert:value(frame,instruction.result,value_ops::convert(read(frame,instruction.left),static_cast<int>(instruction.operand)));break;
                 case Opcode::jump:frame.pc=instruction.target;break;
                 case Opcode::branch_false:if(!value_ops::truth(read(frame,instruction.left)))frame.pc=instruction.target;break;
                 case Opcode::branch_flow:if(frame.returned||frame.broken||frame.continued)frame.pc=instruction.target;break;
