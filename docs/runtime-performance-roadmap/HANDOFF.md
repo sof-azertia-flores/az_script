@@ -30,7 +30,7 @@
 - [STATUS.md](STATUS.md)：已有验证证据；注意区分已冻结的 R05 与当前未验证的 VM 接入。
 - [SEMANTICS.md](SEMANTICS.md)：54 个 wire opcode 与可观察行为清单。
 - [STORAGE_DESIGN.md](STORAGE_DESIGN.md)：稳定存储身份、工作区和帧设计。
-- [JIT.md](JIT.md)：基于 VM 执行器的 LLVM ORC 优化层设计（后续独立项目）。
+- [../jit-roadmap/](../jit-roadmap/DESIGN.md)：基于 VM 执行器的 LLVM ORC 优化层（后续独立项目）的设计、计划与进度。
 - 仓库根目录 `AGENTS.md`、`README.md` 及 `docs/EXEC_FORMAT.md`。
 
 用户优先级是循环、对象和函数调用速度，接受较大架构调整。外部 exec v10、JNI snapshot v10 暂时保持。迁移期树执行器仍是默认，新 VM 必须明确拒绝未实现功能，不能静默回退。

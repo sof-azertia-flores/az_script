@@ -1,6 +1,6 @@
-# JIT：基于 VM 执行器的优化层
+# JIT 设计：基于 VM 执行器的优化层
 
-日期：2026-10-19（UTC）。适用分支：`claude/runtime-performance-handoff-5mdt6h`。本文件是 [PLAN.md](PLAN.md) 第 1 节所列“JIT/AOT 后续独立项目”中 JIT 部分的设计，建立在 R12 之后的寄存器 VM 上，不改变 [ENGINE_SPLIT.md](ENGINE_SPLIT.md) 中“VM 证明可靠后删除树执行器”的目标。实际进度和验证证据记录在 [STATUS.md](STATUS.md)。
+日期：2026-10-19（UTC）。适用分支：`claude/runtime-performance-handoff-5mdt6h`。本文件是运行时性能计划（[../runtime-performance-roadmap/PLAN.md](../runtime-performance-roadmap/PLAN.md) 第 1 节）所列“JIT/AOT 后续独立项目”中 JIT 部分的设计，建立在 R12 之后的寄存器 VM 上，不改变 [ENGINE_SPLIT.md](../runtime-performance-roadmap/ENGINE_SPLIT.md) 中“VM 证明可靠后删除树执行器”的目标。分阶段实施与验收见 [PLAN.md](PLAN.md)，实际进度和验证证据见 [STATUS.md](STATUS.md)。
 
 **用户确认的选择：** 目标 x86-64 与 AArch64；用 LLVM ORC 生成代码；第一个里程碑即包含优化层（类型特化、守卫、去优化）；JIT 编为单独的共享模块；LLVM 以固定版本源码构建；本环境用 qemu 验证 AArch64。
 
@@ -41,13 +41,13 @@ uint32_t entry(azjit_frame*);   // 返回 STEP | REDO | DEOPT | REJECT | YIELD
 - 恢复点：函数开头、每个可能 `STEP` 之后的 `pc+1`、循环头、清理区域的 `finalizer/after`；压力模式下每个 pc 都是恢复点。
 - 计数器、代码、分析结果和溢出缓冲区都不计入 `WorkspaceBudget`，也不改变任何 `WorkspaceVector` 的增长方式。`tier_dispatch` 检查原生栈余量，不足时解释执行（结果相同）。
 
-关闭 JIT 时，VM 的 callgrind 每调用指令数增幅不得超过 0.5%（[ENGINE_SPLIT.md](ENGINE_SPLIT.md) 第 6 节的纯重构门槛）。
+关闭 JIT 时，VM 的 callgrind 每调用指令数增幅不得超过 0.5%（[ENGINE_SPLIT.md](../runtime-performance-roadmap/ENGINE_SPLIT.md) 第 6 节的纯重构门槛）。
 
 ## 6. 分析与 MIR
 
 - **控制流与深度。** 基本块取自已验证函数；`verify_flow` 保证每个汇合点的作用域、语句、循环和清理栈相同，因此这些深度在每个 pc 静态已知。
 - **抽象解释覆盖全部操作码**（包括由 VM 执行的指令，以保证恢复点处的状态可靠）：寄存器为 `unset|value|ref_local(i,binding)|ref_global|ref_orphan|top` 加标签集合，局部为 `未声明|已声明(binding)|不确定` 加标签集合。`declare_slot` 和 `scope_leave` 把指向旧绑定的引用标为孤立：寄存器引用会让 cell 在作用域结束后继续存活。
-- **类型来源。** 常量、形参类型（`ANY` 形参需要守卫）、`value_ops` 的结果规则。宿主调用结果和 global 一律视为 `top` 并加守卫：`HostBridge` 不检查返回标签，global 的标签按 [SEMANTICS.md](SEMANTICS.md) 的约定是动态的。
+- **类型来源。** 常量、形参类型（`ANY` 形参需要守卫）、`value_ops` 的结果规则。宿主调用结果和 global 一律视为 `top` 并加守卫：`HostBridge` 不检查返回标签，global 的标签按 [SEMANTICS.md](../runtime-performance-roadmap/SEMANTICS.md) 的约定是动态的。
 - **状态放置。**
 
 | 类别 | 内容 | 处理 |
@@ -87,32 +87,6 @@ uint32_t entry(azjit_frame*);   // 返回 STEP | REDO | DEOPT | REJECT | YIELD
 - **平台。** Linux/macOS 的 x86-64 与 AArch64；Windows 暂只用 VM。macOS arm64 经 JITLink 使用 `MAP_JIT`，宿主进程需要 `allow-jit` 授权；被拒绝时只用 VM。
 - **AArch64 模拟验证。** `cmake/toolchains/aarch64-linux-gnu.cmake` 交叉构建 LLVM、运行库、测试宿主和模块；`build_and_test.py --target aarch64-linux-gnu --emulator qemu-aarch64` 经 `qemu-aarch64 -L <sysroot>` 包装运行 ctest 和原生宿主套件，Java 编译器仍在主机 JVM 上运行。arm64 上的 JNI 需要真实的 arm64 JVM，记为模拟未覆盖。
 
-## 11. 阶段
-
-| 阶段 | 内容 |
-| --- | --- |
-| J0 | 本文件 |
-| J1 | 只加 VM 钩子：层槽、`end` 阈值、计数器、冷路径 `tier_dispatch`；仅供测试的探针层按固定种子扰动阈值，不含原生代码 |
-| J2 | 分析与可编译性报告（`azscript-run --jit-report`）、`jit-analysis-tests` |
-| J3 | MIR、构建器与校验器、退出映射、辅助函数、解释后端、通用降级（装箱影子值，全部经辅助函数）；eager/stress 模式；统计旁路；工具中的 `vm+jit` 引擎 |
-| J4 | 优化：拆箱、溢出内建函数、块预算、虚引用、静态簿记、守卫与去优化重编 |
-| J5 | 固定版本 LLVM 构建、模块、装载器、ORC 宿主、MIR→IR（x86-64） |
-| J6 | `on` 策略、OSR、去优化重编调优、代码量上限 |
-| J7 | AArch64：交叉工具链、qemu 运行、AArch64 代码生成修正 |
-| J8 | 对象帧；之后是快速调用、内联与虚调用缓存 |
-
-## 12. 验证
-
-- 每个阶段顺序运行 `python3 tools/build_and_test.py --offline` 和 `--offline --sanitize`；sanitizer 构建使用完全插桩的解释后端。
-- **多方一致。** tree / vm / vm+interp / vm+llvm，各自在 `eager` 与 `stress` 模式下，在 `tools/backend_alignment.py`、`tests/vm_execution_end_to_end.py`（全部阶段、完整预算扫描）和 `tests/lifecycle_fuzz.py`（种子 0–199）中逐字节一致；JNI 回归在 `AZSCRIPT_JIT=eager` 下运行。
-- **Workspace。** 经统计旁路比较 vm 与 vm+jit 的 used/peak；在池页和 cell 向量增长边界附近扫描 `--workspace-bytes`。
-- **操作网格。** 每个运算 × 标签组合，以及 INT_MIN/−1、%−1、±0、NaN、FLT_MAX 附近、移位 −1/31/32、地址回绕，解释后端与 LLVM 后端均与 `value_ops` 对照。
-- **升层扫描。** 阈值取 1..K 时观察结果相同。
-- **JIT 变异体。** 在 `tools/conformance_mutants.py` 中以引擎 `jit` 登记，由同一构建的 vm 与 vm+jit 实时比较判定：tick 少扣一次、未加守卫的 `srem`、以 f32 计算、有序 `ne`、未加守卫的 global 标签、跨 `STEP` 缓存 global、覆盖寄存器而不释放、释放次序错误、先释放后分配、缺少引用物化、过期的 `end`，全部必须被捕获。
-- **防止空转。** 门槛运行使用 `require` 模式；eager 模式下按语料检查原生执行指令占比的下限。
-- **性能。** `AZSCRIPT_JIT=off` 时 VM 的 callgrind 增幅不超过 0.5%；新增 `vm-jit` 宿主逐项报告；`tools/bench_runtime.py` 计入编译时间测量墙钟；目标（integer_loop/branch_loop 至少为 VM 的 10 倍）及实际结果记入 STATUS。
-- **AArch64。** 在 qemu 下运行 ctest、一致性子集和操作网格。
-
-## 13. 风险
+## 11. 风险
 
 LLVM 构建时间与模块体积（每个目标约 20–40 MB）；编译延迟（O2 下每函数 10–100 ms，因此阈值较高，eager 只用于测试）；LLVM 内存不足或致命错误会终止进程；可执行内存被拒绝（SELinux execmem、加固的 macOS）时只用 VM；valgrind 需要 `--smc-check=all`；qemu 较慢；VM 仍在演进，钩子限定在四处。
