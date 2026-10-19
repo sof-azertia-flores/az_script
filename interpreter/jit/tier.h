@@ -33,6 +33,7 @@ class Tier {
     std::uint64_t random_;
     bool backedges_=false;
     Counters counters_;
+    Activation scratch_;              // shared: native runs never nest
     std::map<std::string,std::uint64_t> refusals_;
     vm::ProgramCounter random_bound(vm::ProgramCounter low,vm::ProgramCounter end) noexcept;
     Compiled& compiled(std::uint32_t function);

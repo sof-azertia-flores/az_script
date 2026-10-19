@@ -29,7 +29,7 @@ public:
     bool compiled() const noexcept{return entry_;}
     std::string error;
     // Run from the resume point at pc with the same protocol as interpret().
-    Outcome run(const Function& function,vm::ProgramCounter pc,FrameAccess& frame,Counters& counters) const;
+    Outcome run(const Function& function,vm::ProgramCounter pc,FrameAccess& frame,Counters& counters,Activation& activation) const;
 };
 }
 #endif

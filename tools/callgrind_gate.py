@@ -2,7 +2,8 @@
 """Deterministic per-call instruction counts of the runtime benchmark cases.
 
 Runs the reference and candidate benchmark hosts (runtime-benchmark-host for
-the tree engine, runtime-benchmark-vm-host for the VM) under callgrind with two
+the tree engine, runtime-benchmark-vm-host for the VM, the same host with
+AZSCRIPT_JIT=eager+llvm for the jit engine) under callgrind with two
 call counts and reports the steady per-call instruction difference, which
 excludes load, flush and process start. Used for the pure-refactor gates
 (callgrind +0.5% per case) of docs/runtime-performance-roadmap/ENGINE_SPLIT.md.
@@ -19,14 +20,18 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'benchmarks/runtime'))
 import generate  # noqa: E402
 
-HOSTS = {'tree': 'runtime-benchmark-host', 'vm': 'runtime-benchmark-vm-host'}
+HOSTS = {'tree': 'runtime-benchmark-host', 'vm': 'runtime-benchmark-vm-host', 'jit': 'runtime-benchmark-vm-host'}
+# The jit engine is the VM with its LLVM tier compiling every eligible function.
+ENVIRONMENTS = {'jit': {'AZSCRIPT_JIT': 'eager+llvm'}}
 
 
-def instructions(host, binary, size, expected, calls, output):
-    command = ['valgrind', '--tool=callgrind', f'--callgrind-out-file={output}', str(host),
+def instructions(host, binary, size, expected, calls, output, env=None):
+    # Native code is generated once and never rewritten, but freed code
+    # pages may be reused: check every non-file mapping for new code.
+    command = ['valgrind', '--tool=callgrind', '--smc-check=all-non-file', f'--callgrind-out-file={output}', str(host),
                '--script', str(binary), '--argument', str(size), '--expected', str(expected),
                '--calls', str(calls), '--batches', '1', '--warmup', '0']
-    result = subprocess.run(command, capture_output=True, text=True)
+    result = subprocess.run(command, capture_output=True, text=True, env=env)
     if result.returncode:
         raise RuntimeError(f'{host} failed: {result.stderr[-2000:]}')
     match = re.search(r'^summary:\s+(\d+)', Path(output).read_text(), re.MULTILINE)
@@ -62,8 +67,9 @@ def main():
             for side, root in (('reference', args.reference), ('candidate', args.candidate)):
                 host = root / 'interpreter' / HOSTS[engine]
                 expected = generate.expected(case, args.size)
-                one = instructions(host, binary, args.size, expected, 1, work / f'{case}.{engine}.{side}.1.out')
-                six = instructions(host, binary, args.size, expected, 6, work / f'{case}.{engine}.{side}.6.out')
+                engine_env = {**env, **ENVIRONMENTS.get(engine, {})}
+                one = instructions(host, binary, args.size, expected, 1, work / f'{case}.{engine}.{side}.1.out', engine_env)
+                six = instructions(host, binary, args.size, expected, 6, work / f'{case}.{engine}.{side}.6.out', engine_env)
                 counts[side] = (six - one) / 5
             change = 100.0 * (counts['candidate'] - counts['reference']) / counts['reference']
             entry = {'case': case, 'engine': engine, 'reference_per_call': counts['reference'],

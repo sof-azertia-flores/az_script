@@ -4,6 +4,7 @@
 #include "analysis.h"
 #include <cstdint>
 #include <optional>
+#include <string>
 #include <vector>
 
 namespace azertian::jit {
@@ -74,8 +75,12 @@ struct Function {
     // The analysis state at each resume point, for filling shadows.
     std::vector<bool> fill_registers,fill_locals;   // per slot: may hold a shadow at all
     // Per pc-begin with a resume point, the tags each slot's shadow may have
-    // on entry (0 when the slot enters absent); empty elsewhere.
+    // on entry (0 when the slot enters absent: dead registers, unbound or
+    // memory-resident locals); empty elsewhere.
     std::vector<std::vector<TagSet>> resume_tags;
+    // Per exit site, the shadowable registers live at its pc: the VM reads no
+    // other register before writing it, so only these are written back.
+    std::vector<std::vector<std::uint32_t>> exit_registers;
     const FunctionAnalysis* analysis=nullptr;
     vm::ProgramCounter begin=0,end=0;
     std::uint32_t slots() const noexcept{return registers+locals+temporaries;}
@@ -84,5 +89,7 @@ struct Function {
 Function build(const vm::ExecutableProgram& program,const FunctionAnalysis& analysis,bool stress);
 // The program's checks of a built function (targets, slots, exit sites).
 void verify(const Function& function);
+// A readable listing for AZSCRIPT_JIT_DUMP.
+std::string dump(const Function& function);
 }
 #endif

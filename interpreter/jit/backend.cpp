@@ -15,9 +15,10 @@ bool fill(const Function& function,vm::ProgramCounter pc,const FrameAccess& fram
         if(tags[slot]&tag_bit(shadow.tag))return true;
         ++counters.violations;return false;
     };
+    // Only the slots present on entry are loaded; the rest start absent.
     activation.slots.assign(function.slots(),Shadow{});
     for(std::uint32_t reg=0;reg<function.registers;++reg) {
-        if(!function.fill_registers[reg]||state.registers[reg].kind!=RegisterState::Kind::value)continue;
+        if(!tags[reg])continue;
         Value value;
         if(!frame.register_value(reg,value))return false;
         const auto shadow=shadow_of(value);
@@ -25,7 +26,7 @@ bool fill(const Function& function,vm::ProgramCounter pc,const FrameAccess& fram
         activation.slots[reg]=*shadow;
     }
     for(std::uint32_t local=0;local<function.locals;++local) {
-        if(!function.fill_locals[local]||!state.locals[local].bound())continue;
+        if(!tags[function.registers+local])continue;
         Value value;
         if(!frame.local_value(local,value)) {
             if(state.locals[local].declared==LocalState::Declared::yes)return false;
@@ -38,8 +39,9 @@ bool fill(const Function& function,vm::ProgramCounter pc,const FrameAccess& fram
     activation.flags=frame.flags();activation.steps=frame.steps();
     return true;
 }
-void write_back(const Function& function,const ExitSite& exit,FrameAccess& frame,const Activation& activation) noexcept {
-    for(std::uint32_t reg=0;reg<function.registers;++reg)
+void write_back(const Function& function,std::uint32_t site,FrameAccess& frame,const Activation& activation) noexcept {
+    const auto& exit=function.exits[site];
+    for(const auto reg:function.exit_registers[site])
         if(activation.slots[reg].tag!=absent)frame.set_register_value(reg,value_of(activation.slots[reg]));
     for(std::uint32_t local=0;local<function.locals;++local)
         if(const auto& shadow=activation.slots[function.registers+local];shadow.tag!=absent)
@@ -47,16 +49,15 @@ void write_back(const Function& function,const ExitSite& exit,FrameAccess& frame
     frame.set_flags(activation.flags);frame.set_steps(activation.steps);
     frame.set_depths(exit.statement_depth,exit.loop_depth);frame.set_pc(exit.pc);
 }
-Outcome interpret(const Function& function,vm::ProgramCounter pc,FrameAccess& frame,Counters& counters) {
+Outcome interpret(const Function& function,vm::ProgramCounter pc,FrameAccess& frame,Counters& counters,Activation& activation) {
     const auto resume=function.resume.at(pc-function.begin);
     if(resume==none)throw std::logic_error("JIT entry at a pc without a resume point");
-    Activation activation;
     if(!fill(function,pc,frame,activation,counters)){++counters.rejects;return {};}
     ++counters.entries;
     auto& V=activation.slots;
     const auto leave=[&](std::uint32_t site) {
         const auto& exit=function.exits[site];
-        write_back(function,exit,frame,activation);
+        write_back(function,site,frame,activation);
         switch(exit.kind) {
         case ExitKind::step:++counters.steps;break;
         case ExitKind::redo:++counters.redos;break;

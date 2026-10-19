@@ -243,11 +243,12 @@ public:
             refuse(std::string("unsupported opcode ")+vm::opcode_name(instruction.opcode));
         }
     }
-    // Registers whose own value an instruction reads. A reference register's
-    // value field is never read: reads go through the referenced storage.
+    // Registers whose own value an instruction may read. A reference
+    // register's value field is never read: reads go through the referenced
+    // storage. An unknown register may be either.
     void reads(const vm::Instruction& instruction,const FrameState& state,std::vector<bool>& live) const {
         const auto value_read=[&](vm::Register reg) {
-            if(reg!=no_index&&state.registers[reg].kind==Kind::value)live[reg]=true;
+            if(reg!=no_index&&(state.registers[reg].kind==Kind::value||state.registers[reg].kind==Kind::unknown))live[reg]=true;
         };
         switch(instruction.opcode) {
         case Opcode::declare_slot:value_read(instruction.left);break;

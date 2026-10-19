@@ -116,10 +116,9 @@ NativeCode::NativeCode(const azjit_backend& backend,const Function& function):ba
     if(!entry_)error="the JIT module produced no entry";
 }
 NativeCode::~NativeCode() {if(code_)backend_->release(code_);}
-Outcome NativeCode::run(const Function& function,vm::ProgramCounter pc,FrameAccess& frame,Counters& counters) const {
+Outcome NativeCode::run(const Function& function,vm::ProgramCounter pc,FrameAccess& frame,Counters& counters,Activation& activation) const {
     const auto id=resume_ids_.at(pc-function.begin);
     if(id==none)throw std::logic_error("JIT entry at a pc without a resume point");
-    Activation activation;
     if(!fill(function,pc,frame,activation,counters)){++counters.rejects;return {};}
     ++counters.entries;
     azjit_state state{reinterpret_cast<azjit_shadow*>(activation.slots.data()),&frame,activation.steps,id,activation.flags};
@@ -127,7 +126,7 @@ Outcome NativeCode::run(const Function& function,vm::ProgramCounter pc,FrameAcce
     if(site>=function.exits.size())std::terminate();
     activation.steps=state.steps;activation.flags=state.flags;
     const auto& exit=function.exits[site];
-    write_back(function,exit,frame,activation);
+    write_back(function,site,frame,activation);
     switch(exit.kind) {
     case ExitKind::step:++counters.steps;break;
     case ExitKind::redo:++counters.redos;break;

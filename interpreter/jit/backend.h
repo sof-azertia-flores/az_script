@@ -24,9 +24,9 @@ struct Activation {
 // False (nothing changed) when memory disagrees, e.g. a host gave a register
 // a value without a shadow: the VM then continues.
 bool fill(const Function& function,vm::ProgramCounter pc,const FrameAccess& frame,Activation& activation,Counters& counters);
-// Write every present shadow, the flags, the step count, the static depths
-// and the pc of an exit back into VM memory.
-void write_back(const Function& function,const ExitSite& exit,FrameAccess& frame,const Activation& activation) noexcept;
+// Write the exit's live register shadows and every present local shadow,
+// the flags, the step count, the static depths and the pc back into VM memory.
+void write_back(const Function& function,std::uint32_t site,FrameAccess& frame,const Activation& activation) noexcept;
 
 struct Outcome {
     bool entered=false;
@@ -35,6 +35,7 @@ struct Outcome {
 };
 // The portable backend: interpret the function's MIR from the resume point at
 // pc until an exit, with the same entry and exit protocol as native code.
-Outcome interpret(const Function& function,vm::ProgramCounter pc,FrameAccess& frame,Counters& counters);
+// activation is scratch storage, reused: native runs never nest.
+Outcome interpret(const Function& function,vm::ProgramCounter pc,FrameAccess& frame,Counters& counters,Activation& activation);
 }
 #endif

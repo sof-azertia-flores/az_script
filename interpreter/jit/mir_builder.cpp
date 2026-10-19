@@ -19,6 +19,9 @@ class Builder {
     // How each instruction lowered in the sizing pass: only a STEP exit, or
     // an exit that is always taken.
     std::vector<bool> stepped,failing;
+    // Block leaders of the current pass, and instructions folded into the
+    // instruction before them.
+    std::vector<bool> leader,fused;
     std::vector<std::uint32_t> pc_op;
     struct Patch {std::uint32_t op;vm::ProgramCounter pc;bool other=false;};
     std::vector<Patch> patches;
@@ -80,6 +83,25 @@ class Builder {
     void branch(Op branch,vm::ProgramCounter target) {
         const auto index=emit(branch);patches.push_back({index,target});
     }
+    // A declared local loaded and at once snapshotted into the same register
+    // (the left operand of every binary operation): the VM retains the cell
+    // and releases it again while the binding still holds it, so only the
+    // register's old content is released, at the load, and the register
+    // ends as a copy of the local's value.
+    bool fold_snapshot(vm::ProgramCounter pc,int slot) {
+        const auto& instruction=program.instructions[pc];
+        const auto& frame=state(pc);
+        const auto next=pc+1;
+        if(slot<0||static_cast<std::size_t>(slot)>=frame.locals.size()||next>=analysis.end||
+           !analysis.reached[at(next)]||leader[at(next)])return false;
+        const auto& following=program.instructions[next];
+        if((following.opcode!=Opcode::snapshot&&following.opcode!=Opcode::materialize)||
+           following.left!=instruction.result||following.result!=instruction.result)return false;
+        const auto& local=frame.locals[slot];
+        if(local.declared!=LocalState::Declared::yes||!analysis.shadow_locals[slot]||!writable(instruction.result))return false;
+        write(pc,instruction.result,R+static_cast<std::uint32_t>(slot),local.tags);
+        fused[at(next)]=true;return true;
+    }
     void lower(vm::ProgramCounter pc) {
         const auto& instruction=program.instructions[pc];
         const auto& frame=state(pc);
@@ -95,6 +117,7 @@ class Builder {
         }
         case Opcode::load_slot: {
             const int slot=std::bit_cast<int>(instruction.operand);
+            if(fold_snapshot(pc,slot))return;
             Op reference=op(slot<0?Code::reference_global:Code::reference_local,pc);
             reference.a=instruction.result;reference.exit=site(pc,ExitKind::redo);
             if(slot<0) {
@@ -229,7 +252,7 @@ class Builder {
     void pass() {
         const auto size=analysis.end-analysis.begin;
         // Block leaders: entry, branch targets, after transfers and exits.
-        std::vector<bool> leader(size,stress);
+        leader.assign(size,stress);fused.assign(size,false);
         leader[0]=true;
         for(auto pc=analysis.begin;pc<analysis.end;++pc) {
             if(!analysis.reached[at(pc)])continue;
@@ -259,7 +282,7 @@ class Builder {
                 if(ticks) {auto check=op(Code::steps,pc);check.imm=ticks;check.exit=site(pc,ExitKind::redo);emit(check);}
             }
             pc_op[at(pc)]=stress?start-1:start;
-            lower(pc);
+            if(!fused[at(pc)])lower(pc);
         }
     }
 public:
@@ -291,10 +314,17 @@ public:
             const auto& frame=analysis.states[index];
             std::vector<TagSet> tags(out.slots(),0);
             for(std::uint32_t reg=0;reg<R;++reg)
-                if(out.fill_registers[reg]&&frame.registers[reg].kind==Kind::value)tags[reg]=frame.registers[reg].tags;
+                if(out.fill_registers[reg]&&frame.registers[reg].kind==Kind::value&&analysis.live[index][reg])
+                    tags[reg]=frame.registers[reg].tags;
             for(std::uint32_t local=0;local<L;++local)
                 if(out.fill_locals[local]&&frame.locals[local].bound())tags[R+local]=frame.locals[local].tags;
             out.resume_tags[index]=std::move(tags);
+        }
+        for(const auto& exit:out.exits) {
+            std::vector<std::uint32_t> live;
+            for(std::uint32_t reg=0;reg<R;++reg)
+                if(out.fill_registers[reg]&&analysis.live[at(exit.pc)][reg])live.push_back(reg);
+            out.exit_registers.push_back(std::move(live));
         }
         verify(out);
         return std::move(out);
@@ -319,5 +349,29 @@ void verify(const Function& function) {
         if(op.pc<function.begin||op.pc>=function.end)throw std::logic_error("JIT op outside its function");
     }
     for(const auto resume:function.resume)if(resume!=none&&resume>=function.ops.size())throw std::logic_error("JIT resume point without code");
+}
+}
+namespace azertian::jit {
+std::string dump(const Function& function) {
+    static constexpr const char* names[]{"steps","tick","set","copy","forget","read_reference","write_reference","truth",
+        "branch_false","jump","branch_flags","set_flags","loop_next","binary","unary","convert","reference_local",
+        "reference_global","copy_reference","drop_reference","declare","flush_local","enter_scope","leave_scope",
+        "check_undeclared","set_result","exit"};
+    std::string text="function "+std::to_string(function.function)+": "+std::to_string(function.registers)+" registers, "+
+        std::to_string(function.locals)+" locals\n";
+    const auto operand=[](std::uint32_t value){return value==none?std::string("-"):std::to_string(value);};
+    for(std::size_t index=0;index<function.ops.size();++index) {
+        const auto& op=function.ops[index];
+        if(function.resume[op.pc-function.begin]==index)text+="resume "+std::to_string(op.pc)+":\n";
+        text+="  "+std::to_string(index)+" pc"+std::to_string(op.pc)+" "+names[static_cast<int>(op.code)]+
+            " a="+operand(op.a)+" b="+operand(op.b)+" c="+operand(op.c)+" tag="+std::to_string(op.tag)+
+            " imm="+std::to_string(op.imm)+" target="+operand(op.target);
+        if(op.exit!=none) {
+            const auto& exit=function.exits[op.exit];
+            text+=std::string(" exit=")+(exit.kind==ExitKind::step?"step":exit.kind==ExitKind::redo?"redo":"yield")+"@"+std::to_string(exit.pc);
+        }
+        text+="\n";
+    }
+    return text;
 }
 }

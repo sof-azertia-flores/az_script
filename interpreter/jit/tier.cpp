@@ -70,6 +70,8 @@ Tier::Compiled& Tier::compiled(std::uint32_t function) {
         } else {
             entry.code=build(program_,entry.analysis,config_.mode==Mode::stress);
             entry.code.analysis=&entry.analysis;
+            if(const char* path=std::getenv("AZSCRIPT_JIT_DUMP");path&&*path)
+                if(FILE* file=std::fopen(path,"a")){const auto text=dump(entry.code);std::fputs(text.c_str(),file);std::fclose(file);}
             if(native_) {
                 entry.native=std::make_unique<NativeCode>(*native_,entry.code);
                 if(!entry.native->compiled())throw std::runtime_error("native code: "+entry.native->error);
@@ -104,7 +106,7 @@ Tier::Reached Tier::reached(std::uint32_t function,vm::ProgramCounter pc,FrameAc
     auto& entry=compiled(function);
     if(entry.state!=Compiled::State::ready)return {end};
     if(entry.code.resume[pc-entry.analysis.begin]==none)return {after(entry,pc)};
-    const auto outcome=entry.native?entry.native->run(entry.code,pc,frame,counters_):interpret(entry.code,pc,frame,counters_);
+    const auto outcome=entry.native?entry.native->run(entry.code,pc,frame,counters_,scratch_):interpret(entry.code,pc,frame,counters_,scratch_);
     if(!outcome.entered)return {after(entry,pc)};
     switch(outcome.kind) {
     case ExitKind::yield:return {outcome.pc,true};
