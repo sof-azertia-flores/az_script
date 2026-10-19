@@ -245,7 +245,13 @@ struct ScalarExecutor::State {
                     if(target.kind==TargetKind::script) {
                         if(target.entry_kind)objects=true;
                         callers[target.function].push_back(index);
-                    } else if(ids::is_heap_builtin(target.function_id))objects=true;
+                    } else if(ids::is_heap_builtin(target.function_id)||
+                            target.function_id==ids::id(ids::builtin::reflect_invoke_function)) {
+                        // Heap builtins act on the caller's scope; reflection calls
+                        // script code from it, whose returned objects then belong
+                        // to that scope.
+                        objects=true;
+                    }
                 }
             }
             object_function[index]=objects;
