@@ -226,8 +226,11 @@ void differential(const std::string& name,SourceFunction source,std::vector<Valu
     ScalarExecutor eager(program,pool,workspace,{jit::Mode::eager}),stress(program,pool,workspace,{jit::Mode::stress});
     // The same with the LLVM module's code, when this build has the module.
     std::string missing;const bool llvm=jit::native_backend(missing)!=nullptr;
-    std::optional<ScalarExecutor> native,native_stress;
+    std::optional<ScalarExecutor> native,native_stress,policy_native;
+    // The policy compiles after two events, so budget sweeps cross tier-up.
+    ScalarExecutor policy(program,pool,workspace,jit::Config{jit::Mode::on,1,jit::Backend::interp,2});
     if(llvm) {
+        policy_native.emplace(program,pool,workspace,jit::Config{jit::Mode::on,1,jit::Backend::llvm,3});
         native.emplace(program,pool,workspace,jit::Config{jit::Mode::eager,1,jit::Backend::llvm});
         native_stress.emplace(program,pool,workspace,jit::Config{jit::Mode::stress,1,jit::Backend::llvm});
     }
@@ -244,7 +247,9 @@ void differential(const std::string& name,SourceFunction source,std::vector<Valu
         same(reference,vm_run(probe_b,pool,source,slots,globals,arguments,budget),name+" probe 2",budget);
         same(reference,vm_run(eager,pool,source,slots,globals,arguments,budget),name+" eager",budget);
         same(reference,vm_run(stress,pool,source,slots,globals,arguments,budget),name+" stress",budget);
+        same(reference,vm_run(policy,pool,source,slots,globals,arguments,budget),name+" on:2",budget);
         if(llvm) {
+            same(reference,vm_run(*policy_native,pool,source,slots,globals,arguments,budget),name+" on:3+llvm",budget);
             same(reference,vm_run(*native,pool,source,slots,globals,arguments,budget),name+" llvm",budget);
             same(reference,vm_run(*native_stress,pool,source,slots,globals,arguments,budget),name+" llvm stress",budget);
         }

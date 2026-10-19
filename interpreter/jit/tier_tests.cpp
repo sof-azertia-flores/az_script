@@ -23,11 +23,17 @@ void configuration() {
     check(parse_config("probe")==Config{Mode::probe,1},"probe uses seed 1");
     check(parse_config("probe:42")==Config{Mode::probe,42},"probe seed");
     check(parse_config("eager").mode==Mode::eager&&parse_config("stress").mode==Mode::stress,"compiling modes");
-    rejects([]{parse_config("on");},"Unknown AZSCRIPT_JIT mode: on");
+    rejects([]{parse_config("fast");},"Unknown AZSCRIPT_JIT mode: fast");
     rejects([]{parse_config("eager:1");},"Unknown AZSCRIPT_JIT mode");
     check(parse_config("eager+llvm")==Config{Mode::eager,1,Backend::llvm},"a mode names its backend");
     check(parse_config("stress+interp")==Config{Mode::stress,1,Backend::interp},"the portable backend by name");
     rejects([]{parse_config("probe+llvm");},"Unknown AZSCRIPT_JIT mode");
+    check(parse_config("on")==Config{Mode::on,1,Backend::llvm,1000},"the policy compiles with llvm after 1000 events");
+    check(parse_config("on:5+interp")==Config{Mode::on,1,Backend::interp,5},"a threshold and the portable backend");
+    check(parse_config("require:2")==Config{Mode::require,1,Backend::llvm,2},"require");
+    rejects([]{parse_config("on:0");},"Invalid AZSCRIPT_JIT threshold");
+    rejects([]{parse_config("on:x");},"Invalid AZSCRIPT_JIT threshold");
+    rejects([]{parse_config("stress:3");},"Unknown AZSCRIPT_JIT mode");
     rejects([]{parse_config("eager+");},"Unknown AZSCRIPT_JIT mode: eager+");
     rejects([]{parse_config("eager+gcc");},"Unknown AZSCRIPT_JIT_BACKEND: gcc");
     rejects([]{parse_config("probe:");},"Invalid AZSCRIPT_JIT seed");

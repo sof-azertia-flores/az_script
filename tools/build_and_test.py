@@ -236,10 +236,12 @@ def main():
     # natively, stress one instruction per entry. None may change anything.
     # The LLVM backend runs too when this build has the JIT module.
     jit_module=native/'interpreter'/('libazscript-jit.dylib' if sys.platform=='darwin' else 'libazscript-jit.so')
-    jit_modes=('probe:7', 'eager', 'stress')+(('eager+llvm', 'stress+llvm') if jit_module.exists() else ())
+    # on:N compiles after N entries or back-edges, so replays cross tier-up
+    # and on-stack replacement at loop heads.
+    jit_modes=('probe:7', 'eager', 'stress', 'on:2+interp')+(('eager+llvm', 'stress+llvm', 'on:3+llvm') if jit_module.exists() else ())
     print(f'JIT module: {jit_module if jit_module.exists() else "not built"}', flush=True)
     for mode in jit_modes:
-        jit_work=BUILD/'runtime-perf'/(f'vm-execution-jit-{mode.split(":")[0].replace("+","-")}'+('-sanitize' if args.sanitize else ''))
+        jit_work=BUILD/'runtime-perf'/(f'vm-execution-jit-{mode.replace(":","").replace("+","-")}'+('-sanitize' if args.sanitize else ''))
         if jit_work.exists():shutil.rmtree(jit_work)
         stats=jit_work.with_name(jit_work.name+'.stats')
         stats.unlink(missing_ok=True)
@@ -263,7 +265,7 @@ def main():
     align_work=BUILD/'runtime-perf'/('alignment-sanitize' if args.sanitize else 'alignment')
     if align_work.exists():shutil.rmtree(align_work)
     run([sys.executable, ROOT/'tools/backend_alignment.py', '--native', native, '--classpath', classpath, '--work', align_work,
-         '--jit', ','.join(('probe:11', 'eager', 'stress')+(('eager+llvm', 'stress+llvm') if jit_module.exists() else ()))])
+         '--jit', ','.join(('probe:11', 'eager', 'stress', 'on:2+interp')+(('eager+llvm', 'stress+llvm', 'on:3+llvm') if jit_module.exists() else ()))])
     print('Build and all selected tests passed. Use ./azscript --help.')
 
 if __name__=='__main__':

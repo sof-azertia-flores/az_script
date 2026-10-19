@@ -70,7 +70,7 @@ uint32_t entry(azjit_frame*);   // 返回 STEP | REDO | DEOPT | REJECT | YIELD
 
 - **解释后端**（`interpreter/jit/interp_backend.cpp`，不依赖 LLVM）：以同一 ABI 和退出映射执行 MIR，用于 J1–J4 阶段、sanitizer 构建，并作为 LLVM 后端的对照。
 - **LLVM 后端**（`interpreter/jit/llvm/` → `libazscript-jit`）：只接收 POD 形式的 MIR、布局表和辅助函数地址，不包含运行时 C++ 头文件。进程内一个 `LLJIT`（JITLink、`InProcessMemoryManager`，W^X），每个 `Session::Prepared` 一个 `JITDylib`，每个代码版本一个 `ResourceTracker`；使用 TBAA/noalias 和只含标量优化的 O2 管线，代码生成前执行 `verifyModule`。
-- **策略。** `AZSCRIPT_JIT=off|on|eager|stress|require`（编译模式可写成 `eager+llvm` 等以指定后端）、`AZSCRIPT_JIT_BACKEND=interp|llvm`（选择 llvm 而模块无法装载时，会话准备失败）、阈值变量、`AZSCRIPT_JIT_STATS=<路径>`（统计走旁路文件，因为观察协议拒绝未知字段）。在钩子处持 `runtime_mutex` 同步编译，结果确定。每个守卫点计数 `DEOPT`，超过阈值后放宽标签重编，再超过则改用通用路径，最后只解释。切换版本总是安全的：钩子处栈上没有原生代码。缺少模块或可执行内存被拒绝时只用 VM 并记入统计；`require` 模式把这种情况变为错误，避免验证在 JIT 未运行时空转通过。后台编译是以后的可选阶段。
+- **策略。** `AZSCRIPT_JIT=off|on|eager|stress|require`（编译模式可写成 `eager+llvm` 等以指定后端）、`AZSCRIPT_JIT_BACKEND=interp|llvm`（选择 llvm 而模块无法装载时，会话准备失败）、阈值变量、`AZSCRIPT_JIT_STATS=<路径>`（统计走旁路文件，因为观察协议拒绝未知字段）。在钩子处持 `runtime_mutex` 同步编译，结果确定。分析可靠且不做推测（global 与宿主结果按 `top` 处理），因此不需要去优化后重编；每个会话编译的 MIR 有上限。切换版本总是安全的：钩子处栈上没有原生代码。缺少模块或可执行内存被拒绝时只用 VM 并记入统计；`require` 模式把这种情况变为错误，避免验证在 JIT 未运行时空转通过。后台编译是以后的可选阶段。
 
 ## 9. 调用与对象帧
 

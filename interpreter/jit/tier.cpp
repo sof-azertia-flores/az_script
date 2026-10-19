@@ -5,25 +5,39 @@
 #include <stdexcept>
 
 namespace azertian::jit {
+namespace {
+constexpr std::size_t operation_limit=std::size_t{1}<<22;
+}
 Tier::Tier(const vm::ExecutableProgram& program,const Config& config)
     :program_(program),config_(config),random_(config.seed) {
+    if(config.backend==Backend::llvm&&config.mode!=Mode::off&&config.mode!=Mode::probe) {
+        std::string error;
+        native_=native_backend(error);
+        // On runs without the tier when the module is missing; every
+        // other mode that asks for it fails instead of testing nothing.
+        if(!native_&&config.mode==Mode::on){config_.mode=Mode::off;unavailable_=error;++refusals_["module unavailable: "+error];}
+        else if(!native_)throw std::runtime_error("AZSCRIPT_JIT_BACKEND=llvm: "+error);
+    }
     entry_bounds_.reserve(program.functions.size());
     // A probing frame consults the tier at its first instruction; compiling
     // modes start that way too, until a function proves ineligible.
     for(const auto& function:program.functions)
-        entry_bounds_.push_back(config.mode==Mode::off?function.end:function.begin);
-    backedges_=config.mode!=Mode::off;
+        entry_bounds_.push_back(config_.mode==Mode::off?function.end:function.begin);
+    backedges_=config_.mode!=Mode::off;
     functions_.resize(program.functions.size());
-    if(config.backend==Backend::llvm&&config.mode!=Mode::off&&config.mode!=Mode::probe) {
-        std::string error;
-        native_=native_backend(error);
-        if(!native_)throw std::runtime_error("AZSCRIPT_JIT_BACKEND=llvm: "+error);
-    }
+    heat_.assign(program.functions.size(),0);
+}
+bool Tier::policy() const noexcept{return config_.mode==Mode::on||config_.mode==Mode::require;}
+// Under the policy a function compiles once its entries and back-edges
+// reach the threshold; every event before that is interpreted as before.
+bool Tier::hot(std::uint32_t function) noexcept {
+    if(!policy()||functions_[function].state!=Compiled::State::untried)return true;
+    return ++heat_[function]>=config_.threshold;
 }
 Tier::~Tier() {
     // Statistics side channel for tests: one JSON line per session.
     const char* path=std::getenv("AZSCRIPT_JIT_STATS");
-    if(!path||!*path||config_.mode==Mode::off||config_.mode==Mode::probe)return;
+    if(!path||!*path||config_.mode==Mode::probe||(config_.mode==Mode::off&&unavailable_.empty()))return;
     std::size_t ready=0,ineligible=0;
     for(const auto& function:functions_) {
         ready+=function.state==Compiled::State::ready;ineligible+=function.state==Compiled::State::ineligible;
@@ -70,6 +84,10 @@ Tier::Compiled& Tier::compiled(std::uint32_t function) {
         } else {
             entry.code=build(program_,entry.analysis,config_.mode==Mode::stress);
             entry.code.analysis=&entry.analysis;
+            // A session compiles a bounded amount of code; the rest stays
+            // interpreted.
+            if(compiled_operations_+entry.code.ops.size()>operation_limit)throw std::length_error("session code limit reached");
+            compiled_operations_+=entry.code.ops.size();
             if(const char* path=std::getenv("AZSCRIPT_JIT_DUMP");path&&*path)
                 if(FILE* file=std::fopen(path,"a")){const auto text=dump(entry.code);std::fputs(text.c_str(),file);std::fclose(file);}
             if(native_) {
@@ -103,6 +121,7 @@ Tier::Reached Tier::reached(std::uint32_t function,vm::ProgramCounter pc,FrameAc
     case Mode::probe:return {random_bound(pc+1,end)};
     default:break;
     }
+    if(!hot(function))return {end};
     auto& entry=compiled(function);
     if(entry.state!=Compiled::State::ready)return {end};
     if(entry.code.resume[pc-entry.analysis.begin]==none)return {after(entry,pc)};
@@ -120,7 +139,10 @@ vm::ProgramCounter Tier::backedge(std::uint32_t function,vm::ProgramCounter pc,v
     case Mode::probe:return random_bound(pc,program_.functions[function].end);
     default:break;
     }
-    const auto& entry=functions_[function];
+    // A loop of a compiled function continues natively from its head (on-
+    // stack replacement needs nothing more: the frame is the VM's).
+    if(!hot(function))return bound;
+    const auto& entry=compiled(function);
     if(entry.state==Compiled::State::ready&&pc<entry.analysis.end&&entry.code.resume[pc-entry.analysis.begin]!=none)return pc;
     return bound;
 }

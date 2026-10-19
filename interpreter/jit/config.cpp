@@ -10,30 +10,48 @@ Backend parse_backend(std::string_view text) {
     if(text=="llvm")return Backend::llvm;
     throw std::invalid_argument("Unknown AZSCRIPT_JIT_BACKEND: "+std::string(text));
 }
+namespace {
+std::uint64_t number(std::string_view digits,std::string_view text,const char* what) {
+    std::uint64_t value=0;
+    const auto [end,error]=std::from_chars(digits.data(),digits.data()+digits.size(),value);
+    if(digits.empty()||error!=std::errc{}||end!=digits.data()+digits.size())
+        throw std::invalid_argument(std::string("Invalid AZSCRIPT_JIT ")+what+": "+std::string(text));
+    return value;
+}
+}
 Config parse_config(std::string_view text) {
     Config config;
     if(text.empty()||text=="off")return config;
-    // A compiling mode may name its backend: eager+llvm, stress+interp.
+    // A compiling mode may name its backend: eager+llvm, on:10+interp.
     if(const auto plus=text.find('+');plus!=std::string_view::npos) {
         auto result=parse_config(text.substr(0,plus));
-        if(result.mode!=Mode::eager&&result.mode!=Mode::stress)throw std::invalid_argument("Unknown AZSCRIPT_JIT mode: "+std::string(text));
+        if(result.mode==Mode::off||result.mode==Mode::probe||text.substr(plus+1).empty())
+            throw std::invalid_argument("Unknown AZSCRIPT_JIT mode: "+std::string(text));
         result.backend=parse_backend(text.substr(plus+1));
-        if(text.substr(plus+1).empty())throw std::invalid_argument("Unknown AZSCRIPT_JIT mode: "+std::string(text));
         return result;
     }
-    if(text=="eager"){config.mode=Mode::eager;return config;}
-    if(text=="stress"){config.mode=Mode::stress;return config;}
     const auto separator=text.find(':');
     const auto mode=text.substr(0,separator);
-    if(mode!="probe")throw std::invalid_argument("Unknown AZSCRIPT_JIT mode: "+std::string(text));
-    config.mode=Mode::probe;
-    if(separator!=std::string_view::npos) {
-        const auto seed=text.substr(separator+1);
-        const auto [end,error]=std::from_chars(seed.data(),seed.data()+seed.size(),config.seed);
-        if(seed.empty()||error!=std::errc{}||end!=seed.data()+seed.size())
-            throw std::invalid_argument("Invalid AZSCRIPT_JIT seed: "+std::string(text));
+    const auto argument=separator==std::string_view::npos?std::string_view{}:text.substr(separator+1);
+    if(mode=="eager"||mode=="stress") {
+        if(separator!=std::string_view::npos)throw std::invalid_argument("Unknown AZSCRIPT_JIT mode: "+std::string(text));
+        config.mode=mode=="eager"?Mode::eager:Mode::stress;return config;
     }
-    return config;
+    if(mode=="probe") {
+        config.mode=Mode::probe;
+        if(separator!=std::string_view::npos)config.seed=number(argument,text,"seed");
+        return config;
+    }
+    if(mode=="on"||mode=="require") {
+        // The production policy compiles with the LLVM module by default.
+        config.mode=mode=="on"?Mode::on:Mode::require;config.backend=Backend::llvm;
+        if(separator!=std::string_view::npos) {
+            config.threshold=number(argument,text,"threshold");
+            if(!config.threshold)throw std::invalid_argument("Invalid AZSCRIPT_JIT threshold: "+std::string(text));
+        }
+        return config;
+    }
+    throw std::invalid_argument("Unknown AZSCRIPT_JIT mode: "+std::string(text));
 }
 Config environment_config() {
     const char* text=std::getenv("AZSCRIPT_JIT");
@@ -41,7 +59,7 @@ Config environment_config() {
     auto config=parse_config(mode);
     // AZSCRIPT_JIT_BACKEND chooses the backend unless the mode names one.
     const char* backend=std::getenv("AZSCRIPT_JIT_BACKEND");
-    if(mode.find('+')==std::string_view::npos)config.backend=parse_backend(backend?std::string_view(backend):std::string_view{});
+    if(mode.find('+')==std::string_view::npos&&backend&&*backend)config.backend=parse_backend(backend);
     return config;
 }
 }

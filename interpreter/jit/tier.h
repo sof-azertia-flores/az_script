@@ -33,11 +33,16 @@ class Tier {
     std::uint64_t random_;
     bool backedges_=false;
     Counters counters_;
+    std::vector<std::uint64_t> heat_;  // events per untried function under the policy
+    std::string unavailable_;          // why on runs without the tier
+    std::size_t compiled_operations_=0;
     Activation scratch_;              // shared: native runs never nest
     std::map<std::string,std::uint64_t> refusals_;
     vm::ProgramCounter random_bound(vm::ProgramCounter low,vm::ProgramCounter end) noexcept;
     Compiled& compiled(std::uint32_t function);
     vm::ProgramCounter after(const Compiled& entry,vm::ProgramCounter pc) const noexcept;
+    bool policy() const noexcept;
+    bool hot(std::uint32_t function) noexcept;
 public:
     Tier(const vm::ExecutableProgram& program,const Config& config);
     ~Tier();
