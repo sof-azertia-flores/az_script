@@ -76,7 +76,8 @@ def check_error_storage():
     # pointers outside pending_error would silently lose the latter on unwind.
     # Every runtime source of both engines and the shared core is checked.
     interpreter = ROOT/'interpreter'
-    sources = sorted(path for pattern in ('*.h', '*.cpp', 'core/*.h', 'core/*.cpp', 'vm/*.h', 'vm/*.cpp')
+    sources = sorted(path for pattern in ('*.h', '*.cpp', 'core/*.h', 'core/*.cpp', 'tree/*.h', 'tree/*.cpp',
+                                          'vm/*.h', 'vm/*.cpp')
                      for path in interpreter.glob(pattern) if not path.stem.endswith('_tests'))
     for path in sources:
         text = path.read_text(encoding='utf-8')
