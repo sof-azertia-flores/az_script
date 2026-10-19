@@ -91,10 +91,10 @@ if(BUILD_TESTING)
             "vm-program-tests:vm/program_tests.cpp"
             "exec-model-tests:core/exec_tests.cpp"
             "lifecycle-tests:core/lifecycle_tests.cpp"
-            "operations-tests:operations_tests.cpp"
-            "scalar-vm-tests:scalar_vm_tests.cpp"
+            "operations-tests:core/value_ops_tests.cpp"
+            "scalar-vm-tests:vm/scalar_tests.cpp"
             "vm-call-tests:../tests/vm_call_tests.cpp"
-            "vm-session-tests:vm_session_tests.cpp"
+            "vm-session-tests:vm/session_tests.cpp"
             "vm-cleanup-tests:vm/cleanup_tests.cpp")
         string(REPLACE ":" ";" vm_test_parts "${vm_test}")
         list(GET vm_test_parts 0 vm_test_name)
