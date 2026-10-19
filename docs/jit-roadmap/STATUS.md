@@ -8,7 +8,9 @@
 | J1 | 已提交，完整验证待运行 | 见下文“J1：VM 钩子与探针层” |
 | J2 | 已提交 | 见下文“J2–J3：分析与可移植原生层” |
 | J3 | 已提交，完整验证待运行 | 全部 463 个端到端案例在 eager 与 stress 下与树执行器一致 |
-| J4–J8 | J5 代码已写，LLVM 构建进行中 | |
+| J4 | 进行中 | 首个优化（载入后立即快照的折叠）已实现 |
+| J5 | 已提交，完整验证待运行 | 见下文“J5：LLVM ORC 后端”；全部 463 个端到端案例在 eager+llvm 与 stress+llvm 下一致 |
+| J6–J8 | 尚未开始 | |
 
 ## J0：设计（2026-10-19）
 
@@ -49,3 +51,25 @@
   - stress：55,460 进程一致；4,169,807 次原生进入（每条指令一次，4,050,182 次 YIELD），9,862,077 个操作，0 次标签越界。
   - 不可编译原因：对象帧 335,515、生命周期函数 8,153（按会话计）。
 - 解释后端只用于正确性与 sanitizer，不追求速度；性能来自 J5 的 LLVM 后端。
+
+## J5：LLVM ORC 后端（2026-10-19）
+
+| 提交 | 内容 |
+| --- | --- |
+| `feat(jit): compile MIR with LLVM ORC in a separate module` | `jit/abi.h` 是运行时与 `libazscript-jit` 之间唯一的 C 接口（MIR 为纯数据，运行时只经辅助函数表出现；双方核对 ABI 版本与布局摘要）。`tools/build_llvm.py` 构建固定的 LLVM 18.1.8（源码 SHA-256 `0b58557a…2f2a`，固定时已用 LLVM 发布密钥 474E22316ABF4785A88C6E8EA2C794A986419D8A 校验签名），只含 X86/AArch64 后端、静态库、开启 RTTI；`AZSCRIPT_JIT=AUTO` 在固定前缀存在时构建模块（sanitizer 与 Windows 构建不构建）。模块静态链接 LLVM，只导出 `azscript_jit_backend_v1`，运行时从自身所在目录以 `RTLD_LOCAL` 装载。代码生成：每个槽一对 alloca（mem2reg 后为 SSA），恢复点按分析标签装入影子（单一标签时为常量），两个 int 的加减乘除余与比较内联（溢出与除零转为退出），其余经 `value_ops` 辅助函数；O2 管线、`verifyModule`；JITLink 以 W^X 映射代码，每个函数一个 JITDylib，随会话释放。`AZSCRIPT_JIT_BACKEND=llvm` 或 `eager+llvm` 选择它，模块缺失时会话准备失败；`build_and_test --jit` 先构建 LLVM，模块存在时门禁加入 llvm 模式并拒绝编译失败与标签越界 |
+
+验证（定向；完整 `build_and_test --jit` 与 sanitizer 待运行）：
+
+- 模块构建：Release LLVM 安装 223 MB，模块（Debug 构建、未剥离）72 MB；`nm -D` 只有 `azscript_jit_backend_v1`。
+- 标量差分在每个预算扫描点另以 eager+llvm 与 stress+llvm 执行器对照树：53,535 项检查通过，256 次函数编译无一失败；首次运行发现两类缺陷并已修复：只在分析证明不可达的路径上越过最后一个操作的分支（改为 trap 块），以及统计中未转义的拒绝原因。
+- `vm_execution_end_to_end` 以树参考重放全部 463 案例 / 55,460 个独立进程：eager+llvm 与 stress+llvm 均一致；17,323 次 LLVM 编译无拒绝，进入/退出计数与解释后端完全相同，stress 下 4,169,807 次原生进入，0 次标签越界。
+- 初步性能（Release，机器同时运行其它验证，仅作参考；n=4096，每调用墙钟）：
+
+| 案例 | VM | eager+llvm | 倍数 |
+| --- | --- | --- | --- |
+| integer_loop | 2,990.5 µs | 335.1 µs | 8.9× |
+| branch_loop | 3,620.9 µs | 408.4 µs | 8.9× |
+| call_1 | 4,378.1 µs | 2,983.2 µs | 1.5× |
+| call_16 | 12,667.2 µs | 7,870.0 µs | 1.6× |
+
+首次调用含编译，约 80–170 ms。调用仍经调度器（STEP），循环中每次局部载入仍调用引用辅助函数；这些是 J4 的优化对象。

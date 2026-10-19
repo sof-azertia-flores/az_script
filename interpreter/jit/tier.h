@@ -2,6 +2,7 @@
 #define AZSCRIPT_JIT_TIER_H
 
 #include "backend.h"
+#include "native.h"
 #include "config.h"
 #include "../vm/program.h"
 #include <map>
@@ -20,10 +21,12 @@ class Tier {
         enum class State : std::uint8_t {untried,ineligible,ready} state=State::untried;
         FunctionAnalysis analysis;
         Function code;
+        std::unique_ptr<NativeCode> native;           // with the llvm backend
         std::vector<vm::ProgramCounter> next_resume;  // per pc-begin: the first resume point after pc
     };
     const vm::ExecutableProgram& program_;
     Config config_;
+    const azjit_backend* native_=nullptr;
     std::vector<vm::ProgramCounter> entry_bounds_;
     std::vector<bool> object_frames_;
     std::vector<Compiled> functions_;

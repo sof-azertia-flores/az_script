@@ -25,6 +25,11 @@ void configuration() {
     check(parse_config("eager").mode==Mode::eager&&parse_config("stress").mode==Mode::stress,"compiling modes");
     rejects([]{parse_config("on");},"Unknown AZSCRIPT_JIT mode: on");
     rejects([]{parse_config("eager:1");},"Unknown AZSCRIPT_JIT mode");
+    check(parse_config("eager+llvm")==Config{Mode::eager,1,Backend::llvm},"a mode names its backend");
+    check(parse_config("stress+interp")==Config{Mode::stress,1,Backend::interp},"the portable backend by name");
+    rejects([]{parse_config("probe+llvm");},"Unknown AZSCRIPT_JIT mode");
+    rejects([]{parse_config("eager+");},"Unknown AZSCRIPT_JIT mode: eager+");
+    rejects([]{parse_config("eager+gcc");},"Unknown AZSCRIPT_JIT_BACKEND: gcc");
     rejects([]{parse_config("probe:");},"Invalid AZSCRIPT_JIT seed");
     rejects([]{parse_config("probe:x");},"Invalid AZSCRIPT_JIT seed");
     rejects([]{parse_config("probe:1x");},"Invalid AZSCRIPT_JIT seed");

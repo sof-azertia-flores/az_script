@@ -1,0 +1,4 @@
+{
+  global: azscript_jit_backend_v1;
+  local: *;
+};

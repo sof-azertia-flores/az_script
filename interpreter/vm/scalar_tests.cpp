@@ -1,6 +1,7 @@
 #include "library.h"
 #include "vm/execution.h"
 #include "vm/lowering.h"
+#include "jit/native.h"
 #include "core/value_ops.h"
 #include <algorithm>
 #include <array>
@@ -223,6 +224,13 @@ void differential(const std::string& name,SourceFunction source,std::vector<Valu
     ScalarExecutor probe_a(program,pool,workspace,{jit::Mode::probe,1}),probe_b(program,pool,workspace,{jit::Mode::probe,2});
     // Native code from the first entry, and one instruction per entry.
     ScalarExecutor eager(program,pool,workspace,{jit::Mode::eager}),stress(program,pool,workspace,{jit::Mode::stress});
+    // The same with the LLVM module's code, when this build has the module.
+    std::string missing;const bool llvm=jit::native_backend(missing)!=nullptr;
+    std::optional<ScalarExecutor> native,native_stress;
+    if(llvm) {
+        native.emplace(program,pool,workspace,jit::Config{jit::Mode::eager,1,jit::Backend::llvm});
+        native_stress.emplace(program,pool,workspace,jit::Config{jit::Mode::stress,1,jit::Backend::llvm});
+    }
     constexpr std::uint64_t high=100000;
     auto old=old_run(source,globals,arguments,high);
     auto candidate=vm_run(executor,pool,source,slots,globals,arguments,high);same(old,candidate,name,high);
@@ -236,6 +244,10 @@ void differential(const std::string& name,SourceFunction source,std::vector<Valu
         same(reference,vm_run(probe_b,pool,source,slots,globals,arguments,budget),name+" probe 2",budget);
         same(reference,vm_run(eager,pool,source,slots,globals,arguments,budget),name+" eager",budget);
         same(reference,vm_run(stress,pool,source,slots,globals,arguments,budget),name+" stress",budget);
+        if(llvm) {
+            same(reference,vm_run(*native,pool,source,slots,globals,arguments,budget),name+" llvm",budget);
+            same(reference,vm_run(*native_stress,pool,source,slots,globals,arguments,budget),name+" llvm stress",budget);
+        }
     }
     for(auto slot:slots)pool.retire(slot);
 }

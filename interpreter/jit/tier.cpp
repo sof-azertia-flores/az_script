@@ -14,6 +14,11 @@ Tier::Tier(const vm::ExecutableProgram& program,const Config& config)
         entry_bounds_.push_back(config.mode==Mode::off?function.end:function.begin);
     backedges_=config.mode!=Mode::off;
     functions_.resize(program.functions.size());
+    if(config.backend==Backend::llvm&&config.mode!=Mode::off&&config.mode!=Mode::probe) {
+        std::string error;
+        native_=native_backend(error);
+        if(!native_)throw std::runtime_error("AZSCRIPT_JIT_BACKEND=llvm: "+error);
+    }
 }
 Tier::~Tier() {
     // Statistics side channel for tests: one JSON line per session.
@@ -33,7 +38,13 @@ Tier::~Tier() {
             static_cast<unsigned long long>(counters_.violations));
         bool first=true;
         for(const auto& [reason,count]:refusals_) {
-            std::fprintf(file,"%s\"%s\":%llu",first?"":",",reason.c_str(),static_cast<unsigned long long>(count));first=false;
+            std::string text;
+            for(const unsigned char c:reason) {
+                if(c=='"'||c=='\\'){text+='\\';text+=static_cast<char>(c);}
+                else if(c<0x20)text+=' ';
+                else text+=static_cast<char>(c);
+            }
+            std::fprintf(file,"%s\"%s\":%llu",first?"":",",text.c_str(),static_cast<unsigned long long>(count));first=false;
         }
         std::fprintf(file,"}}\n");std::fclose(file);
     }
@@ -59,6 +70,10 @@ Tier::Compiled& Tier::compiled(std::uint32_t function) {
         } else {
             entry.code=build(program_,entry.analysis,config_.mode==Mode::stress);
             entry.code.analysis=&entry.analysis;
+            if(native_) {
+                entry.native=std::make_unique<NativeCode>(*native_,entry.code);
+                if(!entry.native->compiled())throw std::runtime_error("native code: "+entry.native->error);
+            }
             const auto size=entry.analysis.end-entry.analysis.begin;
             entry.next_resume.assign(size,entry.analysis.end);
             auto next=entry.analysis.end;
@@ -89,7 +104,7 @@ Tier::Reached Tier::reached(std::uint32_t function,vm::ProgramCounter pc,FrameAc
     auto& entry=compiled(function);
     if(entry.state!=Compiled::State::ready)return {end};
     if(entry.code.resume[pc-entry.analysis.begin]==none)return {after(entry,pc)};
-    const auto outcome=interpret(entry.code,pc,frame,counters_);
+    const auto outcome=entry.native?entry.native->run(entry.code,pc,frame,counters_):interpret(entry.code,pc,frame,counters_);
     if(!outcome.entered)return {after(entry,pc)};
     switch(outcome.kind) {
     case ExitKind::yield:return {outcome.pc,true};

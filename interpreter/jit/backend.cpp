@@ -65,6 +65,8 @@ Outcome interpret(const Function& function,vm::ProgramCounter pc,FrameAccess& fr
         return Outcome{true,exit.kind,exit.pc};
     };
     for(std::uint32_t at=resume;;) {
+        // Past the last op only on paths the analysis proved impossible.
+        if(at>=function.ops.size())std::terminate();
         const auto& op=function.ops[at++];
         ++counters.operations;
         switch(op.code) {

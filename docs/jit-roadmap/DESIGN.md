@@ -70,7 +70,7 @@ uint32_t entry(azjit_frame*);   // 返回 STEP | REDO | DEOPT | REJECT | YIELD
 
 - **解释后端**（`interpreter/jit/interp_backend.cpp`，不依赖 LLVM）：以同一 ABI 和退出映射执行 MIR，用于 J1–J4 阶段、sanitizer 构建，并作为 LLVM 后端的对照。
 - **LLVM 后端**（`interpreter/jit/llvm/` → `libazscript-jit`）：只接收 POD 形式的 MIR、布局表和辅助函数地址，不包含运行时 C++ 头文件。进程内一个 `LLJIT`（JITLink、`InProcessMemoryManager`，W^X），每个 `Session::Prepared` 一个 `JITDylib`，每个代码版本一个 `ResourceTracker`；使用 TBAA/noalias 和只含标量优化的 O2 管线，代码生成前执行 `verifyModule`。
-- **策略。** `AZSCRIPT_JIT=off|on|eager|stress|require`、`AZSCRIPT_JIT_BACKEND=interp|llvm`、阈值变量、`AZSCRIPT_JIT_STATS=<路径>`（统计走旁路文件，因为观察协议拒绝未知字段）。在钩子处持 `runtime_mutex` 同步编译，结果确定。每个守卫点计数 `DEOPT`，超过阈值后放宽标签重编，再超过则改用通用路径，最后只解释。切换版本总是安全的：钩子处栈上没有原生代码。缺少模块或可执行内存被拒绝时只用 VM 并记入统计；`require` 模式把这种情况变为错误，避免验证在 JIT 未运行时空转通过。后台编译是以后的可选阶段。
+- **策略。** `AZSCRIPT_JIT=off|on|eager|stress|require`（编译模式可写成 `eager+llvm` 等以指定后端）、`AZSCRIPT_JIT_BACKEND=interp|llvm`（选择 llvm 而模块无法装载时，会话准备失败）、阈值变量、`AZSCRIPT_JIT_STATS=<路径>`（统计走旁路文件，因为观察协议拒绝未知字段）。在钩子处持 `runtime_mutex` 同步编译，结果确定。每个守卫点计数 `DEOPT`，超过阈值后放宽标签重编，再超过则改用通用路径，最后只解释。切换版本总是安全的：钩子处栈上没有原生代码。缺少模块或可执行内存被拒绝时只用 VM 并记入统计；`require` 模式把这种情况变为错误，避免验证在 JIT 未运行时空转通过。后台编译是以后的可选阶段。
 
 ## 9. 调用与对象帧
 
@@ -80,7 +80,7 @@ uint32_t entry(azjit_frame*);   // 返回 STEP | REDO | DEOPT | REJECT | YIELD
 
 ## 10. 构建、打包与平台
 
-- **固定版本 LLVM。** `tools/build_and_test.py` 增加源码依赖 `llvm-project-18.1.8.src.tar.xz`（GitHub 发布页，SHA-256 校验，缓存在 `build/deps/`，`--offline` 不下载）。`tools/build_llvm.py` 只构建 `X86;AArch64`、Release、静态库、开启 RTTI，不构建工具、测试和 zlib/zstd/libxml2/terminfo，安装到 `build/deps/llvm-18.1.8-<triple>/`，按摘要与配置打戳；交叉构建复用主机的 `llvm-tblgen`。
+- **固定版本 LLVM。** `python3 tools/build_and_test.py --offline --jit` 先运行 `tools/build_llvm.py`（缺少缓存时去掉 `--offline` 下载），之后的构建因 `AZSCRIPT_JIT=AUTO` 自动构建模块并加入 LLVM 后端的门禁；不加 `--jit` 时，已有的固定前缀同样会被使用。`tools/build_and_test.py` 增加源码依赖 `llvm-project-18.1.8.src.tar.xz`（GitHub 发布页，SHA-256 校验，缓存在 `build/deps/`，`--offline` 不下载）。`tools/build_llvm.py` 只构建 `X86;AArch64`、Release、静态库、开启 RTTI，不构建工具、测试和 zlib/zstd/libxml2/terminfo，安装到 `build/deps/llvm-18.1.8-<triple>/`，按摘要与配置打戳；交叉构建复用主机的 `llvm-tblgen`。
 - **CMake。** `AZSCRIPT_JIT=OFF|AUTO|ON`（AUTO：存在固定版本前缀时构建模块）；只在 `interpreter/jit/llvm/CMakeLists.txt` 中 `find_package(LLVM 18.1.8 EXACT CONFIG)`。模块为共享库，隐藏符号，版本脚本只导出 `azscript_jit_backend_v1`，并使用 `--exclude-libs,ALL`。运行库 `abdInvoker`/`abdInvokero` 不链接 LLVM。
 - **装载。** 依次查找 `AZSCRIPT_JIT_MODULE`、运行库所在目录（`shared_library_directory()`）、可执行文件目录；`dlopen(RTLD_NOW|RTLD_LOCAL)`，不卸载；握手比较 ABI 版本与布局摘要。它属于同一构建，不是用户插件，不需要签名，只从上述位置装载。
 - **发行。** 构建了模块时由 `tools/export_distribution.py` 一并导出，清单记录 JIT 架构；第三方说明增加 LLVM（Apache-2.0 WITH LLVM-exception）。

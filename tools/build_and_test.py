@@ -95,6 +95,7 @@ def main():
     parser.add_argument('--skip-jni',action='store_true')
     parser.add_argument('--skip-tests',action='store_true')
     parser.add_argument('--sanitize',action='store_true',help='Address/UB sanitizers on native tests (builds without JNI)')
+    parser.add_argument('--jit',action='store_true',help='build the pinned LLVM first (tools/build_llvm.py), so the JIT module is built and tested')
     args=parser.parse_args()
     check_error_storage()
     BUILD.mkdir(exist_ok=True)
@@ -107,6 +108,8 @@ def main():
     (BUILD/'java/classpath.txt').write_text(classpath,encoding='utf-8')
     native=BUILD/('sanitize' if args.sanitize else 'native')
     jni=not (args.skip_jni or args.sanitize)
+    if args.jit and not args.sanitize:
+        run([sys.executable,ROOT/'tools/build_llvm.py',*(['--offline'] if args.offline else [])])
     run(['cmake','-S',ROOT,'-B',native,'-DCMAKE_BUILD_TYPE=Debug',f'-DAZSCRIPT_BUILD_JNI={"ON" if jni else "OFF"}',f'-DAZSCRIPT_SANITIZE={"ON" if args.sanitize else "OFF"}'])
     run(['cmake','--build',native,'--parallel',min(os.cpu_count() or 2,8)])
     if args.skip_tests:
@@ -231,8 +234,12 @@ def main():
     # The JIT tier, replayed against the same reference: probing moves the
     # points where frames consult the tier, eager runs eligible functions
     # natively, stress one instruction per entry. None may change anything.
-    for mode in ('probe:7', 'eager', 'stress'):
-        jit_work=BUILD/'runtime-perf'/(f'vm-execution-jit-{mode.split(":")[0]}'+('-sanitize' if args.sanitize else ''))
+    # The LLVM backend runs too when this build has the JIT module.
+    jit_module=native/'interpreter'/('libazscript-jit.dylib' if sys.platform=='darwin' else 'libazscript-jit.so')
+    jit_modes=('probe:7', 'eager', 'stress')+(('eager+llvm', 'stress+llvm') if jit_module.exists() else ())
+    print(f'JIT module: {jit_module if jit_module.exists() else "not built"}', flush=True)
+    for mode in jit_modes:
+        jit_work=BUILD/'runtime-perf'/(f'vm-execution-jit-{mode.split(":")[0].replace("+","-")}'+('-sanitize' if args.sanitize else ''))
         if jit_work.exists():shutil.rmtree(jit_work)
         stats=jit_work.with_name(jit_work.name+'.stats')
         stats.unlink(missing_ok=True)
@@ -244,6 +251,11 @@ def main():
             sessions=[json.loads(line) for line in stats.read_text(encoding='utf-8').splitlines()] if stats.exists() else []
             entries=sum(item['entries'] for item in sessions)
             if not entries:raise RuntimeError(f'AZSCRIPT_JIT={mode} ran no native code')
+            # Only analysis refusals are expected; a compiler error or a value
+            # outside the analysis' tags is a defect.
+            failures=sorted({reason for item in sessions for reason in item['refusals'] if reason.startswith('compiler error')})
+            if failures:raise RuntimeError(f'AZSCRIPT_JIT={mode} failed to compile functions: {failures[:3]}')
+            if sum(item['violations'] for item in sessions):raise RuntimeError(f'AZSCRIPT_JIT={mode} saw values outside the analysis')
             print(f'JIT {mode}: {len(sessions)} sessions, {sum(item["compiled"] for item in sessions)} functions compiled, '
                   f'{entries} native entries, {sum(item["operations"] for item in sessions)} operations', flush=True)
     # Every end-to-end runner invocation, run again with the VM forced: outputs
@@ -251,7 +263,7 @@ def main():
     align_work=BUILD/'runtime-perf'/('alignment-sanitize' if args.sanitize else 'alignment')
     if align_work.exists():shutil.rmtree(align_work)
     run([sys.executable, ROOT/'tools/backend_alignment.py', '--native', native, '--classpath', classpath, '--work', align_work,
-         '--jit', 'probe:11,eager,stress'])
+         '--jit', ','.join(('probe:11', 'eager', 'stress')+(('eager+llvm', 'stress+llvm') if jit_module.exists() else ()))])
     print('Build and all selected tests passed. Use ./azscript --help.')
 
 if __name__=='__main__':
