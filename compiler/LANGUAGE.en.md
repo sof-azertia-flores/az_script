@@ -6,6 +6,12 @@ The compiler was rewritten around the original code-tree format. Source passes t
 
 ## Compilation and embedding
 
+`compile` and `compile-json` accept `-O0` (default) and `-O1`; the last option wins. After semantic validation, O1 applies integer/boolean constant folding, conservative scalar propagation, non-trapping scalar leaf inlining, inline specialization of fixed scalar generic contexts, and total loop-invariant expression hoisting. Overflow, division by zero and invalid shifts remain runtime errors. Floating-point, string and observable object lifetime operations are not algebraically eliminated. The readable AST is unchanged; use identical optimization options when recompiling it to obtain identical ABD bytes. Debug numbering follows optimization.
+
+`--no-fold`, `--no-propagation`, `--no-inline` and `--no-loop-motion` independently disable those passes. Propagation and inlining may still evaluate the constants they expose. Java callers can select `Compiler.Optimization.STANDARD`, or pass an exact `Set<Compiler.OptimizationPass>` to `Compiler.compile(ast, diagnostics, debugInfo, passes)`. `CONSTANTS` enables only folding; existing overloads retain O0.
+
+Optimization reduces executed expressions and budget consumption. `max_steps` prevents runaway execution; optimization levels need not exhaust it at the same source position. Both engines retain the same work-unit charges for a given artifact. In scalar regions without calls, cleanup or control transfers, the VM can validate at most 64 steps together while still charging each executed tick; insufficient budget takes the per-tick path. The default `max_call_depth=0` disables the logical call-depth cap; positive values explicitly enable it. Native-stack and workspace limits remain active. O1 can remove physical calls, so optional depth caps and resource-exhaustion positions are outside O0/O1 equivalence; `getDepth()` and ordinary error traces remain protected.
+
 From the repository root, use the unified build entry point:
 
 ```sh

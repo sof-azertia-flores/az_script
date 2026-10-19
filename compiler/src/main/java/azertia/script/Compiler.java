@@ -7,6 +7,16 @@ import java.util.*;
 
 /** Resolves symbols and lowers the readable JSON AST to numeric-slot ABD instructions. */
 public class Compiler {
+    /** NONE preserves the original lowering; STANDARD enables the opt-in O1 pipeline. */
+    public enum Optimization { NONE, CONSTANTS, STANDARD }
+    public enum OptimizationPass { CONSTANTS, PROPAGATION, INLINING, LOOP_MOTION }
+    public static Set<OptimizationPass> optimizationPasses(Optimization optimization) {
+        return switch (Objects.requireNonNull(optimization)) {
+            case NONE -> Set.of();
+            case CONSTANTS -> Set.of(OptimizationPass.CONSTANTS);
+            case STANDARD -> Set.of(OptimizationPass.values());
+        };
+    }
     // Mutable holders: the depth changes at every node, and updating a holder avoids a ThreadLocal.set each time.
     private static final ThreadLocal<int[]> EXPRESSION_DEPTH = ThreadLocal.withInitial(() -> new int[1]);
     private static final ThreadLocal<int[]> TYPE_DEPTH = ThreadLocal.withInitial(() -> new int[1]);
@@ -124,6 +134,8 @@ public class Compiler {
     private record SyntheticLoop(String breakFlag, String continueFlag, int outerLoopDepth, boolean transparent, boolean breakAllowed) {}
     /** Per-compilation state shared through the root environment. */
     static final class CompilationState {
+        Set<OptimizationPass> optimizationPasses = Set.of();
+        final Map<Integer,Set<Integer>> optimizerTemps = new HashMap<>();
         final Diagnostics diagnostics;
         final SourceMap sources;
         final CompilerMetrics metrics;
@@ -1639,7 +1651,7 @@ public class Compiler {
                         "Expression nesting exceeds the ABD limit of "+environment.state().abdLimit
                         +" levels; this cut would change object lifetime or copying; store this operand in a local variable first"),operator,environment);
                 if(environment.counter.next>=MAX_VARIABLE_SLOTS)throw new IllegalArgumentException("Function frame exceeds "+MAX_VARIABLE_SLOTS+" variable slots");
-                int slot=environment.counter.next++;environment.tables.slots.put(slot,0);
+                int slot=environment.counter.next++;environment.tables.slots.put(slot,0);environment.tables.temporarySlots.add(slot);
                 AcsObject definition=new AcsObject();definition.put("t",0);definition.put("c",ExecOpcodes.DEFINE);definition.put("v",slot);definition.put("val",value);
                 environment.tables.stagedCaptures.add(definition);recordPosition(operator,definition,environment);prefixes.acsa.add(definition);
                 AcsObject read=new AcsObject();read.put("t",0);read.put("c",ExecOpcodes.VARIABLE);read.put("v",slot);
@@ -2998,6 +3010,15 @@ public class Compiler {
      * changes the instructions.
      */
     public static AcsObject compile(JsonObject source, Diagnostics diagnostics, boolean debugInfo) {
+        return compile(source, diagnostics, debugInfo, Optimization.NONE);
+    }
+    /** Compiles with an explicit optimization level; source AST and diagnostics are unchanged. */
+    public static AcsObject compile(JsonObject source, Diagnostics diagnostics, boolean debugInfo, Optimization optimization) {
+        return compile(source, diagnostics, debugInfo, optimizationPasses(optimization));
+    }
+    /** Select passes independently; the empty set is the byte-preserving O0 path. */
+    public static AcsObject compile(JsonObject source, Diagnostics diagnostics, boolean debugInfo, Set<OptimizationPass> passes) {
+        passes = Set.copyOf(passes);
         int limit=abdLimit();
         boolean parsed = diagnostics.startCompile();
         Map<Integer,ClassInfo> previousLayouts = CLASS_LAYOUTS.get();
@@ -3014,6 +3035,7 @@ public class Compiler {
         if (diagnostics.namesInput()) sources.input(diagnostics.defaultFile());
         diagnostics.sources(sources);
         CompilationState state = new CompilationState(diagnostics, sources, parsed, limit);
+        state.optimizationPasses = passes;
         if (debugInfo) state.enableDebugInfo();
         try {
             // Bound nesting and reject cycles first: the shape check walks the whole tree.
@@ -3273,6 +3295,24 @@ public class Compiler {
         }
         diagnostics.checkpoint();
         result.put("f",output);normalizeContexts(result);
+        Set<OptimizationPass> passes = state.optimizationPasses;
+        for (AcsElement item : output.acsa) {
+            AcsObject compiled = (AcsObject)item; AcsElement optimized = compiled.mmp.get("script");
+            if (passes.contains(OptimizationPass.CONSTANTS)) optimized = ExecOptimizer.constants(optimized, state.positions);
+            if (passes.contains(OptimizationPass.PROPAGATION)) {
+                optimized = ExecDataflow.optimize(compiled, optimized, state.positions);
+                ExecDataflow.removeDeadTemporaries(optimized, state.optimizerTemps.get(compiled.getAsInt("id")));
+            }
+            compiled.mmp.put("script", optimized);
+        }
+        if (passes.contains(OptimizationPass.INLINING)) ExecInliner.optimize(output, state.positions);
+        for (AcsElement item : output.acsa) {
+            AcsObject compiled = (AcsObject)item;
+            if (passes.contains(OptimizationPass.PROPAGATION) && passes.contains(OptimizationPass.INLINING))
+                compiled.mmp.put("script", ExecDataflow.optimize(compiled, compiled.mmp.get("script"), state.positions));
+            if (passes.contains(OptimizationPass.LOOP_MOTION)) ExecLoopMotion.optimize(compiled, state.positions);
+            if (!passes.isEmpty()) ExecShape.requireFits(compiled.mmp.get("script"), 4, state.abdLimit);
+        }
         AcsArray debugFiles = new AcsArray();
         for (String file : state.debugFiles) debugFiles.acsa.add(new AcsStringElement(file));
         result.put("debug-files", debugFiles);
@@ -3410,6 +3450,7 @@ public class Compiler {
             throw relocate(error,anchor,scope);
         }
         scope.counter.next=scope.tables.nextSlot;compiled.put("script",body);
+        global.state().optimizerTemps.put(function.id(), Set.copyOf(scope.tables.temporarySlots));
         compiled.put("local-count",scope.counter.next-parameter);return compiled;
     }
 }

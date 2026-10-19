@@ -246,7 +246,7 @@ void default_workspace_boundaries() {
         check(pool.size()==0&&workspace.peak_bytes()<=default_workspace_bytes,"Dense legal-MAX frame retires every slot within the default");
         std::cout<<"vm-call default dense locals="<<count<<" workspace="<<workspace.used_bytes()<<" peak="<<workspace.peak_bytes()<<'\n';
     }
-    // Large sparse headers recurse to the runtime's default depth limit of 256:
+    // Large sparse headers recurse to an explicitly configured depth limit of 256:
     // the public entry holds one admission and script CALL takes the rest.
     auto source=recursive();source.local_count=32767;
     const auto program=lower_program(SourceProgram{{source},{}});
@@ -254,9 +254,9 @@ void default_workspace_boundaries() {
     std::size_t active=0,depth_limit=256;std::uint64_t steps=0,max_steps=1000000;
     admission::accounting accounting(active,depth_limit,steps,max_steps);ExecutionOptions options{&accounting,nullptr};
     const std::array deepest{Value(255)};
-    check(executor.invoke(0,deepest,{},steps,nullptr,options).get<int>()==255,"Default workspace admits 32k-local headers at the default depth");
-    check(active==0&&pool.size()==0&&workspace.peak_bytes()<=default_workspace_bytes,"Default-depth recursion releases all admissions and slots");
-    std::cout<<"vm-call default recursion depth=256 locals=32767 workspace="<<workspace.used_bytes()<<" peak="<<workspace.peak_bytes()<<'\n';
+    check(executor.invoke(0,deepest,{},steps,nullptr,options).get<int>()==255,"Default workspace admits 32k-local headers at the configured depth");
+    check(active==0&&pool.size()==0&&workspace.peak_bytes()<=default_workspace_bytes,"Configured-depth recursion releases all admissions and slots");
+    std::cout<<"vm-call configured recursion depth=256 locals=32767 workspace="<<workspace.used_bytes()<<" peak="<<workspace.peak_bytes()<<'\n';
     // Raising only the call depth cannot raise the workspace limit.
     depth_limit=1024;const std::array beyond{Value(1000)};bool rejected=false;
     try{executor.invoke(0,beyond,{},steps,nullptr,options);}

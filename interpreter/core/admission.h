@@ -52,7 +52,7 @@ public:
     // Native entries check depth, then enter the native-stack guard, then admit.
     // In-loop VM entries have no native-stack guard and use enter().
     void check_can_enter() const {
-        if(active_calls_>=max_call_depth_)throw std::runtime_error("Script call depth limit exceeded");
+        if(max_call_depth_ && active_calls_>=max_call_depth_)throw std::runtime_error("Script call depth limit exceeded");
     }
     ticket admit() noexcept {
         if(!active_calls_)remaining_steps_=max_steps_;

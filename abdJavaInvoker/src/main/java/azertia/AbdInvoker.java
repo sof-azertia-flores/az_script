@@ -120,9 +120,9 @@ public final class AbdInvoker {
         long[] limits = limitsForUpdate();
         Caller.setLimits(maxSteps, (int) limits[1], limits[2]);
     }
-    /** Nested script and host function calls allowed at once; the default is 256. */
+    /** Optional nested script/host call cap. Zero (the default) disables this cap; stack and step limits still apply. */
     public static synchronized void setMaxCallDepth(int maxCallDepth) {
-        if (maxCallDepth < 1) throw new IllegalArgumentException("maxCallDepth must be positive");
+        if (maxCallDepth < 0) throw new IllegalArgumentException("maxCallDepth must not be negative");
         long[] limits = limitsForUpdate();
         Caller.setLimits(limits[0], maxCallDepth, limits[2]);
     }

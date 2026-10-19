@@ -125,8 +125,14 @@ void logical_call_accounting() {
         limit=2;rejects([&]{accounting.enter();},"Depth accounting reads current host limits");
     }
     limit=0;remaining=31;
-    rejects([&]{accounting.enter();},"Zero depth limit rejects even an outer entry");
-    check(active==0&&remaining==31,"Rejected outer entry does not reset its step budget");
+    {
+        std::vector<admission::accounting::ticket> entries;
+        for(int i=0;i<1024;++i)entries.push_back(accounting.enter());
+        check(active==1024&&remaining==75,"Zero depth cap permits deep entry but refills budget only once");
+        remaining=0;auto nested=accounting.enter();
+        check(remaining==0,"Uncapped reentry cannot refill an exhausted budget");
+    }
+    check(active==0&&remaining==0,"Uncapped admissions unwind without resetting budget");
 }
 
 void layouts() {

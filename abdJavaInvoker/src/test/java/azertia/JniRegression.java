@@ -427,7 +427,7 @@ public final class JniRegression {
     private static void nativeStack(File work) throws InterruptedException {
         final int deep = 0x7a010001;
         equal(1_000_000L, AbdInvoker.getMaxSteps());
-        equal(256, AbdInvoker.getMaxCallDepth());
+        equal(0, AbdInvoker.getMaxCallDepth());
         equal(0L, AbdInvoker.getMaxStackBytes());
         File script = new File(work, "deep.exec.abd");
         loadAndFlush(script);
@@ -450,7 +450,8 @@ public final class JniRegression {
         equal(8, AbdInvoker.getMaxCallDepth());
         equal(140, AbdInvoker.invoke(deep, 7));
         limited("Script call depth limit exceeded", () -> AbdInvoker.invoke(deep, 8));
-        AbdInvoker.setMaxCallDepth(256);
+        AbdInvoker.setMaxCallDepth(0);
+        equal(0, AbdInvoker.getMaxCallDepth());
         AbdInvoker.setMaxSteps(50);
         limited("Script execution step limit exceeded", () -> AbdInvoker.invoke(deep, 20));
         // Limits are process-wide and apply to scripts loaded later, onload included.
@@ -459,10 +460,10 @@ public final class JniRegression {
         equal(50L, AbdInvoker.getMaxSteps());
         limited("Script execution step limit exceeded", () -> AbdInvoker.invoke(deep, 20));
         fails(IllegalArgumentException.class, () -> AbdInvoker.setMaxSteps(0));
-        fails(IllegalArgumentException.class, () -> AbdInvoker.setMaxCallDepth(0));
+        fails(IllegalArgumentException.class, () -> AbdInvoker.setMaxCallDepth(-1));
         fails(IllegalArgumentException.class, () -> AbdInvoker.setMaxStackBytes(-1));
         fails(IllegalArgumentException.class, () -> Caller.setLimits(0, 256, 0));
-        fails(IllegalArgumentException.class, () -> Caller.setLimits(1, 0, 0));
+        fails(IllegalArgumentException.class, () -> Caller.setLimits(1, -1, 0));
         fails(IllegalArgumentException.class, () -> Caller.setLimits(1, 256, -1));
         // Limits cannot change while functions run, through either API.
         AbdInvoker.registerJfunction(0x7a020001, values -> { AbdInvoker.setMaxSteps(10); return null; });

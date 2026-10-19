@@ -792,7 +792,7 @@ JNIEXPORT void JNICALL Java_azertia_jni_Caller_setLimits(JNIEnv* env, jclass, jl
     boundary(env, [&] {
         requireIdle();
         if (maxSteps < 1) throw std::invalid_argument("maxSteps must be positive");
-        if (maxCallDepth < 1) throw std::invalid_argument("maxCallDepth must be positive");
+        if (maxCallDepth < 0) throw std::invalid_argument("maxCallDepth must not be negative");
         if (maxStackBytes < 0 || static_cast<std::uint64_t>(maxStackBytes) > std::numeric_limits<std::size_t>::max())
             throw std::invalid_argument("maxStackBytes must be zero (automatic) or a positive byte count");
         hostLimits = {static_cast<std::uint64_t>(maxSteps), static_cast<std::size_t>(maxCallDepth), static_cast<std::size_t>(maxStackBytes)};
