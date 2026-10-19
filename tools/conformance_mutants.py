@@ -101,7 +101,7 @@ MUTANTS = [
          'false&&block->owner&&owning&&owning->temporaries==frame) {'),
     ]),
     ('teardown-without-guard', [
-        ('interpreter/library.cpp',
+        ('interpreter/script.cpp',
          """    try {
         call_guard guard(baseEnv);
         for(auto hook=on_destory.rbegin();hook!=on_destory.rend();++hook) {""",
@@ -126,8 +126,8 @@ MUTANTS = [
     ], 'vm'),
     ('continuation-calls-from-current-scope', [
         ('interpreter/vm/execution.cpp',
-         'if constexpr(Continuation)enter_object_frame(index,count,argument,frame,layout,options,continuation->caller);',
-         'if constexpr(Continuation)enter_object_frame(index,count,argument,frame,layout,options,ownership::Site{});'),
+         'if constexpr(Continuation)enter_object_frame(index,count,argument,frame,layout,options,continuation->caller,contexts);',
+         'if constexpr(Continuation)enter_object_frame(index,count,argument,frame,layout,options,ownership::Site{},contexts);'),
     ], 'vm'),
     ('unwinding-levels-not-republished', [
         ('interpreter/vm/execution.cpp',
