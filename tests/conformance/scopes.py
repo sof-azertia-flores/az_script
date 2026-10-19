@@ -645,6 +645,27 @@ def cases():
         '}'), '0000000000000001', tag=7, events=(), teardown_events=(-4,),
         options=['--function', '0x0fff0040', '--arg', 'i:3']))
 
+    # Section 8 #6 through reflection: reflect_invoke_function calls the target
+    # from the scope executing the reflected call (internelFunctions.cpp:39-60,
+    # function::invoke with that environment), so the automatic object the
+    # target returns belongs to that scope and ends with it: the inner block
+    # first, then main's root after event 3. main uses no object itself.
+    result.append(own('own-a11h-reflected-auto-pointer-owned-by-calling-scope', program(
+        PRELUDE,
+        'M * made(int v):0f16{',
+        '  return mkp(v);',
+        '}',
+        'int main(){',
+        '  {',
+        '    address p = reflect_invoke_function<address>(268373782, 7);',
+        '    event(1);',
+        '  }',
+        '  event(2);',
+        '  address q = reflect_invoke_function<address>(268373782, 8);',
+        '  event(3);',
+        '  return 0;',
+        '}'), 0, events=(1, -7, 2, 3, -8)))
+
     # Section 8 #10, ownership verify addition 15: the pointer result is
     # transferred to the call-site block at ro, before g's root cleanup fails, so
     # the block releases it while unwinding, before main's root local.
