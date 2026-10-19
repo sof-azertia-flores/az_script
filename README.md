@@ -189,7 +189,7 @@ script->destroy();
 
 ## 嵌入 Java
 
-使用 `build/java/abdJavaInvoker.jar`，同时部署 `libabdJ`、`libabdInvoker`（macOS 后缀 `.dylib`，Linux 为 `.so`）。也可以按 `abdJavaInvoker/README.md` 选择加载路径。
+使用 `build/java/abdJavaInvoker.jar`，同时部署 `libabdJ` 和 ABI 1 共享运行库 `libabdInvoker-1`（macOS 后缀 `.dylib`，Linux 为 `.so`；保留安装时的版本化库名）。也可以按 `abdJavaInvoker/README.md` 选择加载路径。旧 C++ 宿主和插件需按 [ABI 迁移说明](docs/RUNTIME_ABI.md) 重编译。
 
 ```java
 System.setProperty("azertia.native.library", "/absolute/path/libabdJ.dylib");

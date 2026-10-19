@@ -185,7 +185,7 @@ In a catch handler, call `azertian::describe_error(error)` before `destroy()` or
 
 ## Java embedding
 
-Use build/java/abdJavaInvoker.jar with libabdJ and libabdInvoker (.dylib on macOS, .so on Linux). See [Java integration](abdJavaInvoker/README.en.md) for library paths.
+Use build/java/abdJavaInvoker.jar with libabdJ and ABI 1 shared libabdInvoker-1 (.dylib on macOS, .so on Linux; retain the installed versioned library names). See [Java integration](abdJavaInvoker/README.en.md) for library paths. Rebuild old C++ hosts and plugins following the [ABI migration guide](docs/RUNTIME_ABI.en.md).
 
 ```java
 System.setProperty("azertia.native.library", "/absolute/path/libabdJ.dylib");

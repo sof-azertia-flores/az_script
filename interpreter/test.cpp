@@ -49,7 +49,7 @@ int main(int argc,char* argv[]) {
             catch(const std::exception& error){throw std::runtime_error("Cannot insert "+path+": "+error.what());}
         }
         script->flush();auto value=script->invoke(id);
-        if(value->type!=azertian::VOID_VALUE)std::cout<<azertian::value_to_string(value)<<'\n';
+        if(value->type_tag()!=azertian::VOID_VALUE)std::cout<<azertian::value_to_string(value)<<'\n';
         script->destroy();return 0;
     }catch(const std::exception& error){
         const auto message=azertian::describe_error(error);

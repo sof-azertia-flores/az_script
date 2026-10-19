@@ -8,17 +8,32 @@
 #include <mutex>
 #include <optional>
 #include <set>
+#include <stdexcept>
 #include <string>
+#include <type_traits>
 #include <vector>
+#include <azscript/runtime_abi.hpp>
 #include "../abdC/azertianBinaryDataValues.h"
+#include "core/value.h"
+#include "core/debug.h"
+#include "core/errors.h"
+#include "core/format.h"
+#include "core/limits.h"
+#include "core/signature.h"
+#include "core/ownership.h"
 
 namespace azertian {
-inline constexpr int INT_VALUE=0, STRING_VALUE=1, FLOAT_VALUE=2, DOUBLE_VALUE=3,
-                     BOOLEAN_VALUE=4, VOID_VALUE=5, ANY_VALUE=6, ADDRESS_VALUE=7, OBJECT_VALUE=8;
-inline constexpr std::size_t MAX_VARIABLE_SLOTS=1048576;
+inline constexpr std::size_t MAX_VARIABLE_SLOTS=limits::max_slots;
 // The only exec format the loader reads; ExecCodec.VERSION in the compiler matches it.
-inline constexpr int EXEC_FORMAT_VERSION=10;
+inline constexpr int EXEC_FORMAT_VERSION=exec::format_version;
 class expression; class function; class environment; class variable; class script; struct loaded_module;
+namespace link { struct plan; }
+namespace vm {
+class Session;
+struct WorkspaceUsage;
+void select_backend(script& owner,std::size_t workspace_limit);
+WorkspaceUsage workspace_usage(const script& owner);
+}
 struct slot_block; struct function_frame;
 struct type_context;
 using type_contexts=std::vector<std::shared_ptr<const type_context>>;
@@ -36,58 +51,6 @@ struct bound_method {int function_id;type_contexts contexts;};
 using method_table=std::vector<bound_method>;
 void validate_method_table(const method_table& methods,const std::shared_ptr<script>& script);
 struct context_spec;
-// A source position of an exec debug record; file indexes function_debug::files.
-// Line and column are 1-based; a header position of 0:0 is unknown.
-struct source_position {
-    std::uint32_t file=0,line=0,column=0;
-};
-// The optional debug record of a function, read from an exec compiled with -g. It
-// never affects execution: expression::location indexes its locations.
-struct function_debug {
-    std::string name;
-    std::shared_ptr<const std::vector<std::string>> files;
-    source_position header;
-    std::vector<source_position> locations;
-};
-// Frames are recorded innermost first. Debug names and positions are absent
-// when the source was compiled without -g; function IDs are always available.
-struct trace_frame {
-    int function_id=0;
-    bool native=false;
-    std::string name,file;
-    std::uint32_t line=0,column=0;
-};
-struct error_trace {
-    std::vector<trace_frame> frames;
-    std::size_t omitted_frames=0;
-};
-std::string function_id_text(int id);
-const error_trace& last_error_trace() noexcept;
-std::string format_error_trace(const error_trace& trace);
-// Adds frames only for the exception type and message of the last failure on
-// this thread. The original exception object and its dynamic type are retained.
-std::string describe_error(const std::exception& error);
-void clear_error_trace() noexcept;
-namespace detail {struct trace_state;}
-// Cleanup paths retain the first exception together with its trace, then
-// discard traces from later cleanup failures before restoring the first one.
-class pending_error {
-    friend struct detail::trace_state;
-    std::exception_ptr exception_;
-    error_trace trace_;
-public:
-    pending_error()=default;
-    static pending_error capture() noexcept;
-    explicit operator bool() const noexcept;
-    void capture_current() noexcept;
-    [[noreturn]] void rethrow() const;
-};
-struct function_signature {
-    int return_type=VOID_VALUE;
-    std::vector<int> param_types;
-    int hidden_count=0,entry_kind=0;
-    bool operator==(const function_signature&) const=default;
-};
 // The compatibility heap/executor registry is shared. All entry points use this
 // recursive lock so host callbacks may call back into the VM on the same thread.
 std::recursive_mutex& runtime_mutex();
@@ -141,9 +104,19 @@ public:
     // bypass setup, fault, or destruction state.
     void require_execution() const;
 private:
+    friend class ofunction;
+    friend link::plan plan_links(const script& owner);
+    friend void vm::select_backend(script& owner,std::size_t workspace_limit);
+    friend vm::WorkspaceUsage vm::workspace_usage(const script& owner);
     std::vector<std::shared_ptr<loaded_module>> modules;
+    // Internal migration selection. Public consumers need no VM implementation
+    // headers, and the session does not retain shared ownership of its script.
+    std::shared_ptr<vm::Session> vm_session_;
     bool initializing=false;
 };
+// The link plan of the script's mounted modules (core/link.h); both engines
+// apply the same plan.
+link::plan plan_links(const script& owner);
 class function {
 public:
     virtual ~function()=default;
@@ -173,7 +146,12 @@ public:
         std::vector<std::shared_ptr<variable>> arguments={}) override;
     std::shared_ptr<variable> invoke_bound(std::shared_ptr<environment> env,
         std::vector<std::shared_ptr<variable>> arguments,type_contexts contexts);
+    std::shared_ptr<variable> invoke_bound(ownership::Site caller,
+        std::vector<std::shared_ptr<variable>> arguments,type_contexts contexts);
     std::shared_ptr<expression> code;
+private:
+    friend class script;
+    std::uint32_t vm_function_index_=UINT32_MAX;
 };
 class expression {
 public:
@@ -229,7 +207,7 @@ public:
 class constantExpression : public expression {
 public:
     std::shared_ptr<variable> value;
-    explicit constantExpression(std::shared_ptr<AbdMapValue> value);
+    explicit constantExpression(const Value& value);
     std::shared_ptr<variable> execute(std::shared_ptr<environment> env) override;
 };
 #define AZ_BINARY_EXPRESSION(Name) \
@@ -261,12 +239,24 @@ class continueExpression : public expression {
 public:
     std::shared_ptr<variable> execute(std::shared_ptr<environment> env) override;
 };
+// Engine-side access to a variable's payload; not part of the host API.
+struct value_access {
+    static const Value& read(const variable& source) noexcept;
+    static void assign(variable& destination,Value value) noexcept;
+};
 class variable {
 public:
     variable()=default;
     std::string name;
-    char type=VOID_VALUE;
-    void* value=nullptr;
+    int type_tag() const noexcept { return value_.type_tag(); }
+    // Access is checked and read-only. The reference remains valid until this
+    // variable is assigned or destroyed; use setValue() to replace its value.
+    template<class T> const T& get() const {return value_.get<T>();}
+    // Non-object values, including void, have no object handle.
+    std::shared_ptr<slot_block> object_handle() const noexcept;
+    // Storage transfer exchanges only payloads, retaining each slot's metadata.
+    // Ownership bookkeeping belongs to the storage manager invoking this.
+    void swap_storage(variable& other) noexcept;
     // Set only for the slots of a literal object; copies never inherit it.
     slot_block* container=nullptr;
     std::shared_ptr<variable> deepCopy();
@@ -295,10 +285,16 @@ public:
     void setValue(std::nullptr_t value);
     void setValue(std::shared_ptr<slot_block> value);
 private:
+    friend struct value_access;
+    Value value_;
     void clear() noexcept;
+    void replace_value(Value value) noexcept;
     void copy_value(const variable& other);
 };
 struct function_frame {
+private:
+    ownership::Lease<ownership::TempListId> temporary_storage_;
+public:
     bool returned=false;
     bool break_requested=false;
     bool continue_requested=false;
@@ -312,26 +308,44 @@ struct function_frame {
     type_contexts hidden_contexts;
     std::shared_ptr<variable> result=std::make_shared<variable>(nullptr);
     // Unbound object temporaries; each statement destroys the ones it created.
-    std::vector<std::shared_ptr<slot_block>> temporaries;
-    function_frame()=default;
+    std::vector<std::shared_ptr<slot_block>>& temporaries;
+    explicit function_frame(std::shared_ptr<ownership::Arena> arena={});
+    ownership::TempListId temporary_id() const noexcept{return temporary_storage_.id();}
+    ownership::TemporaryRecord& temporary_record() const noexcept{return temporary_storage_.record();}
     function_frame(const function_frame&)=delete;
     function_frame& operator=(const function_frame&)=delete;
     ~function_frame();
 };
 class environment {
+    ownership::Scope ownership_;
 public:
-    std::vector<address> owned_pointer;
-    std::weak_ptr<environment> parent;
-    // Caller is separate from the lexical parent: functions cannot see locals
-    // in their callers, while explicit allocation transfer still can.
-    std::weak_ptr<environment> caller;
+    // A scope's links are fixed when it is created; its ownership record
+    // names the frame's temporaries from then on.
+    explicit environment(std::shared_ptr<ownership::Arena> arena={},const std::shared_ptr<environment>& parent={},
+                         ownership::ScopeId caller={},std::shared_ptr<function_frame> frame={},bool frame_root=false);
+    // The host's view of an engine scope: it shares the scope's record and
+    // frame, writes no links, and never ends what the scope owns.
+    environment(const ownership::Scope& shared,const std::shared_ptr<environment>& parent,
+                std::shared_ptr<function_frame> frame,bool frame_root);
+    environment(const environment&)=delete;
+    environment& operator=(const environment&)=delete;
+    const std::shared_ptr<ownership::Arena>& ownership_arena() const noexcept{return ownership_.arena();}
+    ownership::ScopeId ownership_id() const noexcept{return ownership_.id();}
+    ownership::Site site() const noexcept {
+        return {&ownership_.record(),frame?&frame->temporary_record():nullptr};
+    }
+    std::vector<address>& owned_pointer;
+    // The caller (kept in the ownership record) is separate from the lexical
+    // parent: functions cannot see locals in their callers, while explicit
+    // allocation transfer still can.
+    const std::weak_ptr<environment> parent;
     std::vector<std::shared_ptr<variable>> variables;
-    std::weak_ptr<azertian::script> script;
-    std::shared_ptr<function_frame> frame;
+    std::weak_ptr<azertian::script>& script;
+    const std::shared_ptr<function_frame> frame;
     std::vector<std::size_t> declared_slots;
-    bool closing=false;
+    bool& closing;
     // The function-level scope of a frame also finalizes parameters and temporaries.
-    bool frame_root=false;
+    const bool frame_root;
     void cleanup(const std::shared_ptr<environment>& self);
     ~environment();
     std::shared_ptr<variable> getVariable(std::string name);
@@ -343,6 +357,10 @@ std::string value_to_string(const std::shared_ptr<variable>& value);
 bool script_namespace_in_use(int namespace_id);
 std::shared_ptr<variable> invoke_bound_function(const std::shared_ptr<script>& script,int id,
     const std::shared_ptr<environment>& env,std::vector<std::shared_ptr<variable>> arguments,type_contexts contexts);
+// A script function called from a site, as object destructors are.
+std::shared_ptr<variable> invoke_bound_function(const std::shared_ptr<script>& script,int id,
+    ownership::Site caller,std::vector<std::shared_ptr<variable>> arguments,type_contexts contexts);
+inline ownership::Site site_of(const std::shared_ptr<environment>& env) noexcept {return env?env->site():ownership::Site{};}
 void validate_type_contexts(const type_contexts& contexts,const std::shared_ptr<script>& script);
 }
 #endif

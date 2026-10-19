@@ -74,15 +74,19 @@ def compile_java(module, deps):
 def check_error_storage():
     # Cleanup must retain both exception identity and its trace. Raw exception
     # pointers outside pending_error would silently lose the latter on unwind.
-    for name in ('library.h', 'library.cpp', 'blocks.h', 'blocks.cpp', 'heepalloc.cpp'):
-        text = (ROOT/'interpreter'/name).read_text(encoding='utf-8')
-        if name == 'library.h':
+    # Every runtime source of both engines and the shared core is checked.
+    interpreter = ROOT/'interpreter'
+    sources = sorted(path for pattern in ('*.h', '*.cpp', 'core/*.h', 'core/*.cpp', 'vm/*.h', 'vm/*.cpp')
+                     for path in interpreter.glob(pattern) if not path.stem.endswith('_tests'))
+    for path in sources:
+        text = path.read_text(encoding='utf-8')
+        if path.relative_to(interpreter).as_posix() == 'core/errors.h':
             start = text.index('class pending_error {')
             end = text.index('\n};', start) + len('\n};')
             text = text[:start] + text[end:]
         if 'std::exception_ptr' in text:
-            raise RuntimeError(f'Raw exception storage outside pending_error in interpreter/{name}')
-    print('Error trace storage check passed.', flush=True)
+            raise RuntimeError(f'Raw exception storage outside pending_error in {path.relative_to(ROOT)}')
+    print(f'Error trace storage check passed ({len(sources)} runtime sources).', flush=True)
 
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
@@ -200,6 +204,34 @@ def main():
             '--libdir', native/'interpreter']
     if jni:extern += ['--bridge', bridge, '--library', native/'abdjni'/libname]
     run(extern)
+    runtime_abi=[sys.executable, ROOT/'tests/runtime_abi_end_to_end.py', '--classpath', classpath,
+                 '--runner', native/'interpreter/azscript-run',
+                 '--signer', native/'interpreter/azscript-sign-extern',
+                 '--libdir', native/'interpreter']
+    if args.sanitize:runtime_abi += ['--sanitize']
+    run(runtime_abi)
+    # Migration VM gates: lowering of real modules, then independent-process
+    # scalar/call execution compared field by field with the default backend.
+    run([sys.executable, ROOT/'tests/vm_program_end_to_end.py', '--classpath', classpath,
+         '--host', native/'interpreter/vm-loader-host'])
+    vm_work=BUILD/'runtime-perf'/('vm-execution-sanitize' if args.sanitize else 'vm-execution')
+    if vm_work.exists():shutil.rmtree(vm_work)
+    vm_work.parent.mkdir(parents=True,exist_ok=True)
+    run([sys.executable, ROOT/'tests/runtime_differential.py', '--self-test'])
+    run([sys.executable, ROOT/'tests/runtime_differences.py', '--self-test'])
+    fuzz_work=BUILD/'runtime-perf'/('fuzz-selftest-sanitize' if args.sanitize else 'fuzz-selftest')
+    if fuzz_work.exists():shutil.rmtree(fuzz_work)
+    run([sys.executable, ROOT/'tests/lifecycle_fuzz.py', '--self-test', '--classpath', classpath,
+         '--reference-host', native/'interpreter/observation-host',
+         '--candidate-host', native/'interpreter/observation-host', '--candidate-engine', 'vm', '--work', fuzz_work])
+    run([sys.executable, ROOT/'tests/vm_execution_end_to_end.py', '--classpath', classpath,
+         '--reference-host', native/'interpreter/observation-host', '--reference-engine', 'tree',
+         '--candidate-host', native/'interpreter/observation-host', '--candidate-engine', 'vm', '--work', vm_work])
+    # Every end-to-end runner invocation, run again with the VM forced: outputs
+    # must be byte-identical or a refusal listed with its exact count.
+    align_work=BUILD/'runtime-perf'/('alignment-sanitize' if args.sanitize else 'alignment')
+    if align_work.exists():shutil.rmtree(align_work)
+    run([sys.executable, ROOT/'tools/backend_alignment.py', '--native', native, '--classpath', classpath, '--work', align_work])
     print('Build and all selected tests passed. Use ./azscript --help.')
 
 if __name__=='__main__':

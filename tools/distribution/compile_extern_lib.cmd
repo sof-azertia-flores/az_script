@@ -24,7 +24,7 @@ if errorlevel 1 (
     echo AzScript: cl.exe was not found on PATH. >&2
     exit /b 1
 )
-cl /nologo /std:c++20 /EHsc /LD /I "%AZSCRIPT_INCLUDE%" %AZSCRIPT_SOURCES% /link /LIBPATH:"%AZSCRIPT_LIBDIR%" abdInvoker.lib /OUT:"%AZSCRIPT_OUT%.dll"
+cl /nologo /std:c++20 /EHsc /LD /I "%AZSCRIPT_INCLUDE%" %AZSCRIPT_SOURCES% /link /LIBPATH:"%AZSCRIPT_LIBDIR%" abdInvoker-1.lib /OUT:"%AZSCRIPT_OUT%.dll"
 exit /b %errorlevel%
 :usage
 echo Usage: compile_extern_lib.cmd -o stem source.cpp [more.cpp...] >&2

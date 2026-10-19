@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "suite": "runtime-core-v1",
+  "function_id": "0x0fff0002",
+  "max_steps": 10000000,
+  "max_call_depth": 256,
+  "max_stack_bytes": 0,
+  "sizes": {"small": 32, "medium": 512, "large": 4096},
+  "scored_sizes": ["medium", "large"],
+  "groups": {
+    "scalar": {"weight": 0.25, "cases": ["integer_loop", "branch_loop"]},
+    "calls": {"weight": 0.25, "cases": ["call_0", "call_1", "call_4", "call_16"]},
+    "objects": {"weight": 0.25, "cases": ["object_fields", "object_copy"]},
+    "virtual": {"weight": 0.25, "cases": ["virtual_monomorphic", "virtual_alternating"]}
+  },
+  "score": "Weighted geometric mean of baseline/candidate steady seconds per call. Cases and scored sizes have equal weight inside each group. No score for incomplete or failed runs.",
+  "excluded_from_score": ["small", "file_read", "load", "flush", "first_invoke", "cold_to_first_invoke", "warmup", "destroy", "process_wall", "peak_rss"],
+  "default_reference_role": "original",
+  "adoption_reference_role": "heap-growth-only",
+  "calibration": {"target_batch_seconds": 0.25, "max_calls_per_batch": 1000000, "warmup_calls": 3, "batches": 5, "rounds": 7}
+}

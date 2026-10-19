@@ -12,12 +12,12 @@ if [ -z "$include" ] || [ -z "$libdir" ]; then
         repo=$(CDPATH= cd -P "$script_dir/../.." && pwd)
         include=${include:-$repo/include}
         if [ -z "$libdir" ]; then
-            if [ -e "$repo/build/native/interpreter/libabdInvoker.so" ] || [ -e "$repo/build/native/interpreter/libabdInvoker.dylib" ]; then
+            if [ -e "$repo/build/native/interpreter/libabdInvoker-1.so" ] || [ -e "$repo/build/native/interpreter/libabdInvoker-1.dylib" ]; then
                 libdir=$repo/build/native/interpreter
-            elif [ -e "$repo/build/sanitize/interpreter/libabdInvoker.so" ] || [ -e "$repo/build/sanitize/interpreter/libabdInvoker.dylib" ]; then
+            elif [ -e "$repo/build/sanitize/interpreter/libabdInvoker-1.so" ] || [ -e "$repo/build/sanitize/interpreter/libabdInvoker-1.dylib" ]; then
                 libdir=$repo/build/sanitize/interpreter
             else
-                echo 'AzScript: set AZSCRIPT_LIBDIR to the directory containing libabdInvoker.' >&2
+                echo 'AzScript: set AZSCRIPT_LIBDIR to the directory containing the ABI 1 shared runtime libabdInvoker-1.' >&2
                 exit 1
             fi
         fi
@@ -79,4 +79,4 @@ set -- $sources
 set +f
 IFS=$old_ifs
 cxx=${CXX:-c++}
-"$cxx" -std=c++20 -fPIC $shared -I "$include" "$@" -L "$libdir" -labdInvoker -Wl,-rpath,"$libdir" -o "$target"
+"$cxx" -std=c++20 -fPIC $shared -I "$include" "$@" -L "$libdir" -labdInvoker-1 -Wl,-rpath,"$libdir" -o "$target"

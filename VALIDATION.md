@@ -1,3 +1,23 @@
+# 可暂停的块析构遍历（2026-10-18）
+
+在 `e8ca1ef` 上迁移 S2.3 的块析构遍历，保留原生脚本调用驱动。定向 16/16 CTest、6,284 项运行时检查通过；新增 161 项生命周期检查包含暂停/重入、原生调用准备分配失败及 65 层遍历零分配。错误成员顺序的负对照被检出。最终树和 VM 分别通过 F0 的 57 案例 / 2,310 次独立进程回放，证据位于 `build/s23/`。
+
+最终普通全量通过：330 项 Java 测试、16/16 CTest（含真实 JNI）、全部跨语言套件与 57 案例 / 2,310 对进程差分，日志 `build/s23/normal.log`。最终 ASan/UBSan 全量通过：15/15 CTest、全部跨语言套件与 57 案例 / 2,310 对进程差分，无 sanitizer 报告，日志 `build/s23/sanitize.log`。普通与 sanitizer 顺序运行，清除三个 Java 选项环境变量；未重新运行发行导出。
+
+Release 诊断已完成：相对 `e8ca1ef`，VM 标量/对象组耗时约增加 2.6% / 0.8%，其余组变化较小；中/大规模、50 ms 校准、7 轮 × 5 批，每引擎 280 个计时进程均通过结果校验。短批次不计算采用分数，正式性能门禁仍未闭合。S2.3 其余生命周期驱动与 VM 循环内析构仍未完成，详见 [实施状态](docs/runtime-performance-roadmap/STATUS.md)。
+
+# 运行时所有权与共享语句协议（2026-10-18）
+
+基于 GitHub `claude/runtime-performance-handoff-5mdt6h` 的 `816a67a`，在 `codex/runtime-performance-continue` 接续 R11b：ScopeId/TempListId 替代块和堆登记中的环境/临时帧指针；核心记录由租约管理，VM 记录页计入 workspace；树与 VM 共享语句水位及参数/局部声明提交顺序。缓冲区赋值跨析构回调的失效作用域问题已在 F0 重现并加入回归。exec v10、JNI snapshot v10 保持。
+
+- 最终普通全量通过：`build/resume/final-normal.log`。从与当前原生源码逐文件相同的冻结副本运行，包括 330 项 Java 测试、15/15 CTest、6,284 项原生运行时检查、3,433 项真实 JNI 断言及全部跨语言套件。
+- 最终 ASan/UBSan 全量通过：`build/resume/s22-sanitize.log`，14/14 CTest、6,284 项运行时检查及全部跨语言套件，最后完成 57 案例 / 2,310 参考与 2,310 候选进程差分，无 sanitizer 报告。普通与 sanitizer 顺序运行；sanitizer 不含 JNI。
+- F0 `ab83ab1`（运行时等于 `97968ba`）的 57 案例、2,310 份观察分别由最终树和 VM 各回放 2,310 次，所有字段一致。记录 `build/resume/validated-f0-vs-tree/`、`validated-f0-vs-vm/`。
+- 两类核心记录的冷分配和跨页增长共 8 个实际分配失败注入点验证回滚；过期身份、槽位复用、临时值水位、首错和空作用域兼容性均有回归。移除作用域有效性检查、破坏语句水位的两个诊断变体均被测试检出。
+- CMake 安装后的独立静态、动态 C++ 消费者编译和执行通过。未执行完整发行导出。
+
+Release 诊断采用 7 轮 × 5 批、50 ms 参考校准和中/大规模，测试期间无其他编译/验证进程；每引擎 280 次计时进程的结果正确。VM 对象/虚调用组相对 F0 耗时仍约增加 4.6% / 2.7%，尚未通过完整性能采用门禁；没有采用评分或默认引擎切换。具体比值、证据路径和后续边界见 [运行时实施记录](docs/runtime-performance-roadmap/STATUS.md)。
+
 # 将 main（原生栈保护）合并到编译器路线图（2026-10-16）
 
 中文 | [English](VALIDATION.en.md)

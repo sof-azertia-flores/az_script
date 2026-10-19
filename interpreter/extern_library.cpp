@@ -173,10 +173,24 @@ bool starts_with(const std::string& text,const char* prefix) {
     const auto length=std::strlen(prefix);
     return text.size()>=length&&text.compare(0,length,prefix)==0;
 }
+bool runtime_dependency(const std::string& leaf) {
+    if(leaf=="libabdInvoker-1.so"||leaf=="libabdInvoker-1.dylib"
+            ||starts_with(leaf,"libabdInvoker-1.so."))return true;
+    // CMake embeds the SOVERSION before .dylib on Apple platforms.
+    constexpr const char* prefix="libabdInvoker-1.";
+    constexpr const char* suffix=".dylib";
+    if(starts_with(leaf,prefix)&&leaf.size()>std::strlen(prefix)+std::strlen(suffix)
+            &&leaf.compare(leaf.size()-std::strlen(suffix),std::strlen(suffix),suffix)==0) {
+        const auto end=leaf.size()-std::strlen(suffix);
+        for(std::size_t i=std::strlen(prefix);i<end;++i)
+            if((leaf[i]<'0'||leaf[i]>'9')&&leaf[i]!='.')return false;
+        return true;
+    }
+    return equals_ignore_case(leaf,"abdInvoker-1.dll")||equals_ignore_case(leaf,"libabdInvoker-1.dll");
+}
 bool allowed_dependency(const std::string& leaf) {
     if(leaf.empty()||leaf.size()>4096||leaf.find('/')!=std::string::npos||leaf.find('\\')!=std::string::npos)return false;
-    if(leaf=="libabdInvoker.so"||leaf=="libabdInvoker.dylib"||starts_with(leaf,"libabdInvoker.so."))return true;
-    if(equals_ignore_case(leaf,"abdInvoker.dll"))return true;
+    if(runtime_dependency(leaf))return true;
     if(starts_with(leaf,"libc.so.")||starts_with(leaf,"libm.so.")||starts_with(leaf,"libdl.so.")
             ||starts_with(leaf,"libpthread.so.")||starts_with(leaf,"librt.so.")
             ||starts_with(leaf,"libgcc_s.so.")||starts_with(leaf,"libstdc++.so.")
@@ -193,10 +207,6 @@ bool allowed_dependency(const std::string& leaf) {
     std::string lower=leaf;
     for(char& ch:lower)if(ch>='A'&&ch<='Z')ch=static_cast<char>(ch-'A'+'a');
     return starts_with(lower,"api-ms-win-crt-")||starts_with(lower,"api-ms-win-core-");
-}
-bool runtime_dependency(const std::string& leaf) {
-    return leaf=="libabdInvoker.so"||leaf=="libabdInvoker.dylib"||starts_with(leaf,"libabdInvoker.so.")
-        ||equals_ignore_case(leaf,"abdInvoker.dll");
 }
 void read_c_string(ByteReader& reader,std::size_t offset,std::size_t limit,std::string& out) {
     out.clear();
@@ -514,6 +524,16 @@ void invoke_entry(void* handle) {
     auto entry=reinterpret_cast<void(*)()>(dlsym(handle,"azscript_load_extern"));
 #endif
     if(!entry)throw std::runtime_error("Extern library is missing azscript_load_extern");
+#if defined(_WIN32)
+    auto abi=reinterpret_cast<std::uint32_t(*)()>(GetProcAddress(static_cast<HMODULE>(handle),"azscript_extern_runtime_abi"));
+#else
+    dlerror();
+    auto abi=reinterpret_cast<std::uint32_t(*)()>(dlsym(handle,"azscript_extern_runtime_abi"));
+#endif
+    if(!abi)throw std::runtime_error("Extern library is missing azscript_extern_runtime_abi; rebuild the plugin for runtime ABI "+std::to_string(RUNTIME_ABI_VERSION));
+    const auto plugin_abi=abi();
+    if(plugin_abi!=RUNTIME_ABI_VERSION)
+        throw std::runtime_error("Extern library runtime ABI mismatch: expected "+std::to_string(RUNTIME_ABI_VERSION)+", got "+std::to_string(plugin_abi));
     auto before=executor_registry_generation();
     entry();
     if(executor_registry_generation()==before)

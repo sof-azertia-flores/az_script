@@ -1,204 +1,37 @@
 #include "library.h"
 #include "blocks.h"
+#include "core/statement.h"
+#include "core/lifecycle.h"
 #include "heepalloc.h"
 #include "internelFunctions.h"
-#include <charconv>
+#include "vm/session.h"
+#include "core/trace.h"
+#include "core/admission.h"
+#include "core/ids.h"
+#include "core/exec.h"
+#include "core/link.h"
+#include "core/value_ops.h"
 #include <algorithm>
-#include <bit>
-#include <cerrno>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <exception>
 #include <limits>
-#include <locale.h>
 #include <new>
 #include <stdexcept>
 #include <system_error>
 #include <typeinfo>
 #include <type_traits>
 #include <utility>
-#if defined(_WIN32)
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN
-#endif
-#include <windows.h>
-#if defined(_MSC_VER)
-#include <intrin.h>
-#endif
-#else
-#include <pthread.h>
-#endif
 
 namespace azertian {
-namespace detail {
-struct trace_state {
-    error_trace active,published;
-    const std::type_info* published_type=nullptr;
-    // Keep exception ownership inside pending_error. Equality works for every
-    // C++ exception type and retaining it prevents allocator-address reuse.
-    pending_error published_exception;
-    std::string published_message;
-    std::size_t entries=0,sequence=0,published_sequence=0;
-    trace_state* next=nullptr;
-    void remember_exception() noexcept {published_exception.exception_=std::current_exception();}
-    bool matches_current_exception() const noexcept {return published_exception.exception_==std::current_exception();}
-    void forget_exception() noexcept {published_exception.exception_=nullptr;}
-};
-}
 namespace {
-using detail::trace_state;
-// A trivial TLS pointer remains usable during host and plugin teardown. In
-// particular, no TLS vector/string destructor races later runtime cleanup.
-thread_local trace_state* thread_trace=nullptr;
-struct trace_registry {
-    std::mutex mutex;
-    trace_state* first=nullptr;
-};
-trace_state* trace_storage() noexcept {
-    // Process ownership also retains states from terminated threads. Keeping
-    // the registry itself alive avoids static destruction-order dependencies.
-    static trace_registry* registry=new(std::nothrow) trace_registry;
-    if(!thread_trace&&registry) {
-        auto state=new(std::nothrow) trace_state;if(!state)return nullptr;
-        try {
-            std::lock_guard<std::mutex> lock(registry->mutex);
-            state->next=registry->first;registry->first=state;thread_trace=state;
-        } catch(...) {delete state;}
-    }
-    return thread_trace;
-}
-void discard_active_trace() noexcept {
-    if(thread_trace)thread_trace->active={};
-}
-void publish_trace(const std::exception* error,bool move_outermost=true) noexcept {
-    auto state=thread_trace;if(!state)return;
-    try {
-        std::string message=error&&error->what()?error->what():"";
-        error_trace trace;
-        if(move_outermost&&state->entries<=1){trace=std::move(state->active);state->active={};}
-        else trace=state->active;
-        state->published=std::move(trace);
-        state->published_message=std::move(message);
-        state->published_type=error?&typeid(*error):nullptr;
-        state->remember_exception();state->published_sequence=state->sequence;
-    } catch(...) {
-        state->published={};state->published_message.clear();state->published_type=nullptr;state->forget_exception();
-    }
-}
-class entry_scope {
-    trace_state* state=trace_storage();
-    bool failed=false;
-public:
-    entry_scope() noexcept {if(state){++state->entries;++state->sequence;state->active={};}}
-    ~entry_scope() noexcept {
-        if(state){if(!failed)clear_error_trace();--state->entries;}
-    }
-    template<class Body> decltype(auto) run(Body body) {
-        try {return body();}
-        catch(const std::exception& error){failed=true;publish_trace(&error);throw;}
-        catch(...){failed=true;publish_trace(nullptr);throw;}
-    }
-};
-void note_frame(trace_frame frame) noexcept {
-    auto state=trace_storage();if(!state)return;
-    try {
-        if(state->active.frames.size()<64)state->active.frames.push_back(std::move(frame));
-        else ++state->active.omitted_frames;
-    } catch(...) {++state->active.omitted_frames;}
-}
+using trace::entry_scope;
+// Frames of tree functions use the shared recorder and their current location.
 void note_script_frame(const ofunction& function,const std::shared_ptr<function_frame>& frame) noexcept {
-    try {
-        trace_frame result;result.function_id=function.function_id;
-        if(auto debug=function.debug) {
-            result.name=debug->name;
-            const auto location=frame?frame->location:0;
-            const auto position=location&&location<=debug->locations.size()?debug->locations[location-1]:debug->header;
-            if(position.line&&position.column&&debug->files&&position.file<debug->files->size()) {
-                result.file=(*debug->files)[position.file];result.line=position.line;result.column=position.column;
-            }
-        }
-        note_frame(std::move(result));
-    } catch(...) {if(auto state=trace_storage())++state->active.omitted_frames;}
+    trace::note_script_frame(function.function_id,function.debug.get(),frame?frame->location:0);
 }
-}
-std::string function_id_text(int id) {
-    char text[16];std::snprintf(text,sizeof text,"0x%08x",static_cast<unsigned>(static_cast<std::uint32_t>(id)));
-    return text;
-}
-const error_trace& last_error_trace() noexcept {
-    static const error_trace empty;
-    return thread_trace?thread_trace->published:empty;
-}
-std::string format_error_trace(const error_trace& trace) {
-    std::string result;
-    for(const auto& frame:trace.frames) {
-        if(!result.empty())result+='\n';
-        result+="  at ";
-        if(frame.native)result+="native function "+function_id_text(frame.function_id);
-        else if(frame.name.empty())result+="function "+function_id_text(frame.function_id);
-        else result+=frame.name;
-        if(!frame.native&&!frame.file.empty()&&frame.line&&frame.column)
-            result+=" ("+frame.file+":"+std::to_string(frame.line)+":"+std::to_string(frame.column)+")";
-    }
-    if(trace.omitted_frames) {
-        if(!result.empty())result+='\n';
-        result+="  ... "+std::to_string(trace.omitted_frames)+" more frames";
-    }
-    return result;
-}
-std::string describe_error(const std::exception& error) {
-    std::string result=error.what()?error.what():"";
-    if(thread_trace&&thread_trace->published_type&&*thread_trace->published_type==typeid(error)&&
-       thread_trace->published_message==result) {
-        auto trace=format_error_trace(thread_trace->published);
-        if(!trace.empty())result+='\n'+trace;
-    }
-    return result;
-}
-void clear_error_trace() noexcept {
-    if(thread_trace) {
-        thread_trace->active={};thread_trace->published={};
-        thread_trace->published_message.clear();thread_trace->published_type=nullptr;thread_trace->forget_exception();
-    }
-}
-pending_error pending_error::capture() noexcept {
-    pending_error result;result.capture_current();return result;
-}
-pending_error::operator bool() const noexcept {return static_cast<bool>(exception_);}
-void pending_error::capture_current() noexcept {
-    if(!exception_) {
-        exception_=std::current_exception();
-        if(exception_&&thread_trace) {
-            trace_=std::move(thread_trace->active);
-            // A direct host cleanup can catch an invocation after its outer
-            // entry moved the active trace into the published record.
-            if(trace_.frames.empty()&&!trace_.omitted_frames&&
-               thread_trace->published_sequence==thread_trace->sequence) {
-                if(thread_trace->published_exception.exception_==exception_)
-                    try {trace_=thread_trace->published;}catch(...) {}
-            }
-        }
-    }
-    discard_active_trace();
-}
-[[noreturn]] void pending_error::rethrow() const {
-    if(thread_trace) {
-        try {thread_trace->active=trace_;}catch(...){thread_trace->active={};}
-    }
-    if(!exception_)throw std::logic_error("No pending error");
-    try {std::rethrow_exception(exception_);}
-    catch(const std::exception& error) {
-        publish_trace(&error,!thread_trace||!thread_trace->entries);
-        throw;
-    } catch(...) {
-        publish_trace(nullptr,!thread_trace||!thread_trace->entries);
-        throw;
-    }
 }
 struct context_spec {
     int ref=-1,abi=VOID_VALUE,kind=0,width=1;
@@ -232,6 +65,9 @@ using V=std::shared_ptr<variable>;
 using E=std::shared_ptr<environment>;
 using M=std::shared_ptr<AbdMap>;
 V nil() { return std::make_shared<variable>(nullptr); }
+// A parameter's storage. Its allocation stays inlined here: the site entry's
+// parameter loop is too large for GCC to inline it there (call_16 +0.7%).
+[[gnu::flatten]] V parameter_storage() { return std::make_shared<variable>(nullptr); }
 // Runtime messages spell IDs like source and the CLI do: 0x plus the full
 // 32-bit pattern, so negative and high-bit IDs read the same everywhere.
 std::string hex_text(std::uint32_t value,int digits) {
@@ -260,10 +96,6 @@ void mark_returned(const E& env,V result) {
     env->frame->return_location=env->frame->location;
     env->frame->result=std::move(result);env->frame->returned=true;
 }
-bool valid_context_kind(int abi,int kind) {
-    return (kind==0&&abi>=INT_VALUE&&abi<=VOID_VALUE)||((kind==1||kind==2)&&abi==ADDRESS_VALUE)
-        ||((kind==3||kind==4)&&abi==OBJECT_VALUE);
-}
 std::shared_ptr<const type_context> bind_context(const std::shared_ptr<context_spec>& spec,const E& env,std::size_t depth=0) {
     if(!spec||depth>=128)throw std::runtime_error("Generic context nesting exceeds 128 levels");
     if(spec->ref>=0) {
@@ -282,49 +114,17 @@ type_contexts bind_contexts(const std::vector<std::shared_ptr<context_spec>>& sp
     for(auto& spec:specs)result.push_back(bind_context(spec,env));
     return result;
 }
-const char* type_name(int type) {
-    switch(type) {
-    case INT_VALUE:return "int";
-    case STRING_VALUE:return "string";
-    case FLOAT_VALUE:return "float";
-    case DOUBLE_VALUE:return "double";
-    case BOOLEAN_VALUE:return "boolean";
-    case VOID_VALUE:return "void";
-    case ANY_VALUE:return "any";
-    case ADDRESS_VALUE:return "address";
-    case OBJECT_VALUE:return "object";
-    default:return "unknown";
-    }
-}
-void validate_arguments(const std::string& kind,int id,const std::vector<int>& expected,
-                        const std::vector<V>& actual,bool allow_any) {
-    if(actual.size()!=expected.size())
-        throw std::runtime_error(kind+" "+function_id_text(id)+" argument count mismatch: expected "+
-            std::to_string(expected.size())+", got "+std::to_string(actual.size()));
-    for(std::size_t i=0;i<expected.size();++i) {
-        if(!actual[i])
-            throw std::runtime_error(kind+" "+function_id_text(id)+" argument "+std::to_string(i+1)+
-                " is a null pointer; use variable(nullptr) for void");
-        const int got=static_cast<int>(actual[i]->type);
-        if(expected[i]!=got&&!(allow_any&&expected[i]==ANY_VALUE))
-            throw std::runtime_error(kind+" "+function_id_text(id)+" argument "+std::to_string(i+1)+
-                " type mismatch: expected "+type_name(expected[i])+", got "+type_name(got));
-    }
-}
 struct parsed_module {
     M meta;
     std::size_t global_count=0;
     std::map<int,std::shared_ptr<function>> functions;
     std::map<int,function_signature> extern_signatures;
-    std::set<int> namespaces{0};
     std::string hint;
     std::map<int,std::string> assumptions;
     std::vector<function_reference> references;
 };
-int namespace_of(int id) { return static_cast<int>(static_cast<unsigned int>(id)>>16); }
-int relocate_id(int id,int ns) {
-    return std::bit_cast<int>((static_cast<std::uint32_t>(ns)<<16)|(static_cast<std::uint32_t>(id)&0xffffu));
-}
+using ids::namespace_of;
+int relocate_id(int id,int ns) noexcept {return ids::relocate(id,ns);}
 using module_list=std::vector<std::shared_ptr<loaded_module>>;
 // Ordinary modules keep their compiled IDs, so a collision names the earlier
 // owner and how to separate the modules. Module ordinals count successful
@@ -353,11 +153,6 @@ std::string mounted_hint_conflict(const char* what,int ns,const module_list& mod
     return std::string(what)+" "+namespace_text(ns)+" conflicts with hint "+modules[index]->manifest.hint+
         ", which module #"+std::to_string(index)+" mounted there; hint libraries take the lowest free namespace, so "+remedy;
 }
-bool valid_hint(const std::string& hint) {
-    auto first=[](unsigned char c){return (c>='a'&&c<='z')||(c>='A'&&c<='Z')||c=='_';};
-    if(hint.empty()||!first(hint[0]))return false;
-    return std::all_of(hint.begin()+1,hint.end(),[&](unsigned char c){return first(c)||(c>='0'&&c<='9');});
-}
 std::vector<std::weak_ptr<script>>& live_scripts(){static std::vector<std::weak_ptr<script>> result;return result;}
 std::shared_ptr<script> owner(E env) {
     if(!env) throw std::runtime_error("Missing execution environment");
@@ -365,310 +160,37 @@ std::shared_ptr<script> owner(E env) {
     if(!s || s->closed) throw std::runtime_error("Script is closed");
     return s;
 }
-// Calls, blocks and expressions recurse natively, so call depth and nesting
-// limits alone do not bound stack use. Each thread records where its outermost
-// script call began; execution stops at the script's byte budget or near the
-// bottom of the thread's real stack, keeping a reserve for unwinding, cleanup,
-// host calls and host guard pages such as the JVM's. Stacks grow downwards.
-constexpr std::size_t min_stack_reserve=64*1024,max_stack_reserve=1024*1024;
-// Applies only where the thread's stack bounds cannot be determined.
-constexpr std::size_t fallback_stack_budget=256*1024;
-struct native_stack {
-    std::uintptr_t base=0,floor=0;
-    std::size_t depth=0;
-    // Cached per thread: the main thread's bounds can require reading /proc.
-    std::uintptr_t low=0,high=0;
-};
-thread_local native_stack stack_state;
-std::uintptr_t stack_position() noexcept {
-#if defined(_MSC_VER)
-    return reinterpret_cast<std::uintptr_t>(_AddressOfReturnAddress());
-#else
-    // The frame address, unlike a local's address, is never on a sanitizer's fake stack.
-    return reinterpret_cast<std::uintptr_t>(__builtin_frame_address(0));
-#endif
-}
-void query_stack_bounds(native_stack& state) noexcept {
-    state.low=state.high=0;
-#if defined(_WIN32)
-#if defined(_WIN32_WINNT)&&_WIN32_WINNT>=0x0602
-    ULONG_PTR low=0,high=0;GetCurrentThreadStackLimits(&low,&high);
-    state.low=low;state.high=high;
-#endif
-#elif defined(__APPLE__)
-    const auto self=pthread_self();
-    state.high=reinterpret_cast<std::uintptr_t>(pthread_get_stackaddr_np(self));
-    state.low=state.high-pthread_get_stacksize_np(self);
-#elif defined(__linux__)
-    pthread_attr_t attributes;
-    if(pthread_getattr_np(pthread_self(),&attributes)!=0)return;
-    void* low=nullptr;std::size_t size=0;
-    if(pthread_attr_getstack(&attributes,&low,&size)==0) {
-        state.low=reinterpret_cast<std::uintptr_t>(low);state.high=state.low+size;
-    }
-    pthread_attr_destroy(&attributes);
-#endif
-}
-void check_native_stack(const script& s,std::uintptr_t here) {
-    const auto& state=stack_state;
-    const std::size_t budget=s.max_stack_bytes?s.max_stack_bytes:state.floor?0:fallback_stack_budget;
-    if((state.floor&&here<state.floor)||(budget&&here<state.base&&state.base-here>budget))
-        throw std::runtime_error("Script native stack limit exceeded");
-}
-// Counts the entry only after the check passes; each counted entry is paired
-// with leave_native_stack.
-void enter_native_stack(const script& s) {
-    auto& state=stack_state;
-    const auto here=stack_position();
-    if(!state.depth) {
-        // Bounds that do not contain this frame are stale, e.g. after a stack switch.
-        if(here<=state.low||here>state.high)query_stack_bounds(state);
-        state.base=here;state.floor=0;
-        if(here>state.low&&here<=state.high)
-            state.floor=state.low+std::clamp<std::size_t>((state.high-state.low)/4,min_stack_reserve,max_stack_reserve);
-    }
-    check_native_stack(s,here);
-    ++state.depth;
-}
-void leave_native_stack() noexcept {--stack_state.depth;}
 void tick(E env) {
     auto s=owner(env);
-    if(stack_state.depth)check_native_stack(*s,stack_position());
+    if(admission::native_stack.depth)admission::check_native_stack(s->max_stack_bytes,admission::stack_position());
     if(!s->remaining_steps) throw std::runtime_error("Script execution step limit exceeded");
     --s->remaining_steps;
 }
-bool numeric(const V& v) { return v && (v->type==INT_VALUE||v->type==FLOAT_VALUE||v->type==DOUBLE_VALUE); }
-double number(const V& v) {
+// Value semantics come from the shared core layer; these adapters add the
+// tree's null-pointer checks and variable wrappers only.
+V wrap(Value value) {auto result=std::make_shared<variable>();value_access::assign(*result,std::move(value));return result;}
+const Value& value_of(const V& v) {
     if(!v) throw std::runtime_error("Null host value");
-    switch(v->type) {
-    case INT_VALUE:return *static_cast<int*>(v->value);
-    case FLOAT_VALUE:return *static_cast<float*>(v->value);
-    case DOUBLE_VALUE:return *static_cast<double*>(v->value);
-    default:throw std::runtime_error("Expected a numeric value");
-    }
+    return value_access::read(*v);
 }
-bool truth(const V& v) {
-    if(!v) throw std::runtime_error("Null host value");
-    if(v->type==BOOLEAN_VALUE) return *static_cast<bool*>(v->value);
-    throw std::runtime_error("Condition must be boolean, got "+std::string(type_name(v->type)));
-}
-V checked_int(std::int64_t n) {
-    if(n<std::numeric_limits<int>::min()||n>std::numeric_limits<int>::max())
-        throw std::overflow_error("Integer overflow");
-    return std::make_shared<variable>(static_cast<int>(n));
+bool numeric(const V& v) { return v && value_ops::numeric(value_access::read(*v)); }
+double number(const V& v) {return value_ops::number(value_of(v));}
+bool truth(const V& v) {return value_ops::truth(value_of(v));}
+BinaryOperation binary_operation(const std::string& op) {
+    static const std::pair<const char*,BinaryOperation> names[]{
+        {"add",BinaryOperation::add},{"minus",BinaryOperation::subtract},{"multiply",BinaryOperation::multiply},
+        {"divide",BinaryOperation::divide},{"mod",BinaryOperation::remainder},{"gt",BinaryOperation::greater},
+        {"lt",BinaryOperation::less},{"eq",BinaryOperation::equal},{"ne",BinaryOperation::not_equal},
+        {"ge",BinaryOperation::greater_equal},{"le",BinaryOperation::less_equal}};
+    for(const auto& [name,operation]:names)if(op==name)return operation;
+    throw std::logic_error("Unknown binary operation: "+op);
 }
 V binary(const std::string& op,const V& a,const V& b) {
-    if(a->type==OBJECT_VALUE||b->type==OBJECT_VALUE)throw std::runtime_error("Unsupported object value operands for "+op);
-    if(op=="add"&&(a->type==STRING_VALUE||b->type==STRING_VALUE))
-        return std::make_shared<variable>(value_to_string(a)+value_to_string(b));
-    if(a->type==ADDRESS_VALUE||b->type==ADDRESS_VALUE) {
-        if(a->type==ADDRESS_VALUE&&b->type==ADDRESS_VALUE) {
-            const auto x=static_cast<address*>(a->value)->value,y=static_cast<address*>(b->value)->value;
-            if(op=="eq")return std::make_shared<variable>(x==y);
-            if(op=="ne")return std::make_shared<variable>(x!=y);
-            if(op=="lt")return std::make_shared<variable>(x<y);
-            if(op=="le")return std::make_shared<variable>(x<=y);
-            if(op=="gt")return std::make_shared<variable>(x>y);
-            if(op=="ge")return std::make_shared<variable>(x>=y);
-        }
-        const bool left_address=a->type==ADDRESS_VALUE;
-        if((op=="add"||(op=="minus"&&left_address))&&
-           (left_address?b->type==INT_VALUE:a->type==INT_VALUE)) {
-            const auto base=static_cast<address*>((left_address?a:b)->value)->value;
-            std::int64_t offset=*static_cast<int*>((left_address?b:a)->value);
-            if(op=="minus")offset=-offset;
-            if(offset>=0) {
-                const auto magnitude=static_cast<std::uint64_t>(offset);
-                if(base>std::numeric_limits<std::uint64_t>::max()-magnitude)throw std::overflow_error("Address overflow");
-                return std::make_shared<variable>(address{base+magnitude});
-            }
-            const auto magnitude=static_cast<std::uint64_t>(-offset);
-            if(base<magnitude)throw std::overflow_error("Address underflow");
-            return std::make_shared<variable>(address{base-magnitude});
-        }
-        throw std::runtime_error("Unsupported address operands for "+op);
-    }
-    if(op=="eq"||op=="ne") {
-        bool eq=false;
-        if(numeric(a)&&numeric(b)) eq=number(a)==number(b);
-        else if(a->type!=b->type)
-            throw std::runtime_error("Equality requires compatible operand types, got "+
-                std::string(type_name(a->type))+" and "+type_name(b->type));
-        else {
-            if(a->type==VOID_VALUE) eq=true;
-            else if(a->type==STRING_VALUE) eq=*static_cast<std::string*>(a->value)==*static_cast<std::string*>(b->value);
-            else if(a->type==BOOLEAN_VALUE) eq=*static_cast<bool*>(a->value)==*static_cast<bool*>(b->value);
-        }
-        return std::make_shared<variable>(op=="eq"?eq:!eq);
-    }
-    if(!numeric(a)||!numeric(b)) throw std::runtime_error("Unsupported operands for "+op);
-    const double x=number(a),y=number(b);
-    if(op=="gt") return std::make_shared<variable>(x>y);
-    if(op=="lt") return std::make_shared<variable>(x<y);
-    if(op=="ge") return std::make_shared<variable>(x>=y);
-    if(op=="le") return std::make_shared<variable>(x<=y);
-    if((op=="divide"||op=="mod")&&y==0) throw std::runtime_error("Division by zero");
-    if(a->type==INT_VALUE&&b->type==INT_VALUE) {
-        const std::int64_t i=*static_cast<int*>(a->value),j=*static_cast<int*>(b->value);
-        if(op=="add") return checked_int(i+j);
-        if(op=="minus") return checked_int(i-j);
-        if(op=="multiply") return checked_int(i*j);
-        if(op=="divide") return checked_int(i/j);
-        if(op=="mod") return checked_int(i%j);
-    }
-    if(op=="mod") throw std::runtime_error("Remainder requires integer operands");
-    double out;
-    if(op=="add") out=x+y;
-    else if(op=="minus") out=x-y;
-    else if(op=="multiply") out=x*y;
-    else if(op=="divide") out=x/y;
-    else throw std::runtime_error("Unknown binary operation: "+op);
-    if(!std::isfinite(out)) throw std::overflow_error("Non-finite arithmetic result");
-    if(a->type==DOUBLE_VALUE||b->type==DOUBLE_VALUE) return std::make_shared<variable>(out);
-    const auto f=static_cast<float>(out);
-    if(!std::isfinite(f)) throw std::overflow_error("Float overflow");
-    return std::make_shared<variable>(f);
-}
-std::string quoted_conversion_text(const std::string& value) {
-    static constexpr char hex[]="0123456789abcdef";
-    std::string result="\"";
-    auto unicode=[&](std::uint32_t code) {
-        result+="\\u";
-        for(int shift=12;shift>=0;shift-=4)result+=hex[(code>>shift)&15u];
-    };
-    std::size_t offset=0;
-    for(std::size_t count=0;offset<value.size()&&count<64;++count) {
-        const auto first=static_cast<unsigned char>(value[offset]);
-        std::uint32_t code=first;std::size_t width=1;
-        if(first>=0xc2&&first<=0xdf){width=2;code=first&0x1fu;}
-        else if(first>=0xe0&&first<=0xef){width=3;code=first&0x0fu;}
-        else if(first>=0xf0&&first<=0xf4){width=4;code=first&7u;}
-        bool valid=first<0x80||width>1;
-        if(width>value.size()-offset)valid=false;
-        if(valid)for(std::size_t i=1;i<width;++i) {
-            const auto next=static_cast<unsigned char>(value[offset+i]);
-            if((next&0xc0u)!=0x80u){valid=false;break;}
-            code=(code<<6)|(next&0x3fu);
-        }
-        if(valid&&((width==2&&code<0x80)||(width==3&&code<0x800)||(width==4&&code<0x10000)||
-           code>0x10ffff||(code>=0xd800&&code<=0xdfff)))valid=false;
-        if(!valid) {
-            result+="\\x";result+=hex[first>>4];result+=hex[first&15u];++offset;continue;
-        }
-        offset+=width;
-        if(code=='"'||code=='\\'){result+='\\';result+=static_cast<char>(code);}
-        else if(code>=0x20&&code<=0x7e)result+=static_cast<char>(code);
-        else if(code<=0xffff)unicode(code);
-        else {code-=0x10000;unicode(0xd800+(code>>10));unicode(0xdc00+(code&0x3ff));}
-    }
-    if(offset<value.size())result+="...";
-    return result+'"';
-}
-[[noreturn]] void conversion_error(const V& value,int target,const char* reason=nullptr) {
-    std::string source=type_name(value->type);
-    if(reason&&value->type==STRING_VALUE)source+=' '+quoted_conversion_text(*static_cast<std::string*>(value->value));
-    std::string message="Cannot convert "+source+" to "+type_name(target);
-    if(reason)message+=std::string(": ")+reason;
-    throw std::runtime_error(message);
-}
-bool decimal_text(const std::string& text,bool integer) {
-    std::size_t offset=0;
-    if(offset<text.size()&&(text[offset]=='+'||text[offset]=='-'))++offset;
-    const auto start=offset;
-    while(offset<text.size()&&text[offset]>='0'&&text[offset]<='9')++offset;
-    bool digits=offset>start;
-    if(!integer&&offset<text.size()&&text[offset]=='.') {
-        const auto fraction=++offset;
-        while(offset<text.size()&&text[offset]>='0'&&text[offset]<='9')++offset;
-        digits=digits||offset>fraction;
-    }
-    if(!digits)return false;
-    if(!integer&&offset<text.size()&&(text[offset]=='e'||text[offset]=='E')) {
-        ++offset;if(offset<text.size()&&(text[offset]=='+'||text[offset]=='-'))++offset;
-        const auto exponent=offset;
-        while(offset<text.size()&&text[offset]>='0'&&text[offset]<='9')++offset;
-        if(offset==exponent)return false;
-    }
-    return offset==text.size();
-}
-class conversion_locale {
-#if defined(_WIN32)
-    _locale_t locale=_create_locale(LC_NUMERIC,"C");
-#else
-    locale_t locale=newlocale(LC_NUMERIC_MASK,"C",nullptr);
-#endif
-public:
-    conversion_locale() {if(!locale)throw std::runtime_error("Cannot create C numeric locale");}
-    conversion_locale(const conversion_locale&)=delete;
-    conversion_locale& operator=(const conversion_locale&)=delete;
-    ~conversion_locale() {
-#if defined(_WIN32)
-        _free_locale(locale);
-#else
-        freelocale(locale);
-#endif
-    }
-    template<class T> T parse(const char* text,char** end) const {
-#if defined(_WIN32)
-        if constexpr(std::is_same_v<T,float>)return _strtof_l(text,end,locale);
-        else return _strtod_l(text,end,locale);
-#else
-        if constexpr(std::is_same_v<T,float>)return strtof_l(text,end,locale);
-        else return strtod_l(text,end,locale);
-#endif
-    }
-};
-template<class T> T parsed_real(const V& value,int target) {
-    const auto& text=*static_cast<std::string*>(value->value);
-    if(!decimal_text(text,false))conversion_error(value,target,"invalid decimal number");
-    conversion_locale locale;char* end=nullptr;errno=0;
-    const auto result=locale.parse<T>(text.c_str(),&end);
-    const bool range=errno==ERANGE;
-    if(end!=text.c_str()+text.size())conversion_error(value,target,"invalid decimal number");
-    // ERANGE also signals permitted underflow. Some libraries report it when
-    // rounding a tiny value up to the least normal value, which is allowed too.
-    if(!std::isfinite(result)||(range&&std::abs(result)>std::numeric_limits<T>::min()))
-        conversion_error(value,target,"value is out of range");
-    return result;
+    return wrap(value_ops::binary(binary_operation(op),value_access::read(*a),value_access::read(*b)));
 }
 V convert_value(const V& value,int target) {
-    if(!value)throw std::runtime_error("Null host value");
-    if(value->type==target)return value->deepCopy();
-    if(target==STRING_VALUE) {
-        if(numeric(value)||value->type==ADDRESS_VALUE)return std::make_shared<variable>(value_to_string(value));
-        conversion_error(value,target);
-    }
-    if(target==ADDRESS_VALUE)conversion_error(value,target);
-    if(value->type==STRING_VALUE) {
-        if(target==INT_VALUE) {
-            const auto& text=*static_cast<std::string*>(value->value);
-            if(!decimal_text(text,true))conversion_error(value,target,"invalid decimal integer");
-            const char* first=text.data();const char* last=first+text.size();
-            if(*first=='+')++first;
-            int result=0;const auto parsed=std::from_chars(first,last,result,10);
-            if(parsed.ec==std::errc::result_out_of_range)conversion_error(value,target,"value is out of range");
-            if(parsed.ec!=std::errc()||parsed.ptr!=last)conversion_error(value,target,"invalid decimal integer");
-            return std::make_shared<variable>(result);
-        }
-        if(target==FLOAT_VALUE)return std::make_shared<variable>(parsed_real<float>(value,target));
-        if(target==DOUBLE_VALUE)return std::make_shared<variable>(parsed_real<double>(value,target));
-    }
-    if(numeric(value)) {
-        const double input=number(value);
-        if(!std::isfinite(input))conversion_error(value,target,"value is out of range");
-        if(target==INT_VALUE) {
-            const double truncated=std::trunc(input);
-            if(truncated<std::numeric_limits<int>::min()||truncated>std::numeric_limits<int>::max())
-                conversion_error(value,target,"value is out of range");
-            return std::make_shared<variable>(static_cast<int>(truncated));
-        }
-        if(target==FLOAT_VALUE) {
-            if(std::abs(input)>std::numeric_limits<float>::max())conversion_error(value,target,"value is out of range");
-            return std::make_shared<variable>(static_cast<float>(input));
-        }
-        if(target==DOUBLE_VALUE)return std::make_shared<variable>(input);
-    }
-    conversion_error(value,target);
+    if(value->type_tag()==target)return value->deepCopy();
+    return wrap(value_ops::convert(value_of(value),target));
 }
 class select_expression final:public expression {
     std::shared_ptr<expression> condition,when_true,when_false;
@@ -694,30 +216,8 @@ public:
     V execute(E env) override {tick(env);return convert_value(run(value,env),target);}
 };
 V bitwise(int opcode,const V& left,const V& right) {
-    static constexpr const char* names[]{"bit_and","bit_or","bit_xor","shl","shr","ushr"};
-    if(left->type!=INT_VALUE||right->type!=INT_VALUE)
-        throw std::runtime_error(std::string(names[opcode-43])+" operands must be int, got "+
-            type_name(left->type)+" and "+type_name(right->type));
-    const auto a=static_cast<std::uint32_t>(*static_cast<int*>(left->value));
-    const auto b=static_cast<std::uint32_t>(*static_cast<int*>(right->value));
-    std::uint32_t result;
-    if(opcode==43)result=a&b;
-    else if(opcode==44)result=a|b;
-    else if(opcode==45)result=a^b;
-    else {
-        const int count=*static_cast<int*>(right->value);
-        if(count<0||count>31)
-            throw std::runtime_error("Shift count must be between 0 and 31, got "+std::to_string(count));
-        const auto shift=static_cast<unsigned>(count);
-        if(opcode==46)result=a<<shift;
-        else {
-            result=a>>shift;
-            // Use unsigned shifts for every bit pattern. The explicit sign
-            // extension also avoids shifting by 32 when the count is zero.
-            if(opcode==47&&shift&&(a&0x80000000u))result|=std::uint32_t{0xffffffffu}<<(32-shift);
-        }
-    }
-    return std::make_shared<variable>(std::bit_cast<int>(result));
+    const auto operation=static_cast<int>(BinaryOperation::bit_and)+opcode-43;
+    return wrap(value_ops::binary(static_cast<BinaryOperation>(operation),value_of(left),value_of(right)));
 }
 class bitwise_expression final:public expression {
     int opcode;
@@ -741,12 +241,7 @@ public:
         tick(env);
         auto x=run(a,env)->deepCopy();
         if(op=="not") return std::make_shared<variable>(!truth(x));
-        if(op=="neg") {
-            if(x->type==INT_VALUE) return checked_int(-static_cast<std::int64_t>(*static_cast<int*>(x->value)));
-            if(!numeric(x)) throw std::runtime_error("Negation requires a numeric operand");
-            return x->type==FLOAT_VALUE?std::make_shared<variable>(-*static_cast<float*>(x->value)):
-                std::make_shared<variable>(-number(x));
-        }
+        if(op=="neg") return wrap(value_ops::unary(UnaryOperation::negate,value_access::read(*x)));
         if(op=="and"&&!truth(x)) return std::make_shared<variable>(false);
         if(op=="or"&&truth(x)) return std::make_shared<variable>(true);
         auto y=run(b,env);
@@ -754,16 +249,23 @@ public:
         return binary(op,x,y);
     }
 };
+// Native admission: logical depth, then the native stack, then the count.
 struct call_guard {
     std::shared_ptr<script> s;
-    explicit call_guard(E env):s(owner(env)) {
-        if(s->active_calls>=s->max_call_depth) throw std::runtime_error("Script call depth limit exceeded");
-        enter_native_stack(*s);
-        if(s->active_calls==0) s->remaining_steps=s->max_steps;
-        ++s->active_calls;
+    admission::accounting calls;
+    admission::accounting::ticket admitted;
+    explicit call_guard(E env):call_guard(owner(env)) {}
+    explicit call_guard(std::shared_ptr<script> owner)
+        :s(std::move(owner)),calls(s->active_calls,s->max_call_depth,s->remaining_steps,s->max_steps) {
+        calls.check_can_enter();
+        admission::enter_native_stack(s->max_stack_bytes);
+        admitted=calls.admit();
     }
-    ~call_guard(){--s->active_calls;leave_native_stack();}
+    ~call_guard(){admitted.reset();admission::leave_native_stack();}
 };
+std::optional<int> argument_tag(const V& argument) noexcept {
+    return argument?std::optional<int>(argument->type_tag()):std::nullopt;
+}
 class checked_external_function final:public function {
     std::shared_ptr<function> target;
     function_signature signature;
@@ -783,14 +285,15 @@ public:
         script->require_execution();
         if(typed&&signature.hidden_count)throw std::runtime_error("Generic external function requires a script implementation and bound contexts");
         call_guard guard(env);
-        if(typed)validate_arguments("External function",id,signature.param_types,args,signature.hidden_count>0);
+        if(typed)admission::check_arguments("External function",id,signature.param_types,args.size(),
+            [&](std::size_t i){return argument_tag(args[i]);},signature.hidden_count>0);
         auto result=target->invoke(std::move(env),std::move(args));
         // Returning normally means any nested failure was handled by the
         // callback. It cannot become part of a later signature error.
-        discard_active_trace();
+        trace::discard_active();
         if(!result)
             throw std::runtime_error("External function "+function_id_text(id)+" returned a null pointer");
-        const int got=static_cast<int>(result->type);
+        const int got=static_cast<int>(result->type_tag());
         if(typed&&signature.return_type!=ANY_VALUE&&got!=signature.return_type)
             throw std::runtime_error("External function "+function_id_text(id)+
                 " return type mismatch: expected "+type_name(signature.return_type)+", got "+type_name(got));
@@ -798,9 +301,9 @@ public:
         } catch(...) {
             // A callback may handle a script error and throw a fresh host
             // exception. Preserve nested frames only for the propagated one.
-            if(thread_trace&&!thread_trace->matches_current_exception())discard_active_trace();
+            if(!trace::current_is_published())trace::discard_active();
             if((static_cast<std::uint32_t>(id)>>16)!=0x0abdu) {
-                trace_frame frame;frame.function_id=id;frame.native=true;note_frame(std::move(frame));
+                trace_frame frame;frame.function_id=id;frame.native=true;trace::note_frame(std::move(frame));
             }
             throw;
         }
@@ -811,10 +314,10 @@ public:
 // ends, including on errors; the first error wins.
 template<class Body> V statement_scope(const E& env,Body body) {
     auto frame=env?env->frame:nullptr;
-    const auto mark=frame?frame->temporaries.size():0;
+    const auto mark=statement::begin(frame?frame->temporary_id():ownership::TempListId{},frame?frame->temporaries.size():0);
     V result;pending_error failure;
     try {result=body();}catch(...){failure.capture_current();}
-    if(frame)try{blocks::finalize_temporaries(*frame,mark,env);}catch(...){failure.capture_current();}
+    if(frame&&frame->temporaries.size()>mark.count)try{statement::finish(mark,site_of(env));}catch(...){failure.capture_current();}
     if(failure)failure.rethrow();
     return result;
 }
@@ -829,8 +332,8 @@ template<class Body> V with_cleanup(const E& scope,Body body) {
 V scoped_execute(const std::shared_ptr<expression>& body,E env) {
     at_location location(env,body->location);
     if(std::dynamic_pointer_cast<complex_expression>(body)) return run(body,env);
-    auto scope=std::make_shared<environment>();
-    scope->parent=env;scope->script=env->script;scope->frame=env->frame;
+    auto scope=std::make_shared<environment>(env->ownership_arena(),env,ownership::ScopeId{},env->frame);
+    scope->script=env->script;
     return with_cleanup(scope,[&]{return statement_scope(scope,[&]{return run(body,scope);});});
 }
 // Compiler-generated base cleanup. It does not encode classes or object layouts:
@@ -882,8 +385,8 @@ public:
     int* destructor_address(){return destructor?&*destructor:nullptr;}
     V execute(E env) override {
         tick(env);auto pointer=run(value,env);
-        if(pointer->type!=ADDRESS_VALUE)throw std::runtime_error("Object pointer requires address type");
-        const auto object_pointer=*static_cast<address*>(pointer->value);
+        if(pointer->type_tag()!=ADDRESS_VALUE)throw std::runtime_error("Object pointer requires address type");
+        const auto object_pointer=pointer->get<address>();
         if(op=="oa")return std::make_shared<variable>(heap::object_address(object_pointer,offset));
         if(op=="ob")heap::register_object(object_pointer,destructor,manual,env,bind_contexts(contexts,env));
         else heap::delete_object(object_pointer,env);
@@ -898,8 +401,8 @@ public:
     explicit member_access_expression(std::shared_ptr<expression> pointer):pointer(std::move(pointer)) {}
     V execute(E env) override {
         tick(env);const auto result=run(pointer,env);
-        if(result->type!=ADDRESS_VALUE)throw std::runtime_error("Object pointer requires address type");
-        return heap::getAt(*static_cast<address*>(result->value));
+        if(result->type_tag()!=ADDRESS_VALUE)throw std::runtime_error("Object pointer requires address type");
+        return heap::getAt(result->get<address>());
     }
 };
 // Literal object storage. The compiler emits these only for its own lowering:
@@ -973,13 +476,13 @@ public:
             }
         }
         auto result=run(value,env);
-        if(!result||result->type!=bound->abi)throw std::runtime_error("Generic value type mismatch");
+        if(!result||result->type_tag()!=bound->abi)throw std::runtime_error("Generic value type mismatch");
         if(opcode==39)return result;
         if(!env->frame)throw std::runtime_error("Return outside function");
-        if(result->type==OBJECT_VALUE)result=blocks::export_result(result,env);
+        if(result->type_tag()==OBJECT_VALUE)result=blocks::export_result(result,env);
         else {
             result=result->deepCopy();
-            if(bound->kind==2)heap::return_object(*static_cast<address*>(result->value),env);
+            if(bound->kind==2)heap::return_object(result->get<address>(),env);
         }
         mark_returned(env,std::move(result));return nil();
     }
@@ -999,7 +502,7 @@ public:
     explicit set_methods_expression(std::shared_ptr<expression> pointer):pointer(std::move(pointer)) {}
     V execute(E env) override {
         tick(env);auto address_value=run(pointer,env);
-        if(address_value->type!=ADDRESS_VALUE)throw std::runtime_error("Virtual method receiver must be address");
+        if(address_value->type_tag()!=ADDRESS_VALUE)throw std::runtime_error("Virtual method receiver must be address");
         bool context_free=true;for(const auto& entry:entries) {
             tick(env);for(const auto& context:entry->contexts)if(!constant_context(context))context_free=false;
         }
@@ -1009,7 +512,7 @@ public:
             for(const auto& entry:entries)bound->push_back({entry->function_id,bind_contexts(entry->contexts,env)});
             methods=std::move(bound);
         }
-        heap::set_methods(*static_cast<address*>(address_value->value),methods,owner(env));
+        heap::set_methods(address_value->get<address>(),methods,owner(env));
         if(context_free)cached=std::move(methods);
         return nil();
     }
@@ -1024,15 +527,15 @@ public:
     V execute(E env) override {
         tick(env);std::vector<V> args;args.reserve(arguments.size());
         for(const auto& argument:arguments)args.push_back(blocks::materialize(run(argument,env),env));
-        if(args.empty()||args[0]->type!=ADDRESS_VALUE)throw std::runtime_error("Virtual method receiver must be address");
-        const auto script=owner(env);const auto methods=heap::methods_at(*static_cast<address*>(args[0]->value),script);
+        if(args.empty()||args[0]->type_tag()!=ADDRESS_VALUE)throw std::runtime_error("Virtual method receiver must be address");
+        const auto script=owner(env);const auto methods=heap::methods_at(args[0]->get<address>(),script);
         if(slot>=methods->size())throw std::runtime_error("Virtual method slot is out of range");
         const auto& method=(*methods)[slot];
         auto result=invoke_bound_function(script,method.function_id,env,std::move(args),method.contexts);
         if(!result)throw std::runtime_error("Host function returned a null pointer");
         blocks::adopt_result(result,env);
-        if(return_type!=ANY_VALUE&&result->type!=return_type)
-            throw std::runtime_error(std::string("Virtual method return type mismatch: expected ")+type_name(return_type)+", got "+type_name(result->type));
+        if(return_type!=ANY_VALUE&&result->type_tag()!=return_type)
+            throw std::runtime_error(std::string("Virtual method return type mismatch: expected ")+type_name(return_type)+", got "+type_name(result->type_tag()));
         return result;
     }
 };
@@ -1050,8 +553,8 @@ public:
         :value(std::move(value)),context(std::move(context)),slot_types(std::move(slot_types)) {}
     V execute(E env) override {
         tick(env);auto result=run(value,env);auto bound=bind_context(context,env);
-        if(!result||result->type!=bound->abi)throw std::runtime_error("Object check failed: value has an incompatible type");
-        if(bound->kind==2)heap::check_object(*static_cast<address*>(result->value),slot_types);
+        if(!result||result->type_tag()!=bound->abi)throw std::runtime_error("Object check failed: value has an incompatible type");
+        if(bound->kind==2)heap::check_object(result->get<address>(),slot_types);
         else if(bound->kind==3||bound->kind==4) {
             auto block=blocks::of(result);
             if(!block||block->state!=slot_block::status::live)throw std::runtime_error("Object check failed: value object has expired");
@@ -1063,7 +566,7 @@ public:
                    (!slot_types.empty()&&block->slots.size()!=slot_types.size()))
                     throw std::runtime_error("Object check failed: class value width mismatch");
                 for(std::size_t i=0;i<slot_types.size();++i)
-                    if(slot_types[i]!=ANY_VALUE&&(!block->slots[i]||block->slots[i]->type!=slot_types[i]))
+                    if(slot_types[i]!=ANY_VALUE&&(!block->slots[i]||block->slots[i]->type_tag()!=slot_types[i]))
                         throw std::runtime_error("Object check failed: slot "+std::to_string(i)+" has an incompatible type");
             }
         }
@@ -1101,546 +604,193 @@ public:
         return std::make_shared<variable>(blocks::compare_value(bind_context(context,env),a,b,env));
     }
 };
+// Identity returns keep the tree's variable copy; conversions and their
+// errors are the shared implementation.
 V convert_return(V v,int type) {
-    if(type==ANY_VALUE)return v->deepCopy();
-    if(type==VOID_VALUE) {
-        if(v->type!=VOID_VALUE) throw std::runtime_error("Void function returned a value");
-        return v;
-    }
-    if(v->type==type) return v->deepCopy();
-    if((v->type==INT_VALUE&&(type==FLOAT_VALUE||type==DOUBLE_VALUE))||
-       (v->type==FLOAT_VALUE&&type==DOUBLE_VALUE)) {
-        double n=number(v);
-        if(!std::isfinite(n)) throw std::runtime_error("Non-finite return value");
-        if(type==DOUBLE_VALUE) return std::make_shared<variable>(n);
-        if(type==FLOAT_VALUE) {
-            const float f=static_cast<float>(n);
-            if(!std::isfinite(f)) throw std::overflow_error("Float return value overflow");
-            return std::make_shared<variable>(f);
-        }
-    }
-    throw std::runtime_error("Function return type mismatch: expected "+std::string(type_name(type))+", got "+type_name(v->type));
+    if(type==ANY_VALUE||(type!=VOID_VALUE&&v->type_tag()==type))return v->deepCopy();
+    auto result=value_ops::convert_return(value_access::read(*v),type);
+    return type==VOID_VALUE?v:wrap(std::move(result));
 }
-// Exec records are raw ABD stacks. Views borrow the caller's input only while
-// decoding; the resulting native expression tree owns all retained data.
-struct raw_view {
-    const unsigned char* data;
-    std::size_t size;
-    std::size_t depth;
-};
-void validate_utf8(raw_view value) {
-    std::size_t i=0;
-    while(i<value.size) {
-        const unsigned first=value.data[i++];
-        if(first<0x80)continue;
-        int remaining;std::uint32_t code,minimum;
-        if(first>=0xc2&&first<=0xdf){remaining=1;code=first&0x1f;minimum=0x80;}
-        else if(first>=0xe0&&first<=0xef){remaining=2;code=first&0x0f;minimum=0x800;}
-        else if(first>=0xf0&&first<=0xf4){remaining=3;code=first&0x07;minimum=0x10000;}
-        else throw std::invalid_argument("Invalid UTF-8 in exec string");
-        if(static_cast<std::size_t>(remaining)>value.size-i)throw std::invalid_argument("Truncated UTF-8 in exec string");
-        while(remaining--) {
-            const unsigned next=value.data[i++];
-            if((next&0xc0)!=0x80)throw std::invalid_argument("Invalid UTF-8 in exec string");
-            code=(code<<6)|(next&0x3f);
-        }
-        if(code<minimum||code>0x10ffff||(code>=0xd800&&code<=0xdfff))throw std::invalid_argument("Invalid UTF-8 in exec string");
-    }
-}
-class raw_cursor {
-    raw_view view;
-    std::size_t position=0;
-public:
-    explicit raw_cursor(raw_view value):view(value) {
-        if(view.depth>128)throw std::invalid_argument("ABD nesting exceeds 128 levels");
-    }
-    bool empty() const{return position==view.size;}
-    raw_view take() {
-        if(view.size-position<4)throw std::invalid_argument("Missing or truncated exec field");
-        const int size=b2i(view.data+position);
-        if(size<0||static_cast<std::size_t>(size)>view.size-position-4)
-            throw std::invalid_argument("Negative or truncated exec field");
-        raw_view result{view.data+position+4,static_cast<std::size_t>(size),view.depth+1};
-        position+=4+result.size;return result;
-    }
-    int integer() {
-        auto value=take();
-        if(value.size!=4)throw std::invalid_argument("Exec integer field must contain four bytes");
-        return b2i(value.data);
-    }
-    bool boolean() {
-        auto value=take();
-        if(value.size!=1||value.data[0]>1)throw std::invalid_argument("Exec boolean field must be one byte, 0 or 1");
-        return value.data[0]==1;
-    }
-    std::string string() {auto value=take();validate_utf8(value);return std::string(reinterpret_cast<const char*>(value.data),value.size);}
-    void finish() const {if(!empty())throw std::invalid_argument("Unexpected extra exec fields");}
-};
-// Metadata is a genuinely extensible typed Map; unlike executable constants,
-// its fields can contain nested maps/arrays and arbitrary raw byte values.
-void check_typed_metadata(raw_view view,int type) {
-    if(type==2||type==0xad) {
-        raw_cursor cursor(view);std::set<std::string> keys;
-        while(!cursor.empty()) {
-            if(type==2&&!keys.insert(cursor.string()).second)throw std::invalid_argument("Duplicate extension key");
-            const int child_type=cursor.integer();check_typed_metadata(cursor.take(),child_type);
-        }
-        return;
-    }
-    switch(type) {
-    case 1:validate_utf8(view);return;
-    case 3:case 0xce867:
-        if(view.size!=4)throw std::invalid_argument("Invalid extension scalar width");return;
-    case 0xce1066:case 0xce200b:
-        if(view.size!=8)throw std::invalid_argument("Invalid extension scalar width");return;
-    case 0x0d00:
-        if(view.size!=1||view.data[0]>1)throw std::invalid_argument("Invalid extension boolean");return;
-    case 0xce2009:
-        if(view.size==0)throw std::invalid_argument("Empty extension BigInteger");return;
-    case 0xce200a:return;
-    default:throw std::invalid_argument("Unsupported extension value type");
-    }
-}
-std::shared_ptr<AbdValue> copy_raw(raw_view value) {
-    return std::make_shared<AbdValue>(value.data,static_cast<int>(value.size));
-}
-std::shared_ptr<expression> parse_raw_constant(raw_view envelope) {
-    raw_cursor fields(envelope);
-    const int type=fields.integer();const auto payload=fields.take();const auto value=copy_raw(payload);fields.finish();
-    std::shared_ptr<AbdMapValue> scalar;
-    switch(type) {
-    case 1:validate_utf8(payload);scalar=std::make_shared<StringAbdValue>(value);break;
-    case 3:scalar=std::make_shared<IntAbdValue>(value);break;
-    case 0xce200b:scalar=std::make_shared<AddressAbdValue>(value);break;
-    case 0xce1066: {
-        auto number=std::make_shared<DoubleAbdValue>(value);
-        if(!std::isfinite(number->data))throw std::invalid_argument("Non-finite exec constant");
-        scalar=std::move(number);break;
-    }
-    case 0xce867: {
-        auto number=std::make_shared<FloatAbdValue>(value);
-        if(!std::isfinite(number->data))throw std::invalid_argument("Non-finite exec constant");
-        scalar=std::move(number);break;
-    }
-    case 0x0d00:scalar=std::make_shared<BoolAbdValue>(value);break;
-    case 0xce200a:scalar=std::make_shared<ByteArrayValue>(value,type);break;
-    default:throw std::invalid_argument("Unsupported exec constant type: "+std::to_string(type));
-    }
-    return std::make_shared<constantExpression>(std::move(scalar));
-}
-// Pre-order numbers of a function body's expression stacks (the body is node 0,
-// contexts take none), matched against the nodes of its debug record.
-struct node_numbering {
-    std::uint32_t next=0;
-    std::size_t located=0;
-    const std::vector<std::uint32_t>* nodes=nullptr;
-};
-struct raw_function_layout {
-    std::size_t parameters,slots,globals;
-    std::vector<function_reference>* references;
-    std::size_t hidden_count=0;
-    node_numbering* numbering=nullptr;
-    void check_slot(int id,bool declaration=false) const {
-        if(id<0) {
-            if(declaration)throw std::invalid_argument("Cannot declare a negative variable slot");
-            const auto index=static_cast<std::uint64_t>(-static_cast<std::int64_t>(id)-1);
-            if(index>=globals)throw std::invalid_argument("Global variable slot is outside its module: "+std::to_string(id));
-        } else {
-            if(static_cast<std::size_t>(id)>=slots)throw std::invalid_argument("Local variable slot is outside its function: "+std::to_string(id));
-            if(declaration&&static_cast<std::size_t>(id)<parameters)throw std::invalid_argument("Cannot redeclare a parameter slot");
-        }
-    }
-};
-std::shared_ptr<context_spec> parse_context(raw_view view,const raw_function_layout& layout,std::size_t depth);
-std::vector<std::shared_ptr<context_spec>> parse_contexts(raw_view view,const raw_function_layout& layout,std::size_t depth) {
-    if(depth>128)throw std::invalid_argument("ABD nesting exceeds 128 levels");
-    raw_cursor cursor(view);std::vector<std::shared_ptr<context_spec>> result;
-    while(!cursor.empty()) {
-        if(result.size()>=MAX_VARIABLE_SLOTS)throw std::invalid_argument("Too many generic contexts");
-        result.push_back(parse_context(cursor.take(),layout,depth+1));
-    }
-    return result;
-}
-std::shared_ptr<context_spec> parse_context(raw_view view,const raw_function_layout& layout,std::size_t depth) {
-    if(depth>128)throw std::invalid_argument("ABD nesting exceeds 128 levels");
-    raw_cursor fields(view);auto spec=std::make_shared<context_spec>();const int kind=fields.integer();
-    if(kind==0) {
-        spec->ref=fields.integer();
-        if(spec->ref<0||static_cast<std::size_t>(spec->ref)>=layout.hidden_count)throw std::invalid_argument("Invalid generic context reference");
-    } else if(kind==1) {
-        spec->abi=fields.integer();spec->kind=fields.integer();spec->width=fields.integer();
-        if(!valid_context_kind(spec->abi,spec->kind)||spec->width<1||static_cast<std::size_t>(spec->width)>MAX_VARIABLE_SLOTS||(spec->kind!=3&&spec->width!=1))throw std::invalid_argument("Invalid generic type context");
-        if(fields.boolean())spec->factory_id=fields.integer();
-        spec->contexts=parse_contexts(fields.take(),layout,depth+1);
-        if((spec->factory_id||!spec->contexts.empty())&&spec->kind!=3)
-            throw std::invalid_argument("Only object type contexts have default factories");
-        if(!spec->factory_id&&!spec->contexts.empty())throw std::invalid_argument("Factory contexts require a factory");
-        if(fields.boolean())spec->placement_id=fields.integer();
-        spec->placement_contexts=parse_contexts(fields.take(),layout,depth+1);
-        if(fields.boolean())spec->element=parse_context(fields.take(),layout,depth+1);
-        if((spec->placement_id||!spec->placement_contexts.empty())&&spec->kind!=3)
-            throw std::invalid_argument("Only class contexts have placement initializers");
-        if(!spec->placement_id&&!spec->placement_contexts.empty())throw std::invalid_argument("Placement contexts require an initializer");
-        if((spec->kind==4)!=static_cast<bool>(spec->element))throw std::invalid_argument("Buffer context requires exactly one element context");
-        if(spec->element&&spec->element->ref<0&&spec->element->abi==VOID_VALUE)throw std::invalid_argument("Buffer element cannot be void");
-        if(spec->placement_id)layout.references->push_back({*spec->placement_id,&*spec->placement_id,false,static_cast<int>(spec->placement_contexts.size()),false,true});
-        if(spec->factory_id)layout.references->push_back({*spec->factory_id,&*spec->factory_id,false,static_cast<int>(spec->contexts.size()),true});
-    } else throw std::invalid_argument("Unknown generic context kind");
-    fields.finish();return spec;
-}
+// The expression tree is built from the validated core model. References are
+// recorded in the model's discovery order, so the linker can patch them in place.
 using X=std::shared_ptr<expression>;
-X parse_raw_expression(raw_view view,const raw_function_layout& layout,std::size_t logical_depth);
-std::vector<X> parse_raw_expressions(raw_view view,const raw_function_layout& layout,std::size_t logical_depth) {
-    raw_cursor cursor(view);std::vector<X> result;
-    while(!cursor.empty())result.push_back(parse_raw_expression(cursor.take(),layout,logical_depth));
-    return result;
-}
 template<class T> X raw_binary(X a,X b) {
     auto node=std::make_shared<T>();node->exp1=std::move(a);node->exp2=std::move(b);return node;
 }
-X parse_raw_expression(raw_view view,const raw_function_layout& layout,std::size_t logical_depth) {
-    std::uint32_t location=0;
-    if(auto* numbering=layout.numbering) {
-        const auto node=numbering->next++;
-        if(numbering->nodes&&numbering->located<numbering->nodes->size()&&(*numbering->nodes)[numbering->located]==node)
-            location=static_cast<std::uint32_t>(++numbering->located);
+exec::reference_kind reference_kind(const function_reference& reference) noexcept {
+    return reference.destructor?exec::reference_kind::destructor:reference.factory?exec::reference_kind::factory:
+        reference.placement?exec::reference_kind::placement:reference.method?exec::reference_kind::method:exec::reference_kind::call;
+}
+class tree_builder {
+    std::vector<function_reference>& references;
+    std::shared_ptr<context_spec> context(const exec::context& source) {
+        auto spec=std::make_shared<context_spec>();
+        if(source.reference){spec->ref=static_cast<int>(*source.reference);return spec;}
+        spec->abi=source.abi;spec->kind=source.kind;spec->width=static_cast<int>(source.width);
+        spec->factory_id=source.factory_id;spec->contexts=contexts(source.contexts);
+        spec->placement_id=source.placement_id;spec->placement_contexts=contexts(source.placement_contexts);
+        if(source.element)spec->element=context(*source.element);
+        if(spec->placement_id)references.push_back({*spec->placement_id,&*spec->placement_id,false,static_cast<int>(spec->placement_contexts.size()),false,true});
+        if(spec->factory_id)references.push_back({*spec->factory_id,&*spec->factory_id,false,static_cast<int>(spec->contexts.size()),true});
+        return spec;
     }
-    raw_cursor fields(view);const int opcode=fields.integer();
-    // The old representation counted Map/Array levels, while literal scalars
-    // did not introduce a level. Retain that budget as well as raw stack depth.
-    if(logical_depth>128||(opcode!=0&&logical_depth>=128))throw std::invalid_argument("ABD nesting exceeds 128 levels");
-    const auto child=[&]{return parse_raw_expression(fields.take(),layout,logical_depth+1);};
-    X result;
-    switch(opcode) {
-    case 0:result=parse_raw_constant(fields.take());break;
-    case 1: {
-        auto node=std::make_shared<complex_expression>();
-        node->expressions=parse_raw_expressions(fields.take(),layout,logical_depth+1);result=std::move(node);break;
+    std::vector<std::shared_ptr<context_spec>> contexts(const std::vector<std::shared_ptr<const exec::context>>& source) {
+        std::vector<std::shared_ptr<context_spec>> result;result.reserve(source.size());
+        for(const auto& value:source)result.push_back(context(*value));
+        return result;
     }
-    case 2: {
-        auto node=std::make_shared<functionInvocationExpression>();node->function_id=fields.integer();
-        node->params=parse_raw_expressions(fields.take(),layout,logical_depth+2);
-        node->contexts=parse_contexts(fields.take(),layout,logical_depth+1);
-        auto member=node->params.size()==1?std::dynamic_pointer_cast<object_expression>(node->params[0]):nullptr;
-        if(node->function_id==0x0abd0006&&node->contexts.empty()&&member&&member->is_member_address())
-            result=std::make_shared<member_access_expression>(std::move(node->params[0]));
-        else {
-            layout.references->push_back({node->function_id,&node->function_id,false,static_cast<int>(node->contexts.size())});
-            result=std::move(node);
-        }
-        break;
+    std::vector<X> expressions(const exec::expression& source,std::size_t first=0) {
+        std::vector<X> result;result.reserve(source.children.size()-first);
+        for(auto i=first;i<source.children.size();++i)result.push_back(build(*source.children[i]));
+        return result;
     }
-    case 3: {
-        const int slot=fields.integer();layout.check_slot(slot);
-        auto node=std::make_shared<varExpression>();node->varindex=slot;result=std::move(node);break;
-    }
-    case 4: {
-        const int slot=fields.integer();layout.check_slot(slot,true);const int type=fields.integer();
-        if(type<INT_VALUE||type>OBJECT_VALUE||type==VOID_VALUE)throw std::invalid_argument("Invalid declared variable type");
-        auto node=std::make_shared<varDefineExpression>();node->varindex=slot;
-        if(fields.boolean())node->initializer=child();result=std::move(node);break;
-    }
-    case 5: {
-        const int slot=fields.integer();layout.check_slot(slot);
-        auto node=std::make_shared<varSetExpression>();node->varindex=slot;node->expression=child();result=std::move(node);break;
-    }
-    case 6: {
-        auto target=child();auto value=child();
-        auto call=std::dynamic_pointer_cast<functionInvocationExpression>(target);
-        if(!std::dynamic_pointer_cast<varExpression>(target)&&!std::dynamic_pointer_cast<member_access_expression>(target)&&!(call&&call->function_id==0x0abd0006))
-            throw std::invalid_argument("Assignment target must be a variable or mem_get(pointer)");
-        result=raw_binary<movExpression>(std::move(target),std::move(value));break;
-    }
-    case 32: {
-        const int size=fields.integer();
-        if(size<1||static_cast<std::size_t>(size)>MAX_VARIABLE_SLOTS)throw std::invalid_argument("Invalid object slot count");
-        result=std::make_shared<new_block_expression>(static_cast<std::size_t>(size));break;
-    }
-    case 33:result=std::make_shared<block_address_expression>(child());break;
-    case 34: {
-        const int slot=fields.integer();layout.check_slot(slot);
-        if(slot<0)throw std::invalid_argument("Object move requires a local slot");
-        result=std::make_shared<move_out_expression>(slot);break;
-    }
-    case 35: {
-        auto target=child();auto call=std::dynamic_pointer_cast<functionInvocationExpression>(target);
-        if(!std::dynamic_pointer_cast<varExpression>(target)&&!std::dynamic_pointer_cast<member_access_expression>(target)&&!(call&&call->function_id==0x0abd0006))
-            throw std::invalid_argument("Object drop target must be a variable or mem_get(pointer)");
-        result=std::make_shared<drop_expression>(std::move(target));break;
-    }
-    case 36:case 37:result=std::make_shared<context_expression>(opcode,parse_context(fields.take(),layout,logical_depth+1));break;
-    case 38:case 39: {
-        auto value=child();auto context=parse_context(fields.take(),layout,logical_depth+1);
-        result=std::make_shared<context_expression>(opcode,std::move(context),std::move(value));break;
-    }
-    case 40:result=std::make_shared<buffer_new_expression>(parse_context(fields.take(),layout,logical_depth+1));break;
-    case 41: {
-        const int operation=fields.integer();auto receiver=child();
-        auto arguments=parse_raw_expressions(fields.take(),layout,logical_depth+1);
-        static constexpr std::size_t counts[]{0,0,1,1,2,1,1};
-        if(operation<0||operation>6||arguments.size()!=counts[operation])throw std::invalid_argument("Invalid buffer operation arguments");
-        result=std::make_shared<buffer_operation_expression>(operation,std::move(receiver),std::move(arguments));break;
-    }
-    case 42: {
-        auto context=parse_context(fields.take(),layout,logical_depth+1);auto left=child();auto right=child();
-        result=std::make_shared<value_compare_expression>(std::move(context),std::move(left),std::move(right));break;
-    }
-    case 43:case 44:case 45:case 46:case 47:case 48: {
-        auto left=child();auto right=child();
-        result=std::make_shared<bitwise_expression>(opcode,std::move(left),std::move(right));break;
-    }
-    case 49: {
-        const int target=fields.integer();
-        if(target!=INT_VALUE&&target!=STRING_VALUE&&target!=FLOAT_VALUE&&target!=DOUBLE_VALUE&&target!=ADDRESS_VALUE)
-            throw std::invalid_argument("Invalid conversion target type: "+std::to_string(target));
-        result=std::make_shared<convert_expression>(target,child());break;
-    }
-    case 52: {
-        auto node=std::make_shared<set_methods_expression>(child());raw_cursor entries(fields.take());
-        while(!entries.empty()) {
-            if(node->entries.size()>=MAX_VARIABLE_SLOTS)throw std::invalid_argument("Too many virtual method entries");
-            raw_cursor entry(entries.take());auto method=std::make_shared<method_spec>();method->function_id=entry.integer();
-            method->contexts=parse_contexts(entry.take(),layout,logical_depth+2);entry.finish();
-            layout.references->push_back({method->function_id,&method->function_id,false,static_cast<int>(method->contexts.size()),false,false,true});
-            node->entries.push_back(std::move(method));
-        }
-        result=std::move(node);break;
-    }
-    case 53: {
-        const int slot=fields.integer(),type=fields.integer();
-        if(slot<0||static_cast<std::size_t>(slot)>=MAX_VARIABLE_SLOTS)throw std::invalid_argument("Invalid virtual method slot");
-        if(type<INT_VALUE||type>OBJECT_VALUE)throw std::invalid_argument("Invalid virtual method return type");
-        auto args=parse_raw_expressions(fields.take(),layout,logical_depth+2);
-        if(args.empty()||args.size()>MAX_VARIABLE_SLOTS)throw std::invalid_argument("Virtual method call requires a receiver and at most 1048576 arguments");
-        result=std::make_shared<call_virtual_expression>(slot,type,std::move(args));break;
-    }
-    case 51: {
-        auto value=child();auto context=parse_context(fields.take(),layout,logical_depth+1);
-        raw_cursor tags(fields.take());std::vector<int> slot_types;
-        while(!tags.empty()) {
-            const int tag=tags.integer();
-            if(tag<INT_VALUE||tag>OBJECT_VALUE||tag==VOID_VALUE||slot_types.size()>=MAX_VARIABLE_SLOTS)
-                throw std::invalid_argument("Invalid object-check slot type");
-            slot_types.push_back(tag);
-        }
-        if(context->ref<0&&context->kind==3&&slot_types.size()!=static_cast<std::size_t>(context->width))
-            throw std::invalid_argument("Object-check class slot count must match context width");
-        result=std::make_shared<check_object_expression>(std::move(value),std::move(context),std::move(slot_types));break;
-    }
-    case 50: {
-        auto condition=child();auto when_true=child();auto when_false=child();
-        result=std::make_shared<select_expression>(std::move(condition),std::move(when_true),std::move(when_false));break;
-    }
-    case 7:case 8: {
-        auto node=std::make_shared<returnExpression>();node->object_return=opcode==8;
-        if(opcode==8||fields.boolean())node->returnType=child();result=std::move(node);break;
-    }
-    case 9: {
-        auto base=child();const int offset=fields.integer();
-        if(offset<0)throw std::invalid_argument("Negative object member offset");
-        result=std::make_shared<object_expression>("oa",std::move(base),offset);break;
-    }
-    case 10: {
-        auto address=child();std::optional<int> destructor;
-        if(fields.boolean())destructor=fields.integer();
-        const bool manual=fields.boolean();
-        if(destructor&&(*destructor==0||*destructor==1||*destructor==0x0fff0000||namespace_of(*destructor)==0x0abd))
-            throw std::invalid_argument("Invalid object destructor id");
-        auto node=std::make_shared<object_expression>(std::move(address),destructor,manual);
-        node->contexts=parse_contexts(fields.take(),layout,logical_depth+1);
-        if(!destructor&&!node->contexts.empty())throw std::invalid_argument("Destructor contexts require a destructor");
-        if(destructor)layout.references->push_back({*destructor,node->destructor_address(),true,static_cast<int>(node->contexts.size())});
-        result=std::move(node);break;
-    }
-    case 11:result=std::make_shared<object_expression>("od",child());break;
-    case 12:case 13:case 14:case 15:case 16:case 17:case 18:case 19:case 20:case 21:case 22:case 23:case 24: {
-        auto a=child();auto b=child();
+public:
+    explicit tree_builder(std::vector<function_reference>& references):references(references) {}
+    X build(const exec::expression& source) {
+        const auto child=[&](std::size_t index){return build(*source.children[index]);};
+        const int opcode=source.opcode;
+        X result;
         switch(opcode) {
-        case 12:result=raw_binary<addExpression>(std::move(a),std::move(b));break;
-        case 13:result=raw_binary<minusExpression>(std::move(a),std::move(b));break;
-        case 14:result=raw_binary<multiplyExpression>(std::move(a),std::move(b));break;
-        case 15:result=raw_binary<divideExpression>(std::move(a),std::move(b));break;
-        case 17:result=raw_binary<gtExpression>(std::move(a),std::move(b));break;
-        case 18:result=raw_binary<ltExpression>(std::move(a),std::move(b));break;
-        case 19:result=raw_binary<equalExpression>(std::move(a),std::move(b));break;
-        default: {
-            const char* operation=opcode==16?"mod":opcode==20?"ne":opcode==21?"ge":opcode==22?"le":opcode==23?"and":"or";
-            result=std::make_shared<extra_expression>(operation,std::move(a),std::move(b));break;
+        case 0:result=std::make_shared<constantExpression>(source.constant);break;
+        case 1: {
+            auto node=std::make_shared<complex_expression>();node->expressions=expressions(source);result=std::move(node);break;
         }
+        case 2: {
+            auto node=std::make_shared<functionInvocationExpression>();node->function_id=source.immediate;
+            node->params=expressions(source);node->contexts=contexts(source.contexts);
+            auto member=node->params.size()==1?std::dynamic_pointer_cast<object_expression>(node->params[0]):nullptr;
+            if(node->function_id==ids::id(ids::builtin::mem_get)&&node->contexts.empty()&&member&&member->is_member_address())
+                result=std::make_shared<member_access_expression>(std::move(node->params[0]));
+            else {
+                references.push_back({node->function_id,&node->function_id,false,static_cast<int>(node->contexts.size())});
+                result=std::move(node);
+            }
+            break;
         }
-        break;
-    }
-    case 25:case 26:result=std::make_shared<extra_expression>(opcode==25?"not":"neg",child());break;
-    case 27: {
-        auto node=std::make_shared<ifExpression>();node->exp1=child();node->exp2=child();
-        if(fields.boolean())node->otherwise=child();result=std::move(node);break;
-    }
-    case 28: {auto condition=child();auto body=child();result=raw_binary<whileExpression>(std::move(condition),std::move(body));break;}
-    case 29:result=std::make_shared<breakExpression>();break;
-    case 30:result=std::make_shared<continueExpression>();break;
-    case 31: {
-        auto body=child();auto cleanup=child();const bool on_error=fields.boolean();
-        result=std::make_shared<cleanup_expression>(std::move(body),std::move(cleanup),on_error);break;
-    }
-    default:throw std::invalid_argument("Unknown exec opcode: "+std::to_string(opcode));
-    }
-    fields.finish();result->location=location;return result;
-}
-std::vector<int> parse_raw_types(raw_view view,bool script_parameters) {
-    raw_cursor fields(view);std::vector<int> result;
-    while(!fields.empty()) {
-        if(result.size()>=MAX_VARIABLE_SLOTS)throw std::invalid_argument("Too many parameter types");
-        const int type=fields.integer();
-        if(type<INT_VALUE||(type>BOOLEAN_VALUE&&type!=ADDRESS_VALUE&&type!=OBJECT_VALUE&&type!=ANY_VALUE))
-            throw std::invalid_argument("Invalid parameter type");
-        result.push_back(type);
-    }
-    return result;
-}
-// Debug names and files are valid UTF-8 without controls (C0, DEL, C1), line or
-// paragraph separators or bidirectional formatting characters, like the compiler's
-// SourceRules.unsafeDisplayCharacter, so they cannot forge a stack-trace line.
-std::string debug_text(raw_cursor& fields,const char* label) {
-    auto text=fields.string();
-    if(text.empty())throw std::invalid_argument(std::string("Empty exec debug ")+label);
-    for(std::size_t i=0;i<text.size();) {
-        const auto first=static_cast<unsigned char>(text[i]);
-        std::uint32_t code;std::size_t length;
-        if(first<0x80){code=first;length=1;}
-        else if(first<0xe0){code=first&0x1fu;length=2;}
-        else if(first<0xf0){code=first&0x0fu;length=3;}
-        else {code=first&0x07u;length=4;}
-        for(std::size_t k=1;k<length;k++)code=(code<<6)|(static_cast<unsigned char>(text[i+k])&0x3fu);
-        i+=length;
-        if(code<0x20||(code>=0x7f&&code<=0x9f)||code==0x2028||code==0x2029||code==0x061c||code==0x200e||code==0x200f||
-           (code>=0x202a&&code<=0x202e)||(code>=0x2066&&code<=0x2069))
-            throw std::invalid_argument(std::string("Exec debug ")+label+" contains a control, separator or bidirectional formatting character");
-    }
-    return text;
-}
-// [name, file, line, column, locations]; locations are (node, file, line, column)
-// quads with strictly increasing nodes. Nodes past the body are rejected after it is parsed.
-std::shared_ptr<function_debug> parse_function_debug(raw_view view,const std::shared_ptr<const std::vector<std::string>>& files,
-        std::vector<std::uint32_t>& nodes) {
-    raw_cursor fields(view);auto debug=std::make_shared<function_debug>();debug->files=files;
-    debug->name=debug_text(fields,"name");
-    const auto file=[&](int value) {
-        if(value<0||static_cast<std::size_t>(value)>=files->size())throw std::invalid_argument("Exec debug file index outside debug files");
-        return static_cast<std::uint32_t>(value);
-    };
-    debug->header.file=file(fields.integer());
-    const int line=fields.integer(),column=fields.integer();
-    if(line<0||column<0||(line==0)!=(column==0))throw std::invalid_argument("Exec debug header position must be both zero or both positive");
-    debug->header.line=static_cast<std::uint32_t>(line);debug->header.column=static_cast<std::uint32_t>(column);
-    raw_cursor quads(fields.take());fields.finish();
-    while(!quads.empty()) {
-        if(debug->locations.size()>=MAX_VARIABLE_SLOTS)throw std::invalid_argument("Too many exec debug locations");
-        const int node=quads.integer();
-        if(quads.empty())throw std::invalid_argument("Exec debug locations must be node, file, line, column quads");
-        source_position position;position.file=file(quads.integer());
-        const int at_line=quads.integer(),at_column=quads.integer();
-        if(node<0||(!nodes.empty()&&static_cast<std::uint32_t>(node)<=nodes.back()))
-            throw std::invalid_argument("Exec debug location nodes must strictly increase");
-        if(at_line<1||at_column<1)throw std::invalid_argument("Exec debug location line and column must be positive");
-        position.line=static_cast<std::uint32_t>(at_line);position.column=static_cast<std::uint32_t>(at_column);
-        nodes.push_back(static_cast<std::uint32_t>(node));debug->locations.push_back(position);
-    }
-    return debug;
-}
-parsed_module parse_raw_module(raw_view root,std::size_t offset) {
-    raw_cursor fields(root);parsed_module module;
-    if(fields.string()!="AZSCRIPT")throw std::invalid_argument("Invalid exec magic");
-    if(const int version=fields.integer();version!=EXEC_FORMAT_VERSION)
-        throw std::invalid_argument("Unsupported exec version "+std::to_string(version)+"; expected exec v"+std::to_string(EXEC_FORMAT_VERSION));
-    fields.integer();fields.string(); // Source version/author are non-executable metadata.
-    const int globals=fields.integer();
-    if(globals<0||static_cast<std::size_t>(globals)>MAX_VARIABLE_SLOTS||offset>MAX_VARIABLE_SLOTS-static_cast<std::size_t>(globals))
-        throw std::invalid_argument("Invalid global variable count");
-    module.global_count=static_cast<std::size_t>(globals);
-    auto extension=fields.take();check_typed_metadata(extension,2);
-    module.meta=std::make_shared<AbdMap>(std::make_shared<AbdStack>(copy_raw(extension)));
-    raw_cursor signatures(fields.take());
-    while(!signatures.empty()) {
-        raw_cursor entry(signatures.take());const int id=entry.integer();function_signature signature;
-        if(id==0||id==1||id==0x0fff0000||namespace_of(id)==0x0abd)throw std::invalid_argument("Invalid external function id");
-        signature.return_type=entry.integer();
-        if(signature.return_type<INT_VALUE||signature.return_type>OBJECT_VALUE)throw std::invalid_argument("Invalid external return type");
-        signature.param_types=parse_raw_types(entry.take(),false);
-        signature.hidden_count=entry.integer();signature.entry_kind=entry.integer();entry.finish();
-        if(signature.hidden_count<0||static_cast<std::size_t>(signature.hidden_count)>MAX_VARIABLE_SLOTS||signature.entry_kind<0||signature.entry_kind>1)
-            throw std::invalid_argument("Invalid external generic ABI");
-        if(!signature.hidden_count&&(signature.return_type==ANY_VALUE||std::find(signature.param_types.begin(),signature.param_types.end(),ANY_VALUE)!=signature.param_types.end()))
-            throw std::invalid_argument("External any types require generic contexts");
-        if(!module.extern_signatures.emplace(id,std::move(signature)).second)throw std::invalid_argument("Duplicate external signature id: "+function_id_text(id));
-    }
-    raw_cursor functions(fields.take());
-    module.hint=fields.string();
-    if(!module.hint.empty()&&!valid_hint(module.hint))throw std::invalid_argument("Invalid namespace hint");
-    raw_cursor assumptions(fields.take());
-    auto debug_files=std::make_shared<std::vector<std::string>>();
-    {
-        raw_cursor files(fields.take());std::set<std::string> names;
-        while(!files.empty()) {
-            if(debug_files->size()>=MAX_VARIABLE_SLOTS)throw std::invalid_argument("Too many exec debug files");
-            auto name=debug_text(files,"file name");
-            if(!names.insert(name).second)throw std::invalid_argument("Duplicate exec debug file name");
-            debug_files->push_back(std::move(name));
+        case 3: {auto node=std::make_shared<varExpression>();node->varindex=source.immediate;result=std::move(node);break;}
+        case 4: {
+            auto node=std::make_shared<varDefineExpression>();node->varindex=source.immediate;
+            if(!source.children.empty())node->initializer=child(0);
+            result=std::move(node);break;
         }
+        case 5: {
+            auto node=std::make_shared<varSetExpression>();node->varindex=source.immediate;node->expression=child(0);result=std::move(node);break;
+        }
+        case 6: {auto target=child(0);auto value=child(1);result=raw_binary<movExpression>(std::move(target),std::move(value));break;}
+        case 32:result=std::make_shared<new_block_expression>(static_cast<std::size_t>(source.immediate));break;
+        case 33:result=std::make_shared<block_address_expression>(child(0));break;
+        case 34:result=std::make_shared<move_out_expression>(source.immediate);break;
+        case 35:result=std::make_shared<drop_expression>(child(0));break;
+        case 36:case 37:result=std::make_shared<context_expression>(opcode,context(*source.contexts[0]));break;
+        case 38:case 39: {
+            auto value=child(0);auto spec=context(*source.contexts[0]);
+            result=std::make_shared<context_expression>(opcode,std::move(spec),std::move(value));break;
+        }
+        case 40:result=std::make_shared<buffer_new_expression>(context(*source.contexts[0]));break;
+        case 41: {
+            auto receiver=child(0);auto arguments=expressions(source,1);
+            result=std::make_shared<buffer_operation_expression>(source.immediate,std::move(receiver),std::move(arguments));break;
+        }
+        case 42: {
+            auto spec=context(*source.contexts[0]);auto left=child(0);auto right=child(1);
+            result=std::make_shared<value_compare_expression>(std::move(spec),std::move(left),std::move(right));break;
+        }
+        case 43:case 44:case 45:case 46:case 47:case 48: {
+            auto left=child(0);auto right=child(1);
+            result=std::make_shared<bitwise_expression>(opcode,std::move(left),std::move(right));break;
+        }
+        case 49:result=std::make_shared<convert_expression>(source.immediate,child(0));break;
+        case 52: {
+            auto node=std::make_shared<set_methods_expression>(child(0));
+            for(const auto& entry:source.methods) {
+                auto method=std::make_shared<method_spec>();method->function_id=entry.function_id;method->contexts=contexts(entry.contexts);
+                references.push_back({method->function_id,&method->function_id,false,static_cast<int>(method->contexts.size()),false,false,true});
+                node->entries.push_back(std::move(method));
+            }
+            result=std::move(node);break;
+        }
+        case 53:result=std::make_shared<call_virtual_expression>(source.immediate,source.return_type,expressions(source));break;
+        case 51: {
+            auto value=child(0);auto spec=context(*source.contexts[0]);
+            result=std::make_shared<check_object_expression>(std::move(value),std::move(spec),source.slot_types);break;
+        }
+        case 50: {
+            auto condition=child(0);auto when_true=child(1);auto when_false=child(2);
+            result=std::make_shared<select_expression>(std::move(condition),std::move(when_true),std::move(when_false));break;
+        }
+        case 7:case 8: {
+            auto node=std::make_shared<returnExpression>();node->object_return=opcode==8;
+            if(!source.children.empty())node->returnType=child(0);
+            result=std::move(node);break;
+        }
+        case 9:result=std::make_shared<object_expression>("oa",child(0),source.immediate);break;
+        case 10: {
+            auto node=std::make_shared<object_expression>(child(0),source.destructor_id,source.manual);
+            node->contexts=contexts(source.contexts);
+            if(source.destructor_id)references.push_back({*source.destructor_id,node->destructor_address(),true,static_cast<int>(node->contexts.size())});
+            result=std::move(node);break;
+        }
+        case 11:result=std::make_shared<object_expression>("od",child(0));break;
+        case 12:case 13:case 14:case 15:case 16:case 17:case 18:case 19:case 20:case 21:case 22:case 23:case 24: {
+            auto a=child(0);auto b=child(1);
+            switch(opcode) {
+            case 12:result=raw_binary<addExpression>(std::move(a),std::move(b));break;
+            case 13:result=raw_binary<minusExpression>(std::move(a),std::move(b));break;
+            case 14:result=raw_binary<multiplyExpression>(std::move(a),std::move(b));break;
+            case 15:result=raw_binary<divideExpression>(std::move(a),std::move(b));break;
+            case 17:result=raw_binary<gtExpression>(std::move(a),std::move(b));break;
+            case 18:result=raw_binary<ltExpression>(std::move(a),std::move(b));break;
+            case 19:result=raw_binary<equalExpression>(std::move(a),std::move(b));break;
+            default: {
+                const char* operation=opcode==16?"mod":opcode==20?"ne":opcode==21?"ge":opcode==22?"le":opcode==23?"and":"or";
+                result=std::make_shared<extra_expression>(operation,std::move(a),std::move(b));break;
+            }
+            }
+            break;
+        }
+        case 25:case 26:result=std::make_shared<extra_expression>(opcode==25?"not":"neg",child(0));break;
+        case 27: {
+            auto node=std::make_shared<ifExpression>();node->exp1=child(0);node->exp2=child(1);
+            if(source.children.size()==3)node->otherwise=child(2);
+            result=std::move(node);break;
+        }
+        case 28: {auto condition=child(0);auto body=child(1);result=raw_binary<whileExpression>(std::move(condition),std::move(body));break;}
+        case 29:result=std::make_shared<breakExpression>();break;
+        case 30:result=std::make_shared<continueExpression>();break;
+        case 31: {
+            auto body=child(0);auto cleanup=child(1);
+            result=std::make_shared<cleanup_expression>(std::move(body),std::move(cleanup),source.on_error);break;
+        }
+        default:throw std::logic_error("Unknown exec model opcode: "+std::to_string(opcode));
+        }
+        result->location=source.location;return result;
     }
-    fields.finish();std::set<std::string> hint_names;
-    while(!assumptions.empty()) {
-        raw_cursor record(assumptions.take());auto hint=record.string();const int ns=record.integer();record.finish();
-        if(!valid_hint(hint)||ns<=0||ns>0xffff||ns==0x0abd||ns==0x0fff)throw std::invalid_argument("Invalid namespace assumption");
-        if(!hint_names.insert(hint).second||!module.assumptions.emplace(ns,std::move(hint)).second)
-            throw std::invalid_argument("Duplicate namespace assumption");
-    }
-    if(!module.hint.empty()&&!hint_names.contains(module.hint))throw std::invalid_argument("Hint module requires an assumption for itself");
-    while(!functions.empty()) {
-        raw_cursor entry(functions.take());auto fn=std::make_shared<ofunction>();
-        fn->global_offset=offset;fn->global_count=module.global_count;
-        fn->function_id=entry.integer();fn->rett=entry.integer();fn->param_count=entry.integer();fn->local_count=entry.integer();
-        if(namespace_of(fn->function_id)==0x0abd)
-            throw std::invalid_argument("Invalid script function id");
-        if(!module.hint.empty()&&namespace_of(fn->function_id)!=0)throw std::invalid_argument("Hint module definitions require namespace zero");
-        if(module.hint.empty()&&fn->function_id!=0&&fn->function_id!=1&&module.assumptions.contains(namespace_of(fn->function_id)))
-            throw std::invalid_argument("Namespace assumption overlaps module definitions");
-        if(fn->rett<INT_VALUE||fn->rett>OBJECT_VALUE)throw std::invalid_argument("Unknown return type");
-        if(fn->param_count<0||fn->local_count<0||static_cast<std::size_t>(fn->param_count)>MAX_VARIABLE_SLOTS||
-           static_cast<std::size_t>(fn->local_count)>MAX_VARIABLE_SLOTS-static_cast<std::size_t>(fn->param_count))
-            throw std::invalid_argument("Invalid function variable count");
-        fn->param_types=parse_raw_types(entry.take(),true);
-        auto body=entry.take();fn->hidden_count=entry.integer();fn->entry_kind=entry.integer();
-        std::vector<std::uint32_t> located;
-        if(entry.boolean())fn->debug=parse_function_debug(entry.take(),debug_files,located);
-        entry.finish();
-        if(fn->hidden_count<0||static_cast<std::size_t>(fn->hidden_count)>MAX_VARIABLE_SLOTS||fn->entry_kind<0||fn->entry_kind>1)
-            throw std::invalid_argument("Invalid function generic ABI");
-        if(fn->rett==ANY_VALUE&&!fn->hidden_count)throw std::invalid_argument("Any return requires generic contexts");
-        if(fn->param_types.size()!=static_cast<std::size_t>(fn->param_count))throw std::invalid_argument("param-count and param-types disagree");
-        if((fn->function_id==0||fn->function_id==1)&&(fn->rett!=VOID_VALUE||fn->param_count!=0||fn->hidden_count!=0))
-            throw std::invalid_argument("Lifecycle function must return void and take no parameters");
-        node_numbering numbering;numbering.nodes=&located;
-        const raw_function_layout layout{static_cast<std::size_t>(fn->param_count),
-            static_cast<std::size_t>(fn->param_count)+static_cast<std::size_t>(fn->local_count),module.global_count,&module.references,
-            static_cast<std::size_t>(fn->hidden_count),&numbering};
-        fn->code=parse_raw_expression(body,layout,3);
-        if(numbering.located!=located.size())throw std::invalid_argument("Exec debug location refers to a missing body node");
-        const int id=fn->function_id;
-        if(!module.functions.emplace(id,std::move(fn)).second)throw std::invalid_argument("Duplicate function id: "+function_id_text(id));
-        module.namespaces.insert(namespace_of(id));
+};
+parsed_module build_module(exec::module model) {
+    parsed_module module;
+    module.meta=std::move(model.meta);module.global_count=model.global_count;
+    module.hint=std::move(model.hint);module.assumptions=std::move(model.assumptions);
+    module.extern_signatures=std::move(model.extern_signatures);
+    for(const auto& source:model.functions) {
+        auto fn=std::make_shared<ofunction>();
+        fn->global_offset=model.global_offset;fn->global_count=module.global_count;
+        fn->function_id=source.function_id;fn->rett=source.return_type;
+        fn->param_count=static_cast<int>(source.param_types.size());fn->local_count=static_cast<int>(source.local_count);
+        fn->param_types=source.param_types;fn->hidden_count=static_cast<int>(source.hidden_count);
+        fn->entry_kind=source.entry_kind;fn->debug=source.debug;
+        const auto first=module.references.size();
+        fn->code=tree_builder(module.references).build(*source.body);
+        // The core linker plan and the tree's patch list must name the same references.
+        const auto expected=exec::references(source.body);
+        if(module.references.size()-first!=expected.size())throw std::logic_error("Tree references differ from the exec model");
+        for(std::size_t i=0;i<expected.size();++i) {
+            const auto& found=module.references[first+i];const auto& wanted=expected[i];
+            if(found.original_id!=wanted.function_id||reference_kind(found)!=wanted.kind||found.hidden_count!=static_cast<int>(wanted.hidden_count))
+                throw std::logic_error("Tree references differ from the exec model");
+        }
+        module.functions.emplace(source.function_id,std::move(fn));
     }
     return module;
-}
-parsed_module decode_module(const unsigned char* bytes,std::size_t length,std::size_t offset=0) {
-    if(length>64*1024*1024)throw std::invalid_argument("Script exceeds 64 MiB limit");
-    if(!bytes||length<4)throw std::invalid_argument("Truncated ABD script");
-    raw_cursor file({bytes,length,0});auto root=file.take();file.finish();
-    raw_cursor fields(root);
-    if(!fields.empty()) {
-        const auto first=fields.take();
-        if(first.size==8&&std::memcmp(first.data,"AZSCRIPT",8)==0)return parse_raw_module(root,offset);
-    }
-    throw std::invalid_argument("Unsupported script format: expected raw exec v"+std::to_string(EXEC_FORMAT_VERSION));
 }
 }
 std::recursive_mutex& runtime_mutex(){static std::recursive_mutex m;return m;}
@@ -1705,6 +855,14 @@ V invoke_bound_function(const std::shared_ptr<script>& script,int id,const E& en
     if(auto fn=std::dynamic_pointer_cast<ofunction>(target))return fn->invoke_bound(env,std::move(args),std::move(contexts));
     if(!contexts.empty())throw std::runtime_error("Generic contexts require a script function implementation");
     return target->invoke(env,std::move(args));
+    });
+}
+V invoke_bound_function(const std::shared_ptr<script>& script,int id,ownership::Site caller,std::vector<V> args,type_contexts contexts) {
+    entry_scope entry;return entry.run([&]() -> V {
+    auto fn=std::dynamic_pointer_cast<ofunction>(script->getFunction(id));
+    // Destructors are validated as script functions when they are bound.
+    if(!fn)throw std::runtime_error("Object destructor must be a script function void(address)");
+    return fn->invoke_bound(caller,std::move(args),std::move(contexts));
     });
 }
 std::shared_ptr<script> load_script(const unsigned char* bytes,std::size_t length) {
@@ -1775,13 +933,30 @@ std::vector<module_manifest_entry> script::module_manifest() const {
     for(auto& module:modules)result.push_back(module->manifest);
     return result;
 }
+void vm::select_backend(script& owner,std::size_t workspace_limit) {
+    std::lock_guard<std::recursive_mutex> lock(runtime_mutex());
+    if(owner.closed)throw std::runtime_error("Script is closed");
+    if(owner.faulted)throw std::runtime_error("Script initialization failed; close and rebuild the script");
+    if(owner.destroying||owner.initializing||owner.active_calls)
+        throw std::runtime_error("Cannot select a VM backend during script execution");
+    if(owner.setup||std::any_of(owner.modules.begin(),owner.modules.end(),
+            [](const auto& module){return module->manifest.initialized;}))
+        throw std::runtime_error("VM backend must be selected before the first flush");
+    if(!workspace_limit)throw std::invalid_argument("VM workspace limit must be positive");
+    owner.vm_session_=std::make_shared<Session>(owner,workspace_limit);
+}
+vm::WorkspaceUsage vm::workspace_usage(const script& owner) {
+    std::lock_guard<std::recursive_mutex> lock(runtime_mutex());
+    if(!owner.vm_session_)return {};
+    return {owner.vm_session_->workspace_bytes(),owner.vm_session_->workspace_peak_bytes(),owner.vm_session_->workspace_limit()};
+}
 void script::insert_script(const unsigned char* bytes,std::size_t length) {
     entry_scope entry;return entry.run([&]() -> void {
     std::lock_guard<std::recursive_mutex> lock(runtime_mutex());
     if(closed)throw std::runtime_error("Script is closed");
     if(faulted)throw std::runtime_error("Script initialization failed; close and rebuild the script");
     if(destroying||initializing||active_calls)throw std::runtime_error("Cannot insert during script execution");
-    auto parsed=decode_module(bytes,length,baseEnv->variables.size());
+    auto parsed=build_module(exec::read_module(bytes,length,baseEnv->variables.size()));
     auto module=std::make_shared<loaded_module>();
     module->manifest.bytes.assign(bytes,bytes+length);
     module->manifest.global_offset=baseEnv->variables.size();module->manifest.global_count=parsed.global_count;
@@ -1840,6 +1015,28 @@ void script::insert_script(const unsigned char* bytes,std::size_t length) {
     baseEnv->variables.swap(candidate_globals);modules.swap(candidate_modules);meta=module->meta;setup=false;
     });
 }
+// Link planning sees the mounted modules only through the neutral input.
+link::plan plan_links(const script& owner) {
+    link::input input;input.modules.reserve(owner.modules.size());
+    for(const auto& module:owner.modules) {
+        link::module item;
+        item.assumptions=module->assumptions;item.hint=module->manifest.hint;
+        item.mounted_namespace=module->manifest.actual_namespace;item.extern_signatures=module->extern_signatures;
+        item.references.reserve(module->references.size());
+        for(const auto& reference:module->references)
+            item.references.push_back({reference.original_id,reference_kind(reference),static_cast<std::uint32_t>(reference.hidden_count)});
+        for(const auto& [original,fn]:module->definitions){(void)original;item.definitions.push_back(fn->function_id);}
+        item.dependencies=module->dependencies;
+        input.modules.push_back(std::move(item));
+    }
+    for(const auto& [id,fn]:owner.functions) {
+        const auto defined=std::dynamic_pointer_cast<ofunction>(fn);
+        input.functions.emplace(id,defined?std::optional<function_signature>(function_signature{defined->rett,defined->param_types,
+            defined->hidden_count,defined->entry_kind}):std::nullopt);
+    }
+    input.script_namespaces=owner.script_namespaces;
+    return link::resolve(input);
+}
 void script::flush() {
     entry_scope entry;return entry.run([&]() -> void {
     std::lock_guard<std::recursive_mutex> lock(runtime_mutex());
@@ -1847,128 +1044,67 @@ void script::flush() {
     if(faulted)throw std::runtime_error("Script initialization failed; close and rebuild the script");
     if(destroying||initializing||active_calls)throw std::runtime_error("Cannot flush during script execution");
     if(setup)return;
-    std::map<std::string,std::size_t> hints;
-    for(std::size_t i=0;i<modules.size();++i)if(!modules[i]->manifest.hint.empty())hints.emplace(modules[i]->manifest.hint,i);
-    std::map<int,std::size_t> function_modules;
-    for(std::size_t i=0;i<modules.size();++i)for(auto& [original,fn]:modules[i]->definitions){(void)original;function_modules.emplace(fn->function_id,i);}
-    std::vector<std::set<std::size_t>> dependencies;
-    for(auto& module:modules)dependencies.push_back(module->dependencies);
-    std::vector<std::map<int,function_signature>> resolved_externs(modules.size());
-    std::vector<std::pair<function_reference*,int>> patches;std::map<int,function_signature> bindings;
-    for(std::size_t index=0;index<modules.size();++index) {
-        auto& module=*modules[index];std::map<int,int> mapping;
-        for(auto& [placeholder,hint]:module.assumptions) {
-            auto target=hints.find(hint);if(target==hints.end())throw std::runtime_error("Missing namespace hint: "+hint);
-            mapping.emplace(placeholder,*modules[target->second]->manifest.actual_namespace);
-            if(target->second!=index)dependencies[index].insert(target->second);
-        }
-        const auto resolve=[&](int id){auto found=mapping.find(namespace_of(id));return found==mapping.end()?id:relocate_id(id,found->second);};
-        for(auto& [original_id,signature]:module.extern_signatures) {
-            const int id=resolve(original_id);auto target=functions.find(id);
-            if(target!=functions.end()) {
-                if(auto defining=function_modules.find(id);defining!=function_modules.end()&&defining->second!=index)dependencies[index].insert(defining->second);
-                auto fn=std::dynamic_pointer_cast<ofunction>(target->second);
-                if(!fn||fn->rett!=signature.return_type||fn->param_types!=signature.param_types||
-                   fn->hidden_count!=signature.hidden_count||fn->entry_kind!=signature.entry_kind)
-                    throw std::runtime_error("External signature does not match script function: "+function_id_text(id));
-            } else if(mapping.contains(namespace_of(original_id))||script_namespaces.contains(namespace_of(id))||namespace_of(id)==0x0fff)
-                throw std::runtime_error("Imported script function is missing: "+function_id_text(id));
-            auto [entry,added]=bindings.emplace(id,signature);
-            if(!added&&!(entry->second==signature))throw std::runtime_error("Conflicting external signature id: "+function_id_text(id));
-            resolved_externs[index].emplace(id,signature);
-        }
-        for(auto& reference:module.references) {
-            const int id=resolve(reference.original_id);
-            if(auto defining=function_modules.find(id);defining!=function_modules.end()&&defining->second!=index)dependencies[index].insert(defining->second);
-            if(mapping.contains(namespace_of(reference.original_id))||reference.destructor||reference.factory||reference.placement||reference.method) {
-                auto target=functions.find(id);
-                if(target==functions.end())throw std::runtime_error("Referenced script function is missing: "+function_id_text(id));
-                if(reference.destructor) {
-                    auto fn=std::dynamic_pointer_cast<ofunction>(target->second);
-                    if(!fn||fn->rett!=VOID_VALUE||fn->param_types!=std::vector<int>{ADDRESS_VALUE})
-                        throw std::runtime_error("Object destructor must be a script function void(address)");
-                }
-                if(reference.placement) {
-                    auto fn=std::dynamic_pointer_cast<ofunction>(target->second);
-                    if(!fn||fn->rett!=VOID_VALUE||fn->param_types!=std::vector<int>{ADDRESS_VALUE}||fn->entry_kind!=1)
-                        throw std::runtime_error("Generic placement initializer must be an internal script function void(address)");
-                }
-                if(reference.method) {
-                    auto fn=std::dynamic_pointer_cast<ofunction>(target->second);
-                    if(!fn||fn->entry_kind!=0||fn->param_types.empty()||fn->param_types.front()!=ADDRESS_VALUE)
-                        throw std::runtime_error("Virtual method entry must be an ordinary script function with an address receiver");
-                }
-                if(reference.factory) {
-                    auto fn=std::dynamic_pointer_cast<ofunction>(target->second);
-                    if(!fn||fn->rett!=OBJECT_VALUE||!fn->param_types.empty())
-                        throw std::runtime_error("Generic default factory must be a script function object()");
-                }
-            }
-            if(auto target=functions.find(id);target!=functions.end()) {
-                auto fn=std::dynamic_pointer_cast<ofunction>(target->second);
-                if(!fn||fn->hidden_count!=reference.hidden_count)throw std::runtime_error("Generic context count does not match function: "+function_id_text(id));
-            } else {
-                auto imported=resolved_externs[index].find(id);
-                if(imported!=resolved_externs[index].end()&&imported->second.hidden_count!=reference.hidden_count)
-                    throw std::runtime_error("Generic context count does not match external function: "+function_id_text(id));
-                if(reference.hidden_count&&imported==resolved_externs[index].end())
-                    throw std::runtime_error("Generic context call requires a matching script import");
-            }
-            patches.emplace_back(&reference,id);
-        }
-    }
-    // Iterative SCC discovery keeps arbitrarily long module dependency chains
-    // off the C++ call stack. Components and ready ties use stable load order.
-    std::vector<bool> visited(modules.size());std::vector<std::size_t> finished;
-    for(std::size_t start=0;start<modules.size();++start)if(!visited[start]) {
-        std::vector<std::pair<std::size_t,bool>> pending{{start,false}};
-        while(!pending.empty()) {
-            auto [current,expanded]=pending.back();pending.pop_back();
-            if(expanded){finished.push_back(current);continue;}
-            if(visited[current])continue;
-            visited[current]=true;pending.emplace_back(current,true);
-            for(auto next=dependencies[current].rbegin();next!=dependencies[current].rend();++next)
-                if(!visited[*next])pending.emplace_back(*next,false);
-        }
-    }
-    std::vector<std::vector<std::size_t>> incoming(modules.size()),groups;
-    for(std::size_t i=0;i<dependencies.size();++i)for(auto next:dependencies[i])incoming[next].push_back(i);
-    std::vector<int> component(modules.size(),-1);
-    for(auto start=finished.rbegin();start!=finished.rend();++start)if(component[*start]<0) {
-        const int id=static_cast<int>(groups.size());std::vector<std::size_t> pending{*start},group;
-        component[*start]=id;
-        while(!pending.empty()) {
-            auto current=pending.back();pending.pop_back();group.push_back(current);
-            for(auto next:incoming[current])if(component[next]<0){component[next]=id;pending.push_back(next);}
-        }
-        std::sort(group.begin(),group.end());groups.push_back(std::move(group));
-    }
-    std::vector<std::set<int>> waits(groups.size());
-    for(std::size_t i=0;i<dependencies.size();++i)for(auto next:dependencies[i])if(component[i]!=component[next])waits[component[i]].insert(component[next]);
-    std::set<std::pair<std::size_t,int>> ready;
-    for(std::size_t i=0;i<groups.size();++i)if(waits[i].empty())ready.emplace(groups[i][0],static_cast<int>(i));
-    std::vector<std::size_t> order;
-    while(!ready.empty()) {
-        const int current=ready.begin()->second;ready.erase(ready.begin());
-        order.insert(order.end(),groups[current].begin(),groups[current].end());
-        for(std::size_t i=0;i<groups.size();++i)if(waits[i].erase(current)&&waits[i].empty())ready.emplace(groups[i][0],static_cast<int>(i));
-    }
+    // Migration acceptance only: run every host (CLI, C++ hosts, JNI) on the
+    // experimental VM without changing them. Production keeps the tree default.
+    if(!vm_session_&&std::none_of(modules.begin(),modules.end(),[](const auto& module){return module->manifest.initialized;}))
+        if(const char* forced=std::getenv("AZSCRIPT_EXPERIMENTAL_VM_BACKEND");forced&&std::string_view(forced)=="1")
+            vm_session_=std::make_shared<vm::Session>(*this,vm::default_workspace_bytes);
+    auto plan=plan_links(*this);
     on_destory.reserve(on_destory.size()+modules.size());
+    std::vector<std::pair<ofunction*,std::uint32_t>> vm_bindings;
+    std::shared_ptr<vm::Session> vm_candidate;
+    if(vm_session_) {
+        // Preparation is the last fallible validation phase. It reads immutable
+        // manifests, so neither tree relocation nor onload can run partially.
+        // Keep the prior session until all binding checks and allocations finish:
+        // destroy() can still run initialized hooks after a failed insertion.
+        vm_candidate=std::make_shared<vm::Session>(*this,vm_session_->workspace_limit());
+        vm_candidate->prepare();
+        const auto& compiled=vm_candidate->compiled();
+        if(compiled.modules.size()!=modules.size())throw std::logic_error("VM module binding differs from validated linkage");
+        const auto bind=[&](const std::shared_ptr<ofunction>& function,std::uint32_t index,bool lifecycle) {
+            if(!function) {
+                if(index!=vm::no_index)throw std::logic_error("VM lifecycle binding differs from validated linkage");
+                return;
+            }
+            if(index>=compiled.program.functions.size())throw std::logic_error("VM function binding is unavailable");
+            const auto& record=compiled.program.functions[index];
+            if(record.function_id!=function->function_id||record.lifecycle!=lifecycle||
+                    record.global_offset!=function->global_offset||record.global_count!=function->global_count||
+                    record.return_type!=function->rett||record.param_types!=function->param_types||
+                    record.hidden_count!=static_cast<std::uint32_t>(function->hidden_count)||record.entry_kind!=function->entry_kind)
+                throw std::logic_error("VM function binding differs from validated linkage");
+            vm_bindings.emplace_back(function.get(),index);
+        };
+        for(std::size_t i=0;i<modules.size();++i) {
+            for(const auto& [original,function]:modules[i]->definitions) {
+                (void)original;
+                const auto found=compiled.public_functions.find(function->function_id);
+                if(found==compiled.public_functions.end())throw std::logic_error("VM public function binding is unavailable");
+                bind(function,found->second,false);
+            }
+            bind(modules[i]->onload,compiled.modules[i].onload,true);
+            bind(modules[i]->pre_destroy,compiled.modules[i].pre_destroy,true);
+        }
+    }
     // Link validation is atomic: no references change and no onload runs before
     // every module has a valid resolution and the complete order is available.
-    for(auto& [reference,id]:patches){*reference->target=id;reference->original_id=id;}
+    for(const auto& [function,index]:vm_bindings)function->vm_function_index_=index;
+    if(vm_candidate)vm_session_.swap(vm_candidate);
     for(std::size_t i=0;i<modules.size();++i) {
-        modules[i]->extern_signatures.swap(resolved_externs[i]);
-        modules[i]->dependencies.swap(dependencies[i]);
+        auto& references=modules[i]->references;
+        for(std::size_t k=0;k<references.size();++k){*references[k].target=plan.references[i][k];references[k].original_id=plan.references[i][k];}
+        modules[i]->extern_signatures.swap(plan.externs[i]);
+        modules[i]->dependencies.swap(plan.dependencies[i]);
         modules[i]->assumptions.clear();
         for(auto& [original,fn]:modules[i]->definitions){(void)original;fn->linked=true;}
         if(modules[i]->onload)modules[i]->onload->linked=true;
         if(modules[i]->pre_destroy)modules[i]->pre_destroy->linked=true;
     }
-    extern_signatures.swap(bindings);initializing=true;
+    extern_signatures.swap(plan.bindings);vm_candidate.reset();initializing=true;
     try {
         call_guard guard(baseEnv);
-        for(auto index:order) {
+        for(auto index:plan.order) {
             auto& module=*modules[index];if(module.manifest.initialized)continue;
             if(module.onload)module.onload->invoke(baseEnv,{});
             module.manifest.initialized=true;
@@ -1995,6 +1131,7 @@ void script::destroy() {
         blocks::finalize_storage(baseEnv->variables,baseEnv,true,failure);
     }catch(...){failure.capture_current();}
     heap::discard_script_objects(this);
+    vm_session_.reset();
     closed=true;setup=false;functions.clear();extern_signatures.clear();on_destory.clear();modules.clear();baseEnv.reset();destroying=false;
     if(failure)failure.rethrow();
     });
@@ -2007,21 +1144,35 @@ V ofunction::invoke(E ev,std::vector<V> args) {
     });
 }
 V ofunction::invoke_bound(E ev,std::vector<V> args,type_contexts contexts) {
+    return invoke_bound(site_of(ev),std::move(args),std::move(contexts));
+}
+V ofunction::invoke_bound(ownership::Site caller,std::vector<V> args,type_contexts contexts) {
     entry_scope entry;return entry.run([&]() -> V {
     std::shared_ptr<function_frame> frame;
+    bool vm_trace=false;
     try {
     std::lock_guard<std::recursive_mutex> lock(runtime_mutex());
     auto bound=script_owner.lock();
-    if(!bound||!ev||ev->script.lock()!=bound)throw std::runtime_error("Function belongs to another or unavailable script");
+    if(!bound||!caller.record||caller.record->script.lock()!=bound)throw std::runtime_error("Function belongs to another or unavailable script");
     bound->require_execution();
     if(!linked)throw std::runtime_error("Function module has not been linked");
     if(contexts.size()!=static_cast<std::size_t>(hidden_count))throw std::runtime_error("Generic context count mismatch");
     validate_type_contexts(contexts,bound);
-    call_guard guard(ev);
-    validate_arguments("Script function",function_id,param_types,args,true);
-    auto env=std::make_shared<environment>();
-    env->script=guard.s;env->parent=guard.s->baseEnv;env->caller=ev;env->frame_root=true;
-    env->frame=std::make_shared<function_frame>();
+    call_guard guard(bound);
+    admission::check_arguments("Script function",function_id,param_types,args.size(),
+        [&](std::size_t i){return argument_tag(args[i]);},true);
+    if(bound->vm_session_) {
+        if(vm_function_index_==vm::no_index)throw std::logic_error("VM function has not been linked");
+        vm::ExecutionPosition position;
+        // Session owns every VM frame, including the entry frame and failures
+        // while importing globals or reserving arguments. Do not append a
+        // duplicate tree frame when it propagates the original exception.
+        vm_trace=true;
+        return bound->vm_session_->invoke(vm_function_index_,args,&position,caller,contexts);
+    }
+    const auto& arena=guard.s->baseEnv->ownership_arena();
+    auto env=std::make_shared<environment>(arena,guard.s->baseEnv,caller.scope(),std::make_shared<function_frame>(arena),true);
+    env->script=guard.s;
     frame=env->frame;
     env->frame->hidden_contexts=std::move(contexts);
     env->frame->global_offset=global_offset;env->frame->global_count=global_count;
@@ -2031,8 +1182,8 @@ V ofunction::invoke_bound(E ev,std::vector<V> args,type_contexts contexts) {
         if(!args[i]) throw std::invalid_argument("Null argument pointer; use variable(nullptr)");
         // Object arguments move from caller temporaries or are copied; parameters
         // are destroyed after every local of the call.
-        auto storage=std::make_shared<variable>(nullptr);blocks::store(storage,args[i],ev);
-        env->frame->slots[i]=storage;blocks::bind_local(storage,env);
+        auto storage=parameter_storage();blocks::store(storage,args[i],caller);
+        statement::bind_parameter(storage,i,env);
     }
     return with_cleanup(env,[&] {
         {
@@ -2043,7 +1194,7 @@ V ofunction::invoke_bound(E ev,std::vector<V> args,type_contexts contexts) {
         env->frame->location=env->frame->return_location;
         return convert_return(env->frame->result,rett);
     });
-    } catch(...) {note_script_frame(*this,frame);throw;}
+    } catch(...) {if(!vm_trace)note_script_frame(*this,frame);throw;}
     });
 }
 V complex_expression::execute_body(E env) {
@@ -2056,7 +1207,7 @@ V complex_expression::execute_body(E env) {
     return nil();
 }
 V complex_expression::execute(E env) {
-    auto scope=std::make_shared<environment>();scope->parent=env;scope->script=env->script;scope->frame=env->frame;
+    auto scope=std::make_shared<environment>(env->ownership_arena(),env,ownership::ScopeId{},env->frame);scope->script=env->script;
     return with_cleanup(scope,[&]{at_location location(scope,this->location);return execute_body(scope);});
 }
 V functionInvocationExpression::execute(E env) {
@@ -2078,8 +1229,7 @@ V varDefineExpression::execute(E env) {
     if(slot)throw std::runtime_error("Duplicate variable slot: "+std::to_string(varindex));
     auto storage=nil();
     if(initializer)blocks::store(storage,run(initializer,env),env);
-    env->declared_slots.push_back(static_cast<std::size_t>(varindex));
-    env->frame->slots[static_cast<std::size_t>(varindex)]=storage;blocks::bind_local(storage,env);return nil();
+    statement::declare_local(storage,static_cast<std::size_t>(varindex),env);return nil();
 }
 V varSetExpression::execute(E env) {
     tick(env);auto v=env->getVariable(varindex);
@@ -2089,26 +1239,17 @@ V returnExpression::execute(E env) {
     tick(env);if(!env->frame) throw std::runtime_error("Return outside function");
     auto value=returnType?run(returnType,env):nil();
     V result;
-    if(value->type==OBJECT_VALUE)result=blocks::export_result(value,env);
+    if(value->type_tag()==OBJECT_VALUE)result=blocks::export_result(value,env);
     else {
         result=value->deepCopy();
         if(object_return) {
-            if(result->type!=ADDRESS_VALUE)throw std::runtime_error("Object return requires address or object type");
-            heap::return_object(*static_cast<address*>(result->value),env);
+            if(result->type_tag()!=ADDRESS_VALUE)throw std::runtime_error("Object return requires address or object type");
+            heap::return_object(result->get<address>(),env);
         }
     }
     mark_returned(env,std::move(result));return nil();
 }
-constantExpression::constantExpression(std::shared_ptr<AbdMapValue> v) {
-    if(auto p=std::dynamic_pointer_cast<IntAbdValue>(v)) value=std::make_shared<variable>(p->data);
-    else if(auto p=std::dynamic_pointer_cast<AddressAbdValue>(v)) value=std::make_shared<variable>(p->data);
-    else if(auto p=std::dynamic_pointer_cast<StringAbdValue>(v)) value=std::make_shared<variable>(p->data);
-    else if(auto p=std::dynamic_pointer_cast<FloatAbdValue>(v)) value=std::make_shared<variable>(p->data);
-    else if(auto p=std::dynamic_pointer_cast<DoubleAbdValue>(v)) value=std::make_shared<variable>(p->data);
-    else if(auto p=std::dynamic_pointer_cast<BoolAbdValue>(v)) value=std::make_shared<variable>(p->data);
-    else if(auto p=std::dynamic_pointer_cast<ByteArrayValue>(v);p&&p->length==1&&p->data[0]==0xff) value=nil();
-    else throw std::invalid_argument("Unsupported script constant");
-}
+constantExpression::constantExpression(const Value& v):value(std::make_shared<variable>()) {value_access::assign(*value,v);}
 V constantExpression::execute(E env){tick(env);return value->deepCopy();}
 #define BINARY_IMPL(Class,Op) \
 V Class::execute(E env){tick(env);auto a=run(exp1,env)->deepCopy();auto b=run(exp2,env);return binary(Op,a,b);}
@@ -2159,77 +1300,105 @@ V continueExpression::execute(E env) {
     return nil();
 }
 void variable::clear() noexcept {
-    switch(type) {
-    case INT_VALUE:delete static_cast<int*>(value);break;
-    case ADDRESS_VALUE:delete static_cast<address*>(value);break;
-    case STRING_VALUE:delete static_cast<std::string*>(value);break;
-    case FLOAT_VALUE:delete static_cast<float*>(value);break;
-    case DOUBLE_VALUE:delete static_cast<double*>(value);break;
-    case BOOLEAN_VALUE:delete static_cast<bool*>(value);break;
-    case OBJECT_VALUE: {
-        auto holder=static_cast<std::shared_ptr<slot_block>*>(value);
-        // The owning storage variable ended: its object's address expires.
-        if(*holder&&(*holder)->owner==this)blocks::abandon(*holder);
-        delete holder;break;
-    }
-    }
-    value=nullptr;type=VOID_VALUE;
+    // The owning storage variable ended: its object's address expires. Value
+    // itself only retains a handle; it never owns script cleanup responsibility.
+    if(auto block=value_.object_handle();block&&block->owner==this)blocks::abandon(block);
+    value_=Value{};
 }
 variable::~variable(){clear();}
-#define VALUE_IMPL(T,Tag) \
+const Value& value_access::read(const variable& source) noexcept {return source.value_;}
+void value_access::assign(variable& destination,Value value) noexcept {
+    destination.replace_value(std::move(value));
+}
+void variable::replace_value(Value value) noexcept {
+    // The argument is already a complete snapshot, even when it came from a
+    // field of the object that clear() is about to abandon.
+    clear();value_.swap(value);
+}
+#define VALUE_IMPL(T) \
 variable::variable(T v){setValue(std::move(v));} \
-void variable::setValue(T v){auto p=std::make_unique<T>(std::move(v));clear();value=p.release();type=Tag;}
-VALUE_IMPL(int,INT_VALUE)
-VALUE_IMPL(address,ADDRESS_VALUE)
-VALUE_IMPL(std::string,STRING_VALUE)
-VALUE_IMPL(float,FLOAT_VALUE)
-VALUE_IMPL(double,DOUBLE_VALUE)
-VALUE_IMPL(bool,BOOLEAN_VALUE)
-VALUE_IMPL(std::shared_ptr<slot_block>,OBJECT_VALUE)
+void variable::setValue(T v){replace_value(Value(std::move(v)));}
+VALUE_IMPL(int)
+VALUE_IMPL(address)
+VALUE_IMPL(std::string)
+VALUE_IMPL(float)
+VALUE_IMPL(double)
+VALUE_IMPL(bool)
+VALUE_IMPL(std::shared_ptr<slot_block>)
 #undef VALUE_IMPL
 variable::variable(const char* value){setValue(value);}
 void variable::setValue(const char* value){if(value)setValue(std::string(value));else setValue(nullptr);}
 variable::variable(std::nullptr_t){}
 void variable::setValue(std::nullptr_t){clear();}
-void variable::copy_value(const variable& v) {
-    switch(v.type) {
-    case INT_VALUE:setValue(*static_cast<int*>(v.value));break;
-    case ADDRESS_VALUE:setValue(*static_cast<address*>(v.value));break;
-    case STRING_VALUE:setValue(*static_cast<std::string*>(v.value));break;
-    case FLOAT_VALUE:setValue(*static_cast<float*>(v.value));break;
-    case DOUBLE_VALUE:setValue(*static_cast<double*>(v.value));break;
-    case BOOLEAN_VALUE:setValue(*static_cast<bool*>(v.value));break;
-    case OBJECT_VALUE:setValue(*static_cast<std::shared_ptr<slot_block>*>(v.value));break;
-    case VOID_VALUE:setValue(nullptr);break;
-    default:throw std::runtime_error("Unknown runtime value type");
-    }
+std::shared_ptr<slot_block> variable::object_handle() const noexcept {
+    return value_.object_handle();
 }
-variable::variable(const variable& v):name(v.name){copy_value(v);}
-variable& variable::operator=(const variable& v){if(this!=&v){copy_value(v);name=v.name;}return *this;}
+void variable::swap_storage(variable& other) noexcept {
+    value_.swap(other.value_);
+}
+void variable::copy_value(const variable& v) {
+    replace_value(v.value_);
+}
+variable::variable(const variable& v):name(v.name),value_(v.value_){}
+variable& variable::operator=(const variable& v){
+    if(this!=&v){std::string next_name(v.name);replace_value(v.value_);name.swap(next_name);}return *this;
+}
 void variable::copy_from(V v){if(!v)throw std::invalid_argument("Null variable");if(v.get()!=this)copy_value(*v);}
 V variable::deepCopy(){auto v=std::make_shared<variable>(*this);v->name.clear();return v;}
-environment::~environment() {heap::discard_owned(this);}
+function_frame::function_frame(std::shared_ptr<ownership::Arena> arena)
+    :temporary_storage_(std::move(arena)),temporaries(temporary_storage_.record().values) {}
+environment::environment(std::shared_ptr<ownership::Arena> arena,const std::shared_ptr<environment>& parent,
+                         ownership::ScopeId caller,std::shared_ptr<function_frame> frame,bool frame_root)
+    :ownership_(std::move(arena),{parent?parent->ownership_id():ownership::ScopeId{},caller,
+                                  frame?frame->temporary_id():ownership::TempListId{}}),
+     owned_pointer(ownership_.record().owned),parent(parent),script(ownership_.record().script),frame(std::move(frame)),
+     closing(ownership_.record().closing),frame_root(frame_root) {}
+environment::environment(const ownership::Scope& shared,const std::shared_ptr<environment>& parent,
+                         std::shared_ptr<function_frame> frame,bool frame_root)
+    :ownership_(shared,ownership::Scope::view_t{}),owned_pointer(ownership_.record().owned),parent(parent),
+     script(ownership_.record().script),frame(std::move(frame)),closing(ownership_.record().closing),frame_root(frame_root) {}
+// What the scope still owns ends before its frame's temporaries do.
+environment::~environment() {ownership_.abandon();}
+namespace {
+// The tree's view of a closing scope's locals for lifecycle::ScopeFinalizer.
+class closing_locals final:public lifecycle::ScopeLocals {
+    environment& scope_;
+public:
+    explicit closing_locals(environment& scope) noexcept:scope_(scope) {}
+    std::vector<V> leftovers() const override {
+        std::vector<V> result;
+        const auto& frame=scope_.frame;
+        if(!frame)return result;
+        if(scope_.frame_root)for(std::size_t i=0;i<frame->param_count&&i<frame->slots.size();++i)result.push_back(frame->slots[i]);
+        for(auto index:scope_.declared_slots)result.push_back(frame->slots[index]);
+        return result;
+    }
+    void undeclare() noexcept override {
+        if(scope_.frame)for(auto index:scope_.declared_slots)scope_.frame->slots[index].reset();
+        scope_.declared_slots.clear();
+    }
+};
+// True when cleanup could run no code and release nothing: it then only
+// closes the scope and undeclares its locals.
+bool nothing_to_release(const environment& scope) noexcept {
+    if(!scope.owned_pointer.empty())return false;
+    const auto& frame=scope.frame;
+    if(!frame)return true;
+    if(scope.frame_root&&!frame->temporaries.empty())return false;
+    const auto owning=[&](std::size_t index){const auto& slot=frame->slots[index];return slot&&blocks::owns(*slot);};
+    if(scope.frame_root)for(std::size_t i=0;i<frame->param_count&&i<frame->slots.size();++i)if(owning(i))return false;
+    for(auto index:scope.declared_slots)if(owning(index))return false;
+    return true;
+}
+}
 void environment::cleanup(const std::shared_ptr<environment>& self) {
     if(closing)return;
-    closing=true;
-    pending_error failure;
-    if(frame_root&&frame)try{blocks::finalize_temporaries(*frame,0,self);}catch(...){failure.capture_current();}
-    while(!owned_pointer.empty()) {
-        address pointer=owned_pointer.back();owned_pointer.pop_back();
-        try {heap::release_owned(pointer,self);}catch(...){failure.capture_current();}
-    }
-    // Objects that a dynamic variable acquired after its declaration end here.
-    if(frame) {
-        std::vector<V> leftovers;
-        for(auto index:declared_slots)leftovers.push_back(frame->slots[index]);
-        if(frame_root)for(std::size_t i=0;i<frame->param_count&&i<frame->slots.size();++i)leftovers.insert(leftovers.begin()+static_cast<std::ptrdiff_t>(i),frame->slots[i]);
-        blocks::finalize_storage(leftovers,self,true,failure);
-    }
-    // Destructors may still observe the current block through host callbacks;
-    // retire its locals only after every owned allocation has been cleaned.
-    if(frame)for(auto index:declared_slots)frame->slots[index].reset();
-    declared_slots.clear();
-    if(failure)failure.rethrow();
+    closing_locals locals(*this);
+    if(nothing_to_release(*this)){closing=true;locals.undeclare();return;}
+    std::lock_guard<std::recursive_mutex> lock(runtime_mutex());
+    lifecycle::ScopeFinalizer cleanup(ownership_.id(),frame_root&&frame?frame->temporary_id():ownership::TempListId{},locals);
+    lifecycle::drive(cleanup,site());
+    cleanup.finish();
 }
 V environment::getVariable(std::string name) {
     for(auto& v:variables) if(v->name==name)return v;
@@ -2258,26 +1427,8 @@ V environment::getVariable(int index) {
     return value;
 }
 bool environment::testForVar(std::string name){for(auto& v:variables)if(v->name==name)return true;return false;}
-namespace {
-// Shortest representation that parses back to the same value, e.g. 0.1+0.2
-// prints 0.30000000000000004 and 123456789.0 prints 123456789.
-template<class T> std::string shortest_number(T value) {
-    char text[64];
-    auto result=std::to_chars(text,text+sizeof text,value);
-    if(result.ec!=std::errc()) throw std::runtime_error("Cannot format number");
-    return std::string(text,result.ptr);
-}
-}
 std::string value_to_string(const V& v) {
     if(!v)throw std::invalid_argument("Null variable");
-    if(v->type==STRING_VALUE)return *static_cast<std::string*>(v->value);
-    if(v->type==BOOLEAN_VALUE)return *static_cast<bool*>(v->value)?"true":"false";
-    if(v->type==VOID_VALUE)return "null";
-    if(v->type==INT_VALUE)return shortest_number(*static_cast<int*>(v->value));
-    if(v->type==ADDRESS_VALUE)return shortest_number(static_cast<address*>(v->value)->value);
-    if(v->type==FLOAT_VALUE)return shortest_number(*static_cast<float*>(v->value));
-    if(v->type==DOUBLE_VALUE)return shortest_number(*static_cast<double*>(v->value));
-    if(v->type==OBJECT_VALUE)throw std::runtime_error("An object value cannot be converted to a string");
-    throw std::runtime_error("Unknown runtime value type");
+    return value_ops::to_string(value_access::read(*v));
 }
 }

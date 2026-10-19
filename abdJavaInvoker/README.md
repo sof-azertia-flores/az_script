@@ -16,7 +16,7 @@ cd abdJavaInvoker
 
 macOS 自动通过 `java_home` 发现 JDK；也可以设置 `JAVA_HOME`。独立 `build.sh` 只需本地 JDK；原 Gradle 工程也可用 `./gradlew jar` 构建。JNI 回归由 CTest 调用真实 JVM，使用 `-Xcheck:jni`；测试所需 Java/Python 均在本地执行，不下载 Maven 包。
 
-启动宿主时通过 `-Djava.library.path=/absolute/path/build/native/abdjni` 找到 `abdJ`，或者使用 `-Dazertia.native.library=/absolute/path/libabdJ.dylib` 明确指定文件。Windows 对应 `abdJ.dll`，Linux 对应 `libabdJ.so`；关联的 `abdInvoker` 动态库也必须能被系统加载。
+启动宿主时通过 `-Djava.library.path=/absolute/path/build/native/abdjni` 找到 `abdJ`，或者使用 `-Dazertia.native.library=/absolute/path/libabdJ.dylib` 明确指定文件。Windows 对应 `abdJ.dll`，Linux 对应 `libabdJ.so`；关联的 ABI 1 `abdInvoker-1` 动态库也必须能被系统加载。
 
 ```java
 int hostAdd = 0x12340001;

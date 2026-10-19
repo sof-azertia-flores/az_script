@@ -1,4 +1,5 @@
 #include "internelFunctions.h"
+#include "core/ids.h"
 #include "extern_library.h"
 #include "heepalloc.h"
 #include "blocks.h"
@@ -23,16 +24,15 @@ public:
     int return_type()override{return INT_VALUE;}
     std::shared_ptr<variable> invoke(std::shared_ptr<environment> env,std::vector<std::shared_ptr<variable>> args)override {
         if(!args.empty())throw std::invalid_argument("getDepth takes no arguments");
-        int depth=0;for(auto e=env;e;e=e->parent.lock())++depth;
-        return std::make_shared<variable>(depth);
+        return std::make_shared<variable>(env?ownership::depth(env->ownership_id()):0);
     }
 };
 class load_extern_library_function final:public function {
 public:
     int return_type()override{return VOID_VALUE;}
     std::shared_ptr<variable> invoke(std::shared_ptr<environment>,std::vector<std::shared_ptr<variable>> args={})override {
-        if(args.size()!=1||!args[0]||args[0]->type!=STRING_VALUE)throw std::invalid_argument("load_extern_library requires one string");
-        load_named_extern_library(*static_cast<std::string*>(args[0]->value));
+        if(args.size()!=1||!args[0]||args[0]->type_tag()!=STRING_VALUE)throw std::invalid_argument("load_extern_library requires one string");
+        load_named_extern_library(args[0]->get<std::string>());
         return std::make_shared<variable>(nullptr);
     }
 };
@@ -40,9 +40,9 @@ class reflect_invoke_function final:public function {
 public:
     int return_type()override{return ANY_VALUE;}
     std::shared_ptr<variable> invoke(std::shared_ptr<environment> env,std::vector<std::shared_ptr<variable>> args)override {
-        if(args.size()<2||!args[0]||!args[1]||args[0]->type!=INT_VALUE||args[1]->type!=INT_VALUE)
+        if(args.size()<2||!args[0]||!args[1]||args[0]->type_tag()!=INT_VALUE||args[1]->type_tag()!=INT_VALUE)
             throw std::invalid_argument("reflect_invoke_function requires a return type and integer function ID");
-        const int expected=*static_cast<int*>(args[0]->value),id=*static_cast<int*>(args[1]->value);
+        const int expected=args[0]->get<int>(),id=args[1]->get<int>();
         if(expected<INT_VALUE||expected>OBJECT_VALUE||expected==ANY_VALUE)throw std::invalid_argument("Invalid reflection return type");
         auto script=env?env->script.lock():nullptr;
         if(!script)throw std::runtime_error("Missing execution environment");
@@ -55,7 +55,7 @@ public:
         args.erase(args.begin(),args.begin()+2);
         auto result=target->invoke(env,std::move(args));
         if(result)blocks::adopt_result(result,env);
-        if(!result||result->type!=expected)throw std::runtime_error("Reflection return type mismatch");
+        if(!result||result->type_tag()!=expected)throw std::runtime_error("Reflection return type mismatch");
         return result;
     }
 };
@@ -65,10 +65,10 @@ public:
     explicit hint_query_function(bool presence):presence(presence){}
     int return_type()override{return presence?BOOLEAN_VALUE:INT_VALUE;}
     std::shared_ptr<variable> invoke(std::shared_ptr<environment> env,std::vector<std::shared_ptr<variable>> args)override {
-        if(args.size()!=1||!args[0]||args[0]->type!=STRING_VALUE)throw std::invalid_argument("Hint query requires one string");
+        if(args.size()!=1||!args[0]||args[0]->type_tag()!=STRING_VALUE)throw std::invalid_argument("Hint query requires one string");
         auto script=env?env->script.lock():nullptr;
         if(!script)throw std::runtime_error("Missing execution environment");
-        const auto& hint=*static_cast<std::string*>(args[0]->value);
+        const auto& hint=args[0]->get<std::string>();
         if(presence)return std::make_shared<variable>(script->hint_loaded(hint));
         return std::make_shared<variable>(script->namespace_for_hint(hint));
     }
@@ -92,12 +92,12 @@ public:
         } else if(args.size()!=arity)
             throw std::invalid_argument(name+" requires "+std::to_string(arity)+(arity==1?" argument":" arguments"));
         auto argument=[&](std::size_t index,int type) -> const std::shared_ptr<variable>& {
-            if(!args[index]||args[index]->type!=type)
+            if(!args[index]||args[index]->type_tag()!=type)
                 throw std::invalid_argument(name+" argument "+std::to_string(index+1)+" must be "+(type==INT_VALUE?"int":"string"));
             return args[index];
         };
-        auto integer=[&](std::size_t index){return *static_cast<int*>(argument(index,INT_VALUE)->value);};
-        auto string=[&](std::size_t index) -> const std::string& {return *static_cast<std::string*>(argument(index,STRING_VALUE)->value);};
+        auto integer=[&](std::size_t index){return argument(index,INT_VALUE)->get<int>();};
+        auto string=[&](std::size_t index) -> const std::string& {return argument(index,STRING_VALUE)->get<std::string>();};
         auto as_int=[](std::size_t size) {
             if(size>static_cast<std::size_t>(std::numeric_limits<int>::max()))throw std::overflow_error("String length exceeds int range");
             return static_cast<int>(size);
@@ -146,7 +146,9 @@ std::shared_ptr<function> builtin(int id) {
         std::make_shared<string_function>(0x0e),std::make_shared<string_function>(0x0f),std::make_shared<string_function>(0x10),
         std::make_shared<string_function>(0x11),std::make_shared<string_function>(0x12),std::make_shared<string_function>(0x13),
         std::make_shared<f_object_alloc>()};
-    int i=id&0xffff;
+    // The table is indexed by ids::builtin order; both engines classify by those ids.
+    if(functions.size()!=static_cast<std::size_t>(ids::builtin_count))throw std::logic_error("Builtin table does not match the builtin ids");
+    int i=ids::local_of(id);
     return i<static_cast<int>(functions.size())?functions[i]:nullptr;
 }
 }

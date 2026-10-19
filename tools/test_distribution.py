@@ -679,7 +679,7 @@ int main() {
         # that runtime and its platform runtime dependencies, without the JARs,
         # Java runtime, JNI bridge, headers or compiler from the distribution.
         if WINDOWS:
-            runtime_names = {"abdinvoker.dll", "libabdinvoker.dll"}
+            runtime_names = {"abdinvoker-1.dll", "libabdinvoker-1.dll"}
             runtime_libraries = [library for library in (package / "bin").glob("*.dll")
                                  if library.name.lower() in runtime_names]
             standalone_lib = standalone_bin
@@ -690,7 +690,7 @@ int main() {
         else:
             standalone_lib = standalone / "lib"
             standalone_lib.mkdir()
-            pattern = "libabdInvoker*.dylib" if sys.platform == "darwin" else "libabdInvoker.so*"
+            pattern = "libabdInvoker-1*.dylib" if sys.platform == "darwin" else "libabdInvoker-1.so*"
             runtime_libraries = list((package / "lib").glob(pattern))
         _require(bool(runtime_libraries), "Missing shared AzScript runtime for standalone runner")
         for library in runtime_libraries:
