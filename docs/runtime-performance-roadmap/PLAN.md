@@ -10,7 +10,7 @@
 - 已核对远端 main 为上述 SHA，并在现有 checkout 创建 `codex/runtime-performance`；没有创建额外 worktree。冻结源码保存在忽略目录 `build/runtime-perf/baseline-source/`。
 - 当前分析快照和机制探针在忽略目录 `build/performance-analysis/`；它们不是已经实现的优化，也不是完整运行基准。
 - 主线包含 Value/Slot、字节码、调用与清理栈、对象/泛型/虚调用、宿主/JNI/快照接入、类型特化和编译器内部 IR。
-- 多实例并行、JNI 批量调用 API、模块加载算法、Unicode 索引、容器算法、JIT/AOT、增量编译为后续独立项目。本轮仍可迁移这些边界，但不把它们的专项提速混入主线成果。
+- 多实例并行、JNI 批量调用 API、模块加载算法、Unicode 索引、容器算法、JIT/AOT、增量编译为后续独立项目。JIT 的设计见 [JIT.md](JIT.md)。本轮仍可迁移这些边界，但不把它们的专项提速混入主线成果。
 - `decompiler` 当前未展开。本轮保持 exec wire v10；不声称外部反编译器已经验证兼容。如以后变更 wire，先取得固定提交的实际源码再协调生产/消费端。
 
 ## 2. 现在确定的架构决策
