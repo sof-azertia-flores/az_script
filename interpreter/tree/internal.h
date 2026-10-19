@@ -3,13 +3,14 @@
 
 // Private to the tree executor's translation units: the records its modules
 // share and the helpers its expression nodes run on.
-#include "../library.h"
+#include "expressions.h"
 #include "../blocks.h"
 #include "../core/admission.h"
 #include "../core/exec.h"
 #include "../core/ids.h"
 #include "../core/statement.h"
 #include "../core/trace.h"
+#include "../core/value_ops.h"
 #include <cstdio>
 #include <exception>
 #include <map>
@@ -43,8 +44,6 @@ struct parsed_module {
     std::vector<function_reference> references;
 };
 namespace tree {
-using V=std::shared_ptr<variable>;
-using E=std::shared_ptr<environment>;
 using M=std::shared_ptr<AbdMap>;
 // Internal linkage, as in the single file they came from: GCC inlines
 // these helpers into the node bodies only while each copy is local.
@@ -156,7 +155,17 @@ exec::reference_kind reference_kind(const function_reference& reference) noexcep
         reference.placement?exec::reference_kind::placement:reference.method?exec::reference_kind::method:exec::reference_kind::call;
 }
 }
-// Defined with the expression nodes and the module builder.
+namespace {
+// Value semantics come from the shared core layer; these adapters add the
+// tree's null-pointer checks and variable wrappers only.
+V wrap(Value value) {auto result=std::make_shared<variable>();value_access::assign(*result,std::move(value));return result;}
+const Value& value_of(const V& v) {
+    if(!v) throw std::runtime_error("Null host value");
+    return value_access::read(*v);
+}
+bool truth(const V& v) {return value_ops::truth(value_of(v));}
+}
+// Defined in values.cpp and builder.cpp.
 V convert_return(V v,int type);
 parsed_module build_module(exec::module model);
 }

@@ -1,11 +1,101 @@
-#ifndef AZSCRIPT_TREE_NODES_H
-#define AZSCRIPT_TREE_NODES_H
+#ifndef AZSCRIPT_TREE_EXPRESSIONS_H
+#define AZSCRIPT_TREE_EXPRESSIONS_H
 
-// The tree executor's own expression nodes; the module builder creates them
-// from the validated exec model and nodes.cpp defines what they execute.
-#include "internal.h"
+// The tree executor's expression nodes. The module builder creates them from
+// the validated exec model; each node's execute body is in the module of
+// its concern (values, variables, control, calls, objects, generics).
+#include "../library.h"
 
-namespace azertian::tree {
+namespace azertian {
+class expression {
+public:
+    virtual ~expression()=default;
+    int return_type=VOID_VALUE;
+    // 1-based index into the owning function's debug locations; 0 inherits the
+    // position of the enclosing expression.
+    std::uint32_t location=0;
+    virtual std::shared_ptr<variable> execute(std::shared_ptr<environment> env)=0;
+};
+class complex_expression : public expression {
+public:
+    std::vector<std::shared_ptr<expression>> expressions;
+    complex_expression()=default;
+    std::shared_ptr<variable> execute(std::shared_ptr<environment> env) override;
+    std::shared_ptr<variable> execute_body(std::shared_ptr<environment> env);
+};
+class functionInvocationExpression : public expression {
+public:
+    std::vector<std::shared_ptr<expression>> params;
+    std::vector<std::shared_ptr<context_spec>> contexts;
+    int function_id=0;
+    functionInvocationExpression()=default;
+    std::shared_ptr<variable> execute(std::shared_ptr<environment> env) override;
+};
+class varDefineExpression : public expression {
+public:
+    int varindex=0;
+    std::shared_ptr<azertian::expression> initializer;
+    varDefineExpression()=default;
+    std::shared_ptr<variable> execute(std::shared_ptr<environment> env) override;
+};
+class varSetExpression : public expression {
+public:
+    int varindex=0;
+    std::shared_ptr<azertian::expression> expression;
+    varSetExpression()=default;
+    std::shared_ptr<variable> execute(std::shared_ptr<environment> env) override;
+};
+class returnExpression : public expression {
+public:
+    std::shared_ptr<expression> returnType;
+    bool object_return=false;
+    returnExpression()=default;
+    std::shared_ptr<variable> execute(std::shared_ptr<environment> env) override;
+};
+class varExpression : public expression {
+public:
+    int varindex=0;
+    varExpression()=default;
+    std::shared_ptr<variable> execute(std::shared_ptr<environment> env) override;
+};
+class constantExpression : public expression {
+public:
+    std::shared_ptr<variable> value;
+    explicit constantExpression(const Value& value);
+    std::shared_ptr<variable> execute(std::shared_ptr<environment> env) override;
+};
+#define AZ_BINARY_EXPRESSION(Name) \
+class Name : public expression { public: \
+    std::shared_ptr<expression> exp1,exp2; \
+    Name()=default; \
+    std::shared_ptr<variable> execute(std::shared_ptr<environment> env) override; };
+AZ_BINARY_EXPRESSION(addExpression)
+AZ_BINARY_EXPRESSION(minusExpression)
+AZ_BINARY_EXPRESSION(multiplyExpression)
+AZ_BINARY_EXPRESSION(divideExpression)
+AZ_BINARY_EXPRESSION(equalExpression)
+AZ_BINARY_EXPRESSION(gtExpression)
+AZ_BINARY_EXPRESSION(ltExpression)
+AZ_BINARY_EXPRESSION(movExpression)
+AZ_BINARY_EXPRESSION(whileExpression)
+#undef AZ_BINARY_EXPRESSION
+class ifExpression : public expression {
+public:
+    std::shared_ptr<expression> exp1,exp2,otherwise;
+    ifExpression()=default;
+    std::shared_ptr<variable> execute(std::shared_ptr<environment> env) override;
+};
+class breakExpression : public expression {
+public:
+    std::shared_ptr<variable> execute(std::shared_ptr<environment> env) override;
+};
+class continueExpression : public expression {
+public:
+    std::shared_ptr<variable> execute(std::shared_ptr<environment> env) override;
+};
+namespace tree {
+using V=std::shared_ptr<variable>;
+using E=std::shared_ptr<environment>;
 class select_expression final:public expression {
     std::shared_ptr<expression> condition,when_true,when_false;
 public:
@@ -155,5 +245,6 @@ public:
         :context(std::move(context)),left(std::move(left)),right(std::move(right)) {}
     V execute(E env) override;
 };
+}
 }
 #endif

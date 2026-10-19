@@ -1,4 +1,4 @@
-#include "nodes.h"
+#include "internal.h"
 #include <stdexcept>
 
 namespace azertian::tree {
