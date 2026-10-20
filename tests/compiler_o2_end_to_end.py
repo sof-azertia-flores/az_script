@@ -108,10 +108,15 @@ def semantic(observation):
 
 def jit_summary(mode, stats):
     sessions = [json.loads(line) for line in stats.read_text().splitlines()] if stats.exists() else []
+    # The runtime deliberately emits no statistics for probe: it varies VM
+    # dispatch boundaries but never compiles. Its observations are still
+    # compared exactly on every replay below.
+    if mode.startswith('probe'):
+        assert not sessions, (mode, 'probe unexpectedly emitted compilation statistics')
+        return {'entries': 0, 'compiled': 0, 'sessions': 0}
     assert sessions, (mode, 'missing JIT statistics')
     entries = sum(item['entries'] for item in sessions)
-    if not mode.startswith('probe'):
-        assert entries > 0, (mode, 'no compiled execution')
+    assert entries > 0, (mode, 'no compiled execution')
     assert not sum(item['violations'] for item in sessions), (mode, 'invalid type analysis')
     assert not any(reason.startswith('compiler error') for item in sessions for reason in item['refusals'])
     return {'entries': entries, 'compiled': sum(item['compiled'] for item in sessions),
