@@ -39,23 +39,46 @@ final class ExecScalarAnalysis {
     static boolean scalar(int type) { return type == INT_VALUE || type == BOOLEAN_VALUE; }
     static int count(AcsElement value) {
         int size = 1;
-        for (var child : ExecShape.children(value)) size += count(child.value());
+        for (var child : ExecShape.children(value))
+            if (child.role() != ExecShape.Role.CONTEXT && child.role() != ExecShape.Role.METHOD_ENTRY)
+                size += count(child.value());
         return size;
     }
 
     /** A least fixed point: recursion and unresolved callees never become safe. */
     static Set<Integer> safeFunctions(AcsArray functions) {
+        Set<Integer> ids = new HashSet<>();
+        for (var item : functions.acsa) ids.add(((AcsObject)item).getAsInt("id"));
+        Map<Integer,Set<Integer>> pending = new LinkedHashMap<>();
+        Map<Integer,List<Integer>> callers = new HashMap<>();
+        var work = new ArrayDeque<Integer>();
+        for (var item : functions.acsa) {
+            var function = (AcsObject)item;
+            if (!eligible(function,ids)) continue;
+            int id = function.getAsInt("id");
+            Set<Integer> dependencies = new HashSet<>();
+            calls(function.mmp.get("script"),dependencies);
+            pending.put(id,dependencies);
+            if (dependencies.isEmpty()) work.add(id);
+            for (int callee : dependencies) callers.computeIfAbsent(callee,ignored -> new ArrayList<>()).add(id);
+        }
         Set<Integer> safe = new HashSet<>();
-        boolean changed;
-        do {
-            changed = false;
-            for (var item : functions.acsa) {
-                var function = (AcsObject)item;
-                int id = function.getAsInt("id");
-                if (!safe.contains(id) && eligible(function, safe)) changed |= safe.add(id);
+        while (!work.isEmpty()) {
+            int id = work.remove();
+            if (!safe.add(id)) continue;
+            for (int caller : callers.getOrDefault(id,List.of())) {
+                Set<Integer> dependencies = pending.get(caller);
+                dependencies.remove(id);
+                if (dependencies.isEmpty()) work.add(caller);
             }
-        } while (changed);
+        }
         return Set.copyOf(safe);
+    }
+    private static void calls(AcsElement value, Set<Integer> result) {
+        if (opcode(value) == CALL) result.add(number(value,"id"));
+        for (var child : ExecShape.children(value))
+            if (child.role() != ExecShape.Role.CONTEXT && child.role() != ExecShape.Role.METHOD_ENTRY)
+                calls(child.value(),result);
     }
     static boolean eligible(AcsObject function, Set<Integer> safe) {
         if (function.getAsInt("hidden-count") != 0 || function.getAsInt("entry-kind") != 0) return false;

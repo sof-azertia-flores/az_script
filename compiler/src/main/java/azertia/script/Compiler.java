@@ -3316,6 +3316,7 @@ public class Compiler {
             if (passes.contains(OptimizationPass.LOOP_MOTION)) ExecLoopMotion.optimize(compiled, state.positions);
             if (!passes.isEmpty()) ExecShape.requireFits(compiled.mmp.get("script"), 4, state.abdLimit);
         }
+        ExecO2.optimize(output, passes, state.positions, state.abdLimit);
         AcsArray debugFiles = new AcsArray();
         for (String file : state.debugFiles) debugFiles.acsa.add(new AcsStringElement(file));
         result.put("debug-files", debugFiles);
