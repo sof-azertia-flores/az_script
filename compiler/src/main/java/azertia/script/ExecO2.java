@@ -24,10 +24,16 @@ final class ExecO2 {
                          Map<AcsElement,int[]> positions, int abdLimit) {
         if (!enabled(passes)) return;
         var optimizer = new ExecO2(passes, positions);
+        Map<Integer,Integer> originalNodes = new HashMap<>(), originalSlots = new HashMap<>();
         for (var item : functions.acsa) {
             var function = (AcsObject)item;
-            optimizer.returns.put(function.getAsInt("id"),function.getAsInt("return-type"));
+            int id = function.getAsInt("id");
+            optimizer.returns.put(id,function.getAsInt("return-type"));
+            originalNodes.put(id,count(function.mmp.get("script")));
+            originalSlots.put(id,function.getAsInt("param-count")+function.getAsInt("local-count"));
         }
+        if (passes.contains(SCALAR_INLINING))
+            ExecScalarInliner.optimize(functions,positions,originalNodes,originalSlots,abdLimit);
         Set<Integer> safe = safeFunctions(functions);
         for (var item : functions.acsa) {
             var function = (AcsObject)item;

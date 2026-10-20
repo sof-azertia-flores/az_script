@@ -23,6 +23,12 @@ CASES = O1_CASES + (
     ('o2-loop-join', 'int f(int n){int i=0;int a=7;while(i<n){if(i==3){a=9;}i+=1;}return a;}int main(){return f(0)+f(6);}', 16, '', None),
     ('o2-contradiction', 'int f(int n){if(n<5){if(n>10){return 1/0;}return n;}return 7;}int main(){return f(3)+f(8);}', 10, '', None),
     ('o2-snapshot', 'int f(int n){int a=n;n=9;int b=a+1;return b+n;}int main(){return f(2);}', 12, '', None),
+    ('o2-inline-repeat', 'int f(int x){int y=x*x;return y+x;}int main(){int x=7;return f(x+1);}', 72, '', None),
+    ('o2-inline-order', 'int f(int x,int y){int a=y-x;return a+x;}int main(){return f(3,9);}', 9, '', None),
+    ('o2-inline-arg-trap', 'int f(int x,int y){return x+y;}int main(){return f(1/0,2147483647+1);}', None, '', 'Division by zero'),
+    ('o2-inline-origin', 'int f(int x){\n return 1/x;\n}\nint main(){return f(0);}', None, '', 'Division by zero'),
+    ('o2-inline-overflow', 'int f(int x){\n int y=x+1;\n return y;\n}\nint main(){return f(2147483647);}', None, '', 'Integer overflow'),
+    ('o2-inline-loop', 'int f(int x){return (x&7)+(x&3);}int run(int n){int s=0;for(int i=0;i<n;i++){s+=f(i);}return s;}int main(){return run(8);}', 40, '', None),
 )
 
 
