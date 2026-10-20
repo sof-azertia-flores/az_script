@@ -84,10 +84,10 @@ def main():
     parser.add_argument('--suggest', type=Path, help='write observed refusals as registry entries for review')
     parser.add_argument('--jit', help='also run each invocation on the VM with AZSCRIPT_JIT set to each of these comma-separated modes')
     args = parser.parse_args()
-    if not 0 < args.runner_timeout < float('inf'):
-        parser.error('--runner-timeout must be finite and positive')
     modes = args.jit.split(',') if args.jit else []
     native = args.native.resolve()
+    if not 0 < args.runner_timeout < float('inf'):
+        parser.error('--runner-timeout must be finite and positive')
     work = args.work.resolve()
     work.mkdir(parents=True, exist_ok=False)
     interpreter = work / 'interpreter'
