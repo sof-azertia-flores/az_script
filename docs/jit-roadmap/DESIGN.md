@@ -85,7 +85,7 @@ uint32_t entry(azjit_frame*);   // 返回 STEP | REDO | DEOPT | REJECT | YIELD
 - **装载。** 依次查找 `AZSCRIPT_JIT_MODULE`、运行库所在目录（`shared_library_directory()`）、可执行文件目录；`dlopen(RTLD_NOW|RTLD_LOCAL)`，不卸载；握手比较 ABI 版本与布局摘要。它属于同一构建，不是用户插件，不需要签名，只从上述位置装载。
 - **发行。** 构建了模块时由 `tools/export_distribution.py` 一并导出，清单记录 JIT 架构；第三方说明增加 LLVM（Apache-2.0 WITH LLVM-exception）。
 - **平台。** Linux/macOS 的 x86-64 与 AArch64；Windows 暂只用 VM。macOS arm64 经 JITLink 使用 `MAP_JIT`，宿主进程需要 `allow-jit` 授权；被拒绝时只用 VM。
-- **AArch64 模拟验证。** `cmake/toolchains/aarch64-linux-gnu.cmake` 交叉构建 LLVM、运行库、测试宿主和模块；`build_and_test.py --target aarch64-linux-gnu --emulator qemu-aarch64` 经 `qemu-aarch64 -L <sysroot>` 包装运行 ctest 和原生宿主套件，Java 编译器仍在主机 JVM 上运行。arm64 上的 JNI 需要真实的 arm64 JVM，记为模拟未覆盖。
+- **AArch64 模拟验证。** `cmake/toolchains/aarch64-linux-gnu.cmake` 交叉构建（`-DAZSCRIPT_BUILD_JNI=OFF`）；`tools/build_llvm.py --triple aarch64-linux-gnu --toolchain … --tablegen <主机前缀>/bin/llvm-tblgen` 交叉构建 LLVM；ctest 经 `CMAKE_CROSSCOMPILING_EMULATOR`（`qemu-aarch64 -L /usr/aarch64-linux-gnu`）运行；`tools/emulated_test.py` 用包装后的观察宿主在模拟器中收集树参考、比较 VM 并按各 JIT 模式重放。Java 编译器仍在主机 JVM 上运行；arm64 上的 JNI 需要真实的 arm64 JVM，记为模拟未覆盖；所有权阶段（约 5.2 万个进程）在模拟器下过慢，未纳入。
 
 ## 11. 风险
 

@@ -11,7 +11,7 @@
 | J4 | 第一轮已提交，进行中 | 见下文“J4 第一轮”；callgrind 下 integer_loop 为 VM 的 17.2 倍 |
 | J5 | 已提交，完整验证待运行 | 见下文“J5：LLVM ORC 后端”；全部 463 个端到端案例在 eager+llvm 与 stress+llvm 下一致 |
 | J6 | 已提交 | 见下文“J6：升层策略”；阈值 1–4 的全语料重放一致 |
-| J7 | 进行中 | qemu-user 与 aarch64 交叉工具链已安装，AArch64 LLVM 已交叉构建 |
+| J7 | 已提交 | 见下文“J7：AArch64（qemu 模拟）”；ctest 18/18 与 scalar/calls/objects 语料在模拟器下一致 |
 | J8 | 尚未开始 | |
 
 ## J0：设计（2026-10-19）
@@ -114,3 +114,26 @@ callgrind（Release，n=512，每调用指令数，同一构建中 VM 与 eager+
 | on:2+interp | 12,004 | 81,371 | 75,255 | 6,116 |
 | on:3+llvm | 8,713 | 68,639 | 63,315 | 5,324 |
 | on:4+llvm | 7,193 | 60,663 | 55,994 | 4,669 |
+
+## J7：AArch64（qemu 模拟）（2026-10-20）
+
+| 提交 | 内容 |
+| --- | --- |
+| `test: build and test the JIT for AArch64 under qemu` | `cmake/toolchains/aarch64-linux-gnu.cmake`（GNU 交叉工具链，`CMAKE_CROSSCOMPILING_EMULATOR` 为 `qemu-aarch64 -L /usr/aarch64-linux-gnu`）；`tools/emulated_test.py` 以模拟器包装交叉构建的观察宿主，收集树参考、比较 VM，并以每个 JIT 模式重放；每个模式在所有阶段合计必须有原生代码运行 |
+
+环境：本容器经 apt 安装 `qemu-user` 与 `g++-aarch64-linux-gnu`（含 `/usr/aarch64-linux-gnu` sysroot）；未注册 binfmt，因此需显式包装。固定版本 LLVM 以主机的 `llvm-tblgen` 交叉构建到 `build/deps/llvm-18.1.8-aarch64-linux-gnu/`（220 MB）。
+
+验证（模拟，Debug 构建，JNI 关闭）：
+
+- ctest 18/18 在 qemu 下通过；其中标量差分的 LLVM 执行器在 AArch64 上编译 384 次（6 个执行器 × 64 个函数），完整预算扫描与树一致，0 次标签越界；`jit-operation-tests` 63,284 项通过。
+- `tools/emulated_test.py`（scalar/calls/objects，树参考在模拟器上收集）：
+
+| 阶段 | 进程 | eager | stress | eager+llvm | stress+llvm | on:2+llvm |
+| --- | --- | --- | --- | --- | --- | --- |
+| scalar | 399 | 1,233 | 67,438 | 1,233 | 67,438 | 158 |
+| calls | 426 | 1,587 | 24,435 | 1,587 | 24,435 | 442 |
+| objects | 1,606 | 39 | 183 | 39 | 183 | 0 |
+
+（表中为原生进入次数；VM 与全部模式结果与树参考逐字段一致，0 次标签越界、0 次编译失败。objects 阶段在 on:2 下没有函数变热，覆盖检查因此改为按模式跨阶段合计。）
+
+未覆盖：所有权阶段与 19 个端到端套件未在模拟器下运行；arm64 JNI；真实 arm64 硬件与 macOS arm64（MAP_JIT）。
