@@ -16,7 +16,11 @@ def main():
     p.add_argument('--runner',type=Path,required=True)
     p.add_argument('--bridge',type=Path,required=True)
     p.add_argument('--library',type=Path)
+    p.add_argument('--runner-timeout',type=float,default=10,
+                   help='wall-clock limit per runner call, including any backend wrapper')
     a=p.parse_args()
+    if not 0 < a.runner_timeout < float('inf'):
+        p.error('--runner-timeout must be finite and positive')
     checks=0
     with tempfile.TemporaryDirectory(prefix='e2e-',dir=ROOT/'build') as temp:
         work=Path(temp)
@@ -29,7 +33,7 @@ def main():
             src=work/'case.azs';src.write_text(source,encoding='utf-8')
             binary=work/'case.abd'
             compiler('compile',src,'-o',binary)
-            result=subprocess.run([str(a.runner),str(binary),*options],capture_output=True,text=True,timeout=10)
+            result=subprocess.run([str(a.runner),str(binary),*options],capture_output=True,text=True,timeout=a.runner_timeout)
             if error:
                 assert result.returncode!=0 and error in result.stderr,(source,result.stdout,result.stderr)
             else:
@@ -139,7 +143,7 @@ def main():
         searching=work/'app/searching.azs'
         searching.write_text('#include "first.azs"\n#include "second.azs"\nint main(){return first()+second();}\n',encoding='utf-8')
         compiler('compile',searching,'-I',work/'first','--include-dir',work/'second','-o',work/'searching.abd')
-        result=subprocess.run([str(a.runner),str(work/'searching.abd')],capture_output=True,text=True,timeout=10)
+        result=subprocess.run([str(a.runner),str(work/'searching.abd')],capture_output=True,text=True,timeout=a.runner_timeout)
         assert result.returncode==0 and result.stdout=='3\n',(result.stdout,result.stderr)
         missing=compiler('compile',searching,'-I',work/'first','-o',work/'searching.abd',success=False)
         assert missing.stderr.startswith('searching.azs:2:1: error: Include not found: "second.azs" (searched '+str(work.resolve()/'app/second.azs')+', '
@@ -194,7 +198,7 @@ def main():
         compiler('compile',original,'-o',binary,'--ast',ast,'--exec-json',instructions)
         compiler('compile-json',ast,'-o',work/'from-json.abd')
         assert binary.read_bytes()==(work/'from-json.abd').read_bytes(),'AST recompile differs'
-        result=subprocess.run([str(a.runner),str(binary)],capture_output=True,text=True,timeout=10)
+        result=subprocess.run([str(a.runner),str(binary)],capture_output=True,text=True,timeout=a.runner_timeout)
         expected=['quoted: "a,(b);{c}" and a backslash: \\','15','10','17','120','26','false','true','146','done']
         assert result.returncode==0 and result.stdout.splitlines()==expected,(result.stdout,result.stderr)
         checks+=2
@@ -202,7 +206,7 @@ def main():
         original=work/'heap.azs'
         original.write_text((ROOT/'abdJavaInvoker/tse.azs').read_text(encoding='utf-8'),encoding='utf-8')
         compiler('compile',original,'-o',work/'heap.abd')
-        result=subprocess.run([str(a.runner),str(work/'heap.abd')],capture_output=True,text=True,timeout=10)
+        result=subprocess.run([str(a.runner),str(work/'heap.abd')],capture_output=True,text=True,timeout=a.runner_timeout)
         assert result.returncode==0 and '24:33554432' in result.stdout and result.stdout.rstrip().endswith('predestroy2'),(result.stdout,result.stderr)
         checks+=1
         if a.library:
