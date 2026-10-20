@@ -61,13 +61,13 @@ def observed(host, engine, binary, inserted, options, extra, budget, destination
     return value
 
 
-def compile_source(compiler, source, name, folder, env):
+def compile_source(compiler, source, name, folder, env, optimization="-O0"):
     path = folder / (name + '.azs')
     path.write_text(source, encoding='utf-8')
     binary, ast, inspection, rebuilt = (folder / (name + suffix) for suffix in
                                       ('.abd', '.ast.json', '.exec.json', '.rebuilt.abd'))
-    commands = [compiler + ['compile', str(path), '-g', '-o', str(binary), '--ast', str(ast), '--exec-json', str(inspection)],
-                compiler + ['compile-json', str(ast), '-g', '-o', str(rebuilt)]]
+    commands = [compiler + ['compile', str(path), '-g', optimization, '-o', str(binary), '--ast', str(ast), '--exec-json', str(inspection)],
+                compiler + ['compile-json', str(ast), '-g', optimization, '-o', str(rebuilt)]]
     for index, command in enumerate(commands):
         result = subprocess.run(command, cwd=ROOT, capture_output=True, text=True,
                                 encoding='utf-8', env=env, timeout=90)

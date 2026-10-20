@@ -79,7 +79,8 @@ public:
     std::set<int> fixed_host_namespaces;
     std::vector<std::shared_ptr<function>> on_destory;
     std::uint64_t max_steps=1000000;
-    std::size_t max_call_depth=256;
+    // Zero disables the optional logical depth cap; stack and step guards remain active.
+    std::size_t max_call_depth=0;
     // Native stack bytes execution may use below the outermost script call on
     // the calling thread. 0 relies on the thread's detected stack bounds; those
     // bounds, less a reserve, always apply as well.

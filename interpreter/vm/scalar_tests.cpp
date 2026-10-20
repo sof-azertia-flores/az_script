@@ -463,6 +463,25 @@ void internal_program_guards() {
     }
     check(rejected,"internal store silently wrote a value register instead of a slot");
 }
+void budget_batch_equivalence() {
+    for(bool failure:{false,true}) {
+        Node expression=literal(1);
+        for(int i=0;i<90;++i) expression=op(12,{expression,literal(i)});
+        if(failure)expression=op(15,{expression,literal(0)});
+        auto program=lower_program(SourceProgram{{function(returned(expression),INT_VALUE,0,{},0)},{}});
+        WorkspaceBudget budget(4*1024*1024);SlotPool pool(budget);ScalarExecutor executor(program,pool,budget);
+        for(std::uint64_t supplied=0;supplied<190;++supplied) {
+            std::string errors[2];std::uint64_t remaining[2];int values[2]{};ExecutionPosition positions[2];
+            for(int mode=0;mode<2;++mode) {
+                remaining[mode]=supplied;ExecutionOptions options;options.batch_budget=mode!=0;
+                try{values[mode]=executor.invoke(0,{}, {},remaining[mode],&positions[mode],options).get<int>();}
+                catch(const std::runtime_error& error){errors[mode]=error.what();}
+            }
+            check(errors[0]==errors[1]&&remaining[0]==remaining[1]&&values[0]==values[1],"budget batch changed result or charges");
+            check(positions[0].node==positions[1].node&&positions[0].location==positions[1].location,"budget batch changed failure position");
+        }
+    }
+}
 void allocation_scaling() {
     const auto source=function(counting_loop(100000),INT_VALUE,2,{},0);
     const auto program=lower_program(SourceProgram{{source},{}});
@@ -478,6 +497,6 @@ void allocation_scaling() {
 }
 }
 int main() {
-    try{scalar_cases();call_cases();cleanup_cases();refusal_and_resources();entry_indices();internal_program_guards();allocation_scaling();std::cout<<"Scalar VM checks passed: "<<checks<<'\n';}
+    try{scalar_cases();call_cases();cleanup_cases();refusal_and_resources();entry_indices();internal_program_guards();budget_batch_equivalence();allocation_scaling();std::cout<<"Scalar VM checks passed: "<<checks<<'\n';}
     catch(const std::exception& error){count_allocations=false;std::cerr<<error.what()<<'\n';return 1;}
 }

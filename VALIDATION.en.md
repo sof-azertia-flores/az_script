@@ -1,3 +1,39 @@
+# Compiler optimization merge validation (2026-10-19)
+
+Merged compiler optimization `c697ffd` with main `3e4f978`. Resolved the standalone runner's argument parsing conflict while retaining tree/VM selection, `--max-steps N|unlimited` and its equals form, logical depth limits and native stack limits. Updated the step-option diagnostic assertion and checked budget termination, explicit depth limits and combined options on both backends.
+
+A fresh distribution export passed all 32 relocation/consumer checks, including backend selection, step limits, C++ and real JNI. `tests/end_to_end.py` passed 95 compiler/native integration checks, including real JNI. Logs: `build/compiler-optimization-merge-distribution.log` and `build/compiler-optimization-merge-e2e.log`. The first integration run lost its temporary JNI library during export cleanup at the final JNI load; rerunning against the published export passed. This merge only integrates the CLI and tests; the previously passing full normal and sanitizer suites were not repeated.
+
+# Compiler optimization C01–C07 final validation (2026-10-19)
+
+Completed the bounded implementation on `codex/compiler-optimization`, based on main `90dc825` including reflection fix `187f498`: typed IR, scalar constant/copy propagation, dead compiler temporaries, small-function inlining, fixed scalar generic identity specialization and loop motion. O1 is opt-in; O0 remains the default. VM budget batches validate up to 64 charge points while preserving exact charges. The default logical depth limit is 0; positive opt-in limits and native stack protection remain. Exec and snapshots stay at v10. See the [implementation record](docs/compiler-optimization/STATUS.md) for scope and evidence.
+
+On Linux x86_64, the full normal build, full ASan/UBSan build and distribution export ran sequentially and exited 0. Both builds passed 350 Java tests; normal passed 16/16 CTest including real JNI, sanitizer passed 15/15 with no ASan/UBSan reports. Both passed 28 focused O0/O1 cases on tree/VM, 8 termination checks, 463 corpus cases / 1,852 observations, 463 multi-budget cases / 55,460 independent process pairs, and 1,369 aligned end-to-end invocations. Across optimization levels, only budget balances and budget-exhaustion locations may differ; engines executing the same artifact remain strictly compared. Source/AST/ABD and Java/C++ round trips passed.
+
+The distribution passed 30 relocation/consumer checks, including static/shared C++, bundled Java and real JNI. All 189 manifest file sizes and SHA-256 digests matched. Logs: `build/compiler-optimization-final-normal.log`, `build/compiler-optimization-final-sanitize.log`, `build/compiler-optimization-distribution.log`. Export: `build/compiler-optimization-distribution`.
+
+Independent Release measurements then covered 14 workloads, 7 rounds × 5 batches and 588 timed processes. Within the new VM runtime, O0/O1 paired speedups were 1.420× for zero-argument calls, 1.306× for the constant loop, 1.094× for loop motion, 3.638× for scalar generic identity and 1.087× for object constant initialization. The other 9 standard workloads have identical O0/O1 ABD and show no compiler benefit. New/old runtime O0 comparisons also recorded regressions: VM standard object/virtual-call wall time rose about 2.1%–3.8%, and unspecialized generic identity about 7.3%. Median compilation of 1,000 functions rose from 0.641 to 0.745 seconds including JVM startup and I/O; ABD fell from 298,218 to 166,218 bytes. Full tables, size increases, raw reports and reproduction commands are in the implementation record. This single-size diagnostic is not an overall adoption score.
+
+Final edits only changed documentation and one test comment/output label; production code and test behavior stayed unchanged, so full validation was not repeated.
+
+# Compiler optimization C01 (2026-10-19)
+
+Started `codex/compiler-optimization` from main `90dc825`, including reflection scope fix `187f498`. Added explicit O0/O1: O1 folds non-failing integer/boolean constants after semantic validation; O0 remains the default. Native budget and call-depth implementations are unchanged. See the [optimization record](docs/compiler-optimization/STATUS.md) for the plan, evidence and limitations.
+
+On Linux x86_64, `python3 tools/build_and_test.py --offline` exited 0 with all three Java option environment variables cleared: 338 Java tests, 16/16 CTest (including real JNI), all cross-language suites and ABD round trips passed. The new gate compares full O0/O1 observations for 13 cases on tree/VM and checks 8 budget-termination runs. Full tree/VM differential validation passed 463 cases and 55,460 independent process pairs; the final 19 suites passed 1,365 aligned invocations with no refusals or mismatches. Log: `build/compiler-optimization-normal.log`.
+
+Release diagnostics ran separately after validation. The constant-heavy loop showed paired O0/O1 speedups of 1.427× on tree and 1.355× on VM. All 10 existing standard workloads produced byte-identical O0/O1 artifacts, so this gain does not generalize to them. Whole-process compilation of 1,000 functions took median 0.632/0.614 seconds, not evidence of faster compilation. No native memory or cleanup implementation changed; sanitizer and full distribution export were not rerun.
+
+# macOS AppleClang build fix (2026-10-19)
+
+Reproduced undeclared `strtof_l` / `strtod_l` errors in `interpreter/core/value_ops.cpp`, blocking both static and shared runtime builds on macOS arm64 with AppleClang 21.0.0, CMake 4.4.3, Temurin JDK 21.0.5 and Python 3.14.7. Darwin provides these declarations in `<xlocale.h>`, which is now included only on Apple platforms. Numeric conversion, exec and JNI snapshot contracts are unchanged.
+
+`cmake --build build/native --parallel 8` passed; log: `build/macos-clang-build.log`. Targeted `runtime-tests` and `operations-tests` passed. The added shared value-operation regression checks C-locale float/double parsing, rejection of comma decimal separators and preservation of the host locale. This machine provides `de_DE.UTF-8`, so the non-C locale path was exercised.
+
+The complete `python3 tools/build_and_test.py --offline` run exited 0; log: `build/macos-clang-validation.log`. All 330 Java tests, 16/16 CTest tests (including 3,433 real-JVM JNI assertions), cross-language suites and byte-for-byte Java/C++ ABD comparisons passed, including source→AST→`compile-json`→ABD identity checks. All 462 tree/VM cases and 55,344 independent process pairs matched. The final 19 end-to-end suites also matched on 1,365/1,365 dual-engine invocations, with no refusals. Reports: `build/runtime-perf/vm-execution/report.json` and `build/runtime-perf/alignment/report.json`.
+
+No memory, destruction or cleanup implementation changed; sanitizers were not run. Linux/Windows and distribution export were not tested for this fix.
+
 # Merge of main (native stack guard) into the compiler roadmap (2026-10-16)
 
 [中文](VALIDATION.md) | English

@@ -21,6 +21,7 @@ final class FunctionTables {
     final IdentityHashMap<AcsElement,JsonElement> origins = new IdentityHashMap<>();
     final IdentityHashMap<AcsElement,Boolean> results = new IdentityHashMap<>();
     final IdentityHashMap<AcsElement,int[]> positions;
+    final Set<Integer> temporarySlots = new HashSet<>();
     int nextSlot;
 
     FunctionTables(Map<Integer,Integer> returns, IdentityHashMap<AcsElement,int[]> positions) {
@@ -36,7 +37,7 @@ final class FunctionTables {
     }
     int allocate(boolean owning) {
         if (nextSlot >= ExecCodec.MAX_SLOTS) throw new IllegalArgumentException("Function frame exceeds " + ExecCodec.MAX_SLOTS + " variable slots");
-        int slot=nextSlot++; slots.put(slot,owning?8:0); return slot;
+        int slot=nextSlot++; temporarySlots.add(slot); slots.put(slot,owning?8:0); return slot;
     }
     static int opcode(AcsElement value) {
         return value instanceof AcsObject object && object.mmp.get("t") instanceof AcsIntegerElement kind && kind.s==0

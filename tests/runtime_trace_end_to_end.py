@@ -145,7 +145,7 @@ def main():
                 ('recursion', 'int recurse(){return recurse();}\nint main(){return recurse();}\n',
                  'Script call depth limit exceeded')]:
             binary, _ = compile_case(name, text)
-            result = run([args.runner, binary])
+            result = run([args.runner, binary, *(["--max-call-depth", "128"] if name == "recursion" else [])])
             assert result.returncode == 1 and result.stdout == '', (result.stdout, result.stderr)
             lines = result.stderr.splitlines()
             assert lines[0] == 'AzScript error: ' + message, result.stderr

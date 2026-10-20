@@ -67,6 +67,8 @@ struct ExecutionOptions {
     ownership::Site caller;
     // A public entry's hidden contexts, already checked by its caller.
     const type_contexts* contexts=nullptr;
+    // Diagnostic fallback for checking the batched and per-tick paths.
+    bool batch_budget=true;
 };
 
 std::span<const Opcode> scalar_capabilities() noexcept;

@@ -37,7 +37,7 @@ public class Main {
      * {@code --unrestricted-includes} allows absolute includes and includes outside the include roots;
      * {@code -g} adds exec debug records.
      */
-    private static final Set<String> FLAG_OPTIONS = Set.of("--debug-compiler", "--unrestricted-includes", "-g");
+    private static final Set<String> FLAG_OPTIONS = Set.of("--debug-compiler", "--unrestricted-includes", "-g", "-O0", "-O1", "--no-fold", "--no-propagation", "--no-inline", "--no-loop-motion");
     /** The system property naming the standard library directory, searched after every {@code -I} directory. */
     public static final String STDLIB_PROPERTY = "azscript.stdlib";
     /** Warning options other than {@code -W<name>} and {@code -Wno-<name>}. */
@@ -58,6 +58,20 @@ public class Main {
         public boolean unrestrictedIncludes() { return flags.contains("--unrestricted-includes"); }
         /** Whether {@code -g} was given: the exec then carries function and file names and source positions. */
         public boolean debugInfo() { return flags.contains("-g"); }
+        /** The last -O option wins; O0 is the default. */
+        public Compiler.Optimization optimization() {
+            return flags.contains("-O1") ? Compiler.Optimization.STANDARD : Compiler.Optimization.NONE;
+        }
+        /** Explicit pass switches are useful for diagnostics and independent comparisons. */
+        public Set<Compiler.OptimizationPass> optimizationPasses() {
+            var passes = java.util.EnumSet.noneOf(Compiler.OptimizationPass.class);
+            passes.addAll(Compiler.optimizationPasses(optimization()));
+            if (flags.contains("--no-fold")) passes.remove(Compiler.OptimizationPass.CONSTANTS);
+            if (flags.contains("--no-propagation")) passes.remove(Compiler.OptimizationPass.PROPAGATION);
+            if (flags.contains("--no-inline")) passes.remove(Compiler.OptimizationPass.INLINING);
+            if (flags.contains("--no-loop-motion")) passes.remove(Compiler.OptimizationPass.LOOP_MOTION);
+            return Set.copyOf(passes);
+        }
         /** The ABD output: {@code -o}, or the source name with {@code .exec.abd} beside it. */
         public Path outputOrDefault() {
             if (output != null) return output;
@@ -109,6 +123,9 @@ public class Main {
                 else if (value.isEmpty()) throw new IllegalArgumentException("Empty directory for " + argument + "; use . for the working directory");
                 else includeDirectories.add(path(value));
             } else if (FLAG_OPTIONS.contains(argument)) {
+                if (argument.equals("-O0") || argument.equals("-O1")) {
+                    flags.remove("-O0"); flags.remove("-O1");
+                }
                 flags.add(argument);
             } else if (argument.equals("-w") || argument.startsWith("-W")) {
                 String name = argument.startsWith("-Wno-") ? argument.substring(5) : argument.substring(2);
@@ -169,7 +186,7 @@ public class Main {
                 StringBuilder warnings = new StringBuilder();
                 for (Diagnostics.Warning warning : Diagnostics.WARNINGS)
                     warnings.append(String.format("\n  %-20s %s (%s)", warning.name(), warning.description(), warning.enabledByDefault() ? "on" : "off"));
-                out.println("AzScript compiler\n  compile <source.azs> [-o output.abd] [--ast tree.json] [--exec-json instructions.json] [-g] [-I dir]... [--unrestricted-includes]\n  compile-json <tree.json> [-o output.abd] [--exec-json instructions.json] [-g]\n  pack <output.abd> <file-or-directory>...\n  unpack <archive.abd> <new-or-empty-directory>\nCompile options:\n  -g                 add debug records: function and file names and source positions\n  --max-errors N     stop after N errors (default " + Diagnostics.DEFAULT_MAX_ERRORS + ", 0 for no limit)\n  --debug-compiler   print the stack trace of an internal compiler error\n  -I dir, --include-dir dir\n                     search dir for includes; repeatable\n  --unrestricted-includes\n                     allow absolute includes and includes outside the include roots\n  -Wall              enable every warning\n  -W<name>           enable one warning; -Wno-<name> disables it, also after -Wall\n  -w                 suppress all warnings\n  -Werror            report warnings as errors\ncompile-json validates operator chains, if-chains, class method modifiers and switch sections in the readable AST.\nWarnings (default state):" + warnings + "\nIncludes are searched in the including file's directory, then in each -I directory in order, then in the\nstandard library directory of the ./azscript wrapper or the distribution. They must stay inside the main\nfile's directory or one of those directories.\nOptions may precede or follow the input path; -- ends the options. Diagnostics are written to stderr as\nfile:line:column: error: message, or warning: message [-W<name>]. The exit status is 1 when compilation fails\nand 2 for an internal compiler error; warnings alone do not fail it.");
+                out.println("AzScript compiler\n  compile <source.azs> [-o output.abd] [--ast tree.json] [--exec-json instructions.json] [-g] [-I dir]... [--unrestricted-includes]\n  compile-json <tree.json> [-o output.abd] [--exec-json instructions.json] [-g]\n  pack <output.abd> <file-or-directory>...\n  unpack <archive.abd> <new-or-empty-directory>\nCompile options:\n  -O0, -O1          disable optimizations (default), or enable scalar optimization passes; last wins\n  --no-fold, --no-propagation, --no-inline, --no-loop-motion\n                     disable an O1 pass independently\n  -g                 add debug records: function and file names and source positions\n  --max-errors N     stop after N errors (default " + Diagnostics.DEFAULT_MAX_ERRORS + ", 0 for no limit)\n  --debug-compiler   print the stack trace of an internal compiler error\n  -I dir, --include-dir dir\n                     search dir for includes; repeatable\n  --unrestricted-includes\n                     allow absolute includes and includes outside the include roots\n  -Wall              enable every warning\n  -W<name>           enable one warning; -Wno-<name> disables it, also after -Wall\n  -w                 suppress all warnings\n  -Werror            report warnings as errors\ncompile-json validates operator chains, if-chains, class method modifiers and switch sections in the readable AST.\nWarnings (default state):" + warnings + "\nIncludes are searched in the including file's directory, then in each -I directory in order, then in the\nstandard library directory of the ./azscript wrapper or the distribution. They must stay inside the main\nfile's directory or one of those directories.\nOptions may precede or follow the input path; -- ends the options. Diagnostics are written to stderr as\nfile:line:column: error: message, or warning: message [-W<name>]. The exit status is 1 when compilation fails\nand 2 for an internal compiler error; warnings alone do not fail it.");
                 return 0;
             }
             switch (args[0]) {
@@ -195,7 +212,7 @@ public class Main {
                         script.execute(source, diagnostics);
                         ast = script.toObj(); included = script.includedFiles();
                     }
-                    AcsObject compiled = Compiler.compile(ast, diagnostics, arguments.debugInfo());
+                    AcsObject compiled = Compiler.compile(ast, diagnostics, arguments.debugInfo(), arguments.optimizationPasses());
                     // A successful compilation may still report warnings.
                     for (Diagnostic warning : diagnostics.warnings()) err.println(warning.format());
                     var outputs = new java.util.HashSet<Path>();

@@ -36,7 +36,7 @@ uint32_t entry(azjit_frame*);   // 返回 STEP | REDO | DEOPT | REJECT | YIELD
 
 ## 5. VM 钩子：每条指令零开销
 
-- 复用调度循环已有的边界检查 `frame.pc>=frame.end`。由层管理的帧把一个“重新查询阈值”存入 `end`；冷路径 `tier_dispatch`（`noinline`、`cold`）或者确认真正的函数结尾（抛出相同的 `logic_error`），或者进入原生代码。
+- 复用调度循环已有的边界检查 `frame.pc>=frame.end`。由层管理的帧把一个“重新查询阈值”存入 `end`；冷路径 `tier_dispatch`（`noinline`、`cold`）或者确认真正的函数结尾（抛出相同的 `logic_error`），或者进入原生代码。VM 的批量预算路径（标量帧中由 `tick` 开始、只含无副作用标量指令的直线段）在段内不检查边界，可能越过阈值；因此层在任意 pc 都可被查询：该 pc 若不是恢复点，只返回下一个阈值。
 - 函数入口按每个函数一个不计入 workspace 的层槽选择 `end`，并递减入口计数；`loop_next` 回边递减回边计数，用于升层和 OSR（在循环头恢复点进入）。返回到有原生代码的调用者时经同一阈值机制。
 - 恢复点：函数开头、每个可能 `STEP` 之后的 `pc+1`、循环头、清理区域的 `finalizer/after`；压力模式下每个 pc 都是恢复点。
 - 计数器、代码、分析结果和溢出缓冲区都不计入 `WorkspaceBudget`，也不改变任何 `WorkspaceVector` 的增长方式。`tier_dispatch` 检查原生栈余量，不足时解释执行（结果相同）。
