@@ -8,7 +8,7 @@
 | J1 | 已提交，完整验证待运行 | 见下文“J1：VM 钩子与探针层” |
 | J2 | 已提交 | 见下文“J2–J3：分析与可移植原生层” |
 | J3 | 已提交，完整验证待运行 | 全部 463 个端到端案例在 eager 与 stress 下与树执行器一致 |
-| J4 | 第一轮已提交，进行中 | 见下文“J4 第一轮”；callgrind 下 integer_loop 为 VM 的 17.2 倍 |
+| J4 | 两轮已提交，进行中 | 见下文“J4 第一轮”与“J4 第二轮”；callgrind 下 integer_loop 为 VM 的 17.2 倍 |
 | J5 | 已提交，完整验证待运行 | 见下文“J5：LLVM ORC 后端”；全部 463 个端到端案例在 eager+llvm 与 stress+llvm 下一致 |
 | J6 | 已提交 | 见下文“J6：升层策略”；阈值 1–4 的全语料重放一致 |
 | J7 | 已提交 | 见下文“J7：AArch64（qemu 模拟）”；ctest 18/18 与 scalar/calls/objects 语料在模拟器下一致 |
@@ -137,3 +137,22 @@ callgrind（Release，n=512，每调用指令数，同一构建中 VM 与 eager+
 （表中为原生进入次数；VM 与全部模式结果与树参考逐字段一致，0 次标签越界、0 次编译失败。objects 阶段在 on:2 下没有函数变热，覆盖检查因此改为按模式跨阶段合计。）
 
 未覆盖：所有权阶段与 19 个端到端套件未在模拟器下运行；arm64 JNI；真实 arm64 硬件与 macOS arm64（MAP_JIT）。
+
+## J4 第二轮：影子直接传递与原生规模上限（2026-10-20）
+
+| 提交 | 内容 |
+| --- | --- |
+| `perf(jit): move shadows between the frame and native code directly` | 进入与退出时寄存器和局部的值以影子形式直接由 VM 的 `Value` 构造或写回（`FrameAccess` 的 `register_shadow`/`set_register_shadow`/`local_shadow`/`set_local_shadow`），不再经中间 `Value` 复制 |
+| `fix(jit): keep functions too large for LLVM on the VM` | LLVM 编译时间随函数规模超线性增长（O2 下 1,500 个 MIR 操作约 0.4 s、3,000 个 1.6 s、6,000 个 8 s、12,000 个 46 s），`limits_end_to_end` 中 10,000 项的字符串链在 eager+llvm 下超时；超过 2,048 个操作的函数留给 VM，统计记录 `too large for native code`。可移植后端不受此限 |
+
+验证（定向）：`ctest` 18/18；以树参考重放 463 案例 / 55,460 进程，eager、stress、eager+llvm、stress+llvm 全部一致。包含这两项提交的完整验证（`build_and_test.py --offline --jit` 与 `--sanitize`）在提交本记录时仍在运行，结果另行记录。
+
+callgrind（Release，n=512，eager+llvm 每调用指令数，相对第一轮）：
+
+| 案例 | 第一轮 | 第二轮 | 变化 |
+| --- | --- | --- | --- |
+| integer_loop | 284,636 | 284,619 | 0.0% |
+| branch_loop | 384,541 | 384,473 | 0.0% |
+| call_0 | 2,349,080 | 2,256,306 | −3.9% |
+| call_1 | 2,828,761 | 2,703,396 | −4.4% |
+| call_16 | 9,019,511 | 8,440,796 | −6.4% |
