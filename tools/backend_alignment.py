@@ -72,9 +72,9 @@ def main():
     parser.add_argument('--only', help='comma-separated suite names (refusal counts are checked for these only)')
     parser.add_argument('--suggest', type=Path, help='write observed refusals as registry entries for review')
     args = parser.parse_args()
+    native = args.native.resolve()
     if not 0 < args.runner_timeout < float('inf'):
         parser.error('--runner-timeout must be finite and positive')
-    native = args.native.resolve()
     work = args.work.resolve()
     work.mkdir(parents=True, exist_ok=False)
     interpreter = work / 'interpreter'
