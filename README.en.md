@@ -28,7 +28,7 @@ python3 tools/build_and_test.py --offline
 python3 tools/build_and_test.py --offline --sanitize
 ```
 
-Sanitize enables AddressSanitizer/UndefinedBehaviorSanitizer for native data, interpreter, and compilation/execution tests. JNI uses the ordinary build and JVM -Xcheck:jni. Use --skip-tests for build-only or --skip-jni to omit JNI.
+Sanitize enables AddressSanitizer/UndefinedBehaviorSanitizer for native data, interpreter, and compilation/execution tests. JNI uses the ordinary build and JVM -Xcheck:jni. Use --skip-tests for build-only or --skip-jni to omit JNI. `--jit` first builds the pinned LLVM (`tools/build_llvm.py`; drop `--offline` to download it when it is not cached), so the JIT module is built and tested.
 
 `CompilerScalingTest` checks that compile work grows linearly with program size. It compares deterministic operation counts of generated programs with ones eight times larger: many locals, statements, functions, globals, classes, fields, externs or parameters. After a build, `python3 tools/bench_compiler.py` times the compiler on such programs, up to 32,000 locals in one scope or 20,000 functions; it is an opt-in benchmark outside the validation run.
 
@@ -43,7 +43,7 @@ cd /path/to/azscript
 ./run.sh examples/hello.exec.abd
 ```
 
-Compile.sh xxx.azs defaults to xxx.exec.abd, xxx.ast.json, and xxx.exec.json beside the source. Either -o out/demo.abd or -o out/demo.exec.abd defaults JSON paths to out/demo.ast.json and out/demo.exec.json, individually overridable with --ast/--exec-json. Windows uses compile.cmd/run.cmd. run.sh uses the tree interpreter by default; append `--backend vm` (or `--vm`) to use the new VM and `--max-steps N` to change the step limit, as described in the package docs/USAGE.en.md.
+Compile.sh xxx.azs defaults to xxx.exec.abd, xxx.ast.json, and xxx.exec.json beside the source. Either -o out/demo.abd or -o out/demo.exec.abd defaults JSON paths to out/demo.ast.json and out/demo.exec.json, individually overridable with --ast/--exec-json. Windows uses compile.cmd/run.cmd. run.sh uses the tree interpreter by default; append `--backend vm` (or `--vm`) to use the new VM and `--max-steps N` to change the step limit, as described in the package docs/USAGE.en.md. The VM also has an experimental JIT tier, off by default: with the environment variable `AZSCRIPT_JIT=on`, hot scalar functions run as native code with results identical to the VM. The native code is compiled by the `libazscript-jit` module that a `--jit` source build produces (distribution packages do not include it yet); without the module, scripts run on the VM as usual. Design, plan and progress are in the [JIT documents](docs/jit-roadmap/DESIGN.md) (Chinese).
 
 The package includes the complete compiler/dependencies, jlink Java runtime, standalone interpreter defaulting to main (0x0fff0000), static/shared C++ libraries and public headers, relocatable `find_package(AzScript CONFIG REQUIRED)`, JNI JAR and platform .dylib/.so/.dll, syntax/usage guides, math library, and C++/Java examples. The interpreter links RuntimeShared so signed plugins share its function registry; running ABD needs no Java. Embedded C++ hosts may use Runtime or RuntimeShared, but only the latter shares plugin registrations.
 

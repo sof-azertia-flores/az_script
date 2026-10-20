@@ -30,7 +30,7 @@ python3 tools/build_and_test.py --offline
 python3 tools/build_and_test.py --offline --sanitize
 ```
 
-`--sanitize` 对原生数据层、解释器和编译执行链启用 AddressSanitizer/UndefinedBehaviorSanitizer；JNI 使用普通构建配合 JVM 的 `-Xcheck:jni` 验证。只构建可使用 `--skip-tests`；不需要 JNI 可使用 `--skip-jni`。
+`--sanitize` 对原生数据层、解释器和编译执行链启用 AddressSanitizer/UndefinedBehaviorSanitizer；JNI 使用普通构建配合 JVM 的 `-Xcheck:jni` 验证。只构建可使用 `--skip-tests`；不需要 JNI 可使用 `--skip-jni`。`--jit` 先构建固定版本的 LLVM（`tools/build_llvm.py`，缺少缓存时去掉 `--offline` 下载），从而构建并测试 JIT 模块。
 
 `CompilerScalingTest` 检查编译工作量随程序规模线性增长：它比较生成程序与其八倍规模版本的确定性操作计数，覆盖大量局部变量、语句、函数、全局变量、类、字段、extern 或参数。构建后可运行 `python3 tools/bench_compiler.py`，在这类程序上测量编译耗时，最大到单个作用域 32,000 个局部变量或 20,000 个函数；它是可选基准，不属于验证流程。
 
@@ -47,7 +47,7 @@ cd /path/to/azscript
 ./run.sh examples/hello.exec.abd
 ```
 
-`compile.sh xxx.azs` 默认在源码旁同时生成 `xxx.exec.abd`、`xxx.ast.json` 和 `xxx.exec.json`。指定 `-o out/demo.abd` 或 `-o out/demo.exec.abd` 后，两份 JSON 默认变为 `out/demo.ast.json`、`out/demo.exec.json`，也能通过 `--ast` / `--exec-json` 单独指定。Windows 使用 `compile.cmd` 和 `run.cmd`。`run.sh` 默认使用树解释器，追加 `--backend vm`（或 `--vm`）改用新的 VM，`--max-steps N` 调整执行步数上限，详见发行包 `docs/USAGE.md`。
+`compile.sh xxx.azs` 默认在源码旁同时生成 `xxx.exec.abd`、`xxx.ast.json` 和 `xxx.exec.json`。指定 `-o out/demo.abd` 或 `-o out/demo.exec.abd` 后，两份 JSON 默认变为 `out/demo.ast.json`、`out/demo.exec.json`，也能通过 `--ast` / `--exec-json` 单独指定。Windows 使用 `compile.cmd` 和 `run.cmd`。`run.sh` 默认使用树解释器，追加 `--backend vm`（或 `--vm`）改用新的 VM，`--max-steps N` 调整执行步数上限，详见发行包 `docs/USAGE.md`。VM 另有实验性的 JIT 层，默认关闭：设置环境变量 `AZSCRIPT_JIT=on` 后，热点标量函数编译为原生代码执行，结果与 VM 完全一致；原生代码由 `--jit` 源码构建生成的 `libazscript-jit` 模块编译（发行包暂不包含），模块缺失时照常以 VM 运行。设计、计划与进度见 [JIT 文档](docs/jit-roadmap/DESIGN.md)。
 
 发行包包含完整编译器及依赖、由 `jlink` 生成的 Java 运行环境、默认调用 `main`（`0x0fff0000`）的独立解释器、C++ 静态/动态库与公开头文件、可迁移的 `find_package(AzScript CONFIG REQUIRED)` 配置、JNI JAR 和本系统的 `.dylib` / `.so` / `.dll`，以及语法文档、使用文档、数学库和 C++ / Java 接入示例。独立解释器链接共享运行库 `AzScript::RuntimeShared`，因此签名动态库与解释器共用同一份函数注册表；运行 ABD 无需 Java。嵌入式 C++ 宿主可链接 `AzScript::Runtime` 或 `AzScript::RuntimeShared`，只有后者能和 `load_extern_library` 插件共用注册表。
 
