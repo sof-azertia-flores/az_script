@@ -21,6 +21,8 @@ python3 tools/build_and_test.py
 
 The regression script returns 146 and its destruction hook prints done. Optional --ast saves the readable tree and --exec-json the lowered instruction tree for inspection. `-g` adds debug records (function and file names, source positions) to the executable; they are off by default.
 
+Compilation defaults to `-O0`. Select conservative optimization with `-O1` or advanced scalar optimization with `-O2`. Optimization levels are independent of execution backends and still emit exec v10. See [compilation and embedding](compiler/LANGUAGE.en.md#compilation-and-embedding) for switches and semantic boundaries.
+
 Builds reuse Gradle/Maven caches and download missing pinned dependencies from Maven Central with SHA-256 verification. All output, downloads, and temporary tests live under build/. With populated caches:
 
 ```sh

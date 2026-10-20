@@ -10,6 +10,8 @@ Native libraries target the build system and CPU, not multiple platforms: .dylib
 
 ## Compile and run
 
+`compile.sh` / `compile.cmd` and `compile-json` accept `-O0` (default), `-O1` and `-O2`; the last level wins. O2 extends scalar propagation, common expression and dead code elimination, inlining and safe loop motion. It does not enable JIT. See the [language guide](LANGUAGE.en.md#compilation-and-embedding) for switches and semantic boundaries. Use the same optimization options when recompiling the AST.
+
 From the distribution root:
 
 ```sh
