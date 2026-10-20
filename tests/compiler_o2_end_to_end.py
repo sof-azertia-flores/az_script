@@ -15,7 +15,7 @@ from runtime_differential import checked_observation, compare_engines, differenc
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def generated_flow_case():
+def generated_flow_case(first=0, count=48):
     """Independent bounded integer oracle for joins, scopes and loop transfers."""
     rng = random.Random(20261020)
     functions, invocations, expected = [], [], []
@@ -49,8 +49,10 @@ def generated_flow_case():
             i += 1
         expected.append(str(x * 128 + y))
         invocations.append(f'print(flow{index}({n}));')
-    return ('o2-generated-flow', '\n'.join(functions) + 'int main(){' + ''.join(invocations) + 'return 0;}',
-            0, '\n'.join(expected) + '\n', None)
+    selected = slice(first, first + count)
+    name = 'o2-generated-flow' + (f'-{first}' if first else '')
+    return (name, '\n'.join(functions[selected]) + 'int main(){' + ''.join(invocations[selected]) + 'return 0;}',
+            0, '\n'.join(expected[selected]) + '\n', None)
 
 
 CASES = O1_CASES + (
@@ -132,11 +134,16 @@ def main():
     parser.add_argument('--jit-modes', default='', help='comma-separated existing AZSCRIPT_JIT modes')
     parser.add_argument('--report', type=Path, required=True)
     parser.add_argument('--only', help='run cases whose names contain this text')
+    parser.add_argument('--flow-batch-size', type=int, choices=(8, 48), default=48,
+                        help='split the 48-function oracle into smaller compilation batches for emulation')
     args = parser.parse_args()
     env = {k: v for k, v in os.environ.items() if k not in
            ('JAVA_TOOL_OPTIONS', 'JDK_JAVA_OPTIONS', '_JAVA_OPTIONS', 'AZSCRIPT_EXPERIMENTAL_VM_BACKEND')
            and not k.startswith('AZSCRIPT_JIT')}
-    report = {'cases': [], 'observations': 0, 'budget_checks': 0, 'jit': {}, 'jit_cases': []}
+    report = {'cases': [], 'observations': 0, 'budget_checks': 0, 'jit': {}, 'jit_cases': [],
+              'flow_batch_size': args.flow_batch_size}
+    selected_cases = CASES[:-1] + tuple(generated_flow_case(first, args.flow_batch_size)
+                                        for first in range(0, 48, args.flow_batch_size))
 
     def run(command, extra=None, timeout=90):
         result = subprocess.run(list(map(str, command)), cwd=ROOT, env={**env, **(extra or {})},
@@ -147,7 +154,7 @@ def main():
     with tempfile.TemporaryDirectory(prefix='o2-', dir=ROOT / 'build') as directory:
         work = Path(directory)
         modes = [mode for mode in args.jit_modes.split(',') if mode]
-        for name, source, returned, stdout, error in CASES:
+        for name, source, returned, stdout, error in selected_cases:
             if args.only and args.only not in name:
                 continue
             path = work / (name + '.azs')
@@ -190,7 +197,7 @@ def main():
                         # This oracle invokes 48 distinct functions. LLVM
                         # compilation (especially under emulation) needs a
                         # larger wall-clock allowance than individual cases.
-                        generated = name == 'o2-generated-flow'
+                        generated = name.startswith('o2-generated-flow')
                         if generated:
                             print(f'O2 generated flow: {mode}, options={options}', flush=True)
                         result = checked_observation(run([args.host, abd, '--engine', 'vm', '--steps', '1000000'],
@@ -202,7 +209,7 @@ def main():
                             with stats.open('rb') as stream:
                                 stream.seek(offset)
                                 sessions = [json.loads(line) for line in stream if line.strip()]
-                        if name in ('loop', 'o2-range-loop', 'o2-range-guard', 'o2-inline-loop', 'o2-generated-flow') and not mode.startswith('probe'):
+                        if (name in ('loop', 'o2-range-loop', 'o2-range-guard', 'o2-inline-loop') or generated) and not mode.startswith('probe'):
                             assert sum(item['entries'] for item in sessions) > 0, (name, mode, 'qualifying loop never compiled')
                         report['jit_cases'].append({'case': name, 'options': options, 'mode': mode, 'sessions': sessions})
                         report['observations'] += 1
