@@ -93,6 +93,10 @@ def semantic(observation):
 
     def errors(item):
         if isinstance(item, dict):
+            # Host events and snapshots may report the remaining budget too.
+            # Only cross-level comparison ignores it; backend comparison
+            # always uses the original observation.
+            item.pop('remaining_steps', None)
             if {'category', 'message', 'trace', 'described'} <= item.keys():
                 frames = item.pop('trace')['frames']
                 item.pop('described')
