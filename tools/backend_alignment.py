@@ -78,10 +78,14 @@ def main():
     parser.add_argument('--native', type=Path, default=ROOT / 'build/native', help='CMake build directory')
     parser.add_argument('--classpath', required=True)
     parser.add_argument('--work', type=Path, required=True, help='new directory for wrappers and records')
+    parser.add_argument('--runner-timeout', type=float, default=60,
+                        help='end_to_end wall-clock limit per wrapper call, covering all backends')
     parser.add_argument('--only', help='comma-separated suite names (refusal counts are checked for these only)')
     parser.add_argument('--suggest', type=Path, help='write observed refusals as registry entries for review')
     parser.add_argument('--jit', help='also run each invocation on the VM with AZSCRIPT_JIT set to each of these comma-separated modes')
     args = parser.parse_args()
+    if not 0 < args.runner_timeout < float('inf'):
+        parser.error('--runner-timeout must be finite and positive')
     modes = args.jit.split(',') if args.jit else []
     native = args.native.resolve()
     work = args.work.resolve()
@@ -104,7 +108,8 @@ def main():
     run, host = interpreter / 'azscript-run', interpreter / 'numeric-module-host'
     arguments = {
         'math_library': ['--runner', run], 'containers_library': ['--runner', run],
-        'end_to_end': ['--runner', run, '--bridge', ROOT / 'build/java/abdJavaInvoker.jar'],
+        'end_to_end': ['--runner', run, '--bridge', ROOT / 'build/java/abdJavaInvoker.jar',
+                      '--runner-timeout', args.runner_timeout],
         'loops_end_to_end': ['--runner', run], 'limits_end_to_end': ['--runner', run, '--host', host],
         'address_end_to_end': ['--runner', run, '--host', host], 'numeric_slots_end_to_end': ['--host', host],
         'extern_library_end_to_end': ['--runner', run, '--signer', signer, '--libdir', native / 'interpreter'],
@@ -121,7 +126,7 @@ def main():
     env = os.environ.copy()
     for key in ('JAVA_TOOL_OPTIONS', 'JDK_JAVA_OPTIONS', '_JAVA_OPTIONS', 'AZSCRIPT_EXPERIMENTAL_VM_BACKEND', 'AZSCRIPT_JIT'):
         env.pop(key, None)
-    report = {'native': str(native), 'suites': {}, 'failures': []}
+    report = {'native': str(native), 'runner_timeout': args.runner_timeout, 'suites': {}, 'failures': []}
     for name in selected:
         suite_records = work / 'records' / name
         suite_records.mkdir(parents=True)
