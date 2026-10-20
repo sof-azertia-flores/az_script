@@ -138,9 +138,9 @@ def main():
            and not k.startswith('AZSCRIPT_JIT')}
     report = {'cases': [], 'observations': 0, 'budget_checks': 0, 'jit': {}, 'jit_cases': []}
 
-    def run(command, extra=None):
+    def run(command, extra=None, timeout=90):
         result = subprocess.run(list(map(str, command)), cwd=ROOT, env={**env, **(extra or {})},
-                                capture_output=True, text=True, timeout=90)
+                                capture_output=True, text=True, timeout=timeout)
         assert result.returncode == 0, (command, result.stdout, result.stderr)
         return result
 
@@ -187,8 +187,15 @@ def main():
                     for mode in modes:
                         stats = work / (mode.replace(':', '-').replace('+', '-') + '.stats')
                         offset = stats.stat().st_size if stats.exists() else 0
+                        # This oracle invokes 48 distinct functions. LLVM
+                        # compilation (especially under emulation) needs a
+                        # larger wall-clock allowance than individual cases.
+                        generated = name == 'o2-generated-flow'
+                        if generated:
+                            print(f'O2 generated flow: {mode}, options={options}', flush=True)
                         result = checked_observation(run([args.host, abd, '--engine', 'vm', '--steps', '1000000'],
-                                {'AZSCRIPT_JIT': mode, 'AZSCRIPT_JIT_STATS': str(stats)}))
+                                {'AZSCRIPT_JIT': mode, 'AZSCRIPT_JIT_STATS': str(stats)},
+                                timeout=600 if generated else 90))
                         assert not compare_engines(observations[1], result, 'vm', 'vm'), (name, mode, result)
                         sessions = []
                         if stats.exists():
