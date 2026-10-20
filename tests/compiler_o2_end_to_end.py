@@ -5,6 +5,7 @@ import copy
 import json
 import os
 from pathlib import Path
+import random
 import subprocess
 import tempfile
 
@@ -12,6 +13,46 @@ from compiler_optimization_end_to_end import CASES as O1_CASES
 from runtime_differential import checked_observation, compare_engines, differences
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def generated_flow_case():
+    """Independent bounded integer oracle for joins, scopes and loop transfers."""
+    rng = random.Random(20261020)
+    functions, invocations, expected = [], [], []
+    for index in range(48):
+        n, seed, initial, factor, salt = (rng.randrange(64), rng.randrange(16),
+                                         rng.randrange(16), rng.randrange(1, 8), rng.randrange(16))
+        functions.append(f'''int flow{index}(int n){{
+            int x=(n&31)+{seed};int y={initial};int i=0;
+            while(i<(n&7)){{
+                int old=x;int a=(x&15)*{factor};int b=(x&15)*{factor};
+                if((i&1)==0){{x=(a+b+y)%127;}}else{{x=(old+y+{salt})%127;}}
+                {{int discarded=(y&7)*{factor};}}
+                int z=(y&7)*{factor};y=(y+z)%127;
+                if(i==2){{i+=1;continue;}}
+                if(i==4&&(n&8)!=0){{break;}}
+                y=(y+(n&7))%127;i+=1;
+            }}
+            return x*128+y;
+        }}''')
+        x, y, i = (n & 31) + seed, initial, 0
+        while i < (n & 7):
+            a = (x & 15) * factor
+            x = (2 * a + y) % 127 if i % 2 == 0 else (x + y + salt) % 127
+            y = (y + (y & 7) * factor) % 127
+            if i == 2:
+                i += 1
+                continue
+            if i == 4 and (n & 8) != 0:
+                break
+            y = (y + (n & 7)) % 127
+            i += 1
+        expected.append(str(x * 128 + y))
+        invocations.append(f'print(flow{index}({n}));')
+    return ('o2-generated-flow', '\n'.join(functions) + 'int main(){' + ''.join(invocations) + 'return 0;}',
+            0, '\n'.join(expected) + '\n', None)
+
+
 CASES = O1_CASES + (
     ('o2-cse', 'int f(int n){int a=n*7;int b=n*7;return a+b;}int main(){return f(9);}', 126, '', None),
     ('o2-cse-scope', 'int f(int n){{int a=n*7;}int b=n*7;return b;}int main(){return f(9);}', 63, '', None),
@@ -33,6 +74,12 @@ CASES = O1_CASES + (
     ('o2-range-guard', 'int f(int n){if(n>=0&&n<=100){int i=0;int s=0;while(i<10){s+=n*n;i+=1;}return s;}return 0;}int main(){return f(11)+f(-1);}', 1210, '', None),
     ('o2-zero-trip-overflow', 'int f(int n){int i=0;int s=0;while(i<0){s+=n+1;i+=1;}return s;}int main(){return f(2147483647);}', 0, '', None),
     ('o2-conditional-trap', 'int f(int n){return (n+1>2147483647)?1:2;}int main(){return f(2147483647);}', None, '', 'Integer overflow'),
+    ('o2-cse-dominator', 'int f(int n,boolean b){int a=n*7;if(b){return n*7;}else{return a;}}int main(){return f(9,true)+f(8,false);}', 119, '', None),
+    ('o2-unused-storage', 'int f(int n){int a=0;int unused=n&7;a=n;return a;}int main(){return f(9);}', 9, '', None),
+    ('o2-cse-backedge', 'int f(int n){int a=7/n;while(7/n>0){n=0;}return a;}int main(){return f(1);}', None, '', 'Division by zero'),
+    ('o2-cse-loop-storage', 'int f(int n){int a=n*7;int i=0;while(i<2&&n*7>0){a=0;i++;}return i;}int main(){return f(1);}', 2, '', None),
+    ('o2-cse-loop-stable', 'int f(int n){int a=7/n;int i=0;while(i<2&&7/n>0){int b=7/n;i++;}return a+i;}int main(){return f(1);}', 9, '', None),
+    generated_flow_case(),
 )
 
 
@@ -59,6 +106,18 @@ def semantic(observation):
     return value
 
 
+def jit_summary(mode, stats):
+    sessions = [json.loads(line) for line in stats.read_text().splitlines()] if stats.exists() else []
+    assert sessions, (mode, 'missing JIT statistics')
+    entries = sum(item['entries'] for item in sessions)
+    if not mode.startswith('probe'):
+        assert entries > 0, (mode, 'no compiled execution')
+    assert not sum(item['violations'] for item in sessions), (mode, 'invalid type analysis')
+    assert not any(reason.startswith('compiler error') for item in sessions for reason in item['refusals'])
+    return {'entries': entries, 'compiled': sum(item['compiled'] for item in sessions),
+            'sessions': len(sessions)}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--classpath', required=True)
@@ -67,11 +126,12 @@ def main():
     parser.add_argument('--baseline-host', type=Path, help='frozen v10 runtime, to check O2 compatibility')
     parser.add_argument('--jit-modes', default='', help='comma-separated existing AZSCRIPT_JIT modes')
     parser.add_argument('--report', type=Path, required=True)
+    parser.add_argument('--only', help='run cases whose names contain this text')
     args = parser.parse_args()
     env = {k: v for k, v in os.environ.items() if k not in
            ('JAVA_TOOL_OPTIONS', 'JDK_JAVA_OPTIONS', '_JAVA_OPTIONS', 'AZSCRIPT_EXPERIMENTAL_VM_BACKEND')
            and not k.startswith('AZSCRIPT_JIT')}
-    report = {'cases': [], 'observations': 0, 'budget_checks': 0, 'jit': {}}
+    report = {'cases': [], 'observations': 0, 'budget_checks': 0, 'jit': {}, 'jit_cases': []}
 
     def run(command, extra=None):
         result = subprocess.run(list(map(str, command)), cwd=ROOT, env={**env, **(extra or {})},
@@ -83,15 +143,20 @@ def main():
         work = Path(directory)
         modes = [mode for mode in args.jit_modes.split(',') if mode]
         for name, source, returned, stdout, error in CASES:
+            if args.only and args.only not in name:
+                continue
             path = work / (name + '.azs')
             path.write_text(source, encoding='utf-8')
             levels = []
-            for level in ('O0', 'O1', 'O2'):
-                abd, ast = work / f'{name}-{level}.abd', work / f'{name}-{level}.json'
+            variants = [('O0', []), ('O1', []), ('O2', [])]
+            if name.startswith('o2-'):
+                variants.append(('O2', ['--no-inline']))
+            for index, (level, options) in enumerate(variants):
+                abd, ast = work / f'{name}-{index}.abd', work / f'{name}-{index}.json'
                 java = ['java', '-cp', args.classpath, 'azertia.Main']
-                run(java + ['compile', path, '-g', '-' + level, '-o', abd, '--ast', ast])
+                run(java + ['compile', path, '-g', '-' + level, *options, '-o', abd, '--ast', ast])
                 rebuilt = work / 'rebuilt.abd'
-                run(java + ['compile-json', ast, '-g', '-' + level, '-o', rebuilt])
+                run(java + ['compile-json', ast, '-g', '-' + level, *options, '-o', rebuilt])
                 assert abd.read_bytes() == rebuilt.read_bytes(), (name, level, 'AST identity')
                 if args.baseline_classpath and level != 'O2':
                     run(['java', '-cp', args.baseline_classpath, 'azertia.Main', 'compile', path,
@@ -116,13 +181,24 @@ def main():
                             assert not compare_engines(observations[0], old, 'tree', engine), (name, 'v10 compatibility', old)
                     for mode in modes:
                         stats = work / (mode.replace(':', '-').replace('+', '-') + '.stats')
+                        offset = stats.stat().st_size if stats.exists() else 0
                         result = checked_observation(run([args.host, abd, '--engine', 'vm', '--steps', '1000000'],
                                 {'AZSCRIPT_JIT': mode, 'AZSCRIPT_JIT_STATS': str(stats)}))
                         assert not compare_engines(observations[1], result, 'vm', 'vm'), (name, mode, result)
+                        sessions = []
+                        if stats.exists():
+                            with stats.open('rb') as stream:
+                                stream.seek(offset)
+                                sessions = [json.loads(line) for line in stream if line.strip()]
+                        if name in ('loop', 'o2-range-loop', 'o2-range-guard', 'o2-inline-loop', 'o2-generated-flow') and not mode.startswith('probe'):
+                            assert sum(item['entries'] for item in sessions) > 0, (name, mode, 'qualifying loop never compiled')
+                        report['jit_cases'].append({'case': name, 'options': options, 'mode': mode, 'sessions': sessions})
                         report['observations'] += 1
             assert not differences(levels[0], levels[1]), (name, 'O0/O1', differences(levels[0], levels[1]))
-            assert not differences(levels[0], levels[2]), (name, 'O0/O2', differences(levels[0], levels[2]))
+            for observed in levels[2:]:
+                assert not differences(levels[0], observed), (name, 'O0/O2', differences(levels[0], observed))
             report['cases'].append(name)
+        assert report['cases'], 'No fixtures selected'
         for source in ('void main(){while(true){}}', 'void f(){f();}void main(){f();}'):
             path = work / 'termination.azs'; path.write_text(source)
             abd = work / 'termination.abd'
@@ -131,14 +207,15 @@ def main():
                 result = checked_observation(run([args.host, abd, '--engine', engine, '--steps', '100', '--call-depth', '0']))
                 assert result['remaining_steps'] == 0 and 'step limit' in result['error']['message'], result
                 report['budget_checks'] += 1
+                if engine == 'vm':
+                    for mode in modes:
+                        replay = checked_observation(run([args.host, abd, '--engine', 'vm', '--steps', '100', '--call-depth', '0'],
+                                                         {'AZSCRIPT_JIT': mode}))
+                        assert not compare_engines(result, replay, 'vm', 'vm'), (mode, 'budget termination', replay)
+                        report['budget_checks'] += 1
         for mode in modes:
             stats = work / (mode.replace(':', '-').replace('+', '-') + '.stats')
-            sessions = [json.loads(line) for line in stats.read_text().splitlines()] if stats.exists() else []
-            assert sum(item['entries'] for item in sessions) > 0, (mode, 'no compiled execution')
-            assert not sum(item['violations'] for item in sessions), (mode, 'invalid type analysis')
-            assert not any(reason.startswith('compiler error') for item in sessions for reason in item['refusals'])
-            report['jit'][mode] = {'entries': sum(item['entries'] for item in sessions),
-                                   'compiled': sum(item['compiled'] for item in sessions)}
+            report['jit'][mode] = jit_summary(mode, stats)
     report['status'] = 'passed'
     args.report.parent.mkdir(parents=True, exist_ok=True)
     args.report.write_text(json.dumps(report, indent=2) + '\n')

@@ -215,10 +215,22 @@ def main():
     run([sys.executable, ROOT/'tests/compiler_optimization_end_to_end.py', '--classpath', classpath,
          '--host', native/'interpreter/observation-host',
          '--report', BUILD/('compiler-optimization-sanitize.json' if args.sanitize else 'compiler-optimization.json')])
+    # This compiler branch also runs against the independently maintained JIT
+    # integration. Discover that checkout's existing tiers without enabling or
+    # configuring a runtime backend in the compiler.
+    o2_replay=[]
+    if (ROOT/'interpreter/jit').is_dir():
+        module=native/'interpreter'/('libazscript-jit.dylib' if sys.platform=='darwin' else 'libazscript-jit.so')
+        modes=['probe:7','eager','stress','on:2+interp']
+        if module.exists():modes+=['eager+llvm','stress+llvm','on:3+llvm']
+        o2_replay=['--jit-modes',','.join(modes)]
+    run([sys.executable, ROOT/'tests/compiler_o2_end_to_end.py', '--classpath', classpath,
+         '--host', native/'interpreter/observation-host', *o2_replay,
+         '--report', BUILD/('compiler-o2-sanitize.json' if args.sanitize else 'compiler-o2.json')])
     compiler_corpus=BUILD/('compiler-optimization-corpus-sanitize' if args.sanitize else 'compiler-optimization-corpus')
     if compiler_corpus.exists():shutil.rmtree(compiler_corpus)
     run([sys.executable, ROOT/'tests/compiler_optimization_corpus.py', '--classpath', classpath,
-         '--host', native/'interpreter/observation-host', '--work', compiler_corpus])
+         '--host', native/'interpreter/observation-host', '--work', compiler_corpus, '--o2', *o2_replay])
     run([sys.executable, ROOT/'tests/vm_program_end_to_end.py', '--classpath', classpath,
          '--host', native/'interpreter/vm-loader-host'])
     vm_work=BUILD/'runtime-perf'/('vm-execution-sanitize' if args.sanitize else 'vm-execution')
