@@ -104,6 +104,6 @@ class ExecOptimizerTest {
                 Main.parseCompileArguments(List.of("compile", "-O0", "input.azs", "-O1")).optimization());
         assertEquals(Compiler.Optimization.NONE,
                 Main.parseCompileArguments(List.of("compile-json", "-O1", "input.json", "-O0")).optimization());
-        assertThrows(IllegalArgumentException.class, () -> Main.parseCompileArguments(List.of("compile", "input.azs", "-O2")));
+        assertThrows(IllegalArgumentException.class, () -> Main.parseCompileArguments(List.of("compile", "input.azs", "-O3")));
     }
 }

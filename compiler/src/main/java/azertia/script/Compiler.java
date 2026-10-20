@@ -8,13 +8,16 @@ import java.util.*;
 /** Resolves symbols and lowers the readable JSON AST to numeric-slot ABD instructions. */
 public class Compiler {
     /** NONE preserves the original lowering; STANDARD enables the opt-in O1 pipeline. */
-    public enum Optimization { NONE, CONSTANTS, STANDARD }
-    public enum OptimizationPass { CONSTANTS, PROPAGATION, INLINING, LOOP_MOTION }
+    public enum Optimization { NONE, CONSTANTS, STANDARD, ADVANCED }
+    public enum OptimizationPass { CONSTANTS, PROPAGATION, INLINING, LOOP_MOTION,
+        CONTROL_FLOW, COMMON_SUBEXPRESSIONS, DEAD_CODE, SCALAR_INLINING, RANGE_LOOP_MOTION }
     public static Set<OptimizationPass> optimizationPasses(Optimization optimization) {
         return switch (Objects.requireNonNull(optimization)) {
             case NONE -> Set.of();
             case CONSTANTS -> Set.of(OptimizationPass.CONSTANTS);
-            case STANDARD -> Set.of(OptimizationPass.values());
+            case STANDARD -> Set.of(OptimizationPass.CONSTANTS, OptimizationPass.PROPAGATION,
+                    OptimizationPass.INLINING, OptimizationPass.LOOP_MOTION);
+            case ADVANCED -> Set.of(OptimizationPass.values());
         };
     }
     // Mutable holders: the depth changes at every node, and updating a holder avoids a ThreadLocal.set each time.
