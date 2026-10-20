@@ -89,6 +89,19 @@ def check_error_storage():
             raise RuntimeError(f'Raw exception storage outside pending_error in {path.relative_to(ROOT)}')
     print(f'Error trace storage check passed ({len(sources)} runtime sources).', flush=True)
 
+def check_jit_stats(mode,stats):
+    # A pass where native code never ran would prove nothing.
+    sessions=[json.loads(line) for line in stats.read_text(encoding='utf-8').splitlines()] if stats.exists() else []
+    entries=sum(item['entries'] for item in sessions)
+    if not entries:raise RuntimeError(f'AZSCRIPT_JIT={mode} ran no native code')
+    # Only analysis refusals are expected; a compiler error or a value
+    # outside the analysis' tags is a defect.
+    failures=sorted({reason for item in sessions for reason in item['refusals'] if reason.startswith('compiler error')})
+    if failures:raise RuntimeError(f'AZSCRIPT_JIT={mode} failed to compile functions: {failures[:3]}')
+    if sum(item['violations'] for item in sessions):raise RuntimeError(f'AZSCRIPT_JIT={mode} saw values outside the analysis')
+    print(f'JIT {mode}: {len(sessions)} sessions, {sum(item["compiled"] for item in sessions)} functions compiled, '
+          f'{entries} native entries, {sum(item["operations"] for item in sessions)} operations', flush=True)
+
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--offline',action='store_true')
@@ -255,18 +268,19 @@ def main():
         run([sys.executable, ROOT/'tests/vm_execution_end_to_end.py', '--reference-work', vm_work,
              '--candidate-host', native/'interpreter/observation-host', '--candidate-engine', 'vm', '--work', jit_work],
             env={**os.environ, 'AZSCRIPT_JIT': mode, 'AZSCRIPT_JIT_STATS': str(stats)})
-        if mode != 'probe:7':
-            # A pass where native code never ran would prove nothing.
-            sessions=[json.loads(line) for line in stats.read_text(encoding='utf-8').splitlines()] if stats.exists() else []
-            entries=sum(item['entries'] for item in sessions)
-            if not entries:raise RuntimeError(f'AZSCRIPT_JIT={mode} ran no native code')
-            # Only analysis refusals are expected; a compiler error or a value
-            # outside the analysis' tags is a defect.
-            failures=sorted({reason for item in sessions for reason in item['refusals'] if reason.startswith('compiler error')})
-            if failures:raise RuntimeError(f'AZSCRIPT_JIT={mode} failed to compile functions: {failures[:3]}')
-            if sum(item['violations'] for item in sessions):raise RuntimeError(f'AZSCRIPT_JIT={mode} saw values outside the analysis')
-            print(f'JIT {mode}: {len(sessions)} sessions, {sum(item["compiled"] for item in sessions)} functions compiled, '
-                  f'{entries} native entries, {sum(item["operations"] for item in sessions)} operations', flush=True)
+        if mode != 'probe:7':check_jit_stats(mode,stats)
+    # The optimized (O1) corpus has code shapes the compiler emits only when
+    # optimizing; every instruction runs natively and must match the tree.
+    if not args.sanitize:
+        mode='stress+llvm' if jit_module.exists() else 'stress'
+        optimized_work=BUILD/f'compiler-optimization-corpus-jit-{mode.replace("+","-")}'
+        if optimized_work.exists():shutil.rmtree(optimized_work)
+        stats=optimized_work.with_name(optimized_work.name+'.stats')
+        stats.unlink(missing_ok=True)
+        run([sys.executable, ROOT/'tests/compiler_optimization_corpus.py', '--classpath', classpath,
+             '--host', native/'interpreter/observation-host', '--work', optimized_work],
+            env={**os.environ, 'AZSCRIPT_JIT': mode, 'AZSCRIPT_JIT_STATS': str(stats)})
+        check_jit_stats(f'{mode} (compiler corpus)',stats)
     # Every end-to-end runner invocation, run again with the VM forced: outputs
     # must be byte-identical or a refusal listed with its exact count.
     # One JIT mode per pass keeps each invocation (tree, VM, JIT) within the
