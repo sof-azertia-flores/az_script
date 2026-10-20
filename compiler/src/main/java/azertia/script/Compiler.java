@@ -7,10 +7,10 @@ import java.util.*;
 
 /** Resolves symbols and lowers the readable JSON AST to numeric-slot ABD instructions. */
 public class Compiler {
-    /** NONE preserves the original lowering; STANDARD enables the opt-in O1 pipeline. */
+    /** NONE preserves lowering; STANDARD and ADVANCED select the O1 and O2 pipelines. */
     public enum Optimization { NONE, CONSTANTS, STANDARD, ADVANCED }
     public enum OptimizationPass { CONSTANTS, PROPAGATION, INLINING, LOOP_MOTION,
-        CONTROL_FLOW, COMMON_SUBEXPRESSIONS, DEAD_CODE, SCALAR_INLINING, RANGE_LOOP_MOTION }
+        CONTROL_FLOW, COMMON_SUBEXPRESSIONS, DEAD_CODE, SCALAR_INLINING, RANGE_LOOP_MOTION, FLOW_PROPAGATION }
     public static Set<OptimizationPass> optimizationPasses(Optimization optimization) {
         return switch (Objects.requireNonNull(optimization)) {
             case NONE -> Set.of();

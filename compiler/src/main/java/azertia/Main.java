@@ -68,7 +68,10 @@ public class Main {
             var passes = java.util.EnumSet.noneOf(Compiler.OptimizationPass.class);
             passes.addAll(Compiler.optimizationPasses(optimization()));
             if (flags.contains("--no-fold")) passes.remove(Compiler.OptimizationPass.CONSTANTS);
-            if (flags.contains("--no-propagation")) passes.remove(Compiler.OptimizationPass.PROPAGATION);
+            if (flags.contains("--no-propagation")) {
+                passes.remove(Compiler.OptimizationPass.PROPAGATION);
+                passes.remove(Compiler.OptimizationPass.FLOW_PROPAGATION);
+            }
             if (flags.contains("--no-inline")) {
                 passes.remove(Compiler.OptimizationPass.INLINING);
                 passes.remove(Compiler.OptimizationPass.SCALAR_INLINING);

@@ -46,6 +46,21 @@ class ExecO2OptimizerTest {
         var loop=body(compile("int run(int n){int i=0;while(i<n){i+=1;}return i;}",Set.of(DEAD_CODE)));
         assertEquals(1,count(loop,SET));
     }
+    @Test void dominatingExpressionsEnterBranchesButDoNotEscapeTheirScopes() throws Exception {
+        var code=body(compile("int run(int n,boolean b){int a=n*7;if(b){return n*7;}else{return a;}}",
+                Set.of(COMMON_SUBEXPRESSIONS)));
+        assertEquals(1,count(code,MULTIPLY));
+        var modified=body(compile("int run(int n,boolean b){int a=n*7;if(b){n=3;return n*7;}return a;}",
+                Set.of(COMMON_SUBEXPRESSIONS)));
+        assertEquals(2,count(modified,MULTIPLY));
+    }
+    @Test void unusedDefinitionsRetainFailuresAndRequiredStorage() throws Exception {
+        assertEquals(0,count(body(compile("int f(int n){int a=n&7;return n;}",Set.of(DEAD_CODE))),DEFINE));
+        assertEquals(1,count(body(compile("int f(int n){int a=1/n;return n;}",Set.of(DEAD_CODE))),DEFINE));
+        var code=body(compile("int f(int n){int a=0;a=n;return a;}",Set.of(DEAD_CODE)));
+        assertEquals(1,count(code,DEFINE));
+        assertEquals(1,count(code,SET));
+    }
     @Test void pruningDoesNotSpeculateErrorsOrRemoveInfiniteLoops() throws Exception {
         var trap=body(compile("int run(int n){if((1/n)==0){return 1;}return 2;}",Set.of(CONTROL_FLOW)));
         assertEquals(1,count(trap,DIVIDE));

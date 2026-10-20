@@ -14,7 +14,21 @@ class ExecO2AnalysisTest {
         return Compiler.compile(parser.toObj(),new Diagnostics(),true,level);
     }
     static AcsObject first(AcsObject program) { return (AcsObject)program.getAsAcsArray("f").acsa.get(0); }
-    @Test void levelsAndOverridesDoNotExpandO1() {
+    @Test void debugAndAstRoundTripsKeepTheSameO2Instructions() throws Exception {
+        var parser=new GeneraterJson.AzScript();
+        parser.execute("int f(int n){int a=n&7;return a+a;}int main(){int s=0;for(int i=0;i<5;i++){int v=f(i);s+=v;}return s;}");
+        var ast=parser.toObj();var saved=ast.deepCopy();
+        var plain=Compiler.compile(ast,new Diagnostics(),false,Compiler.Optimization.ADVANCED);
+        var debug=Compiler.compile(ast,new Diagnostics(),true,Compiler.Optimization.ADVANCED);
+        assertEquals(saved,ast);
+        var a=plain.getAsAcsArray("f").acsa;var b=debug.getAsAcsArray("f").acsa;
+        for(int i=0;i<a.size();i++)
+            assertEquals(((AcsObject)a.get(i)).mmp.get("script").toJson(),((AcsObject)b.get(i)).mmp.get("script").toJson());
+        assertArrayEquals(debug.toValue().toAbdFormat(),
+                Compiler.compile(saved,new Diagnostics(),true,Compiler.Optimization.ADVANCED).toValue().toAbdFormat());
+        assertArrayEquals(debug.toValue().toAbdFormat(),ExecCodec.decode(debug.toValue()).toValue().toAbdFormat());
+    }
+    @Test void levelsAndOverridesDoNotExpandO1() throws Exception {
         assertEquals(4,Compiler.optimizationPasses(Compiler.Optimization.STANDARD).size());
         assertEquals(Compiler.Optimization.ADVANCED,
                 Main.parseCompileArguments(List.of("compile","x.azs","-O1","-O2")).optimization());
@@ -24,6 +38,12 @@ class ExecO2AnalysisTest {
                 Main.parseCompileArguments(List.of("compile-json","x.json","-O2","-O0")).optimization());
         assertTrue(Main.parseCompileArguments(List.of("compile","x.azs","-O2","--no-fold","--no-propagation",
                 "--no-inline","--no-loop-motion","--no-cfg-opt","--no-cse","--no-dce")).optimizationPasses().isEmpty());
+        var propagationOnly=Main.parseCompileArguments(List.of("compile","x.azs","-O2","--no-fold",
+                "--no-inline","--no-loop-motion","--no-cfg-opt","--no-cse","--no-dce")).optimizationPasses();
+        assertTrue(ExecO2.enabled(propagationOnly),"O2 propagation must not depend on another enabled stage");
+        var code=ExecO2OptimizerTest.body(ExecO2OptimizerTest.compile(
+                "int f(boolean b){int n=0;if(b){n=7;}else{n=7;}return n+1;}",propagationOnly));
+        assertEquals(0,ExecO2OptimizerTest.count(code,ADD));
     }
     @Test void effectsExcludeObserversAliasesAndRecursion() throws Exception {
         var program=compile("int leaf(int x){return x+1;}int caller(int x){return leaf(x);}"

@@ -18,7 +18,8 @@ final class ExecO2 {
     }
     static boolean enabled(Set<Compiler.OptimizationPass> passes) {
         return passes.contains(CONTROL_FLOW) || passes.contains(COMMON_SUBEXPRESSIONS)
-                || passes.contains(DEAD_CODE) || passes.contains(SCALAR_INLINING) || passes.contains(RANGE_LOOP_MOTION);
+                || passes.contains(DEAD_CODE) || passes.contains(SCALAR_INLINING)
+                || passes.contains(RANGE_LOOP_MOTION) || passes.contains(FLOW_PROPAGATION);
     }
     static void optimize(AcsArray functions, Set<Compiler.OptimizationPass> passes,
                          Map<AcsElement,int[]> positions, int abdLimit) {
@@ -49,6 +50,12 @@ final class ExecO2 {
             // a valid source solely because an optional pass was selected.
             if (4L + ExecShape.height(body) <= abdLimit) function.mmp.put("script",body);
             else function.mmp.put("script",original);
+            if (passes.contains(DEAD_CODE)) {
+                optimizer.analysis = new ExecScalarAnalysis(function,optimizer.returns);
+                var needed = reads(function.mmp.get("script"));
+                assignmentTargets(function.mmp.get("script"),needed);
+                optimizer.removeUnusedDefinitions(function.mmp.get("script"),needed);
+            }
             if (passes.contains(RANGE_LOOP_MOTION)) {
                 int id = function.getAsInt("id");
                 ExecRangeLoopMotion.optimize(function,optimizer.returns,positions,
@@ -93,6 +100,22 @@ final class ExecO2 {
         for (var child : ExecShape.children(value)) if (!reusable(child.value())) return false;
         return true;
     }
+    private static void assignmentTargets(AcsElement value, Set<Integer> needed) {
+        if (opcode(value) == SET || opcode(value) == MOVE) needed.add(written(value));
+        for (var child : ExecShape.children(value)) assignmentTargets(child.value(),needed);
+    }
+    private void removeUnusedDefinitions(AcsElement value, Set<Integer> needed) {
+        if (opcode(value) == BLOCK) {
+            ((AcsArray)value).acsa.removeIf(item -> {
+                if (opcode(item) != DEFINE || needed.contains(written(item))) return false;
+                Block site = analysis.sites.get(item);
+                if (site == null || site.in == null) return false;
+                Value rhs = analysis.evaluate(field(item,"val"),site.in);
+                return rhs.total() && rhs.type() == number(item,"declared-type");
+            });
+        }
+        for (var child : ExecShape.children(value)) removeUnusedDefinitions(child.value(),needed);
+    }
     private AcsElement expression(AcsElement value, Map<Integer,Value> facts, Map<String,Available> available) {
         if (value == null) return null;
         if (passes.contains(COMMON_SUBEXPRESSIONS) && reusable(value)) {
@@ -100,7 +123,7 @@ final class ExecO2 {
             if (known != null && facts.containsKey(known.slot)) return variable(known.slot,value,positions);
         }
         Value known = analysis.evaluate(value,facts);
-        if (passes.contains(PROPAGATION) && known.constant() && known.total())
+        if ((passes.contains(PROPAGATION) || passes.contains(FLOW_PROPAGATION)) && known.constant() && known.total())
             return locate(known.literal(),value,positions);
         for (var child : ExecShape.children(value))
             ExecOptimizer.replace(value,child,expression(child.value(),facts,available));
@@ -131,17 +154,20 @@ final class ExecO2 {
             var condition = field(value,"v");
             Value known = analysis.evaluate(condition,site.in);
             object.mmp.put("v",expression(condition,site.in,available));
+            // Definitions preceding an IF dominate either arm. Each arm gets
+            // its own version map; nothing is exported through the join.
+            var incoming = op == IF ? new HashMap<>(available) : new HashMap<String,Available>();
             available.clear();
             if (passes.contains(CONTROL_FLOW) && known.type() == Compiler.AsTypes.BOOLEAN_VALUE
                     && known.constant() && known.total()) {
                 if (op == IF) {
                     var chosen = field(value,known.low() != 0 ? "val" : "else");
-                    return chosen == null ? null : statement(chosen,new HashMap<>());
+                    return chosen == null ? null : statement(chosen,new HashMap<>(incoming));
                 }
                 if (known.low() == 0) return null;
             }
             for (String name : List.of("val","else")) if (object.mmp.containsKey(name)) {
-                var branch = statement(field(value,name),new HashMap<>());
+                var branch = statement(field(value,name),new HashMap<>(incoming));
                 object.mmp.put(name,branch == null ? new AcsArray() : branch);
             }
             return value;
