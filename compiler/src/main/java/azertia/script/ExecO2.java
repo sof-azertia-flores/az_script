@@ -49,6 +49,11 @@ final class ExecO2 {
             // a valid source solely because an optional pass was selected.
             if (4L + ExecShape.height(body) <= abdLimit) function.mmp.put("script",body);
             else function.mmp.put("script",original);
+            if (passes.contains(RANGE_LOOP_MOTION)) {
+                int id = function.getAsInt("id");
+                ExecRangeLoopMotion.optimize(function,optimizer.returns,positions,
+                        originalNodes.get(id),originalSlots.get(id),abdLimit);
+            }
         }
     }
     static AcsElement copy(AcsElement value, Map<AcsElement,int[]> positions) {

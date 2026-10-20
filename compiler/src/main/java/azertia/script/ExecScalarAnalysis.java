@@ -283,7 +283,10 @@ final class ExecScalarAnalysis {
         if (op == SELECT) {
             Value test = evaluate(field(source, "v"), facts);
             if (test.type != BOOLEAN_VALUE) return UNKNOWN;
-            if (test.constant()) return evaluate(field(source, test.low != 0 ? "then" : "else"), facts);
+            if (test.constant()) {
+                Value selected = evaluate(field(source, test.low != 0 ? "then" : "else"), facts);
+                return new Value(selected.type,selected.low,selected.high,test.total && selected.total);
+            }
             Value a = evaluate(field(source, "then"), facts), b = evaluate(field(source, "else"), facts);
             return a.scalar() && a.type == b.type
                     ? new Value(a.type, Math.min(a.low,b.low), Math.max(a.high,b.high), test.total && a.total && b.total) : UNKNOWN;
@@ -355,6 +358,8 @@ final class ExecScalarAnalysis {
         if (test.type == BOOLEAN_VALUE && test.constant()) return (test.low != 0) == truth;
         int op = opcode(source);
         if (op == NOT) return refine(field(source,"v"), !truth, facts);
+        if (op == AND && truth || op == OR && !truth)
+            return refine(field(source,"v1"),truth,facts) && refine(field(source,"v2"),truth,facts);
         if (op == VARIABLE && test.type == BOOLEAN_VALUE) {
             facts.put(number(source,"v"),new Value(BOOLEAN_VALUE,truth?1:0,truth?1:0,true)); return true;
         }

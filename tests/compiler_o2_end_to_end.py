@@ -29,6 +29,10 @@ CASES = O1_CASES + (
     ('o2-inline-origin', 'int f(int x){\n return 1/x;\n}\nint main(){return f(0);}', None, '', 'Division by zero'),
     ('o2-inline-overflow', 'int f(int x){\n int y=x+1;\n return y;\n}\nint main(){return f(2147483647);}', None, '', 'Integer overflow'),
     ('o2-inline-loop', 'int f(int x){return (x&7)+(x&3);}int run(int n){int s=0;for(int i=0;i<n;i++){s+=f(i);}return s;}int main(){return run(8);}', 40, '', None),
+    ('o2-range-loop', 'int f(int n){int s=0;int i=0;while(i<10){s+=((n&7)+1)*3;i+=1;}return s;}int main(){return f(11);}', 120, '', None),
+    ('o2-range-guard', 'int f(int n){if(n>=0&&n<=100){int i=0;int s=0;while(i<10){s+=n*n;i+=1;}return s;}return 0;}int main(){return f(11)+f(-1);}', 1210, '', None),
+    ('o2-zero-trip-overflow', 'int f(int n){int i=0;int s=0;while(i<0){s+=n+1;i+=1;}return s;}int main(){return f(2147483647);}', 0, '', None),
+    ('o2-conditional-trap', 'int f(int n){return (n+1>2147483647)?1:2;}int main(){return f(2147483647);}', None, '', 'Integer overflow'),
 )
 
 
