@@ -7,6 +7,10 @@
 namespace azertian::jit {
 namespace {
 constexpr std::size_t operation_limit=std::size_t{1}<<22;
+// LLVM's compile time grows faster than linearly with a function's size
+// (about 1.6 s for 3,000 MIR operations, 46 s for 12,000 at O2); larger
+// functions stay with the VM.
+constexpr std::size_t native_operation_limit=2048;
 }
 Tier::Tier(const vm::ExecutableProgram& program,const Config& config)
     :program_(program),config_(config),random_(config.seed) {
@@ -90,6 +94,12 @@ Tier::Compiled& Tier::compiled(std::uint32_t function) {
             compiled_operations_+=entry.code.ops.size();
             if(const char* path=std::getenv("AZSCRIPT_JIT_DUMP");path&&*path)
                 if(FILE* file=std::fopen(path,"a")){const auto text=dump(entry.code);std::fputs(text.c_str(),file);std::fclose(file);}
+            if(native_&&entry.code.ops.size()>native_operation_limit) {
+                ++refusals_["too large for native code"];
+                entry.state=Compiled::State::ineligible;entry_bounds_[function]=program_.functions[function].end;
+                compiled_operations_-=entry.code.ops.size();
+                return entry;
+            }
             if(native_) {
                 entry.native=std::make_unique<NativeCode>(*native_,entry.code);
                 if(!entry.native->compiled())throw std::runtime_error("native code: "+entry.native->error);
