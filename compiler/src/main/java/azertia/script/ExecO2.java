@@ -57,9 +57,7 @@ final class ExecO2 {
                 optimizer.removeUnusedDefinitions(function.mmp.get("script"),needed);
             }
             if (passes.contains(RANGE_LOOP_MOTION)) {
-                int id = function.getAsInt("id");
-                ExecRangeLoopMotion.optimize(function,optimizer.returns,positions,
-                        originalNodes.get(id),originalSlots.get(id),abdLimit);
+                ExecRangeLoopMotion.optimize(function,optimizer.returns,positions,abdLimit);
             }
         }
     }

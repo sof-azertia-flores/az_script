@@ -15,7 +15,7 @@ from bench_compiler_optimization import workloads
 
 ROOT = Path(__file__).resolve().parents[1]
 CASES = ('integer_loop', 'branch_loop', 'call_0', 'call_1', 'call_4', 'call_16',
-         'repeated_expression', 'scalar_call', 'range_loop', 'object_fields',
+         'repeated_expression', 'scalar_call', 'range_loop', 'range_division', 'range_local', 'object_fields',
          'object_copy', 'virtual_monomorphic', 'virtual_alternating')
 
 
@@ -27,6 +27,10 @@ def source(name):
                 + workloads.wrap('int v=value(i);total+=v;'))
     if name == 'range_loop':
         return workloads.wrap('total+=((n&7)+1)*3;')
+    if name == 'range_division':
+        return workloads.wrap('total+=((n&7)+1)*3/((n&3)+1);')
+    if name == 'range_local':
+        return workloads.wrap('int v=((n&7)+1)*3/((n&3)+1);total+=v;')
     return workloads.source(name)
 
 
@@ -37,6 +41,8 @@ def expected(name, n):
         return sum((i & 127) ** 2 + (i & 127) for i in range(n))
     if name == 'range_loop':
         return ((n & 7) + 1) * 3 * n
+    if name in ('range_division', 'range_local'):
+        return (((n & 7) + 1) * 3 // ((n & 3) + 1)) * n
     return workloads.expected(name, n)
 
 
