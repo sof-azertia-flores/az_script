@@ -199,6 +199,20 @@ def main():
                             assert sum(item['entries'] for item in sessions) > 0, (name, mode, 'qualifying loop never compiled')
                         report['jit_cases'].append({'case': name, 'options': options, 'mode': mode, 'sessions': sessions})
                         report['observations'] += 1
+                    if not options and name in ('o2-inline-repeat', 'o2-inline-overflow', 'o2-range-loop',
+                                                'o2-cse-backedge', 'o2-loop-join', 'o2-generated-flow'):
+                        # Exercise optimized shapes on either side of the VM's
+                        # batch boundary, including traps and native tier-up.
+                        for budget in (1, 7, 31, 63, 64, 65, 127, 255):
+                            command = [args.host, abd, '--steps', str(budget)]
+                            tree = checked_observation(run(command + ['--engine', 'tree']))
+                            vm = checked_observation(run(command + ['--engine', 'vm']))
+                            assert not compare_engines(tree, vm, 'tree', 'vm'), (name, budget, tree, vm)
+                            report['budget_checks'] += 2
+                            for mode in modes:
+                                replay = checked_observation(run(command + ['--engine', 'vm'], {'AZSCRIPT_JIT': mode}))
+                                assert not compare_engines(vm, replay, 'vm', 'vm'), (name, budget, mode, vm, replay)
+                                report['budget_checks'] += 1
             assert not differences(levels[0], levels[1]), (name, 'O0/O1', differences(levels[0], levels[1]))
             for observed in levels[2:]:
                 assert not differences(levels[0], observed), (name, 'O0/O2', differences(levels[0], observed))
