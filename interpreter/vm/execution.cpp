@@ -1034,25 +1034,25 @@ struct ScalarExecutor::State {
     public:
         TierFrame(State& state,FrameRecord& record,std::uint64_t& steps,std::span<const SlotId> slots) noexcept
             :vm(state),frame(record),steps_(steps),globals(slots) {}
-        bool register_value(std::uint32_t index,Value& out) const noexcept override {
+        bool register_shadow(std::uint32_t index,std::optional<jit::Shadow>& out) const noexcept override {
             const auto& value=reg(index);
             if(value.reference)return false;
-            out=value.value;return true;
+            out=jit::shadow_of(value.value);return true;
         }
-        void set_register_value(std::uint32_t index,const Value& value) noexcept override {
+        void set_register_shadow(std::uint32_t index,const jit::Shadow& value) noexcept override {
             auto& target=reg(index);
             if(target.reference)std::terminate();
-            target.value=value;
+            target.value=jit::value_of(value);
         }
-        bool local_value(std::uint32_t index,Value& out) const noexcept override {
+        bool local_shadow(std::uint32_t index,std::optional<jit::Shadow>& out) const noexcept override {
             const auto cell=local(index);
             if(cell==no_index)return false;
-            out=cell_value(cell);return true;
+            out=jit::shadow_of(cell_value(cell));return true;
         }
-        void set_local_value(std::uint32_t index,const Value& value) noexcept override {
+        void set_local_shadow(std::uint32_t index,const jit::Shadow& value) noexcept override {
             const auto cell=local(index);
             if(cell==no_index)std::terminate();
-            cell_value(cell)=value;
+            cell_value(cell)=jit::value_of(value);
         }
         std::uint8_t flags() const noexcept override {
             return static_cast<std::uint8_t>(frame.returned|frame.broken<<1|frame.continued<<2);

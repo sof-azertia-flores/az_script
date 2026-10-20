@@ -2,8 +2,10 @@
 #define AZSCRIPT_JIT_FRAME_ACCESS_H
 
 #include "../core/value.h"
+#include "shadow.h"
 #include "../vm/program.h"
 #include <cstdint>
+#include <optional>
 
 namespace azertian::jit {
 // The executor's frame as native code sees it. Every structural operation is
@@ -14,12 +16,13 @@ namespace azertian::jit {
 class FrameAccess {
 public:
     virtual ~FrameAccess()=default;
-    // Shadow transfer at entry and exit. register_value is false for a
-    // reference register, local_value for an unbound local.
-    virtual bool register_value(std::uint32_t reg,Value& out) const noexcept=0;
-    virtual void set_register_value(std::uint32_t reg,const Value& value) noexcept=0;
-    virtual bool local_value(std::uint32_t local,Value& out) const noexcept=0;
-    virtual void set_local_value(std::uint32_t local,const Value& value) noexcept=0;
+    // Shadow transfer at entry and exit, without copying values. The reads
+    // are false for a reference register or an unbound local; out is then
+    // untouched, and it is nullopt for a value without a shadow (a string).
+    virtual bool register_shadow(std::uint32_t reg,std::optional<Shadow>& out) const noexcept=0;
+    virtual void set_register_shadow(std::uint32_t reg,const Shadow& value) noexcept=0;
+    virtual bool local_shadow(std::uint32_t local,std::optional<Shadow>& out) const noexcept=0;
+    virtual void set_local_shadow(std::uint32_t local,const Shadow& value) noexcept=0;
     // returned, broken and continued as bits 0, 1 and 2.
     virtual std::uint8_t flags() const noexcept=0;
     virtual void set_flags(std::uint8_t flags) noexcept=0;

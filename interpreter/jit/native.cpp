@@ -37,7 +37,7 @@ const azjit_helpers helpers{
     [](void* frame,std::uint32_t reg,std::uint64_t bits,std::uint32_t tag)->int{return access(frame).write_reference(reg,value_of(shadow(bits,tag)));},
     [](void* frame,std::uint32_t local,std::uint64_t bits,std::uint32_t tag)->int{return access(frame).declare(local,value_of(shadow(bits,tag)));},
     [](void* frame,std::uint32_t local,std::uint64_t bits,std::uint32_t tag) {
-        if(tag!=absent)access(frame).set_local_value(local,value_of(shadow(bits,tag)));
+        if(tag!=absent)access(frame).set_local_shadow(local,shadow(bits,tag));
     },
     [](void* frame){access(frame).enter_scope();},
     [](void* frame){access(frame).leave_scope();},

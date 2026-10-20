@@ -19,20 +19,18 @@ bool fill(const Function& function,vm::ProgramCounter pc,const FrameAccess& fram
     activation.slots.assign(function.slots(),Shadow{});
     for(std::uint32_t reg=0;reg<function.registers;++reg) {
         if(!tags[reg])continue;
-        Value value;
-        if(!frame.register_value(reg,value))return false;
-        const auto shadow=shadow_of(value);
+        std::optional<Shadow> shadow;
+        if(!frame.register_shadow(reg,shadow))return false;
         if(!shadow||!expected(reg,*shadow))return false;
         activation.slots[reg]=*shadow;
     }
     for(std::uint32_t local=0;local<function.locals;++local) {
         if(!tags[function.registers+local])continue;
-        Value value;
-        if(!frame.local_value(local,value)) {
+        std::optional<Shadow> shadow;
+        if(!frame.local_shadow(local,shadow)) {
             if(state.locals[local].declared==LocalState::Declared::yes)return false;
             continue;
         }
-        const auto shadow=shadow_of(value);
         if(!shadow||!expected(function.registers+local,*shadow))return false;
         activation.slots[function.registers+local]=*shadow;
     }
@@ -42,10 +40,10 @@ bool fill(const Function& function,vm::ProgramCounter pc,const FrameAccess& fram
 void write_back(const Function& function,std::uint32_t site,FrameAccess& frame,const Activation& activation) noexcept {
     const auto& exit=function.exits[site];
     for(const auto reg:function.exit_registers[site])
-        if(activation.slots[reg].tag!=absent)frame.set_register_value(reg,value_of(activation.slots[reg]));
+        if(activation.slots[reg].tag!=absent)frame.set_register_shadow(reg,activation.slots[reg]);
     for(std::uint32_t local=0;local<function.locals;++local)
         if(const auto& shadow=activation.slots[function.registers+local];shadow.tag!=absent)
-            frame.set_local_value(local,value_of(shadow));
+            frame.set_local_shadow(local,shadow);
     frame.set_flags(activation.flags);frame.set_steps(activation.steps);
     frame.set_depths(exit.statement_depth,exit.loop_depth);frame.set_pc(exit.pc);
 }
@@ -124,7 +122,7 @@ Outcome interpret(const Function& function,vm::ProgramCounter pc,FrameAccess& fr
             V[function.registers+op.a]=initial;break;
         }
         case Code::flush_local:
-            if(V[op.a].tag!=absent)frame.set_local_value(op.b,value_of(V[op.a]));
+            if(V[op.a].tag!=absent)frame.set_local_shadow(op.b,V[op.a]);
             break;
         case Code::enter_scope:frame.enter_scope();break;
         case Code::leave_scope:frame.leave_scope();break;

@@ -42,10 +42,10 @@ void configuration() {
 }
 // Probing never runs native code, so it never touches the frame.
 struct Untouched final:FrameAccess {
-    bool register_value(std::uint32_t,Value&) const noexcept override{std::terminate();}
-    void set_register_value(std::uint32_t,const Value&) noexcept override{std::terminate();}
-    bool local_value(std::uint32_t,Value&) const noexcept override{std::terminate();}
-    void set_local_value(std::uint32_t,const Value&) noexcept override{std::terminate();}
+    bool register_shadow(std::uint32_t,std::optional<Shadow>&) const noexcept override{std::terminate();}
+    void set_register_shadow(std::uint32_t,const Shadow&) noexcept override{std::terminate();}
+    bool local_shadow(std::uint32_t,std::optional<Shadow>&) const noexcept override{std::terminate();}
+    void set_local_shadow(std::uint32_t,const Shadow&) noexcept override{std::terminate();}
     std::uint8_t flags() const noexcept override{std::terminate();}
     void set_flags(std::uint8_t) noexcept override{std::terminate();}
     std::uint64_t steps() const noexcept override{std::terminate();}
