@@ -239,7 +239,7 @@ def main():
     args.report.parent.mkdir(parents=True, exist_ok=True)
     args.report.write_text(json.dumps(report, indent=2) + '\n')
     print(f'O2: {len(report["cases"])} cases, {report["observations"]} observations, '
-          f'{report["budget_checks"]} termination checks; {args.report}')
+          f'{report["budget_checks"]} budget checks; {args.report}')
 
 
 if __name__ == '__main__':
