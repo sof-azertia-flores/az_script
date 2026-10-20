@@ -152,11 +152,21 @@ final class ExecO2 {
         if (op == IF || op == WHILE) {
             var object = (AcsObject)value;
             var condition = field(value,"v");
+            if (op == WHILE) {
+                // The condition also runs after every backedge. A value
+                // available before the loop is reusable there only when
+                // neither its storage nor any operand can change in the loop.
+                Set<Integer> modified = new HashSet<>();
+                writes(value,modified);
+                available.entrySet().removeIf(e -> modified.contains(e.getValue().slot)
+                        || !Collections.disjoint(modified,e.getValue().dependencies));
+            }
             Value known = analysis.evaluate(condition,site.in);
             object.mmp.put("v",expression(condition,site.in,available));
             // Definitions preceding an IF dominate either arm. Each arm gets
-            // its own version map; nothing is exported through the join.
-            var incoming = op == IF ? new HashMap<>(available) : new HashMap<String,Available>();
+            // its own version map; loop inputs have additionally been checked
+            // against all loop writes. Nothing is exported through the join.
+            var incoming = new HashMap<>(available);
             available.clear();
             if (passes.contains(CONTROL_FLOW) && known.type() == Compiler.AsTypes.BOOLEAN_VALUE
                     && known.constant() && known.total()) {

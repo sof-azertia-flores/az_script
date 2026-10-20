@@ -54,6 +54,17 @@ class ExecO2OptimizerTest {
                 Set.of(COMMON_SUBEXPRESSIONS)));
         assertEquals(2,count(modified,MULTIPLY));
     }
+    @Test void loopConditionCseChecksEveryBackedgeWrite() throws Exception {
+        var operand=body(compile("int f(int n){int a=7/n;while(7/n>0){n=0;}return a;}",
+                Set.of(COMMON_SUBEXPRESSIONS)));
+        assertEquals(2,count(operand,DIVIDE));
+        var storage=body(compile("int f(int n){int a=n*7;int i=0;while(i<2&&n*7>0){a=0;i++;}return i;}",
+                Set.of(COMMON_SUBEXPRESSIONS)));
+        assertEquals(2,count(storage,MULTIPLY));
+        var stable=body(compile("int f(int n){int a=7/n;int i=0;while(i<2&&7/n>0){int b=7/n;i++;}return a+i;}",
+                Set.of(COMMON_SUBEXPRESSIONS)));
+        assertEquals(1,count(stable,DIVIDE),"a previous successful, unchanged value dominates every iteration");
+    }
     @Test void unusedDefinitionsRetainFailuresAndRequiredStorage() throws Exception {
         assertEquals(0,count(body(compile("int f(int n){int a=n&7;return n;}",Set.of(DEAD_CODE))),DEFINE));
         assertEquals(1,count(body(compile("int f(int n){int a=1/n;return n;}",Set.of(DEAD_CODE))),DEFINE));

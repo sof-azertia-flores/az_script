@@ -56,10 +56,6 @@ final class ExecRangeLoopMotion {
         }
         block.acsa.clear();block.acsa.addAll(output);
     }
-    private static void writes(AcsElement value,Set<Integer> slots) {
-        int slot=written(value);if(slot>=0)slots.add(slot);
-        for(var child:ExecShape.children(value))writes(child.value(),slots);
-    }
     private void motion(AcsElement source,Map<Integer,Value> stable,Map<String,Integer> cached,
                         List<AcsElement> prefix) {
         for(var child:ExecShape.children(source)) {

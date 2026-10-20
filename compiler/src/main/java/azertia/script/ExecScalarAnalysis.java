@@ -228,6 +228,11 @@ final class ExecScalarAnalysis {
         return op == DEFINE || op == SET ? number(value, "v")
                 : op == MOVE && opcode(field(value, "v1")) == VARIABLE ? number(field(value, "v1"), "v") : -1;
     }
+    static void writes(AcsElement value, Set<Integer> slots) {
+        int slot = written(value);
+        if (slot >= 0) slots.add(slot);
+        for (var child : ExecShape.children(value)) writes(child.value(),slots);
+    }
     static Set<Integer> reads(AcsElement value) {
         Set<Integer> result = new HashSet<>();
         if (value == null) return result;
