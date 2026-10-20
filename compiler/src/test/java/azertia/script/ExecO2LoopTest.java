@@ -57,6 +57,16 @@ class ExecO2LoopTest {
         var before=function(source,Set.of());var after=function(source,Set.of(RANGE_LOOP_MOTION));
         assertEquals(before.toJson().toString(),after.toJson().toString());
     }
+    @Test void promotionLimitPreservesRemainingInitializersAndStorage() throws Exception {
+        var body=new StringBuilder();
+        for(int i=0;i<70;i++)body.append("int v").append(i).append("=(n&7)+1;s+=v").append(i).append(";");
+        String source="int f(int n){int s=0;int i=0;while(i<2){"+body+"i+=1;}return s;}";
+        var before=function(source,Set.of());var after=function(source,Set.of(RANGE_LOOP_MOTION));
+        assertEquals(before.getAsInt("local-count"),after.getAsInt("local-count"));
+        assertEquals(6,ExecO2OptimizerTest.count(nodes(after.mmp.get("script"),WHILE).get(0),DEFINE));
+        assertEquals(ExecO2OptimizerTest.count(before.mmp.get("script"),DEFINE),
+                ExecO2OptimizerTest.count(after.mmp.get("script"),DEFINE));
+    }
     @Test void constantConditionalResultDoesNotHideAConditionTrap() throws Exception {
         var after=function("int f(int n){return (n+1>2147483647)?1:2;}",Set.of(PROPAGATION,CONTROL_FLOW));
         assertEquals(1,ExecO2OptimizerTest.count(after.mmp.get("script"),ADD));
