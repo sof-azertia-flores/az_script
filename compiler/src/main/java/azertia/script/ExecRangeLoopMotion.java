@@ -5,36 +5,25 @@ import java.util.*;
 import static azertia.script.ExecOpcodes.*;
 import static azertia.script.ExecScalarAnalysis.*;
 
-/** Loop speculation only when every operand and failure condition is proven
- * safe at the loop header, including the zero-iteration path. */
+/** Move readonly scalar initializers only when they are safe even on the
+ * zero-iteration path. Reuse their existing slots instead of growing frames. */
 final class ExecRangeLoopMotion {
-    // A new local has a cost even when an invariant is safe. In particular,
-    // stacking a temporary on O1's bit-operation hoists can slow native loops.
-    // This is an exec-expression profitability floor, not a MIR size estimate.
-    private static final int MIN_HOIST_COST = 4;
-    private final AcsObject function;
     private final ExecScalarAnalysis analysis;
-    private final Map<AcsElement,int[]> positions;
-    private final int maxNodes, maxSlot;
-    private int nodes, nextSlot, hoisted;
-    private ExecRangeLoopMotion(AcsObject function, Map<Integer,Integer> returns,
-                               Map<AcsElement,int[]> positions, int originalNodes, int originalSlots) {
-        this.function=function;this.positions=positions;
+    private final Map<Integer,Integer> allWrites=new HashMap<>(), allReads=new HashMap<>();
+    private final int parameters;
+    private int hoisted;
+    private ExecRangeLoopMotion(AcsObject function, Map<Integer,Integer> returns) {
         analysis=new ExecScalarAnalysis(function,returns);
-        nodes=count(function.mmp.get("script"));
-        maxNodes=originalNodes+Math.max(64,originalNodes/4);
-        nextSlot=function.getAsInt("param-count")+function.getAsInt("local-count");
-        maxSlot=Math.min(256,originalSlots+128);
+        parameters=function.getAsInt("param-count");
+        references(function.mmp.get("script"),allWrites,allReads);
     }
     static void optimize(AcsObject function, Map<Integer,Integer> returns, Map<AcsElement,int[]> positions,
-                         int originalNodes, int originalSlots, int abdLimit) {
+                         int abdLimit) {
         AcsElement original=function.mmp.get("script");
         function.mmp.put("script",ExecO2.copy(original,positions));
-        var pass=new ExecRangeLoopMotion(function,returns,positions,originalNodes,originalSlots);
+        var pass=new ExecRangeLoopMotion(function,returns);
         pass.blocks(function.mmp.get("script"));
-        if(4L+ExecShape.height(function.mmp.get("script"))<=abdLimit)
-            function.put("local-count",pass.nextSlot-function.getAsInt("param-count"));
-        else function.mmp.put("script",original);
+        if(4L+ExecShape.height(function.mmp.get("script"))>abdLimit)function.mmp.put("script",original);
     }
     private void blocks(AcsElement source) {
         if(opcode(source)!=BLOCK) {
@@ -53,49 +42,53 @@ final class ExecRangeLoopMotion {
                     Set<Integer> modified=new HashSet<>();writes(statement,modified);
                     Map<Integer,Value> stable=new HashMap<>(site.in);
                     modified.forEach(stable::remove);
-                    motion(statement,stable,new HashMap<>(),output);
+                    promote(statement,stable,output);
                 }
             }
             blocks(statement);output.add(statement);
         }
         block.acsa.clear();block.acsa.addAll(output);
     }
-    private void motion(AcsElement source,Map<Integer,Value> stable,Map<String,Integer> cached,
-                        List<AcsElement> prefix) {
-        for(var child:ExecShape.children(source)) {
-            if(child.role()==ExecShape.Role.STORAGE_TARGET)continue;
-            AcsElement value=child.value();
-            int op=opcode(value);
-            if(op!=CONSTANT&&op!=VARIABLE&&ExecO2.reusable(value)
-                    &&stable.keySet().containsAll(reads(value))) {
+    private void promote(AcsElement loop,Map<Integer,Value> stable,List<AcsElement> prefix) {
+        if(!(field(loop,"val") instanceof AcsArray body))return;
+        Map<Integer,Integer> loopReads=new HashMap<>();
+        references(loop,new HashMap<>(),loopReads);
+        List<AcsElement> remaining=new ArrayList<>();
+        for(var item:body.acsa) {
+            int slot=written(item);
+            var site=analysis.sites.get(item);
+            if(hoisted<64&&opcode(item)==DEFINE&&slot>=parameters
+                    &&allWrites.getOrDefault(slot,0)==1
+                    &&Objects.equals(allReads.getOrDefault(slot,0),loopReads.getOrDefault(slot,0))
+                    &&site!=null&&site.in!=null&&dominatesUses(site,slot)) {
+                var definition=(AcsObject)item;
+                var value=field(item,"val");
                 Value result=analysis.evaluate(value,stable);
-                if(result.total()&&result.scalar()) {
-                    String key=value.toJson().toString();
-                    Integer slot=cached.get(key);
-                    if(slot!=null) {
-                        nodes+=1-count(value);
-                        ExecOptimizer.replace(source,child,ExecO2.variable(slot,value,positions));
-                        continue;
-                    }
-                    if(hoistCost(value)>=MIN_HOIST_COST&&hoisted<64&&nextSlot<maxSlot&&nodes+2<=maxNodes) {
-                        slot=nextSlot++;hoisted++;nodes+=2;cached.put(key,slot);
-                        prefix.add(ExecO2.define(slot,result.type(),value,positions));
-                        ExecOptimizer.replace(source,child,ExecO2.variable(slot,value,positions));
-                        continue;
-                    }
+                if(definition.mmp.containsKey("declared-type")&&result.total()&&result.scalar()
+                        &&result.type()==number(item,"declared-type")
+                        &&stable.keySet().containsAll(reads(value))) {
+                    // A single write and no uses outside this loop also guard
+                    // against slot reuse across disjoint lexical scopes.
+                    prefix.add(item);stable.put(slot,result.evaluated());hoisted++;
+                    continue;
                 }
             }
-            motion(value,stable,cached,prefix);
+            remaining.add(item);
         }
+        body.acsa.clear();body.acsa.addAll(remaining);
     }
-    private static int hoistCost(AcsElement value) {
-        int op=opcode(value);
-        if(op==CONSTANT||op==VARIABLE)return 0;
-        int cost=op==DIVIDE||op==MODULO?MIN_HOIST_COST:1;
-        for(var child:ExecShape.children(value)) {
-            if(cost>=MIN_HOIST_COST)break;
-            cost+=hoistCost(child.value());
+    private boolean dominatesUses(Block definition,int slot) {
+        for(var block:analysis.blocks) {
+            if(block.source==null||block.in==null)continue;
+            var value=block.condition?field(block.source,"v"):block.source;
+            if(reads(value).contains(slot)&&!block.dominators.get(definition.id))return false;
         }
-        return Math.min(cost,MIN_HOIST_COST);
+        return true;
+    }
+    private static void references(AcsElement value,Map<Integer,Integer> writes,Map<Integer,Integer> reads) {
+        int slot=written(value);
+        if(slot>=0)writes.merge(slot,1,Integer::sum);
+        if(opcode(value)==VARIABLE)reads.merge(number(value,"v"),1,Integer::sum);
+        for(var child:ExecShape.children(value))references(child.value(),writes,reads);
     }
 }
