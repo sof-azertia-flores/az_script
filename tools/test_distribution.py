@@ -201,6 +201,25 @@ def verify(package: Path, java: Optional[Path] = None) -> Dict[str, object]:
         passed("source paths with spaces and three default outputs" +
                (" without system Java" if bundled_java.is_file() and not WINDOWS else ""))
 
+        optimized_source = source_directory / "scalar optimization.azs"
+        optimized_source.write_text("int f(int n){int a=n&7;return a*a+a;}"
+                                    "int guard(int n){int a=n*7;int i=0;while(i<2&&n*7>0){a=0;i++;}return i;}"
+                                    "int main(){int s=0;for(int i=0;i<8;i++){int v=f(i);s+=v;}return s+guard(1);}")
+        _run([compiler, optimized_source, "-O2", "-o", "optimized/program.abd"], cwd, compiler_environment)
+        _outputs(cwd / "optimized/program.abd", cwd / "optimized/program.ast.json",
+                 cwd / "optimized/program.exec.json")
+        _run([compiler, "compile-json", cwd / "optimized/program.ast.json", "-O2",
+              "-o", "optimized/roundtrip.abd"], cwd, compiler_environment)
+        _require((cwd / "optimized/program.abd").read_bytes() == (cwd / "optimized/roundtrip.abd").read_bytes(),
+                 "O2 source/AST mismatch")
+        optimized = _run([runner, cwd / "optimized/program.abd"], cwd, environment)
+        _require(optimized.stdout.strip() == "170", "O2 scalar program result mismatch")
+        _run([compiler, optimized_source, "-O2", "-O0", "-o", "optimized/last.abd"], cwd, compiler_environment)
+        _run([compiler, optimized_source, "-o", "optimized/default.abd"], cwd, compiler_environment)
+        _require((cwd / "optimized/last.abd").read_bytes() == (cwd / "optimized/default.abd").read_bytes(),
+                 "Last optimization option did not win")
+        passed("O2 source and AST entry points, runtime result and last optimization option")
+
         _run([compiler, source, "-o", "output directory/custom.abd"], cwd, compiler_environment)
         custom = cwd / "output directory"
         _outputs(custom / "custom.abd", custom / "custom.ast.json", custom / "custom.exec.json")

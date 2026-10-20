@@ -7,14 +7,17 @@ import java.util.*;
 
 /** Resolves symbols and lowers the readable JSON AST to numeric-slot ABD instructions. */
 public class Compiler {
-    /** NONE preserves the original lowering; STANDARD enables the opt-in O1 pipeline. */
-    public enum Optimization { NONE, CONSTANTS, STANDARD }
-    public enum OptimizationPass { CONSTANTS, PROPAGATION, INLINING, LOOP_MOTION }
+    /** NONE preserves lowering; STANDARD and ADVANCED select the O1 and O2 pipelines. */
+    public enum Optimization { NONE, CONSTANTS, STANDARD, ADVANCED }
+    public enum OptimizationPass { CONSTANTS, PROPAGATION, INLINING, LOOP_MOTION,
+        CONTROL_FLOW, COMMON_SUBEXPRESSIONS, DEAD_CODE, SCALAR_INLINING, RANGE_LOOP_MOTION, FLOW_PROPAGATION }
     public static Set<OptimizationPass> optimizationPasses(Optimization optimization) {
         return switch (Objects.requireNonNull(optimization)) {
             case NONE -> Set.of();
             case CONSTANTS -> Set.of(OptimizationPass.CONSTANTS);
-            case STANDARD -> Set.of(OptimizationPass.values());
+            case STANDARD -> Set.of(OptimizationPass.CONSTANTS, OptimizationPass.PROPAGATION,
+                    OptimizationPass.INLINING, OptimizationPass.LOOP_MOTION);
+            case ADVANCED -> Set.of(OptimizationPass.values());
         };
     }
     // Mutable holders: the depth changes at every node, and updating a holder avoids a ThreadLocal.set each time.
@@ -3313,6 +3316,7 @@ public class Compiler {
             if (passes.contains(OptimizationPass.LOOP_MOTION)) ExecLoopMotion.optimize(compiled, state.positions);
             if (!passes.isEmpty()) ExecShape.requireFits(compiled.mmp.get("script"), 4, state.abdLimit);
         }
+        ExecO2.optimize(output, passes, state.positions, state.abdLimit);
         AcsArray debugFiles = new AcsArray();
         for (String file : state.debugFiles) debugFiles.acsa.add(new AcsStringElement(file));
         result.put("debug-files", debugFiles);

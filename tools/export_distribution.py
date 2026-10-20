@@ -79,6 +79,8 @@ def check_destination(raw, force):
 
 def copy_assets(package):
     (package / 'docs').mkdir()
+    (package / 'docs/compiler-optimization').mkdir()
+    shutil.copy2(ROOT / 'docs/compiler-optimization/O2.md', package / 'docs/compiler-optimization/O2.md')
     for name in ('USAGE.md', 'QUICKSTART.md', 'USAGE.en.md', 'QUICKSTART.en.md'):
         shutil.copy2(TEMPLATES / name, package / 'docs' / name)
     for name in ('EXEC_FORMAT.md', 'HINT_LINKING.md', 'EXTERN_LIBRARY.md', 'RUNTIME_ABI.md',
@@ -111,6 +113,7 @@ def copy_assets(package):
         '完整参数及 C++ / JNI 接入见 [使用说明](USAGE.md)。\n\n') + language[end:]
     language = language.replace('](stdlib/', '](../stdlib/').replace('](examples/', '](../examples/')
     language = language.replace('](../docs/EXEC_FORMAT.md)', '](EXEC_FORMAT.md)').replace('](../docs/HINT_LINKING.md)', '](HINT_LINKING.md)').replace('](../docs/EXTERN_LIBRARY.md)', '](EXTERN_LIBRARY.md)')
+    language = language.replace('](../docs/compiler-optimization/O2.md)', '](compiler-optimization/O2.md)')
     (package / 'docs/LANGUAGE.md').write_text(language, encoding='utf-8')
     language = (ROOT / 'compiler/LANGUAGE.en.md').read_text(encoding='utf-8')
     start = language.index('From the repository root')
@@ -124,6 +127,7 @@ def copy_assets(package):
     language = language.replace('](stdlib/', '](../stdlib/').replace('](examples/', '](../examples/')
     for name in ('EXEC_FORMAT.en.md', 'HINT_LINKING.en.md', 'EXTERN_LIBRARY.en.md'):
         language = language.replace(f'](../docs/{name})', f']({name})')
+    language = language.replace('](../docs/compiler-optimization/O2.md)', '](compiler-optimization/O2.md)')
     (package / 'docs/LANGUAGE.en.md').write_text(language, encoding='utf-8')
     shutil.copytree(TEMPLATES / 'licenses', package / 'licenses')
     shutil.copy2(TEMPLATES / 'THIRD_PARTY.md', package / 'THIRD_PARTY.md')
