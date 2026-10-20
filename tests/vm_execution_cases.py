@@ -118,6 +118,9 @@ def cases(stage='all'):
     result = [
         case('zero-loop', 'int main(){int n=7;for(int i=0;i<0;i=i+1){n=n+100;}return n;}\n', 7),
         case('break-continue', 'int main(){int n=0;for(int i=0;i<6;i=i+1){if(i==2)continue;if(i==5)break;n=n+i;}return n;}\n', 8),
+        # At the end of the body x is declared on some paths only.
+        case('flow-skips-declaration', 'int f(int n){int sum=0;for(int i=0;i<6;i=i+1){if(i==1)continue;if(i==n)break;int x=i;sum=sum+x;}return sum;}\n'
+             'int main(){return f(3)*100+f(9);}\n', 214),
         case('nested-scope', 'int main(){int n=2;{int n=7;n=n+3;}return n;}\n', 2),
         case('return-from-loop', 'int main(){int i=0;while(i<3){int n=i+1;if(n==2)return n;i=i+1;}return 9;}\n', 2),
         case('short-circuit', 'int main(){int n=0;boolean a=false&&((n=1)==1);boolean b=true||((n=2)==2);return n;}\n', 0),

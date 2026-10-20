@@ -145,7 +145,12 @@ class Generator {
                 const auto allowed=source.resume_tags[std::size_t{id}*source.slots+slot];
                 if(!allowed){b.CreateStore(c64(0),bits[slot]);b.CreateStore(c8(AZJIT_ABSENT),tags[slot]);continue;}
                 b.CreateStore(b.CreateLoad(i64,slot_field(c32(slot),0)),bits[slot]);
-                store_tag(slot,b.CreateLoad(i8,slot_field(c32(slot),1)),allowed);
+                // A register present here is always loaded, but a local that
+                // may be undeclared (a break or return skipped its declaration)
+                // enters absent: its tag is loaded, never assumed.
+                auto* tag=b.CreateLoad(i8,slot_field(c32(slot),1));
+                if(slot<source.registers)store_tag(slot,tag,allowed);
+                else b.CreateStore(tag,tags[slot]);
             }
             b.CreateBr(blocks[source.resume_ops[id]]);
         }
