@@ -69,4 +69,12 @@ ScalarExecutor::State::reach_bound
 最小复现、逐模式结果与诊断回溯：O2 工作树的
 `build/o2-jit-baseline-repro/{early-return.azs,small.log,trace.log}`。
 
-在修复提交完成相应重放前，不能宣告 JIT 联合验收全部通过。
+等待超时已单独处理：后端对齐驱动向 `end_to_end.py` 显式传递 60 秒 watchdog，
+单独运行该套件仍默认 10 秒。LLVM stress 和 sanitizer MIR stress 的端到端重放
+各 60/60 通过；没有改动运行预算、结果比较或 JIT 配置。sanitizer 原有其余套件
+与本次重放合并后为 1,376/1,376 通过，原超时报告和重放报告均保留。
+报告为联合/消毒工作树的 `build/runtime-perf/alignment-stress-*-watchdog/report.json`，
+完整 sanitizer 验收索引为 O2 工作树的 `build/o2-sanitize-acceptance.json`。
+
+因此剩余阻塞是上述 10 个运行时异常观察。等待上限修正不构成它们的修复；
+在 JIT 修复提交完成相应重放前，不能宣告 JIT 联合验收全部通过。

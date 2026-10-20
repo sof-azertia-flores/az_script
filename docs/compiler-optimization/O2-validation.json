@@ -1,0 +1,217 @@
+{
+  "compiler_implementation": "a9d1e3e",
+  "final_test_commit": "b259460",
+  "runtime": "93b5dd0",
+  "status": "compiler-validation-passed-joint-jit-blocked",
+  "java_tests": 375,
+  "java_log": {
+    "path": "build/o2-candidate4-final-java.log",
+    "sha256": "1e9525f59206d5c6921e73ea6c4a560b97d734b6ba77641703c8f3e069c4c3fc"
+  },
+  "abd_java_regression": "passed",
+  "corpus_recompilation": {
+    "cases": 463,
+    "commands": 2838,
+    "identical_artifacts_by_level": {
+      "O0": 473,
+      "O1": 473,
+      "O2": 473
+    },
+    "evidence": {
+      "path": "build/o2-candidate4-corpus/report.json",
+      "sha256": "8f6cc5a57979d2244a8c4e54d1caa0732ac8e781e7c009f345d075d3a89394e5"
+    },
+    "reuse_reports": {
+      "ordinary": {
+        "path": "/workspace/az_script_o2/build/compiler-optimization-corpus/report.json",
+        "sha256": "0129a17cf852f8551e4a6b0e05e8f70de5c6f3a1f9578c44b5c15823f9f8fcc9"
+      },
+      "jit": {
+        "path": "/workspace/az_script_o2_jit/build/compiler-optimization-corpus/report.json",
+        "sha256": "3b234984759af41cb48327344f78c622d8d1c7fa3ed69a676ea5d8b725e78fd6"
+      },
+      "sanitize": {
+        "path": "/workspace/az_script_o2_sanitize/build/compiler-optimization-corpus-sanitize/report.json",
+        "sha256": "b4f0d1b546969f124d8d1f557dfe847e1ddb9a3442eb2a0dd6651409ec9a18fe"
+      },
+      "aarch64": {
+        "path": "/workspace/az_script_o2/build/o2-aarch64-corpus/report.json",
+        "sha256": "eee1a511862753fe31a02df263d1385789885fb78b69e6e1afc014a023935cac"
+      }
+    },
+    "note": "Recompiled all sources/modules and ASTs; compared every ABD byte against the completed ordinary, JIT, sanitizer and AArch64 corpus artifacts. Runtime observations for unchanged bytes were reused; these are not newly repeated native executions."
+  },
+  "targeted_revalidation": {
+    "source_cases_including_both_generated_batch_sizes": 63,
+    "variants": 224,
+    "changed_cases": [
+      "o2-cse-loop-stable",
+      "o2-range-division",
+      "o2-range-guard",
+      "o2-range-guard-division",
+      "o2-range-loop",
+      "o2-range-reset"
+    ],
+    "evidence": {
+      "path": "build/o2-candidate4-target-audit/report.json",
+      "sha256": "d50bdb287e35afa06009a297f308cdf13a21d9374b4453c5a6de311c9be75a47"
+    },
+    "platforms": {
+      "jit": {
+        "cases": 6,
+        "observations": 132,
+        "budget_checks": 180,
+        "reports": [
+          {
+            "path": "build/o2-candidate4-range-jit.json",
+            "sha256": "7c5d11037b62197a1c6f613198f668ca8c542973f7672d3319eb9896ee4339e4"
+          },
+          {
+            "path": "build/o2-candidate4-cse-jit.json",
+            "sha256": "822b43242bb5661afa6cc2057b502fdff2d18771ca5bac5b06a5f3e477337ee4"
+          }
+        ],
+        "jit": {
+          "probe:7": {
+            "sessions": 0,
+            "entries": 0,
+            "compiled": 0
+          },
+          "eager": {
+            "sessions": 12,
+            "entries": 74,
+            "compiled": 24
+          },
+          "stress": {
+            "sessions": 12,
+            "entries": 6922,
+            "compiled": 24
+          },
+          "on:2+interp": {
+            "sessions": 12,
+            "entries": 18,
+            "compiled": 12
+          },
+          "eager+llvm": {
+            "sessions": 12,
+            "entries": 74,
+            "compiled": 24
+          },
+          "stress+llvm": {
+            "sessions": 12,
+            "entries": 6922,
+            "compiled": 24
+          },
+          "on:3+llvm": {
+            "sessions": 12,
+            "entries": 18,
+            "compiled": 12
+          }
+        }
+      },
+      "sanitize": {
+        "cases": 6,
+        "observations": 96,
+        "budget_checks": 120,
+        "reports": [
+          {
+            "path": "build/o2-candidate4-range-sanitize.json",
+            "sha256": "b049a0dc2585484b66b6aa452faba1f734bf15c142b1ee40d79416bf503a838f"
+          },
+          {
+            "path": "build/o2-candidate4-cse-sanitize.json",
+            "sha256": "ca70cf308ee9b5affa04d88d990cdb261d0136160a36869b988a1e59996307fa"
+          }
+        ],
+        "jit": {
+          "probe:7": {
+            "sessions": 0,
+            "entries": 0,
+            "compiled": 0
+          },
+          "eager": {
+            "sessions": 12,
+            "entries": 74,
+            "compiled": 24
+          },
+          "stress": {
+            "sessions": 12,
+            "entries": 6922,
+            "compiled": 24
+          },
+          "on:2+interp": {
+            "sessions": 12,
+            "entries": 18,
+            "compiled": 12
+          }
+        }
+      },
+      "aarch64": {
+        "cases": 6,
+        "observations": 132,
+        "budget_checks": 180,
+        "reports": [
+          {
+            "path": "build/o2-candidate4-range-aarch64.json",
+            "sha256": "7c5d11037b62197a1c6f613198f668ca8c542973f7672d3319eb9896ee4339e4"
+          },
+          {
+            "path": "build/o2-candidate4-cse-aarch64.json",
+            "sha256": "822b43242bb5661afa6cc2057b502fdff2d18771ca5bac5b06a5f3e477337ee4"
+          }
+        ],
+        "jit": {
+          "probe:7": {
+            "sessions": 0,
+            "entries": 0,
+            "compiled": 0
+          },
+          "eager": {
+            "sessions": 12,
+            "entries": 74,
+            "compiled": 24
+          },
+          "stress": {
+            "sessions": 12,
+            "entries": 6922,
+            "compiled": 24
+          },
+          "on:2+interp": {
+            "sessions": 12,
+            "entries": 18,
+            "compiled": 12
+          },
+          "eager+llvm": {
+            "sessions": 12,
+            "entries": 74,
+            "compiled": 24
+          },
+          "stress+llvm": {
+            "sessions": 12,
+            "entries": 6922,
+            "compiled": 24
+          },
+          "on:3+llvm": {
+            "sessions": 12,
+            "entries": 18,
+            "compiled": 12
+          }
+        }
+      }
+    }
+  },
+  "distribution": {
+    "checks": 33,
+    "manifest_files": 191,
+    "compiler_class_contents_match": true,
+    "evidence": {
+      "path": "build/o2-distribution-candidate4-check.json",
+      "sha256": "b5e1a5f10946ff359f873b54293ce0231ad975da9643d6bfab901dc609092ca9"
+    }
+  },
+  "sanitizer_full_acceptance": {
+    "path": "build/o2-sanitize-acceptance.json",
+    "sha256": "feb2182f0913ac2a3550fcdb518dc144a0fb6d9754c071eb7b5b7228660a956d"
+  },
+  "jit_blocker": "JIT-93b5dd0-validation.md"
+}
