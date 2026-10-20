@@ -18,7 +18,7 @@ class ExecO2LoopTest {
         return result;
     }
     @Test void rangeProofHoistsWholeArithmeticInsteadOfOnlyBitOperations() throws Exception {
-        String source="int f(int n){int s=0;int i=0;while(i<10){s+=((n&7)+1)*3;i+=1;}return s;}";
+        String source="int f(int n){int s=0;int i=0;while(i<10){s+=((n&7)+1)*3/((n&3)+1);i+=1;}return s;}";
         var before=function(source,Set.of());var after=function(source,Set.of(RANGE_LOOP_MOTION));
         assertEquals(before.getAsInt("local-count")+1,after.getAsInt("local-count"));
         var loop=nodes(after.mmp.get("script"),WHILE).get(0);
@@ -26,12 +26,22 @@ class ExecO2LoopTest {
         assertEquals(1,ExecO2OptimizerTest.count(after.mmp.get("script"),MULTIPLY));
     }
     @Test void branchRangesProveSafetyButFullIntInputsDoNot() throws Exception {
-        String guarded="int f(int n){if(n>=0&&n<=100){int i=0;int s=0;while(i<10){s+=n*n;i+=1;}return s;}return 0;}";
+        String guarded="int f(int n){if(n>=0&&n<=100){int i=0;int s=0;while(i<10){s+=n*n/3;i+=1;}return s;}return 0;}";
         var after=function(guarded,Set.of(RANGE_LOOP_MOTION));
         assertEquals(0,ExecO2OptimizerTest.count(nodes(after.mmp.get("script"),WHILE).get(0),MULTIPLY));
-        String unguarded="int f(int n){int s=0;int i=0;while(i<10){s+=n*n;i+=1;}return s;}";
+        String unguarded="int f(int n){int s=0;int i=0;while(i<10){s+=n*n/3;i+=1;}return s;}";
         var untouched=function(unguarded,Set.of(RANGE_LOOP_MOTION));
         assertEquals(1,ExecO2OptimizerTest.count(nodes(untouched.mmp.get("script"),WHILE).get(0),MULTIPLY));
+    }
+    @Test void cheapArithmeticDoesNotStackAnotherTemporaryOnO1LoopMotion() throws Exception {
+        String source="int f(int n){int s=0;int i=0;while(i<10){s+=((n&7)+1)*3;i+=1;}return s;}";
+        var passes=EnumSet.allOf(Compiler.OptimizationPass.class);
+        passes.remove(RANGE_LOOP_MOTION);
+        var before=function(source,passes);
+        passes.add(RANGE_LOOP_MOTION);
+        var after=function(source,passes);
+        assertEquals(before.getAsInt("local-count"),after.getAsInt("local-count"));
+        assertEquals(1,ExecO2OptimizerTest.count(nodes(after.mmp.get("script"),WHILE).get(0),MULTIPLY));
     }
     @Test void zeroTripAndVariantOperationsStayInside() throws Exception {
         for(String source:List.of(

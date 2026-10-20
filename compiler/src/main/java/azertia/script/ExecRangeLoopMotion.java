@@ -8,6 +8,10 @@ import static azertia.script.ExecScalarAnalysis.*;
 /** Loop speculation only when every operand and failure condition is proven
  * safe at the loop header, including the zero-iteration path. */
 final class ExecRangeLoopMotion {
+    // A new local has a cost even when an invariant is safe. In particular,
+    // stacking a temporary on O1's bit-operation hoists can slow native loops.
+    // This is an exec-expression profitability floor, not a MIR size estimate.
+    private static final int MIN_HOIST_COST = 4;
     private final AcsObject function;
     private final ExecScalarAnalysis analysis;
     private final Map<AcsElement,int[]> positions;
@@ -73,7 +77,7 @@ final class ExecRangeLoopMotion {
                         ExecOptimizer.replace(source,child,ExecO2.variable(slot,value,positions));
                         continue;
                     }
-                    if(hoisted<64&&nextSlot<maxSlot&&nodes+2<=maxNodes) {
+                    if(hoistCost(value)>=MIN_HOIST_COST&&hoisted<64&&nextSlot<maxSlot&&nodes+2<=maxNodes) {
                         slot=nextSlot++;hoisted++;nodes+=2;cached.put(key,slot);
                         prefix.add(ExecO2.define(slot,result.type(),value,positions));
                         ExecOptimizer.replace(source,child,ExecO2.variable(slot,value,positions));
@@ -83,5 +87,15 @@ final class ExecRangeLoopMotion {
             }
             motion(value,stable,cached,prefix);
         }
+    }
+    private static int hoistCost(AcsElement value) {
+        int op=opcode(value);
+        if(op==CONSTANT||op==VARIABLE)return 0;
+        int cost=op==DIVIDE||op==MODULO?MIN_HOIST_COST:1;
+        for(var child:ExecShape.children(value)) {
+            if(cost>=MIN_HOIST_COST)break;
+            cost+=hoistCost(child.value());
+        }
+        return Math.min(cost,MIN_HOIST_COST);
     }
 }
