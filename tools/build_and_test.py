@@ -161,6 +161,9 @@ def main():
     run([sys.executable, ROOT/'tests/containers_library.py', '--classpath', classpath,
          '--runner', native/'interpreter/azscript-run'])
     e2e=[sys.executable,ROOT/'tests/end_to_end.py','--classpath',classpath,'--runner',native/'interpreter/azscript-run','--bridge',bridge]
+    # Under the sanitizers a script run to the default step limit takes about
+    # 5 s on the tree, too close to the 10 s watchdog on a busy machine.
+    if args.sanitize:e2e += ['--runner-timeout',60]
     if jni:e2e += ['--library',native/'abdjni'/libname]
     run(e2e)
     classes=[sys.executable,ROOT/'tests/classes_end_to_end.py','--classpath',classpath,
