@@ -120,7 +120,7 @@ Storage rules: assigning into storage that already owns a class block assigns sl
 
 ## Generic operation contexts (opcodes 36–39)
 
-`hidden_count` is the number of operation contexts a function receives, separate from visible arguments and frame slots. `entry_kind` is 0 for an ordinary entry or 1 for a compiler-internal entry. The inspection JSON uses `hidden-count` and `entry-kind`; decoders emit both even when zero. Lifecycle hooks require zero hidden contexts. Public C++/JNI invocation cannot supply hidden contexts: expose an ordinary non-generic wrapper around a generic implementation. Reflection accepts only ordinary entries with zero hidden contexts. Generic externs resolve to script implementations, not native or Java callbacks.
+`hidden_count` is the number of operation contexts a function receives, separate from visible arguments and frame slots. `entry_kind` is 0 for an ordinary entry or 1 for a compiler-internal entry; function definitions in v11 development may also use 2 (compiler-private, see the v11 additions below), while external signatures stay 0 or 1. The inspection JSON uses `hidden-count` and `entry-kind`; decoders emit both even when zero. Lifecycle hooks require zero hidden contexts. Public C++/JNI invocation cannot supply hidden contexts: expose an ordinary non-generic wrapper around a generic implementation. Reflection accepts only ordinary entries with zero hidden contexts. Generic externs resolve to script implementations, not native or Java callbacks.
 
 A context describes only ABI behavior, never a class name, layout, bound, or native pointer. Each context is a raw stack:
 
@@ -197,7 +197,7 @@ Inspection JSON is `{"t":0,"c":52,"v":address,"entries":[{"id":functionId,"conte
 
 Flush relocates every method function ID and function reference recursively within its contexts under the defining module's assumptions; method slot numbers are not relocatable IDs. Each entry must name an ordinary script function whose first parameter is address and whose hidden count matches the supplied contexts. Native/Java bindings cannot supply entries. These checks do not verify nominal class identity or agreement between independently compiled header slot orders. These opcodes extend exec v10 without changing its version, root, or function record.
 
-## v11 additions in development (opcodes 54–57)
+## v11 additions in development (opcodes 54–57 and private functions)
 
 These records belong to the [exec v11 plan](exec-v11-roadmap/DESIGN.md). Readers and writers on `exec_v11_main` support them, but the exec version stays 10 until the v11 release stage; O0/O1/O2 compilation never emits them.
 
@@ -207,6 +207,8 @@ These records belong to the [exec v11 plan](exec-v11-roadmap/DESIGN.md). Readers
 ```
 
 The inspection JSON of `seq` is `{"t":0,"c":54,"statements":[...],"v":value}`. The statements run in order, each statement's temporaries end with it (as in a block), and then `value` is evaluated and returned. A sequence creates no scope, so readers reject: a variable declaration (opcode 4) outside a nested block; `brk`/`cont` leaving a loop that is not inside the sequence, including a jump in the condition of a loop inside it; `r`/`ro`; and the object ownership and cleanup opcodes 10, 11, 31, 32, 34, 35, 40 and 52. Nested blocks and complete `wi` loops may appear, and sequences may nest. Statements cost the same steps as in a block, and the sequence itself costs one step.
+
+Private functions (`entry_kind=2`) are compiler-generated clones and specializations that only direct calls of the same module reach. Host invocation and reflection treat them as absent (`Unknown function id: …`) and `hasFunction` returns false; external signatures cannot declare a private entry, and flush rejects imports of one and calls from other modules, including hint-mapped calls. Lifecycle functions and main cannot be private. Private functions cannot be method-table entries, placement initializers or default factories, as with entry kind 1. The VM classifies them as ordinary functions; the entry kind alone does not make an object frame.
 
 `wrap_add`, `wrap_minus` and `wrap_multiply` wrap in int32 two's complement when both operands are int and never report overflow; every other operand combination behaves exactly like opcodes 12–14, including string concatenation, float overflow and type errors. The compiler emits them only where it has proved the result cannot overflow, or where wrapping is the intended meaning.
 

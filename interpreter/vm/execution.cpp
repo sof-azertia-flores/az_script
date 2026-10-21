@@ -253,7 +253,7 @@ struct ScalarExecutor::State {
             const auto& function=program.functions[index];
             // Generic functions keep their hidden and bound contexts in an
             // object frame.
-            bool objects=(function.entry_kind&&!function.lifecycle)||object_signature(function.return_type,function.param_types)||
+            bool objects=(function.entry_kind==1&&!function.lifecycle)||object_signature(function.return_type,function.param_types)||
                 function.hidden_count||function.bound_context_count;
             for(auto pc=function.begin;pc<function.end;++pc) {
                 const auto& instruction=program.instructions[pc];
@@ -265,7 +265,7 @@ struct ScalarExecutor::State {
                         throw std::invalid_argument("Scalar VM does not support generic or object call contexts");
                     if(object_signature(target.return_type,target.param_types))objects=true;
                     if(target.kind==TargetKind::script) {
-                        if(target.entry_kind)objects=true;
+                        if(target.entry_kind==1)objects=true;
                         callers[target.function].push_back(index);
                     } else if(ids::is_heap_builtin(target.function_id)||
                             target.function_id==ids::id(ids::builtin::reflect_invoke_function)) {

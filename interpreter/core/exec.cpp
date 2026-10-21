@@ -487,8 +487,12 @@ module read_fields(raw_view root,std::size_t offset) {
         std::vector<std::uint32_t> located;
         if(entry.boolean())fn.debug=read_function_debug(entry.take(),debug_files,located);
         entry.finish();
-        if(hidden<0||static_cast<std::size_t>(hidden)>max_slots||fn.entry_kind<0||fn.entry_kind>1)
+        if(hidden<0||static_cast<std::size_t>(hidden)>max_slots||fn.entry_kind<0||fn.entry_kind>2)
             throw std::invalid_argument("Invalid function generic ABI");
+        // exec v11 private functions (entry kind 2) are compiler clones that
+        // only direct calls of their own module may reach.
+        if(fn.entry_kind==2&&(fn.function_id==0||fn.function_id==1||fn.function_id==ids::main_function))
+            throw std::invalid_argument("Lifecycle and main functions cannot be private");
         if(fn.return_type==ANY_VALUE&&!hidden)throw std::invalid_argument("Any return requires generic contexts");
         if(fn.param_types.size()!=static_cast<std::size_t>(param_count))throw std::invalid_argument("param-count and param-types disagree");
         if((fn.function_id==0||fn.function_id==1)&&(fn.return_type!=VOID_VALUE||param_count!=0||hidden!=0))

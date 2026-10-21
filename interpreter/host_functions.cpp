@@ -68,7 +68,10 @@ std::shared_ptr<function> script::getFunction(int id) {
 bool script::hasFunction(int id) {
     std::lock_guard<std::recursive_mutex> lock(runtime_mutex());
     if(closed)return false;
-    if(functions.contains(id))return true;
+    if(auto found=functions.find(id);found!=functions.end()) {
+        auto fn=std::dynamic_pointer_cast<ofunction>(found->second);
+        return !fn||fn->entry_kind!=2;
+    }
     const int ns=namespace_of(id);
     return (ns==0x0abd||!script_namespaces.contains(ns))&&isInternelFunction(id);
 }

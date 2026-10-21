@@ -956,6 +956,19 @@ def main():
                 ('new-block', block(expression(32, integer(1))), 'own, release or clean up')]:
             body = block(declare, expression(28, constant(True), block(returning(expression(54, stack(statement), local)))))
             execute_wire('sequence-reject-' + name, module([function(body, locals_count=1)]), invalid=True, error=error)
+        # Private functions (entry kind 2) are reachable by their module's direct calls only.
+        helper = 0x0FFFFF00
+        call_helper = expression(2, integer(helper), stack(constant(41)), stack())
+        fields = module([function(returning(call_helper)),
+                         function(returning(expression(12, expression(3, integer(0)), constant(1))), helper, params=[0], entry_kind=2)])
+        payload = frame(stack(*fields))
+        assert encode_compact_module(WireReader().read(payload)) == payload, 'private function independent roundtrip'
+        execute_wire('private-function-call', fields, expected='42\n')
+        execute_wire('private-main', module([function(returning(constant(1)), entry_kind=2)]), invalid=True,
+                     error='cannot be private')
+        execute_wire('entry-kind-3', module([function(returning(constant(1))),
+                                             function(returning(constant(1)), helper, entry_kind=3)]), invalid=True,
+                     error='Invalid function generic ABI')
         # Wrapping arithmetic wraps int32 and otherwise behaves as the checked operator.
         for opcode, left, right, kind, expected in [
                 (55, 2147483647, 1, 0, '-2147483648'), (56, -2147483648, 1, 0, '2147483647'),

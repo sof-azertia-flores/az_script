@@ -24,6 +24,8 @@ V invoke_bound_function(const std::shared_ptr<script>& script,int id,ownership::
 int ofunction::return_type(){return rett;}
 V ofunction::invoke(E ev,std::vector<V> args) {
     entry_scope entry;return entry.run([&]() -> V {
+    // Private functions are invisible to hosts, as if absent.
+    if(entry_kind==2)throw std::runtime_error("Unknown function id: "+function_id_text(function_id));
     if(hidden_count)throw std::runtime_error("Generic function requires a non-generic wrapper for public invocation");
     return invoke_bound(std::move(ev),std::move(args),{});
     });

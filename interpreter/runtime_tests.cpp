@@ -2232,7 +2232,46 @@ void native_stack_tests() {
     check(call(deep_id,20)==400,"the automatic limit leaves ordinary recursion alone");
     deep->destroy();
 }
+// exec v11 private functions (entry kind 2) are reachable only by direct
+// calls of their own module: hosts and reflection see them as absent, and
+// neither imports nor other modules' calls may name them.
+void private_function_tests() {
+    const auto private_fn=[](int id,int type,R body,int locals=0,std::initializer_list<int> params={}) {
+        return replace_raw(rfn(id,type,body,locals,params),7,ri(2));
+    };
+    const char* previous=std::getenv("AZSCRIPT_EXPERIMENTAL_VM_BACKEND");
+    const std::string saved=previous?previous:"";
+    for(const char* engine:{"0","1"}) {
+        setenv("AZSCRIPT_EXPERIMENTAL_VM_BACKEND",engine,1);
+        auto program=load_raw(rmodule({
+            private_fn(0x0fffff00,INT_VALUE,rreturn(rx(12,{rvar(0),rc(n(1))})),0,{INT_VALUE}),
+            rfn(700,INT_VALUE,rreturn(rcall(0x0fffff00,{rc(n(41))}))),
+            rfn(701,INT_VALUE,rreturn(reflect(INT_VALUE,0x0fffff00,{rc(n(1))})))}));
+        check(integer(program->invoke(700))==42,"a module calls its private function directly");
+        rejects_message([&]{program->invoke(0x0fffff00,{std::make_shared<variable>(1)});},
+            "Unknown function id: 0x0fffff00","hosts cannot invoke private functions");
+        rejects_message([&]{program->invoke(701);},"Unknown function id: 0x0fffff00","reflection cannot find private functions");
+        check(!program->hasFunction(0x0fffff00)&&program->hasFunction(700),"private functions are not listed");
+        // Another module reaches the private function neither by import nor by a hint-mapped call.
+        rejects_message([&]{insert_raw(program,rhint("",{rfn(0x10000001,INT_VALUE,rreturn(rcall(0x0fffff00,{rc(n(1))})))},0,nullptr,
+            raw({rsignature(0x0fffff00,INT_VALUE,{INT_VALUE})})));},
+            "Private script function cannot be imported: 0x0fffff00","private functions cannot be imported");
+        program->destroy();
+        auto owner=load_raw(rhint("Owner",{private_fn(0x00000002,INT_VALUE,rreturn(rc(n(5)))),rfn(3,INT_VALUE,rreturn(rcall(2)))}),false);
+        insert_raw(owner,rhint("",{rfn(0x10000001,INT_VALUE,rreturn(rcall(0x20000002)))},0,raw({assume("Owner",0x2000)})),false);
+        rejects_containing([&]{owner->flush();},"Private script function is not visible outside its module","other modules cannot call private functions");
+        owner->destroy();
+    }
+    rejects_message([&]{load_raw(rmodule({replace_raw(rfn(0x0fff0000,VOID_VALUE,rblock({})),7,ri(2))}));},
+        "Lifecycle and main functions cannot be private","main cannot be private");
+    rejects_message([&]{load_raw(rmodule({replace_raw(rfn(5,VOID_VALUE,rblock({})),7,ri(3))}));},
+        "Invalid function generic ABI","entry kinds above private are rejected");
+    rejects_message([&]{load_raw(rmodule({rfn(5,VOID_VALUE,rblock({}))},0,raw({replace_raw(rsignature(0x12340001,INT_VALUE),4,ri(2))})));},
+        "Invalid external generic ABI","imports cannot declare private functions");
+    if(previous)setenv("AZSCRIPT_EXPERIMENTAL_VM_BACKEND",saved.c_str(),1);else unsetenv("AZSCRIPT_EXPERIMENTAL_VM_BACKEND");
+}
 int main(){try{
+    private_function_tests();
     ownership_identity_tests();
     statement_protocol_tests();
     native_stack_tests();

@@ -405,7 +405,7 @@ void validateSnapshotDestructor(std::optional<int> destructor, const type_contex
     auto function = found == loadedScript->functions.end() ? nullptr : std::dynamic_pointer_cast<ofunction>(found->second);
     if (!function || function->rett != VOID_VALUE || function->param_types != std::vector<int>{ADDRESS_VALUE}
         || function->hidden_count < 0 || static_cast<std::size_t>(function->hidden_count) != contexts.size()
-        || (function->entry_kind != 0 && function->entry_kind != 1))
+        || function->entry_kind < 0 || function->entry_kind > 2)
         throw std::invalid_argument("Snapshot object destructor must be a script function void(address) with matching contexts");
 }
 // Spare buffer capacity has no serialized payload. Bound its total separately

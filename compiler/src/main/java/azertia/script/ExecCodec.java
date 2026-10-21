@@ -55,9 +55,12 @@ public final class ExecCodec {
     private static int optionalInteger(AcsObject object,String key,int fallback) {
         return object.mmp.containsKey(key)?integer(object,key):fallback;
     }
-    private static int entryKind(AcsObject value) {
+    /** Definitions may also be private (2, exec v11): compiler clones that only
+     * direct calls of the same module reach; imports never name one. */
+    private static int entryKind(AcsObject value,boolean definition) {
         int kind=optionalInteger(value,"entry-kind",0);
-        if(kind!=0&&kind!=1)throw invalid("entry-kind must be ordinary (0) or internal (1)");
+        if(kind!=0&&kind!=1&&!(definition&&kind==2))
+            throw invalid(definition?"entry-kind must be ordinary (0), internal (1) or private (2)":"entry-kind must be ordinary (0) or internal (1)");
         return kind;
     }
     private static String string(AcsElement value,String label) {
@@ -251,7 +254,7 @@ public final class ExecCodec {
             AcsObject signature=object(item,"signature");keys(signature,SIGNATURE);
             int id=integer(signature,"id"),type=integer(signature,"return-type");externalId(id);type(type,false,true);
             if(!externalIds.add(id))throw invalid("duplicate external function id");
-            int hidden=count(optionalInteger(signature,"hidden-count",0),"hidden context count"),entry=entryKind(signature);
+            int hidden=count(optionalInteger(signature,"hidden-count",0),"hidden context count"),entry=entryKind(signature,false);
             if(type==6&&hidden==0)throw invalid("any return type requires generic contexts");
             signatures.add(stack(n(id),n(type),types(signature.mmp.get("param-types"),-1,true,hidden),n(hidden),n(entry)));
         }
@@ -262,10 +265,11 @@ public final class ExecCodec {
             if(!hint.isEmpty()&&(id>>>16)!=0)throw invalid("hint module definitions must use namespace zero");
             namespaces.add(id>>>16);
             int params=count(integer(function,"param-count"),"parameter count"),locals=count(integer(function,"local-count"),"local count");
-            int hidden=count(optionalInteger(function,"hidden-count",0),"hidden context count"),entry=entryKind(function);
+            int hidden=count(optionalInteger(function,"hidden-count",0),"hidden context count"),entry=entryKind(function,true);
             if(type==6&&hidden==0)throw invalid("any return type requires generic contexts");
             if((long)params+locals>MAX_SLOTS)throw invalid("function frame exceeds slot limit");
             if((id==0||id==1)&&(type!=5||params!=0||hidden!=0))throw invalid("invalid lifecycle function signature");
+            if(entry==2&&(id==0||id==1||id==0x0fff0000))throw invalid("lifecycle and main functions cannot be private");
             Numbering numbering=new Numbering(null);
             AbdValue parameterTypes=types(function.mmp.get("param-types"),params,false,hidden);
             AbdValue body=expression(function.mmp.get("script"),new Layout(globals,params,locals,hidden,numbering),4);

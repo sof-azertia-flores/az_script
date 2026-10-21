@@ -341,7 +341,7 @@ void verify_program(const ExecutableProgram& program) {
     std::set<int> public_ids;
     for(const auto& target:program.targets) {
         if(!public_ids.insert(target.function_id).second)bad("duplicate public function ID");
-        if(!type(target.return_type)||target.hidden_count>max_slots||target.param_types.size()>max_slots||target.entry_kind<0||target.entry_kind>1)bad("invalid call target signature");
+        if(!type(target.return_type)||target.hidden_count>max_slots||target.param_types.size()>max_slots||target.entry_kind<0||target.entry_kind>2)bad("invalid call target signature");
         for(auto parameter:target.param_types)if(!type(parameter,false))bad("invalid target parameter type");
         if(target.dynamic_signature&&target.kind==TargetKind::script)bad("dynamic signature on script target");
         if(target.kind==TargetKind::dynamic&&!target.dynamic_signature)bad("dynamic target requires dynamic signature");
@@ -356,7 +356,7 @@ void verify_program(const ExecutableProgram& program) {
     for(const auto& function:program.functions) {
         if(function.begin!=next||function.end<=function.begin||function.end>program.instructions.size())bad("function instruction ranges do not partition program");
         next=function.end;
-        if(!type(function.return_type)||function.entry_kind<0||function.entry_kind>1||function.param_types.size()>max_slots||function.local_count>max_slots-function.param_types.size()||function.hidden_count>max_slots||function.global_count>max_slots||function.global_offset>max_slots-function.global_count||function.bound_context_count>128||!function.node_count)bad("invalid function layout");
+        if(!type(function.return_type)||function.entry_kind<0||function.entry_kind>2||function.param_types.size()>max_slots||function.local_count>max_slots-function.param_types.size()||function.hidden_count>max_slots||function.global_count>max_slots||function.global_offset>max_slots-function.global_count||function.bound_context_count>128||!function.node_count)bad("invalid function layout");
         for(auto parameter:function.param_types)if(!type(parameter,false))bad("invalid function parameter type");
         if(function.lifecycle) {
             if((function.function_id!=0&&function.function_id!=1)||function.return_type!=VOID_VALUE||!function.param_types.empty()||function.hidden_count)bad("invalid lifecycle signature");

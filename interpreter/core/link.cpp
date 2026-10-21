@@ -74,6 +74,7 @@ plan resolve(const input& source) {
             if(target!=source.functions.end()) {
                 if(auto defining=function_modules.find(id);defining!=function_modules.end()&&defining->second!=index)dependencies.insert(defining->second);
                 const auto& fn=target->second;
+                if(fn&&fn->entry_kind==2)throw std::runtime_error("Private script function cannot be imported: "+function_id_text(id));
                 if(!fn||fn->return_type!=signature.return_type||fn->param_types!=signature.param_types||
                    fn->hidden_count!=signature.hidden_count||fn->entry_kind!=signature.entry_kind)
                     throw std::runtime_error("External signature does not match script function: "+function_id_text(id));
@@ -103,6 +104,8 @@ plan resolve(const input& source) {
             }
             const auto hidden=static_cast<int>(reference.hidden_count);
             if(auto target=found_function(id);target!=source.functions.end()) {
+                if(target->second&&target->second->entry_kind==2&&function_modules.at(id)!=index)
+                    throw std::runtime_error("Private script function is not visible outside its module: "+function_id_text(id));
                 if(!target->second||target->second->hidden_count!=hidden)throw std::runtime_error("Generic context count does not match function: "+function_id_text(id));
             } else {
                 auto imported=result.externs[index].find(id);

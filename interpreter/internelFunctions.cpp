@@ -39,6 +39,8 @@ public:
         auto script=env?env->script.lock():nullptr;
         if(!script)throw std::runtime_error("Missing execution environment");
         auto target=script->getFunction(id);
+        if(auto fn=std::dynamic_pointer_cast<ofunction>(target);fn&&fn->entry_kind==2)
+            throw std::runtime_error("Unknown function id: "+function_id_text(id));
         if(auto fn=std::dynamic_pointer_cast<ofunction>(target);fn&&(fn->entry_kind!=0||fn->hidden_count!=0))
             throw std::runtime_error("Reflection requires an ordinary non-generic function; use a wrapper");
         if(auto declaration=script->extern_signatures.find(id);declaration!=script->extern_signatures.end()&&
