@@ -11,7 +11,7 @@
 | V4 | 完成，定向验证 | `f22357a` |
 | V5 | 完成，定向验证 | 内联、槽压缩与测量见下 |
 | V6 | 完成，定向验证 | 常量实参与泛型上下文专用化 |
-| V7 | 进行中 | 守卫去虚化完成；标量替换、字段缓存进行中 |
+| V7 | 进行中 | 守卫去虚化、标量替换完成；字段缓存进行中 |
 | V8 | 尚未开始 | 无检查运算 |
 | V9 | 尚未开始 | JIT 消费 v11 构造 |
 | V10 | 不在本轮 | 发布收尾 |
@@ -84,3 +84,13 @@
 - `ExecScalarAnalysis` 未修改 C06 的 `Escape` 摘要：`ExecLoopMotion` 的 `isolated` 检查已拒绝任何非标量变量，`OBJECT_ADDRESS`/`BLOCK_ADDRESS` 的分类不影响 O1/O2 产物。
 
 验证：Java 398/398；O2 测试 `--o3 --only o3-`：19 例（单态、交替类别（守卫失败路径）、删除后调用的错误、被内联方法中的除零 trace），O0/O3 语义与 `-g` 帧一致。性能（Release 快速测量，VM，O3/O2）：virtual_monomorphic 0.73（目标 ≤0.9），virtual_alternating 0.90，object_fields 1.06（未变，噪声）。
+
+### 标量替换（2026-10-21）
+
+- `a2432cb`：opcode 59 `reserve_block`，取走下一个字面量块 ID 但不建块，使被拆除的字面量之后的所有字面量和复制对象地址与 O0 相同（`state.probe.next_block` 跨档位比较）。读写端、树与 VM 执行器、Java 模型与编解码、各操作码表及 compact exec 线格式测试同步。
+- `SCALAR_REPLACEMENT`（`--no-scalar-replacement`）在序列内联之后、槽压缩之前运行（`ExecScalarReplacement`）。值工厂须为“`new_block(w)`、以参数调用构造函数、无析构/无上下文的 `ob`、`ro`”四条语句；构造函数与方法的函数体只能包含接收者检查、空方法表、字段存储和对同类函数体的调用，值只能是常量、非接收者参数和字段，因此被内联的部分不会出错，也不会丢失错误帧。
+- 只定义一次、来自这样的工厂（或复制自候选）的对象局部变量，在每次使用都是字段读写、复制或字段方法调用时成为候选；其他任何出现（借用 `C (*)`、指针、传参、返回）拒绝该对象，拒绝在复制关系中双向传播。
+- 改写：实参先求值到快照，再 `reserve_block`，每个字段一个无初值局部变量，构造函数内联为字段存储；构造函数须在读取前存储每个字段。复制先 `reserve_block` 再复制字段。语句位置的方法调用保留实参快照和返回值语句，值位置的方法调用只允许平凡实参。被删除调用的参数和返回类型检查必须由 `ExecScalarAnalysis` 在改写后的函数上证明，否则函数保持不变。内联语句定位在调用处或定义处（`-g` 时预算停止不显示被调函数的行）。
+- 构造函数与方法是 1 号入口（类内部函数）；只内联其函数体，入口类别不影响改写。
+
+验证：Java 404/404（新增 `ExecScalarReplacementTest` 6 例：字段与方法、复制、借用对象保留、计算型方法与虚方法保留、计算型构造函数保留、开关）；O2/O3 测试全量 79 例、1438 次观测、684 次预算检查通过（JIT probe:7、eager、stress、on:2+interp 重放），新增 `o3-scalar-fields`、`o3-scalar-copy`、`o3-scalar-borrowed`、`o3-scalar-argument-error`（构造实参除零，`-g` 帧与 O0 一致）。全量运行用的是改定位之前的编译器；改定位后 `--only o3-` 23 例（probe:7、eager、stress）重新通过。`lifecycle_fuzz` 种子 0–199 的生成程序（临时脚本：O0 与 O3 均带 `-g`，树与 VM 各运行一次，按 `framed()` 比较）全部一致。性能（Release 快速测量，3×3，O3/O2）：VM object_fields 0.149、object_copy 0.205、virtual_monomorphic 0.635、call_4 0.566；on:3+llvm object_fields 0.164、object_copy 0.168。

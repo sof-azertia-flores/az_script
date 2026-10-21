@@ -123,6 +123,18 @@ CASES = O1_CASES + (
      'int run(int n){\n B* b=new C();\n int t=b.v(n);\n delete b;\n return t+b.v(n);\n}\nint main(){return run(5);}', None, '', 'Virtual call'),
     ('o3-devirtualize-error', 'class B{int m;virtual int v(int n){return n+1;}}class C:B{override int v(int n){\n return 100/n;\n}}'
      'int run(int n){\n B* b=new C();\n int t=b.v(n);\n delete b;\n return t;\n}\nint main(){\n return run(0);\n}', None, '', 'Division by zero'),
+    # O3 scalar replacement: fields become locals; reserve_block keeps every later literal id.
+    ('o3-scalar-fields', 'class Cell{int value;Cell(int n){value=n;}int read(){return value;}}'
+     'int run(int n){int t=0;for(int i=0;i<n;i++){Cell c(i%17);c.value=c.value+1;t=t+c.read();}return t;}'
+     'int main(){return run(40);}', sum(i % 17 + 1 for i in range(40)), '', None),
+    ('o3-scalar-copy', 'class Cell{int value;Cell(int n){value=n;}int read(){return value;}}'
+     'int run(int n){int t=0;for(int i=0;i<n;i++){Cell a(i%17);Cell b=a;b.value=b.value+1;t=t+b.value+a.value;}return t;}'
+     'int main(){return run(40);}', sum(2 * (i % 17) + 1 for i in range(40)), '', None),
+    ('o3-scalar-borrowed', 'class Cell{int value;Cell(int n){value=n;}int read(){return value;}}int peek(Cell (*) p){return p.value;}'
+     'int run(int n){Cell a(n);Cell b(n+1);Cell* c=new Cell(n+2);int r=a.read()+peek(b)+c.value;delete c;return r;}'
+     'int main(){return run(4);}', 15, '', None),
+    ('o3-scalar-argument-error', 'class Cell{int value;Cell(int n){value=n;}int read(){return value;}}'
+     'int run(int n){\n Cell a(1);\n Cell b(10/n);\n return a.read()+b.read();\n}\nint main(){\n return run(0);\n}', None, '', 'Division by zero'),
     generated_flow_case(),
 )
 

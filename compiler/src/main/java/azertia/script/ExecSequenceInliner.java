@@ -338,7 +338,7 @@ final class ExecSequenceInliner {
      * visible to the analysis: at statement roots of blocks, branches and loops,
      * and never in a cleanup body.
      */
-    private static boolean analyzable(AcsElement value) {
+    static boolean analyzable(AcsElement value) {
         int op = opcode(value);
         if (op == BLOCK) return ((AcsArray)value).acsa.stream().allMatch(ExecSequenceInliner::analyzable);
         if (op == IF || op == WHILE) return !writesLocal(field(value,"v")) && analyzable(field(value,"val"))
