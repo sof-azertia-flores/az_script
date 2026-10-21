@@ -279,9 +279,11 @@ FunctionDebug = [ name:string, file:int, line:int, column:int, locations:Stack<i
 - `file`、`line`、`column` 指向函数声明，编译器生成的类函数指向类声明。`file` 是 `debug_files` 的下标；line 与 column 同为 0（未知）或同为正数。
 - `locations` 是由 `(node, file, line, column)` 四元组平铺而成的 int stack。node 按线路字段顺序对 `body` 中的表达式 stack 做先序编号：函数体为 0 号，每个常量、块、调用和 opcode 表达式进入时取下一个编号；上下文及其他字段不编号。node 严格递增且小于函数体的节点数，`file` 是 `debug_files` 的下标，line 与 column 从 1 开始（column 与编译诊断一致，按 UTF-16 码元计数）。没有条目的节点使用最近的有位置祖先节点的位置。编译器在运算符、调用和语句的源码记号处记录位置，不记录常量和变量读取，并省略与最近有位置祖先位置相同的节点。
 
-读取器拒绝以下情况：名称或文件为空、不是合法 UTF-8，或包含 C0、DEL、C1 控制字符、U+2028/U+2029 或双向格式字符（U+061C、U+200E、U+200F、U+202A–U+202E、U+2066–U+2069）；文件重复；`has_debug` 为 true 却没有恰好一条记录；记录字段数不为五；locations 不是完整的四元组；node 未递增或超出函数体；文件下标超出 `debug_files`；位置的行或列小于 1；声明位置的行、列只有一个为 0。编译器把显示名中的此类字符替换为 U+FFFD，因此源码名称不会生成无效记录。
+读取器拒绝以下情况：名称或文件为空、不是合法 UTF-8，或包含 C0、DEL、C1 控制字符、U+2028/U+2029 或双向格式字符（U+061C、U+200E、U+200F、U+202A–U+202E、U+2066–U+2069）；文件重复；`has_debug` 为 true 却没有恰好一条记录；记录字段数不为五（或下述扩展形式的七）；locations 不是完整的四元组（扩展形式为五元组）；node 未递增或超出函数体；文件下标超出 `debug_files`；位置的行或列小于 1；声明位置的行、列只有一个为 0。编译器把显示名中的此类字符替换为 U+FFFD，因此源码名称不会生成无效记录。
 
 检查视图的根总是包含 `debug-files`（字符串数组，无 `-g` 时为空）。有调试记录的函数另含 `debug`：`{"name":…, "file":…, "line":…, "column":…, "locations":["node:file:line:column", …]}`，每个位置使用规范十进制。
+
+**扩展形式（v11 开发中）。** O3 内联与专用化时，记录为七个字段：`[name, file, line, column, locations, inlined:Stack<[function_id:int, name:string, call_site:int]>, display_id:int]`。locations 改为 `(node, file, line, column, inline)` 五元组，inline 为 0（不在内联体中）或 inlined 的 1 起下标。每个内联记录给出被内联函数的 ID 与显示名，`call_site` 是调用点的 1 起位置下标；该位置的 inline 必须小于本记录的下标，因此链条总会结束。trace 记录脚本帧时，先按链从内到外输出被内联的帧（各自在到达的位置），再在最外层调用点输出本函数；`display_id` 是本函数在 trace 中显示的 ID（专用化克隆显示原函数）。内联函数 ID 与 display_id 必须与本函数同 namespace，且不为 0/1；trace 中它们取本函数装载后的 namespace，因此不参与重定位。检查视图 JSON 另含 `inlined`（`{"id","name","call-site"}` 数组）与 `display-id`，两者同时出现，位置字符串为 `node:file:line:column:inline`。不进行内联或克隆时，编译器仍输出五字段形式。
 
 调试记录会把函数名、类名和文件名写入执行文件，且每个位置占 32 字节；不希望发行包携带这些信息时不要使用 `-g`。JNI 快照逐字节比较模块，因此 `-g` 构建保存的快照不能恢复到不加 `-g` 编译的同一程序中，反之亦然。
 

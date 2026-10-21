@@ -172,16 +172,29 @@ bool trace::current_is_published() noexcept {
     return thread_trace&&thread_trace->matches_current_exception();
 }
 void trace::note_script_frame(int function_id,const function_debug* debug,std::uint32_t location) noexcept {
-    try {
-        trace_frame result;result.function_id=function_id;
-        if(debug) {
-            result.name=debug->name;
-            const auto position=location&&location<=debug->locations.size()?debug->locations[location-1]:debug->header;
-            if(position.line&&position.column&&debug->files&&position.file<debug->files->size()) {
-                result.file=(*debug->files)[position.file];result.line=position.line;result.column=position.column;
+    // Debug ids are written before the module's namespace is relocated; the
+    // running function's id supplies the namespace it was given.
+    const auto shown=[function_id](int id){return static_cast<int>((static_cast<std::uint32_t>(function_id)&0xffff0000u)|(static_cast<std::uint32_t>(id)&0xffffu));};
+    const auto frame=[&](int id,const std::string* name,std::uint32_t at) {
+        try {
+            trace_frame result;result.function_id=id;
+            if(debug) {
+                result.name=*name;
+                const auto position=at&&at<=debug->locations.size()?debug->locations[at-1]:debug->header;
+                if(position.line&&position.column&&debug->files&&position.file<debug->files->size()) {
+                    result.file=(*debug->files)[position.file];result.line=position.line;result.column=position.column;
+                }
             }
-        }
-        note_frame(std::move(result));
-    } catch(...) {if(auto state=trace_storage())++state->active.omitted_frames;}
+            note_frame(std::move(result));
+        } catch(...) {if(auto state=trace_storage())++state->active.omitted_frames;}
+    };
+    if(!debug){frame(function_id,nullptr,location);return;}
+    // Inlined frames first, innermost outward, each at the location it reached;
+    // then this function at the outermost call site.
+    while(location&&location<=debug->location_inlines.size()&&debug->location_inlines[location-1]) {
+        const auto& inlined=debug->inlined[debug->location_inlines[location-1]-1];
+        frame(shown(inlined.function_id),&inlined.name,location);location=inlined.call_site;
+    }
+    frame(debug->extended?shown(debug->display_id):function_id,&debug->name,location);
 }
 }

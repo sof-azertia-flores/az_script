@@ -168,10 +168,15 @@ def returning(value=None):
     return expression(7, b'\0') if value is None else expression(7, b'\1', value)
 
 
-def debug_record(name, file=0, line=0, column=0, locations=()):
-    """[name, file, line, column, flat (node, file, line, column) int stack]."""
-    return stack(name.encode('utf-8') if isinstance(name, str) else name, integer(file), integer(line), integer(column),
-                 stack(*(integer(part) for quad in locations for part in quad)))
+def debug_record(name, file=0, line=0, column=0, locations=(), inlined=None, display=None):
+    """[name, file, line, column, flat (node, file, line, column) int stack]; the exec v11
+    extended form adds an inline index to each location, the inlined functions and a display id."""
+    fields = [name.encode('utf-8') if isinstance(name, str) else name, integer(file), integer(line), integer(column),
+              stack(*(integer(part) for quad in locations for part in quad))]
+    if inlined is not None:
+        fields += [stack(*(stack(integer(ident), callee.encode('utf-8'), integer(site)) for ident, callee, site in inlined)),
+                   integer(display)]
+    return stack(*fields)
 
 
 def function(body, ident=MAIN, return_type=0, params=(), locals_count=0, hidden_count=0, entry_kind=0, debug=None):
@@ -325,8 +330,11 @@ def encode_compact_module(program):
         body = lower(entry['script'])
         debug = entry.get('debug')
         if debug is not None:
+            inlined = debug.get('inlined')
             debug = debug_record(debug['name'], debug['file'], debug['line'], debug['column'],
-                                 [tuple(int(part) for part in item.split(':')) for item in debug['locations']])
+                                 [tuple(int(part) for part in item.split(':')) for item in debug['locations']],
+                                 None if inlined is None else [(item['id'], item['name'], item['call-site']) for item in inlined],
+                                 debug.get('display-id'))
         functions.append(function(encode_compact_expression(body), entry['id'], entry['return-type'], params,
                                   entry.get('local-count', len(local_names)),
                                   entry.get('hidden-count', 0), entry.get('entry-kind', 0), debug))
@@ -538,19 +546,36 @@ class WireReader:
 
     def debug(self, payload, files):
         fields = frames(payload)
-        assert len(fields) == 5
+        assert len(fields) in (5, 7)
+        extended = len(fields) == 7
+        width = 5 if extended else 4
         name = self.debug_text(fields[0])
         file, line, column = (int_value(field) for field in fields[1:4])
         assert 0 <= file < len(files) and line >= 0 and column >= 0 and (line == 0) == (column == 0)
         values = [int_value(item) for item in frames(fields[4])]
-        assert len(values) % 4 == 0
-        locations = []
-        for i in range(0, len(values), 4):
+        assert len(values) % width == 0
+        locations, inlines = [], []
+        for i in range(0, len(values), width):
             node, at_file, at_line, at_column = values[i:i + 4]
             assert (not locations or node > int(locations[-1].split(':')[0])) and 0 <= node < len(self.nodes)
             assert 0 <= at_file < len(files) and at_line >= 1 and at_column >= 1
-            locations.append(f'{node}:{at_file}:{at_line}:{at_column}')
-        return {'name': name, 'file': file, 'line': line, 'column': column, 'locations': locations}
+            text = f'{node}:{at_file}:{at_line}:{at_column}'
+            if extended:
+                inlines.append(values[i + 4])
+                text += f':{values[i + 4]}'
+            locations.append(text)
+        result = {'name': name, 'file': file, 'line': line, 'column': column, 'locations': locations}
+        if extended:
+            records = []
+            for item in frames(fields[5]):
+                record = frames(item)
+                assert len(record) == 3
+                site = int_value(record[2])
+                assert 1 <= site <= len(inlines) and inlines[site - 1] <= len(records)
+                records.append({'id': int_value(record[0]), 'name': self.debug_text(record[1]), 'call-site': site})
+            assert all(0 <= index <= len(records) for index in inlines)
+            result.update(inlined=records, **{'display-id': int_value(fields[6])})
+        return result
 
     def read(self, data):
         file_fields = frames(data)
@@ -976,6 +1001,34 @@ def main():
         execute_wire('entry-kind-3', module([function(returning(constant(1))),
                                              function(returning(constant(1)), helper, entry_kind=3)]), invalid=True,
                      error='Invalid function generic ABI')
+        # Extended debug records restore inlined frames: the failing node names
+        # its inlined function, whose call site may itself be inlined.
+        # Nodes: 0 block, 1 return, 2 outer seq, 3 inner seq, 4 divide, 5-6 constants.
+        inner_call = expression(54, stack(), expression(15, constant(1), constant(0)))
+        inlined_body = block(returning(expression(54, stack(), inner_call)))
+        nested = [(1, 0, 2, 5, 0), (2, 0, 2, 12, 0), (3, 0, 7, 9, 1), (4, 0, 9, 14, 2)]
+        records = [(0x0FFF0005, 'outer', 2), (0x0FFF0006, 'inner', 3)]
+        for name, locations, inlined, display, expected in [
+                ('nested', nested, records, MAIN,
+                 'Division by zero\n  at inner (inline.azs:9:14)\n  at outer (inline.azs:7:9)\n  at main (inline.azs:2:12)'),
+                ('display-only', [(1, 0, 2, 5, 0), (4, 0, 3, 7, 0)], [], 0x0FFF0007,
+                 'Division by zero\n  at main (inline.azs:3:7)')]:
+            fields = module([function(inlined_body, debug=debug_record('main', 0, 1, 1, locations, inlined, display))],
+                            debug_files=('inline.azs',))
+            payload = frame(stack(*fields))
+            assert encode_compact_module(WireReader().read(payload)) == payload, ('extended debug independent roundtrip', name)
+            execute_wire('inline-debug-' + name, fields, invalid=True, error=expected)
+        for name, locations, inlined, display, error in [
+                ('index-outside', [(2, 0, 2, 12, 0), (4, 0, 9, 14, 2)], [(0x0FFF0005, 'outer', 1)], MAIN, 'inline index outside'),
+                ('own-call-site', [(2, 0, 2, 12, 1)], [(0x0FFF0005, 'outer', 1)], MAIN, 'inline call site'),
+                ('later-call-site', [(2, 0, 2, 12, 2), (3, 0, 7, 9, 1)], [(0x0FFF0005, 'outer', 2), (0x0FFF0006, 'inner', 1)], MAIN,
+                 'inline call site'),
+                ('call-site-zero', [(2, 0, 2, 12, 0)], [(0x0FFF0005, 'outer', 0)], MAIN, 'inline call site'),
+                ('other-namespace', [(2, 0, 2, 12, 0)], [(0x12340005, 'outer', 1)], MAIN, 'same namespace'),
+                ('display-namespace', [(2, 0, 2, 12, 0)], [], 0x12340000, 'same namespace')]:
+            fields = module([function(inlined_body, debug=debug_record('main', 0, 1, 1, locations, inlined, display))],
+                            debug_files=('inline.azs',))
+            execute_wire('inline-debug-reject-' + name, fields, invalid=True, error=error)
         # Wrapping arithmetic wraps int32 and otherwise behaves as the checked operator.
         for opcode, left, right, kind, expected in [
                 (55, 2147483647, 1, 0, '-2147483648'), (56, -2147483648, 1, 0, '2147483647'),

@@ -85,7 +85,8 @@ public final class ExecCodec {
             PROGRAM=KeySpec.of("author version exec-version gvs ext extern-signatures f namespace-hint assume-hints debug-files",""),
             SIGNATURE=KeySpec.of("id return-type param-types","hidden-count entry-kind"),
             FUNCTION=KeySpec.of("id return-type param-count local-count param-types script","hidden-count entry-kind debug"),
-            DEBUG=KeySpec.of("name file line column locations",""),
+            DEBUG=KeySpec.of("name file line column locations","inlined display-id"),
+            INLINED=KeySpec.of("id name call-site",""),
             ASSUMPTION=KeySpec.of("hint namespace",""),
             CALL=KeySpec.of("t id param","contexts"),
             OPERAND=KeySpec.of("t c v",""),
@@ -276,7 +277,7 @@ public final class ExecCodec {
             AbdValue body=expression(function.mmp.get("script"),new Layout(globals,params,locals,hidden,numbering),4);
             List<AbdValue> record=new ArrayList<>(List.of(n(id),n(type),n(params),n(locals),parameterTypes,body,n(hidden),n(entry)));
             AcsElement debug=function.mmp.get("debug");record.add(b(debug!=null));
-            if(debug!=null)record.add(functionDebug(debug,files,numbering.next));
+            if(debug!=null)record.add(functionDebug(debug,files,numbering.next,id));
             functions.add(stack(record));
         }
         List<AbdValue> assumptions=new ArrayList<>();Set<String> hints=new HashSet<>();Set<Integer> aliases=new HashSet<>();
@@ -319,33 +320,53 @@ public final class ExecCodec {
      * stack of {@code (node, file, line, column)} quads with strictly increasing nodes
      * below the body's node count; the inspection view writes each quad as "n:f:l:c".
      */
-    private static AbdValue functionDebug(AcsElement value,List<String> files,int nodes) {
+    private static AbdValue functionDebug(AcsElement value,List<String> files,int nodes,int functionId) {
         AcsObject debug=object(value,"debug");keys(debug,DEBUG);
         String name=debugText(debug.mmp.get("name"),"debug name");
         int file=debugFile(integer(debug,"file"),files),line=integer(debug,"line"),column=integer(debug,"column");
         if(line<0||column<0||(line==0)!=(column==0))throw invalid("debug header position must be both zero or both positive");
+        // exec v11 extended records (inlining, clones) carry both optional keys.
+        boolean extended=debug.mmp.containsKey("inlined");
+        if(extended!=debug.mmp.containsKey("display-id"))throw invalid("extended debug records need both inlined and display-id");
         AcsArray locations=array(debug.mmp.get("locations"),"debug locations");count(locations.acsa.size(),"debug location count");
-        List<AbdValue> quads=new ArrayList<>();int previous=-1;
+        List<AbdValue> quads=new ArrayList<>();List<Integer> inlines=new ArrayList<>();int previous=-1;
         for(AcsElement item:locations.acsa) {
-            int[] location=location(string(item,"debug location"));
+            int[] location=location(string(item,"debug location"),extended);
             if(location[0]<=previous||location[0]>=nodes)throw invalid("debug location nodes must increase and refer to body nodes");
             debugFile(location[1],files);
             if(location[2]<1||location[3]<1)throw invalid("debug location line and column must be positive");
             previous=location[0];for(int part:location)quads.add(n(part));
+            if(extended)inlines.add(location[4]);
         }
-        return stack(s(name),n(file),n(line),n(column),stack(quads));
+        if(!extended)return stack(s(name),n(file),n(line),n(column),stack(quads));
+        int display=integer(debug,"display-id");sameNamespace(display,functionId,"display-id");
+        AcsArray inlined=array(debug.mmp.get("inlined"),"inlined");count(inlined.acsa.size(),"inlined function count");
+        List<AbdValue> records=new ArrayList<>();
+        for(AcsElement item:inlined.acsa) {
+            AcsObject record=object(item,"inlined function");keys(record,INLINED);
+            int id=integer(record,"id"),site=integer(record,"call-site");sameNamespace(id,functionId,"inlined function");
+            // A call site lies before the function it calls in the inline chain.
+            if(site<1||site>inlines.size()||inlines.get(site-1)>records.size())
+                throw invalid("inline call site must be an earlier location outside the inlined function");
+            records.add(stack(n(id),s(debugText(record.mmp.get("name"),"inlined name")),n(site)));
+        }
+        for(int index:inlines)if(index>records.size())throw invalid("debug inline index outside inlined functions");
+        return stack(s(name),n(file),n(line),n(column),stack(quads),stack(records),n(display));
     }
-    /** Parses "node:file:line:column" in canonical decimal. */
-    private static int[] location(String text) {
-        String[] parts=text.split(":",-1);
-        if(parts.length!=4)throw invalid("debug location must be node:file:line:column");
-        int[] result=new int[4];
-        for(int i=0;i<4;i++) {
+    private static void sameNamespace(int id,int functionId,String label) {
+        if(id==0||id==1||(id>>>16)!=(functionId>>>16))throw invalid(label+" must be a function of the same namespace");
+    }
+    /** Parses "node:file:line:column", or with a fifth inline index, in canonical decimal. */
+    private static int[] location(String text,boolean extended) {
+        String[] parts=text.split(":",-1);int width=extended?5:4;
+        if(parts.length!=width)throw invalid(extended?"debug location must be node:file:line:column:inline":"debug location must be node:file:line:column");
+        int[] result=new int[width];
+        for(int i=0;i<width;i++) {
             String part=parts[i];
             boolean canonical=!part.isEmpty()&&part.length()<=10&&(part.equals("0")||part.charAt(0)!='0');
             for(int j=0;canonical&&j<part.length();j++)canonical=part.charAt(j)>='0'&&part.charAt(j)<='9';
             long number=canonical?Long.parseLong(part):-1;
-            if(number<0||number>Integer.MAX_VALUE)throw invalid("debug location must be node:file:line:column");
+            if(number<0||number>Integer.MAX_VALUE)throw invalid(extended?"debug location must be node:file:line:column:inline":"debug location must be node:file:line:column");
             result[i]=(int)number;
         }
         return result;
@@ -691,12 +712,25 @@ public final class ExecCodec {
     private static AcsObject decodeDebug(AbdValue value,int level) {
         Record record=new Record(value,level);AcsObject view=new AcsObject();
         view.put("name",record.string());view.put("file",record.integer());view.put("line",record.integer());view.put("column",record.integer());
-        Record quads=new Record(record.next(),level+1);record.end();
-        if(quads.fields.size()%4!=0)throw invalid("debug locations must be node:file:line:column quads");
+        Record quads=new Record(record.next(),level+1);boolean extended=record.position<record.fields.size();
+        int width=extended?5:4;
+        if(quads.fields.size()%width!=0)throw invalid(extended?"debug locations must be node:file:line:column:inline quintuples":"debug locations must be node:file:line:column quads");
         AcsArray locations=new AcsArray();
-        while(quads.position<quads.fields.size())
-            locations.acsa.add(new AcsStringElement(location(quads.integer(),quads.integer(),quads.integer(),quads.integer())));
-        view.put("locations",locations);return view;
+        while(quads.position<quads.fields.size()) {
+            String text=location(quads.integer(),quads.integer(),quads.integer(),quads.integer());
+            locations.acsa.add(new AcsStringElement(extended?text+":"+quads.integer():text));
+        }
+        view.put("locations",locations);
+        if(extended) {
+            Record inlined=new Record(record.next(),level+1);AcsArray records=new AcsArray();
+            for(AbdValue item:inlined.fields) {
+                Record entry=new Record(item,level+2);AcsObject inline=new AcsObject();
+                inline.put("id",entry.integer());inline.put("name",entry.string());inline.put("call-site",entry.integer());entry.end();
+                records.acsa.add(inline);
+            }
+            view.put("inlined",records);view.put("display-id",record.integer());
+        }
+        record.end();return view;
     }
     public static AcsObject decode(byte[] frame) {
         if(frame.length>MAX_BYTES)throw invalid("executable exceeds 64 MiB");return decode(AbdValue.fromAbd(frame));

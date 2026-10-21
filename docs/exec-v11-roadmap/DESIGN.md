@@ -38,7 +38,7 @@ JIT 方面：调用只有约 2 倍收益（`call_1` 每调用 2.70M 条指令，
 
 `seq{statements:E[], value:E}`：依次执行语句，再求值并得到 `value`。它**不引入作用域**，自身不扣预算以外的工作量（与普通节点一样计一个 tick）。
 
-- 序列中的语句只能对**已在外层声明**的局部赋值（SET/MOVE）或调用；不能声明（DEFINE）局部、不能 break/continue/return。被内联函数的局部和实参快照由编译器提升为调用者函数根块中的声明，序列内只写入。这样序列可以出现在循环条件、惰性分支和任意运算数位置而不引起“重复声明”或生命周期变化。
+- 序列中的语句只能对**已在外层声明**的局部赋值（SET/MOVE）或调用；不能在序列这一层声明（DEFINE）局部（嵌套块内可以），不能 return，break/continue 只能针对序列内部的循环（读取端校验，见 EXEC_FORMAT）。被内联函数的局部和实参快照由编译器提升为调用者函数根块中的声明，序列内只写入。这样序列可以出现在循环条件、惰性分支和任意运算数位置而不引起“重复声明”或生命周期变化。
 - 对象生命周期不进入序列：序列内不能创建拥有对象的临时值（编译期校验），这类调用仍按 O2 规则只在语句根部展开或不展开。
 - 树执行器、VM lowering（依次 lower 语句再 lower 值）、校验和 JIT 分析都只需按普通表达式处理；VM 指令层面不新增指令。
 
@@ -52,21 +52,21 @@ JIT 方面：调用只有约 2 倍收益（`call_1` 每调用 2.70M 条指令，
 
 ### 4.3 无检查整数运算
 
-为 add、minus、multiply、shl 以及 increment 形态增加 int32 无检查版本（新 opcode）：两个操作数必须是 int（运行时仍检查类型标签，类型不符时与对应有检查运算同样报错），结果按二进制补码回绕，不报溢出。
+为 add、minus、multiply 增加 int32 回绕版本（opcode 55–57，increment 是加 1 的形式；shl 本身不检查溢出，不需要新版本）：两个操作数都是 int 时按二进制补码回绕，不报溢出；其他操作数组合与对应有检查运算完全一致（字符串连接、浮点溢出、类型错误），因此类型擦除路径不变。
 
 - 编译器只在区间分析证明结果不溢出时发射；回绕语义只是为了在证明错误时各引擎仍逐字节一致，而不是可依赖的语言行为。O3 以外的档位从不发射。
 - VM 中只省去 `checked_int` 分支；主要收益在 JIT：无检查运算没有失败退出，LLVM 中是普通 `add/sub/mul`，减少退出点和恢复单元，也让 LLVM 的循环优化可用。
 
-### 4.4 方法绑定守卫 `guard_method`（新 opcode）
+### 4.4 方法绑定守卫 `guard_method`（opcode 58）
 
-`guard_method{receiver:E, slot:int, function:int}` 得到 bool：当 receiver 是当前脚本的有效对象、其方法表有第 `slot` 项、且该项绑定 `function`（及与直接调用相同的上下文）时为真；**任何会让 `call_virtual` 报错的情况都返回假，不报错**。编译器把虚调用写成 `select(guard_method(...), 直接调用或内联体, call_virtual(...))`，失败路径保留原虚调用，因此错误、trace 和返回类型检查与原来相同。
+`guard_method{receiver:E, slot:int, function:int}` 得到 bool：当 receiver 是当前脚本的有效对象、其方法表有第 `slot` 项、且该项绑定 `function` 并且**没有绑定上下文**时为真；**任何会让 `call_virtual` 报错的情况都返回假，不报错**。编译器把虚调用写成 `select(guard_method(...), 直接调用或内联体, call_virtual(...))`，失败路径保留原虚调用，因此错误、trace 和返回类型检查与原来相同。泛型方法（表项带上下文）不做守卫去虚化。
 
-- 读取路径同 `heap::methods_at`，但不抛出。函数 ID 随 namespace 重定位，在链接时参与引用遍历（`core/exec.cpp` 的 `reference_walk` 与树的引用表）。
+- 读取路径同 `heap::methods_at`（`heap::find_methods` 为其不报错形式）。目标在读取模型中保存为无上下文的方法表项，因此 `core/exec.cpp` 的 `reference_walk`、树的引用表与 flush 都按方法表项处理：随 namespace 重定位，须为首参数为 address、无隐藏上下文的普通脚本函数。
 - 守卫只在对象帧中出现（它读取堆）；JIT 在支持对象帧之前不处理它。
 
 ### 4.5 内联记录（调试信息）
 
-每个函数的调试记录增加可选的 `inlined` 表：`[callee_name, callee_file, callee_line, callee_column, call_site_location]` 的列表，`locations` 中的每个位置可附带内联表下标（0 表示不在内联体中）。trace 在记录一个脚本帧时，先按链输出被内联的帧，再在调用点位置输出外层帧；64 帧上限同样适用。记录没有执行语义，不参与链接和重定位；不带 `-g` 时不生成。
+调试记录增加七字段的扩展形式：`[name, file, line, column, locations, inlined, display_id]`。locations 为 `(node, file, line, column, inline)` 五元组，inline 为 0 或 `inlined` 的 1 起下标；`inlined` 每项为 `[function_id, name, call_site]`，`call_site` 是调用点的位置下标，该位置的 inline 必须更小，链条因此必然结束。trace 记录一个脚本帧时，先按链从内到外输出被内联的帧，再在最外层调用点输出外层帧；64 帧上限同样适用。`display_id` 让专用化克隆显示原函数 ID。内联 ID 与 display_id 与本函数同 namespace，trace 中取本函数装载后的 namespace，因此记录没有执行语义，不参与链接和重定位；不带 `-g` 时不生成，不内联也不克隆时仍为五字段形式。
 
 ## 5. 删除 `getDepth`
 

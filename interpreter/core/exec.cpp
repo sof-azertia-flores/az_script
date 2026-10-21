@@ -401,7 +401,7 @@ std::string debug_text(raw_cursor& fields,const char* label) {
 // [name, file, line, column, locations]; locations are (node, file, line, column)
 // quads with strictly increasing nodes. Nodes past the body are rejected after it is read.
 std::shared_ptr<function_debug> read_function_debug(raw_view view,const std::shared_ptr<const std::vector<std::string>>& files,
-        std::vector<std::uint32_t>& nodes) {
+        std::vector<std::uint32_t>& nodes,int function_id) {
     raw_cursor fields(view);auto debug=std::make_shared<function_debug>();debug->files=files;
     debug->name=debug_text(fields,"name");
     const auto file=[&](int value) {
@@ -412,19 +412,50 @@ std::shared_ptr<function_debug> read_function_debug(raw_view view,const std::sha
     const int line=fields.integer(),column=fields.integer();
     if(line<0||column<0||(line==0)!=(column==0))throw std::invalid_argument("Exec debug header position must be both zero or both positive");
     debug->header.line=static_cast<std::uint32_t>(line);debug->header.column=static_cast<std::uint32_t>(column);
-    raw_cursor quads(fields.take());fields.finish();
+    raw_cursor quads(fields.take());
+    // exec v11: an extended record adds an inline index to each location, the
+    // inlined functions and a display id. Plain -g output keeps five fields.
+    debug->extended=!fields.empty();
     while(!quads.empty()) {
         if(debug->locations.size()>=max_slots)throw std::invalid_argument("Too many exec debug locations");
         const int node=quads.integer();
-        if(quads.empty())throw std::invalid_argument("Exec debug locations must be node, file, line, column quads");
+        if(quads.empty())throw std::invalid_argument(debug->extended?"Exec debug locations must be node, file, line, column, inline quintuples":
+            "Exec debug locations must be node, file, line, column quads");
         source_position position;position.file=file(quads.integer());
         const int at_line=quads.integer(),at_column=quads.integer();
         if(node<0||(!nodes.empty()&&static_cast<std::uint32_t>(node)<=nodes.back()))
             throw std::invalid_argument("Exec debug location nodes must strictly increase");
         if(at_line<1||at_column<1)throw std::invalid_argument("Exec debug location line and column must be positive");
         position.line=static_cast<std::uint32_t>(at_line);position.column=static_cast<std::uint32_t>(at_column);
+        if(debug->extended) {
+            const int inline_index=quads.integer();
+            if(inline_index<0)throw std::invalid_argument("Exec debug inline index must not be negative");
+            debug->location_inlines.push_back(static_cast<std::uint32_t>(inline_index));
+        }
         nodes.push_back(static_cast<std::uint32_t>(node));debug->locations.push_back(position);
     }
+    if(debug->extended) {
+        const auto same_namespace=[&](int id,const char* label) {
+            if(id==0||id==1||namespace_of(id)!=namespace_of(function_id))
+                throw std::invalid_argument(std::string("Exec debug ")+label+" must be a function of the same namespace");
+        };
+        raw_cursor inlined(fields.take());debug->display_id=fields.integer();fields.finish();
+        same_namespace(debug->display_id,"display id");
+        while(!inlined.empty()) {
+            if(debug->inlined.size()>=max_slots)throw std::invalid_argument("Too many exec inlined functions");
+            raw_cursor record(inlined.take());inlined_function value;
+            value.function_id=record.integer();value.name=debug_text(record,"inlined name");const int call_site=record.integer();record.finish();
+            same_namespace(value.function_id,"inlined function");
+            // A call site lies outside the function it calls, in the caller or
+            // an earlier inlined function, so every chain ends.
+            if(call_site<1||static_cast<std::size_t>(call_site)>debug->locations.size()||
+               debug->location_inlines[static_cast<std::size_t>(call_site)-1]>debug->inlined.size())
+                throw std::invalid_argument("Exec debug inline call site must be an earlier location outside the inlined function");
+            value.call_site=static_cast<std::uint32_t>(call_site);debug->inlined.push_back(std::move(value));
+        }
+        for(const auto index:debug->location_inlines)
+            if(index>debug->inlined.size())throw std::invalid_argument("Exec debug inline index outside inlined functions");
+    } else fields.finish();
     return debug;
 }
 module read_fields(raw_view root,std::size_t offset) {
@@ -492,7 +523,7 @@ module read_fields(raw_view root,std::size_t offset) {
         fn.param_types=read_types(entry.take());
         auto body=entry.take();const int hidden=entry.integer();fn.entry_kind=entry.integer();
         std::vector<std::uint32_t> located;
-        if(entry.boolean())fn.debug=read_function_debug(entry.take(),debug_files,located);
+        if(entry.boolean())fn.debug=read_function_debug(entry.take(),debug_files,located,fn.function_id);
         entry.finish();
         if(hidden<0||static_cast<std::size_t>(hidden)>max_slots||fn.entry_kind<0||fn.entry_kind>2)
             throw std::invalid_argument("Invalid function generic ABI");

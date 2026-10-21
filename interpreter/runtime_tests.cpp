@@ -2270,7 +2270,36 @@ void private_function_tests() {
         "Invalid external generic ABI","imports cannot declare private functions");
     if(previous)setenv("AZSCRIPT_EXPERIMENTAL_VM_BACKEND",saved.c_str(),1);else unsetenv("AZSCRIPT_EXPERIMENTAL_VM_BACKEND");
 }
+// exec v11 extended debug records restore inlined frames in both engines;
+// their ids take the namespace the module is mounted at.
+void inline_trace_tests() {
+    const auto extended=[](R function,const std::string& name,std::initializer_list<int> locations,std::initializer_list<R> inlined,int display) {
+        AbdStack values;for(int value:locations)values.vs.push_back(ri(value));
+        return append_raw(replace_raw(function,8,rb(true)),raw({rs(name),ri(0),ri(1),ri(1),values.toAbdValue(),raw(inlined),ri(display)}));
+    };
+    const auto inner=rx(54,{raw({}),rx(15,{rc(n(1)),rc(n(0))})});
+    const auto body=rblock({rreturn(rx(54,{raw({}),inner}))});
+    const auto lib=replace_raw(rhint("Lib",{extended(rfn(2,INT_VALUE,body),"libmain",{1,0,2,5,0,2,0,2,12,0,3,0,7,9,1,4,0,9,14,2},
+        {raw({ri(5),rs("outer"),ri(2)}),raw({ri(6),rs("inner"),ri(3)})},2)}),10,raw({rs("lib.azs")}));
+    const auto main=rhint("",{rfn(0x0fff0000,INT_VALUE,rreturn(rcall(0x20000002)))},0,raw({assume("Lib",0x2000)}));
+    const char* previous=std::getenv("AZSCRIPT_EXPERIMENTAL_VM_BACKEND");
+    const std::string saved=previous?previous:"";
+    for(const char* engine:{"0","1"}) {
+        setenv("AZSCRIPT_EXPERIMENTAL_VM_BACKEND",engine,1);
+        auto program=load_raw(main,false);insert_raw(program,lib);
+        const int mounted=program->namespace_for_hint("Lib");
+        std::string message;try{program->invoke(0x0fff0000);}catch(const std::exception& error){message=describe_error(error);}
+        check(message=="Division by zero\n  at inner (lib.azs:9:14)\n  at outer (lib.azs:7:9)\n  at libmain (lib.azs:2:12)\n  at function 0x0fff0000",
+            "inlined frames precede their call sites");
+        const auto& frames=last_error_trace().frames;
+        check(frames.size()==4&&frames[0].function_id==(mounted<<16|6)&&frames[1].function_id==(mounted<<16|5)&&
+            frames[2].function_id==(mounted<<16|2),"inlined frame ids follow the mounted namespace");
+        program->destroy();
+    }
+    if(previous)setenv("AZSCRIPT_EXPERIMENTAL_VM_BACKEND",saved.c_str(),1);else unsetenv("AZSCRIPT_EXPERIMENTAL_VM_BACKEND");
+}
 int main(){try{
+    inline_trace_tests();
     private_function_tests();
     ownership_identity_tests();
     statement_protocol_tests();
