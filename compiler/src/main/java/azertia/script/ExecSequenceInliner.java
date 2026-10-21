@@ -36,11 +36,15 @@ final class ExecSequenceInliner {
     private int nextVirtual = VIRTUAL, nodes, limit, expansions, namespace;
     private boolean objects;
 
-    private ExecSequenceInliner(Map<Integer,Candidate> candidates, Map<AcsElement,int[]> positions, ExecInlineSites sites) {
-        this.candidates = candidates; this.positions = positions; this.sites = sites;
+    private final Map<Integer,Integer> originals;
+    private ExecSequenceInliner(Map<Integer,Candidate> candidates, Map<AcsElement,int[]> positions, ExecInlineSites sites,
+                                Map<Integer,Integer> originals) {
+        this.candidates = candidates; this.positions = positions; this.sites = sites; this.originals = originals;
     }
 
-    static void optimize(AcsArray functions, Map<AcsElement,int[]> positions, ExecInlineSites sites, int abdLimit) {
+    /** originals maps O3 specializations to the functions their frames show. */
+    static void optimize(AcsArray functions, Map<AcsElement,int[]> positions, ExecInlineSites sites, int abdLimit,
+                         Map<Integer,Integer> originals) {
         Map<Integer,Integer> returns = new HashMap<>();
         for (var item : functions.acsa) {
             var function = (AcsObject)item; returns.put(function.getAsInt("id"),function.getAsInt("return-type"));
@@ -58,7 +62,7 @@ final class ExecSequenceInliner {
         if (candidates.isEmpty()) return;
         for (var item : functions.acsa) {
             var function = (AcsObject)item;
-            var pass = new ExecSequenceInliner(candidates,positions,sites);
+            var pass = new ExecSequenceInliner(candidates,positions,sites,originals);
             AcsElement body = pass.caller(function,returns);
             if (body == null) continue;
             if (4L + ExecShape.height(body) > abdLimit) continue;
@@ -299,7 +303,8 @@ final class ExecSequenceInliner {
         if (nodes + callee.nodes + 2 * arguments.size() + 2 > limit) return null;
         int before = nodes;
 
-        int site = sites == null ? 0 : sites.add(callee.function.getAsInt("id"));
+        int id = callee.function.getAsInt("id");
+        int site = sites == null ? 0 : sites.add(originals.getOrDefault(id, id));
         List<Owned> slots = new ArrayList<>();
         Map<Integer,Integer> rename = new HashMap<>(); Map<Integer,AcsElement> substitutes = new HashMap<>();
         List<AcsElement> statements = new ArrayList<>();

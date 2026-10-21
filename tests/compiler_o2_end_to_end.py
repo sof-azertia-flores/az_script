@@ -103,6 +103,13 @@ CASES = O1_CASES + (
     ('o3-overflow-loop', 'int f(int x){\n return x*65536;\n}\nint main(){int s=0;for(int i=0;i<100000;i+=30000){s=f(i);}return s;}',
      None, '', 'Integer overflow'),
     ('o3-sibling-slots', 'int f(int a,int b){int c=a*b;return c-a;}int main(){int x=f(3,4)+f(5,6)+f(7,8);return x;}', 9+25+49, '', None),
+    # O3 specialization: constant arguments and fixed generic contexts get
+    # private clones whose frames show the original.
+    ('o3-constant-clone', 'int work(int x,boolean fast,int mode){\n if(fast){return x+1;}\n int s=0;int i=0;\n while(i<x){if(mode==1){s+=i*2;}else{if(mode==2){s+=i*3;}else{s+=i;}}i++;}\n return s/(mode-3);\n}\n'
+     'int main(){int a=work(5,true,0);int b=0;for(int k=0;k<10;k++){b+=work(k+20,false,2);}return a+b;}', 6+sum((k + 19) * (k + 20) // 2 * 3 // -1 for k in range(10)), '', None),
+    ('o3-constant-clone-error', 'int work(int x,int mode){\n int s=x;\n if(mode==1){s=s*2;}\n return s/(mode-3);\n}\nint main(){\n return work(4,1)+work(4,3);\n}', None, '', 'Division by zero'),
+    ('o3-generic-clone', '<T> T pick(boolean c,T a,T b){if(c){return a;}return b;}<T> int count(T x,int n){int s=0;for(int i=0;i<n;i++){s+=i;}return s;}'
+     'int main(){int x=pick(true,3,4);boolean y=pick(false,true,false);int z=count(5,10)+count(true,3);return y?0:x+z;}', 51, '', None),
     generated_flow_case(),
 )
 

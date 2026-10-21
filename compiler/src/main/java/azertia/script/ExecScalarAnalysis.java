@@ -81,7 +81,8 @@ final class ExecScalarAnalysis {
                 calls(child.value(),result);
     }
     static boolean eligible(AcsObject function, Set<Integer> safe) {
-        if (function.getAsInt("hidden-count") != 0 || function.getAsInt("entry-kind") != 0) return false;
+        // O3 specializations are private (entry kind 2) but otherwise ordinary.
+        if (function.getAsInt("hidden-count") != 0 || function.getAsInt("entry-kind") == 1) return false;
         // Bound the product of CFG states and local facts, not just tree size.
         if ((long)function.getAsInt("param-count") + function.getAsInt("local-count") > 256) return false;
         if (!scalar(function.getAsInt("return-type")) && function.getAsInt("return-type") != VOID_VALUE) return false;

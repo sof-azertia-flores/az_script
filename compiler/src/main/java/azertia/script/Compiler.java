@@ -15,7 +15,7 @@ public class Compiler {
     public enum OptimizationPass { CONSTANTS, PROPAGATION, INLINING, LOOP_MOTION,
         CONTROL_FLOW, COMMON_SUBEXPRESSIONS, DEAD_CODE, SCALAR_INLINING, RANGE_LOOP_MOTION, FLOW_PROPAGATION,
         // O3 (exec v11) only.
-        SEQUENCE_INLINING, SLOT_COMPACTION }
+        SPECIALIZATION, SEQUENCE_INLINING, SLOT_COMPACTION }
     // O2 is listed explicitly, so passes added for O3 never change its output.
     private static final Set<OptimizationPass> ADVANCED_PASSES = Set.of(OptimizationPass.CONSTANTS,
             OptimizationPass.PROPAGATION, OptimizationPass.INLINING, OptimizationPass.LOOP_MOTION,
@@ -3332,19 +3332,33 @@ public class Compiler {
             if (!passes.isEmpty()) ExecShape.requireFits(compiled.mmp.get("script"), 4, state.abdLimit);
         }
         ExecO2.optimize(output, passes, state.positions, state.abdLimit);
+        Map<Integer,Integer> originals = Map.of();
+        if (passes.contains(OptimizationPass.SPECIALIZATION)) {
+            Set<Integer> reserved = new HashSet<>();
+            for (AcsElement item : result.getAsAcsArray("extern-signatures").acsa) reserved.add(((AcsObject) item).getAsInt("id"));
+            originals = ExecSpecializer.optimize(output, reserved, passes, state.positions, state.abdLimit);
+        }
         if (passes.contains(OptimizationPass.SEQUENCE_INLINING))
-            ExecSequenceInliner.optimize(output, state.positions, state.inlineSites, state.abdLimit);
+            ExecSequenceInliner.optimize(output, state.positions, state.inlineSites, state.abdLimit, originals);
         if (passes.contains(OptimizationPass.SLOT_COMPACTION)) ExecSlotCompaction.optimize(output);
         AcsArray debugFiles = new AcsArray();
         for (String file : state.debugFiles) debugFiles.acsa.add(new AcsStringElement(file));
         result.put("debug-files", debugFiles);
         // Every function compiled, so the outputs are in function order.
-        Map<Integer,String> names = new HashMap<>();
-        if (state.positions != null) for (int i = 0; i < functions.size(); i++)
-            names.put(((AcsObject) output.acsa.get(i)).getAsInt("id"), SourceRules.debugText(debugName(functions.get(i).name())));
+        Map<Integer,String> names = new HashMap<>(); Map<Integer,Integer> indexes = new HashMap<>();
         if (state.positions != null) for (int i = 0; i < functions.size(); i++) {
+            int id = ((AcsObject) output.acsa.get(i)).getAsInt("id");
+            names.put(id, SourceRules.debugText(debugName(functions.get(i).name()))); indexes.put(id, i);
+        }
+        for (var clone : originals.entrySet()) if (names.containsKey(clone.getValue())) names.put(clone.getKey(), names.get(clone.getValue()));
+        if (state.positions != null) for (int i = 0; i < output.acsa.size(); i++) {
             AcsObject compiled = (AcsObject) output.acsa.get(i);
-            compiled.put("debug", debugRecord(functions.get(i), compiled, globals, global, names));
+            Integer original = originals.get(compiled.getAsInt("id"));
+            // O3 specializations follow the functions; they show their original.
+            Function shown = functions.get(original == null ? i : indexes.get(original));
+            AcsObject debug = debugRecord(shown, compiled, globals, global, names);
+            if (original != null) displayAs(debug, original);
+            compiled.put("debug", debug);
         }
         return result;
     }
@@ -3353,6 +3367,16 @@ public class Compiler {
      * declaration (the class declaration for a synthesized class function, 0:0 when
      * unknown) and the positions of its nodes.
      */
+    /** Turns a debug record into the exec v11 extended form shown with another function's id. */
+    private static void displayAs(AcsObject debug, int id) {
+        if (!debug.mmp.containsKey("inlined")) {
+            AcsArray locations = new AcsArray();
+            for (AcsElement item : debug.getAsAcsArray("locations").acsa)
+                locations.acsa.add(new AcsStringElement(((AcsStringElement) item).s + ":0"));
+            debug.mmp.put("locations", locations); debug.mmp.put("inlined", new AcsArray());
+        }
+        debug.put("display-id", id);
+    }
     private static AcsObject debugRecord(Function function, AcsObject compiled, int globals, LogicEnvironment global,
                                          Map<Integer,String> names) {
         CompilationState state = global.state(); JsonObject meta = function.metadata();

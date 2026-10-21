@@ -38,27 +38,44 @@ final class ExecO2 {
         Set<Integer> safe = safeFunctions(functions);
         for (var item : functions.acsa) {
             var function = (AcsObject)item;
-            if (!safe.contains(function.getAsInt("id"))) continue;
-            AcsElement original = function.mmp.get("script");
-            AcsElement body = copy(original, positions);
-            function.mmp.put("script", body);
-            optimizer.analysis = new ExecScalarAnalysis(function,optimizer.returns);
-            body = optimizer.statement(body, new HashMap<>());
-            if (body == null) body = new AcsArray();
-            // Scope wrappers can make an otherwise smaller body deeper. In
-            // that case keep the known encodable original rather than reject
-            // a valid source solely because an optional pass was selected.
-            if (4L + ExecShape.height(body) <= abdLimit) function.mmp.put("script",body);
-            else function.mmp.put("script",original);
-            if (passes.contains(DEAD_CODE)) {
-                optimizer.analysis = new ExecScalarAnalysis(function,optimizer.returns);
-                var needed = reads(function.mmp.get("script"));
-                assignmentTargets(function.mmp.get("script"),needed);
-                optimizer.removeUnusedDefinitions(function.mmp.get("script"),needed);
-            }
-            if (passes.contains(RANGE_LOOP_MOTION)) {
-                ExecRangeLoopMotion.optimize(function,optimizer.returns,positions,abdLimit);
-            }
+            if (safe.contains(function.getAsInt("id"))) optimizer.function(function, abdLimit);
+        }
+    }
+    /**
+     * The per-function O2 stages for one function outside the module list (an O3
+     * specialization), when it is a closed scalar region over the module's safe
+     * functions.
+     */
+    static void optimizeFunction(AcsObject function, AcsArray functions, Set<Compiler.OptimizationPass> passes,
+                                 Map<AcsElement,int[]> positions, int abdLimit) {
+        if (!enabled(passes)) return;
+        var optimizer = new ExecO2(passes, positions);
+        for (var item : functions.acsa) {
+            var other = (AcsObject)item; optimizer.returns.put(other.getAsInt("id"),other.getAsInt("return-type"));
+        }
+        optimizer.returns.put(function.getAsInt("id"),function.getAsInt("return-type"));
+        if (eligible(function, safeFunctions(functions))) optimizer.function(function, abdLimit);
+    }
+    private void function(AcsObject function, int abdLimit) {
+        AcsElement original = function.mmp.get("script");
+        AcsElement body = copy(original, positions);
+        function.mmp.put("script", body);
+        analysis = new ExecScalarAnalysis(function,returns);
+        body = statement(body, new HashMap<>());
+        if (body == null) body = new AcsArray();
+        // Scope wrappers can make an otherwise smaller body deeper. In
+        // that case keep the known encodable original rather than reject
+        // a valid source solely because an optional pass was selected.
+        if (4L + ExecShape.height(body) <= abdLimit) function.mmp.put("script",body);
+        else function.mmp.put("script",original);
+        if (passes.contains(DEAD_CODE)) {
+            analysis = new ExecScalarAnalysis(function,returns);
+            var needed = reads(function.mmp.get("script"));
+            assignmentTargets(function.mmp.get("script"),needed);
+            removeUnusedDefinitions(function.mmp.get("script"),needed);
+        }
+        if (passes.contains(RANGE_LOOP_MOTION)) {
+            ExecRangeLoopMotion.optimize(function,returns,positions,abdLimit);
         }
     }
     static AcsElement copy(AcsElement value, Map<AcsElement,int[]> positions) {
