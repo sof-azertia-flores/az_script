@@ -198,3 +198,9 @@ sanitizer（`--sanitize`，不构建 JIT 模块）：完整运行在合并头 `8
 | 提交 | 内容 |
 | --- | --- |
 | `feat(distribution): ship the JIT with --jit and enable it with run --jit` | `azscript-run --jit[=on|require|off]`（`on:N`、`require:N` 设阈值），隐含 `--vm`，与 `--tree` 冲突，优先于继承的 `AZSCRIPT_JIT`；`require` 缺少模块时的错误改为 `The LLVM JIT backend is unavailable: …`。`export_distribution.py --jit` 构建固定版本 LLVM 并要求包内有模块，否则以 `AZSCRIPT_JIT=OFF` 构建；`manifest.json` 增加 `jit`；第三方说明增加 LLVM，附 `licenses/LLVM-LICENSE.txt`（原样取自已校验的源码包，`.gitattributes` 对许可证文本不做空白检查）。`test_distribution.py` 按包内是否有模块检查 `--jit`、`--jit=on:2`、`--jit=require` 及错误选项，并清除继承的 JIT 环境变量 |
+
+验证（`3e7b0b9`，Linux x86-64）：
+
+- `python3 tools/export_distribution.py build/dist-jit --offline --jit` 与不加 `--jit` 的导出均通过搬迁后的完整发行包检查。前者含 `lib/libazscript-jit.so`（64 MB，静态链接 LLVM），`manifest.json` 的 `jit` 为 `{"module": "lib/libazscript-jit.so", "llvmVersion": "18.1.8"}`，检查项为 “run wrapper --jit runs hot functions natively”；后者不含模块，`jit` 为 `null`，`--jit` 以 VM 完成、`--jit=require` 失败。
+- 用导出的 Release 运行器执行 2,000 万次迭代的标量循环：`--vm` 34.8 s，`--jit` 2.1 s（含编译），结果相同；无模块的包 `--jit` 31.7 s。
+- `tests/test_export_distribution.py` 23 项通过（新增 `jit` 清单字段检查）。
