@@ -236,14 +236,17 @@ final class ExecScalarAnalysis {
     static void writes(AcsElement value, Set<Integer> slots) {
         int slot = written(value);
         if (slot >= 0) slots.add(slot);
-        for (var child : ExecShape.children(value)) writes(child.value(),slots);
+        // Contexts and method entries hold no expression (only O3 callers have them).
+        for (var child : ExecShape.children(value))
+            if (child.role() != ExecShape.Role.CONTEXT && child.role() != ExecShape.Role.METHOD_ENTRY) writes(child.value(),slots);
     }
     static Set<Integer> reads(AcsElement value) {
         Set<Integer> result = new HashSet<>();
         if (value == null) return result;
         if (opcode(value) == VARIABLE) result.add(number(value, "v"));
         else for (var child : ExecShape.children(value))
-            if (child.role() != ExecShape.Role.STORAGE_TARGET) result.addAll(reads(child.value()));
+            if (child.role() != ExecShape.Role.STORAGE_TARGET && child.role() != ExecShape.Role.CONTEXT
+                    && child.role() != ExecShape.Role.METHOD_ENTRY) result.addAll(reads(child.value()));
         return result;
     }
     private void liveness() {

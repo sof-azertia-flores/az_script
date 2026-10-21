@@ -110,6 +110,8 @@ CASES = O1_CASES + (
     ('o3-constant-clone-error', 'int work(int x,int mode){\n int s=x;\n if(mode==1){s=s*2;}\n return s/(mode-3);\n}\nint main(){\n return work(4,1)+work(4,3);\n}', None, '', 'Division by zero'),
     ('o3-generic-clone', '<T> T pick(boolean c,T a,T b){if(c){return a;}return b;}<T> int count(T x,int n){int s=0;for(int i=0;i<n;i++){s+=i;}return s;}'
      'int main(){int x=pick(true,3,4);boolean y=pick(false,true,false);int z=count(5,10)+count(true,3);return y?0:x+z;}', 51, '', None),
+    ('o3-virtual-class-caller', 'class B{int m;virtual int v(int n){return n+1;}}class C:B{override int v(int n){return n+2;}}'
+     'int f(int x){return x*2;}int main(){B* b=new C();int r=f(3)+b.v(4);delete b;return r;}', 12, '', None),
     generated_flow_case(),
 )
 

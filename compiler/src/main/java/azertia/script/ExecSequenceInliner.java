@@ -147,7 +147,9 @@ final class ExecSequenceInliner {
     private static boolean returnInLoop(AcsElement value, boolean loop) {
         int op = opcode(value);
         if (op == RETURN) return loop;
-        for (var child : ExecShape.children(value)) if (returnInLoop(child.value(), loop || op == WHILE)) return true;
+        for (var child : ExecShape.children(value))
+            if (child.role() != ExecShape.Role.CONTEXT && child.role() != ExecShape.Role.METHOD_ENTRY
+                    && returnInLoop(child.value(), loop || op == WHILE)) return true;
         return false;
     }
     private static boolean containsReturn(AcsElement value) { return returnInLoop(value, true); }
@@ -190,7 +192,8 @@ final class ExecSequenceInliner {
     }
     private static void collect(AcsElement value, int op, List<AcsElement> result) {
         if (opcode(value) == op) result.add(value);
-        for (var child : ExecShape.children(value)) collect(child.value(), op, result);
+        for (var child : ExecShape.children(value))
+            if (child.role() != ExecShape.Role.CONTEXT && child.role() != ExecShape.Role.METHOD_ENTRY) collect(child.value(), op, result);
     }
 
     // ---- callers ------------------------------------------------------------
@@ -246,7 +249,8 @@ final class ExecSequenceInliner {
     private static boolean writesLocal(AcsElement value) {
         if (value == null) return false;
         if (written(value) >= 0) return true;
-        for (var child : ExecShape.children(value)) if (writesLocal(child.value())) return true;
+        for (var child : ExecShape.children(value))
+            if (child.role() != ExecShape.Role.CONTEXT && child.role() != ExecShape.Role.METHOD_ENTRY && writesLocal(child.value())) return true;
         return false;
     }
 
