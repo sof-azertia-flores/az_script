@@ -6,7 +6,7 @@ random.Random(seed) alone (no global random state, time or hash order). The
 programs combine classes with literal-object and pointer fields, inheritance
 chains of up to three levels, explicit and synthesized destructors that emit
 event()/probe(), sometimes fail (division by zero, integer overflow, host
-failure, a failing Bad field) or call getDepth/alloc/mem_send_up/mem_free/
+failure, a failing Bad field) or call alloc/mem_send_up/mem_free/
 make_free/delete, functions returning locals, parameters, fields and
 temporaries by value, statement and condition temporaries, objects in loops
 with break/continue/return, switch sections, nested blocks, automatic and
@@ -559,7 +559,7 @@ class Generator:
     def recursion_helper(self, cls):
         def build(name):
             body = [stmt(self.literal_decl(cls, 't', 'd')), stmt('t.n = d;'),
-                    Item(['if (d <= 0) {', [stmt('probe(getDepth());'), stmt('return t.n;', fixed=True)], '}'], 'if'),
+                    Item(['if (d <= 0) {', [stmt('probe(d);'), stmt('return t.n;', fixed=True)], '}'], 'if'),
                     stmt(f'return {name}(d - 1) + t.n;', fixed=True)]
             return Item([f'int {name}(int d) {{', body, '}'], 'func', name=name)
         return self.helper(('rec', cls.name), f'rec{cls.name}', build)
@@ -673,7 +673,7 @@ class Generator:
 
         def probe():
             self.feature(f'probe-in-{where}')
-            return [stmt(rng.choice(('probe(getDepth());', 'probe(n);', 'event(getDepth());')))]
+            return [stmt(rng.choice(('probe(n);', 'event(n);')))]
 
         def nested():
             other = self.some_class(level)
@@ -779,7 +779,6 @@ class Generator:
             (3, lambda: str(self.small())),
             (3, lambda: self.pick_var(fn, 'int')),
             (4, lambda: self.member_read(fn)),
-            (1, lambda: 'getDepth()'),
             (0.6 if self.g0 else 0, lambda: 'g0'),
         ])
 
@@ -1322,7 +1321,7 @@ class Generator:
             (6, delete),
             (1.5, alias),
             (5, lambda: [stmt(f'event({self.int_expr(fn)});')]),
-            (1.5, lambda: [stmt('probe(getDepth());' if self.chance(0.5) else f'probe({self.int_expr(fn)});')]),
+            (1.5, lambda: [stmt(f'probe({self.int_expr(fn)});')]),
             (0.4, lambda: [stmt(f'print({self.int_expr(fn)});')]),
             (1.5, assign_int),
             (4, assign_object),

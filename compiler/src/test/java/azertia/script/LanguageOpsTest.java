@@ -659,9 +659,9 @@ class LanguageOpsTest {
             assertEquals(targetCode(target), converted.get("type").getAsInt());
             roundTrip(source);
         }
-        JsonObject identity = execReturn("int main(){return int(getDepth());}");
+        JsonObject identity = execReturn("int main(){return int(str_length(\"ab\"));}");
         assertEquals(1, identity.get("t").getAsInt());
-        assertEquals(0x0abd0001, identity.get("id").getAsInt());
+        assertEquals(0x0abd000b, identity.get("id").getAsInt());
         roundTrip("void main(){int(1);float(1);double(1);string(1);address(alloc(1));}");
         roundTrip("int main(){int x=1;for(int(x);true;int(x)){break;}return x;}");
     }

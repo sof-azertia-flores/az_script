@@ -915,9 +915,6 @@ def main():
             parsed = WireReader().read(payload)
             assert encode_compact_module(parsed) == payload, ('select independent roundtrip', name)
             execute_wire('independent-select-' + name, fields, expected=expected)
-        depth_call = expression(2, integer(0x0abd0001), stack(), stack())
-        same_scope = expression(19, expression(50, constant(True), depth_call, depth_call), depth_call)
-        execute_wire('independent-select-current-scope', module([function(returning(same_scope), return_type=4)]), expected='true\n')
         for index, condition in enumerate([0, 1, Scalar(DOUBLE, struct.pack('<d', 1.0)), 'yes', Address(1), b'\xff']):
             body = returning(expression(50, constant(condition), constant(2), constant(3)))
             execute_wire('select-condition-' + str(index), module([function(body)]), invalid=True,
@@ -1033,7 +1030,7 @@ def main():
             execute_wire('virtual-' + label, module([function(body, return_type=5, locals_count=1), method]), invalid=True)
         for label, target, captured in [
                 ('missing-target', method_id + 1, []),
-                ('native-target', 0x0abd0001, []),
+                ('native-target', 0x0abd0000, []),
                 ('hidden-mismatch', method_id, [{'abi': 0, 'kind': 0}])]:
             body = block(allocation, bind_manual, set_methods(pointer, [(target, captured)]))
             execute_wire('virtual-binding-' + label, module([function(body, return_type=5, locals_count=1), method]), invalid=True)

@@ -47,7 +47,7 @@ class ExecO2AnalysisTest {
     }
     @Test void effectsExcludeObserversAliasesAndRecursion() throws Exception {
         var program=compile("int leaf(int x){return x+1;}int caller(int x){return leaf(x);}"
-                +"int observer(){return getDepth();}int recurse(int x){return recurse(x);}"
+                +"int observer(){print(1);return 1;}int recurse(int x){return recurse(x);}"
                 +"int global=1;int readGlobal(){return global;}int main(){return caller(3);}",Compiler.Optimization.NONE);
         var functions=program.getAsAcsArray("f");var safe=ExecScalarAnalysis.safeFunctions(functions);
         int count=0;

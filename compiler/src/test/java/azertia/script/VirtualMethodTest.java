@@ -104,8 +104,8 @@ class VirtualMethodTest {
     }
 
     @Test void builtinNamedMembersAndGenericClassReturnsKeepTheirVirtualBinding() throws Exception {
-        String source = "class Base{int value;virtual int getDepth(){return value;}int invoke(){return getDepth();}}"
-                + "class Child:Base{override int getDepth(){return value+1;}}int main(Base* value){return value.getDepth();}";
+        String source = "class Base{int value;virtual int alloc(){return value;}int invoke(){return alloc();}}"
+                + "class Child:Base{override int alloc(){return value+1;}}int main(Base* value){return value.alloc();}";
         JsonObject ast = tree(source), program = compile(source);
         assertEquals(1, nodes(function(program, ast, "main"), ExecOpcodes.CALL_VIRTUAL).size());
         assertEquals(1, nodes(function(program, ast, "Base::invoke"), ExecOpcodes.CALL_VIRTUAL).size());

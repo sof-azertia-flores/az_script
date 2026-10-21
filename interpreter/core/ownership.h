@@ -71,7 +71,6 @@ ScopeId frame_root(ScopeId scope) noexcept;
 // Where explicit allocation transfer goes: the caller, else the lexical parent.
 ScopeId transfer_parent(ScopeId scope) noexcept;
 // The number of scopes on the parent chain, scope included.
-int depth(ScopeId scope) noexcept;
 
 template<class Id> class Lease {
     std::shared_ptr<Arena> arena_;

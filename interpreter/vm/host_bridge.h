@@ -30,7 +30,7 @@ public:
     HostBridge(script& owner,const ExecutableProgram& program,HostBoundary& boundary)
         :owner_(owner),program_(program),boundary_(boundary) {}
     Value invoke_external(const CallTarget& target,std::span<const Value> arguments,
-        const ExecutionPosition& caller,std::size_t lexical_depth) override;
+        const ExecutionPosition& caller) override;
     std::shared_ptr<variable> invoke_external_in(const CallTarget& target,std::span<const Value> arguments,
         const ExecutionPosition& caller,const std::shared_ptr<environment>& scope) override;
     void note_script_error(const ExecutionPosition& position) noexcept override;

@@ -1,5 +1,5 @@
 """Group A: scope and frame exit (cleanup spec section 12 group A, timelines T1/T2,
-getDepth in every context, and owner-scope rules for automatic objects).
+and owner-scope rules for automatic objects).
 
 Expectations are derived from the tree-interpreter specification and the
 interpreter/compiler source, not from observed output:
@@ -7,16 +7,9 @@ interpreter/compiler source, not from observed output:
   literal locals are pushed by bind_local at the end of their vd (library.cpp:2157-2168,
   blocks.cpp:613-618), parameters at call entry (library.cpp:2115-2121), and automatic
   objects when ro runs (heepalloc.cpp:400-425), onto the env that executed the call node.
-- getDepth counts the lexical parent chain including the calling env
-  (internelFunctions.cpp:21-29). The function body block runs on the root
-  (library.cpp:2125); nested blocks and non-block if/while bodies get a scope
-  (library.cpp:843-849, 2143-2146); conditions run on the enclosing env
-  (library.cpp:2211-2216); #cleanup-wrapped constructor/destructor bodies and the
-  derived-constructor phase add scopes (Compiler.java:2832-2866).
 - for is lowered to {init; #for-first; while(true){ if(first)..else step; if(!cond) break;
-  { body } }} (Compiler.java:1407-1425), so a block body sits four scopes below the
-  enclosing env, the condition runs on the iteration scope and the step is the
-  non-block else body, with its own scoped_execute scope.
+  { body } }} (Compiler.java:1407-1425): the condition runs on the iteration scope and
+  the step is the non-block else body, with its own scoped_execute scope.
 - switch is lowered to {vd value; [vd continue-flag]; while(true){ if(label) {section} ...
   {default} break; } [if(continue-flag) continue] } (Compiler.java:1696-1724): the
   value is evaluated in the wrapper block, each section is a block inside the
@@ -50,9 +43,9 @@ FAIL_MARK = '1 / zero;'
 # A literal class whose address exposes its block id (bit63 | id<<24).
 T_CLASS = ('class T { int n; T(int v){ n = v; } T * self(){ return this; } ~T(){ event(0-n); } }\n'
            'T mkT(int v){ T t(v); return t; }\n')
-# Records n*10+getDepth() in its constructor and the negation in its destructor.
-U_CLASS = ('class U { int n; U(int v){ n = v; event(n * 10 + getDepth()); } '
-           '~U(){ event(0 - (n * 10 + getDepth())); } }\n')
+# Records n*10 in its constructor and the negation in its destructor.
+U_CLASS = ('class U { int n; U(int v){ n = v; event(n * 10); } '
+           '~U(){ event(0 - n * 10); } }\n')
 
 
 def block_address(block_id, offset=0):
@@ -751,75 +744,36 @@ def cases():
                       error='Division by zero', category='runtime_error', trace=('Fail::~Fail', 'g', 'main'),
                       lines=(line_of(source, FAIL_MARK), line_of(source, 'return 4;'), line_of(source, 'g();'))))
 
-    # A12, ownership section 5 table: getDepth in function contexts. Root 2,
-    # nested blocks 3/4, a callee root 2 regardless of call site, non-block and
-    # block if/else bodies 3, if/while conditions on the enclosing env (2),
-    # while body blocks 3, a non-block while body 3; for: initializer 3,
-    # condition 4 (iteration scope), block body 6, non-block body 5.
-    result.append(own('own-a12-getdepth-function-contexts', program(
+    # A12, ownership section 5: an unwrapped constructor runs when the object is
+    # declared and its destructor, including a nested block, when the inner
+    # block ends. A12's "no fields" cannot be written (every class needs a
+    # field, Compiler.java:2487; verify cleanup correction 30), so V has only a
+    # scalar field.
+    result.append(own('own-a12b-unwrapped-ctor-dtor', program(
         EVENT,
-        'int helper(){',
-        '  return event(getDepth());',
-        '}',
-        'int main(){',
-        '  boolean yes = true;',
-        '  boolean no = false;',
-        '  event(getDepth());',
-        '  {',
-        '    event(getDepth());',
-        '    {',
-        '      event(getDepth());',
-        '      helper();',
-        '    }',
-        '  }',
-        '  if (yes) event(getDepth());',
-        '  if (yes) { event(getDepth()); }',
-        '  if (no) { event(0); } else event(getDepth());',
-        '  if (event(getDepth()) == 2) { event(getDepth()); }',
-        '  int i = 0;',
-        '  while (event(getDepth()) + i < 4) {',
-        '    event(10 + getDepth());',
-        '    i = i + 1;',
-        '  }',
-        '  int j = 0;',
-        '  while (j < 2) j = j + event(getDepth());',
-        '  for (int k = event(getDepth()); event(getDepth()) + k < 8; k = k + 1) {',
-        '    event(getDepth());',
-        '  }',
-        '  for (int m = 0; m < 1; m++) event(getDepth());',
-        '  return getDepth();',
-        '}'), 2, events=(2, 3, 4, 2, 3, 3, 3, 2, 3, 2, 13, 2, 13, 2, 3, 3, 4, 6, 4, 5)))
-
-    # A12, ownership section 5: unwrapped constructor and destructor bodies run on
-    # their own root (2) wherever the object lives; a nested block in the
-    # destructor adds one level. A12's "no fields" cannot be written (every class
-    # needs a field, Compiler.java:2487; verify cleanup correction 30), so V has
-    # only a scalar field.
-    result.append(own('own-a12b-getdepth-unwrapped-ctor-dtor', program(
-        EVENT,
-        'class V { int n; V(int v){ n = v; event(n * 10 + getDepth()); } '
-        '~V(){ { event(1000 + getDepth()); } event(0 - (n * 10 + getDepth())); } }',
+        'class V { int n; V(int v){ n = v; event(n * 10); } '
+        '~V(){ { event(1000); } event(0 - n * 10); } }',
         'int main(){',
         '  {',
         '    {',
         '      V u(1);',
-        '      event(getDepth());',
+        '      event(5);',
         '    }',
         '  }',
         '  return 0;',
-        '}'), 0, events=(12, 4, 1003, -12)))
+        '}'), 0, events=(10, 5, 1000, -10)))
 
     # A12 (with a literal field), ownership section 5: a base-less class with an
-    # owned field wraps both constructor and destructor bodies in #cleanup (3).
-    # The field initializer runs inside the wrapped constructor block, so f.n is 3,
-    # and the field's destructor event follows the destructor body.
-    result.append(own('own-a12c-getdepth-wrapped-ctor-dtor-literal-field', program(
+    # owned field wraps both constructor and destructor bodies in #cleanup. The
+    # field initializer runs inside the wrapped constructor block, and the
+    # field's destructor event follows the destructor body.
+    result.append(own('own-a12c-wrapped-ctor-dtor-literal-field', program(
         PRELUDE,
         'class W {',
-        '  M f(getDepth());',
+        '  M f(3);',
         '  int k;',
-        '  W(){ k = getDepth(); event(k); }',
-        '  ~W(){ { event(1000 + getDepth()); } event(10 + getDepth()); }',
+        '  W(){ k = 4; event(k); }',
+        '  ~W(){ { event(1000); } event(10); }',
         '}',
         'int main(){',
         '  {',
@@ -827,22 +781,22 @@ def cases():
         '    event(50);',
         '  }',
         '  return 0;',
-        '}'), 0, events=(3, 50, 1004, 13, -3)))
+        '}'), 0, events=(4, 50, 1000, 10, -3)))
 
     # Verify ownership correction 16: derived constructors/destructors.
-    # B (no base, no owned fields): ctor 2, dtor 2; its events carry 100 * b so the
-    # base parts of d (b = 1) and e (b = 2) are told apart.
-    # D : B (base has a destructor): ctor body 4 (flagged #cleanup + phase block), dtor 3.
-    # E : B with an owned field: ctor 4, dtor 3 then the field, then ~B.
-    # Q : N (base has no destructor, no own owned fields): ctor 3 (phase block), dtor 2.
-    result.append(own('own-a12d-getdepth-derived-ctor-dtor', program(
+    # B (no base, no owned fields); its events carry 100 * b so the base parts of
+    # d (b = 1) and e (b = 2) are told apart.
+    # D : B (base has a destructor; flagged #cleanup + phase block).
+    # E : B with an owned field: the destructor body, then the field, then ~B.
+    # Q : N (base has no destructor, no own owned fields; phase block).
+    result.append(own('own-a12d-derived-ctor-dtor', program(
         PRELUDE,
-        'class B { int b; B(int v){ b = v; event(100 * b + 10 + getDepth()); } '
-        '~B(){ event(100 * b + 20 + getDepth()); } }',
-        'class D : B { int z; D(int v) : B(v) { event(30 + getDepth()); } ~D(){ event(40 + getDepth()); } }',
-        'class E : B { M f(7); E(int v) : B(v) { event(50 + getDepth()); } ~E(){ event(60 + getDepth()); } }',
-        'class N { int n; N(int v){ n = v; event(70 + getDepth()); } }',
-        'class Q : N { int m; Q(int v) : N(v) { event(80 + getDepth()); } ~Q(){ event(90 + getDepth()); } }',
+        'class B { int b; B(int v){ b = v; event(100 * b + 10); } '
+        '~B(){ event(100 * b + 20); } }',
+        'class D : B { int z; D(int v) : B(v) { event(30); } ~D(){ event(40); } }',
+        'class E : B { M f(7); E(int v) : B(v) { event(50); } ~E(){ event(60); } }',
+        'class N { int n; N(int v){ n = v; event(70); } }',
+        'class Q : N { int m; Q(int v) : N(v) { event(80); } ~Q(){ event(90); } }',
         'int main(){',
         '  {',
         '    D d(1);',
@@ -851,31 +805,30 @@ def cases():
         '  }',
         '  event(999);',
         '  return 0;',
-        '}'), 0, events=(112, 34, 212, 54, 72, 83, 92, 63, -7, 222, 43, 122, 999)))
+        '}'), 0, events=(110, 30, 210, 50, 70, 80, 90, 60, -7, 220, 40, 120, 999)))
 
     # Section 8 #30: objects created inside a destructor belong to the
-    # destructor's own scopes (released LIFO when it exits); their constructors
-    # and destructors run at depth 2, and so does the unwrapped destructor body.
+    # destructor's own scopes and are released LIFO when it exits.
     result.append(own('own-a12e-objects-created-in-destructor', program(
         EVENT + U_CLASS,
-        'class Z { int n; Z(int v){ n = v; } ~Z(){ U inside(101); U * a(201); event(getDepth()); } }',
+        'class Z { int n; Z(int v){ n = v; } ~Z(){ U inside(101); U * a(201); event(7); } }',
         'int main(){',
         '  {',
         '    Z z(1);',
         '  }',
         '  event(5);',
         '  return 0;',
-        '}'), 0, events=(1012, 2012, 2, -2012, -1012, 5)))
+        '}'), 0, events=(1010, 2010, 7, -2010, -1010, 5)))
 
     # Ownership sections 5/6.5: a destructor at scope exit runs at the cleanup
     # initiator's active_calls + 1 (probe adds its own level), whether the
-    # object ends at a block, at a callee's root, or as a statement temporary;
-    # getDepth inside it is always 2. main runs at active_calls 1 (script::invoke has
-    # no guard, library.cpp:1768-1773). Swept: the driver's terminal_shape drops the
+    # object ends at a block, at a callee's root, or as a statement temporary.
+    # main runs at active_calls 1 (script::invoke has no guard,
+    # library.cpp:1768-1773). Swept: the driver's terminal_shape drops the
     # probes' remaining_steps.
-    result.append(own('own-a12f-destructor-depth-and-active-calls', program(
+    result.append(own('own-a12f-destructor-active-calls', program(
         EVENT + PROBE,
-        'class PR { int n; PR(int v){ n = v; } ~PR(){ probe(n * 10 + getDepth()); } }',
+        'class PR { int n; PR(int v){ n = v; } ~PR(){ probe(n * 10); } }',
         'PR mkPR(int v){ PR t(v); return t; }',
         'void f(){ PR b(2); }',
         'int main(){',
@@ -884,20 +837,20 @@ def cases():
         '  }',
         '  f();',
         '  event(mkPR(3).n);',
-        '  probe(getDepth());',
+        '  probe(0);',
         '  return 0;',
         '}'), 0, partial=True, raw_events=[
-            {'callback': 5, 'arguments': [typed(0, 12)], 'active_calls': 3},
-            {'callback': 5, 'arguments': [typed(0, 22)], 'active_calls': 4},
+            {'callback': 5, 'arguments': [typed(0, 10)], 'active_calls': 3},
+            {'callback': 5, 'arguments': [typed(0, 20)], 'active_calls': 4},
             {'callback': 1, 'arguments': [typed(0, 3)]},
-            {'callback': 5, 'arguments': [typed(0, 32)], 'active_calls': 3},
-            {'callback': 5, 'arguments': [typed(0, 2)], 'active_calls': 2}]))
+            {'callback': 5, 'arguments': [typed(0, 30)], 'active_calls': 3},
+            {'callback': 5, 'arguments': [typed(0, 0)], 'active_calls': 2}]))
 
-    # Ownership section 5: a host re-entry root has baseEnv as its parent, so
-    # getDepth is 2 there even when the callback is made from a nested block.
-    result.append(own('own-a12g-getdepth-host-reentry-root', program(
+    # Ownership section 5: a host re-entry made from a nested block runs as a
+    # fresh root and returns its result to the caller.
+    result.append(own('own-a12g-host-reentry-from-nested-block', program(
         EVENT + 'extern int reenter(int,int):6dff0004;\n',
-        'int depth(int x):0011{ return getDepth() * 10 + x; }',
+        'int depth(int x):0011{ return 20 + x; }',
         'int main(){',
         '  {',
         '    {',
@@ -909,45 +862,6 @@ def cases():
             {'callback': 4, 'arguments': [typed(0, 268369937), typed(0, 1)]},
             {'reentry_return': typed(0, 21)},
             {'callback': 1, 'arguments': [typed(0, 21)]}]))
-
-    # Ownership section 5 table, host row: the host invoking the getDepth builtin
-    # (0x0abd0001) directly runs it on baseEnv, which has no parent: 1. The
-    # builtin path ticks nothing (only GUARD, which resets the budget), so the
-    # whole budget remains.
-    result.append(own('own-a12h-getdepth-host-invoked-builtin', program(
-        EVENT,
-        'int main(){',
-        '  return getDepth();',
-        '}'), 1, remaining=1000000, options=['--function', '0x0abd0001']))
-
-    # getDepth in a for step and in switch sections (lowerings in the module
-    # docstring), at main's root (2): the for scope is 3, the iteration scope 4, the
-    # step (non-block else of if(#for-first)) 5 and a block body 6; the step returns
-    # event(5) - 4 = 1. A switch value runs in the wrapper block (3), and both a
-    # labelled section and the default section are blocks inside the synthetic
-    # loop's iteration block (5).
-    result.append(own('own-a12i-getdepth-for-step-and-switch-sections', program(
-        EVENT,
-        'int main(){',
-        '  for (int k = 0; k < 2; k = k + event(getDepth()) - 4) {',
-        '    event(10 + getDepth());',
-        '  }',
-        '  switch (event(20 + getDepth())) {',
-        '    case 23:',
-        '      event(30 + getDepth());',
-        '      break;',
-        '    default:',
-        '      event(0);',
-        '  }',
-        '  switch (1) {',
-        '    case 0:',
-        '      event(0);',
-        '      break;',
-        '    default:',
-        '      event(40 + getDepth());',
-        '  }',
-        '  return getDepth();',
-        '}'), 2, events=(16, 5, 16, 5, 23, 35, 45)))
 
     # Section 8 #4/#5: a discarded literal result dies at its statement end; a
     # discarded automatic result stays with the call-site scope, LIFO with locals.

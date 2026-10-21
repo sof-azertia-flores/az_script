@@ -2488,7 +2488,8 @@ int main(){try{
         rejects([&]{insert_raw(linked,alpha,false);},"duplicate hint mount rejected");
         check(linked->setup&&linked->module_manifest().size()==2,"failed mounting preserves previous setup and module list");
         rejects([&]{linked->namespace_for_hint("alpha");},"hint names are case sensitive");
-        auto cached_host=linked->getFunction(0x0abd0001);
+        auto cached_host=linked->getFunction(0x0abd000b);
+        rejects([&]{linked->getFunction(0x0abd0001);},"the retired getDepth id resolves to no function");
         linked->baseEnv->getVariable(-1)->setValue(100);linked->baseEnv->getVariable(-2)->setValue(70);
         insert_raw(linked,rhint("Beta",{rfn(2,STRING_VALUE,rreturn(rc(s("beta"))))}),false);
         rejects([&]{entry->invoke(linked->baseEnv);},"insert invalidates cached script execution gate");

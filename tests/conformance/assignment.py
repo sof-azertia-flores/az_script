@@ -1498,8 +1498,8 @@ def construction_cases():
 
     # Verifier correction 22, unflagged shape: no own owned fields and a base
     # without cleanup destructor give [#check-this, base call, phase] with phase
-    # a nested block, so getDepth is 3 in the body (the flagged shape gives 4,
-    # own-ce11b). The failing base-argument temporary's own error (101)
+    # a nested block (the flagged shape nests the body further, own-ce11b);
+    # the body reports 7 once ok is built. The failing base-argument temporary's own error (101)
     # propagates; this shape has nothing it could roll back, and ok (no
     # destructor anywhere) emits nothing at exit. ND::ND is at the base call
     # (constructor header line), not at the mkf( call on the next line.
@@ -1508,19 +1508,19 @@ def construction_cases():
         'class NB { int k; NB(int v){ k = v; } }',
         'class ND : NB { int j;',
         '  ND(int v) : NB(',
-        '    v == 0 ? mkf(1).n : v) { event(getDepth()); } }',
+        '    v == 0 ? mkf(1).n : v) { event(7); } }',
         'int main(){',
         '  ND ok(5);',
         '  ND bad(0);',
         '  return 0;',
         '}')
     result.append(own('own-ce11-unflagged-derived-shape-base-argument-failure', source, error='Division by zero',
-                      category='runtime_error', events=(3, 101), trace=('Fail::~Fail', 'ND::ND', '<value ND>', 'main'),
+                      category='runtime_error', events=(7, 101), trace=('Fail::~Fail', 'ND::ND', '<value ND>', 'main'),
                       lines=(line_of(source, FAIL_MARK), line_of(source, 'ND(int v)'), line_of(source, 'class ND : NB {'),
                              line_of(source, 'ND bad(0);'))))
 
     # Correction 22, flagged shape: the base has a destructor, so the protected
-    # body and the phase are nested blocks (getDepth 4). The failing argument
+    # body and the phase are nested blocks. The failing argument
     # temporary (102) leaves bad's base rolled back (FB(2): -2), and ok is
     # destroyed through the base's cleanup destructor at main's exit (FB(5): -5).
     source = program(
@@ -1528,14 +1528,14 @@ def construction_cases():
         'class FB { int k; FB(int v){ k = v; } ~FB(){ event(0 - k); } }',
         'class FD : FB { int j;',
         '  FD(int v) : FB(',
-        '    v == 0 ? mkf(2).n : v) { event(getDepth()); } }',
+        '    v == 0 ? mkf(2).n : v) { event(7); } }',
         'int main(){',
         '  FD ok(5);',
         '  FD bad(0);',
         '  return 0;',
         '}')
-    result.append(own('own-ce11b-flagged-derived-shape-depth-and-rollback', source, error='Division by zero',
-                      category='runtime_error', events=(4, 102, -2, -5),
+    result.append(own('own-ce11b-flagged-derived-shape-rollback', source, error='Division by zero',
+                      category='runtime_error', events=(7, 102, -2, -5),
                       trace=('Fail::~Fail', 'FD::FD', '<value FD>', 'main'),
                       lines=(line_of(source, FAIL_MARK), line_of(source, 'FD(int v)'), line_of(source, 'class FD : FB {'),
                              line_of(source, 'FD bad(0);'))))

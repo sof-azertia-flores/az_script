@@ -140,11 +140,6 @@ MUTANTS = [
          'if(unwind.region){unwind.mode=Unwind::Mode::finished;continue;}',
          ''),
     ], 'vm'),
-    ('depth-counts-callers', [
-        ('interpreter/core/ownership.cpp',
-         'for(auto id=scope;const auto* record=find(id);id=record->parent)++result;',
-         'for(auto id=scope;const auto* record=find(id);id=find(record->caller)?record->caller:record->parent)++result;'),
-    ]),
 ]
 
 

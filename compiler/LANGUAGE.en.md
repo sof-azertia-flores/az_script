@@ -12,7 +12,7 @@ The compiler was rewritten around the original code-tree format. Source passes t
 
 O2 (`Compiler.Optimization.ADVANCED` in Java) adds scalar analysis across branches and loop backedges, common expression reuse, unreachable branch and dead scalar write elimination, bounded straight-line scalar function inlining, and loop motion justified by integer ranges. Inlined arguments are evaluated once in their original order; potentially failing operations keep their source locations. `--no-cfg-opt`, `--no-cse` and `--no-dce` disable control-flow pruning, common expression reuse and dead code elimination. Existing propagation, inline and loop-motion switches also control their O2 stages.
 
-O2 preserves results, types, effects, object lifetimes, ordinary error categories and failing source locations. Cross-level comparisons allow shorter error stacks and different resource-exhaustion positions; `getDepth()` behavior remains unchanged. Unknown calls, reflection, cleanup and functions beyond analysis limits are treated conservatively. O2 still emits exec v10 and does not select VM/JIT or change JIT thresholds. Same-artifact backend equivalence is unchanged. See the [O2 boundaries and limits](../docs/compiler-optimization/O2.md).
+O2 preserves results, types, effects, object lifetimes, ordinary error categories and failing source locations. Cross-level comparisons allow shorter error stacks and different resource-exhaustion positions. Unknown calls, reflection, cleanup and functions beyond analysis limits are treated conservatively. O2 still emits exec v10 and does not select VM/JIT or change JIT thresholds. Same-artifact backend equivalence is unchanged. See the [O2 boundaries and limits](../docs/compiler-optimization/O2.md).
 
 Optimization reduces executed expressions and budget consumption. `max_steps` prevents runaway execution; optimization levels need not exhaust it at the same source position. Both engines retain the same work-unit charges for a given artifact. In scalar regions without calls, cleanup or control transfers, the VM can validate at most 64 steps together while still charging each executed tick; insufficient budget takes the per-tick path. The default `max_call_depth=0` disables the logical call-depth cap; positive values explicitly enable it. Native-stack and workspace limits remain active. O1 can remove physical calls, so optional depth caps and resource-exhaustion positions are outside O0/O1 equivalence; `getDepth()` and ordinary error traces remain protected.
 
@@ -97,12 +97,11 @@ Non-hint programs retain `__script_onload = 0`, `main = 0x0fff0000`, and `__scri
 
 `#namespace_hint NAME` declares an independent library. Ordinary library functions, including main, use placeholder 0000; 0/1 are reserved for lifecycle and automatic numbering starts at 2. `#assume_hint NAME abcd` supplies a call namespace relocated by flush. A compilation unit including active includes may have at most one namespace or namespace_hint directive. See [multi-file libraries and hint linking](../docs/HINT_LINKING.en.md).
 
-Twenty built-ins require no declaration:
+Nineteen built-ins require no declaration:
 
 | Name | Signature | ID |
 | --- | --- | --- |
 | `print` | `void(any)` | `0x0abd0000` |
-| `getDepth` | `int()` | `0x0abd0001` |
 | `mem_free` | `boolean(address)` | `0x0abd0002` |
 | `alloc` | `address(int)` | `0x0abd0003` |
 | `make_free` | `void(address)` | `0x0abd0004` |
@@ -578,7 +577,7 @@ A cut inside a lazy operand (the right side of `&&`/`||`, either `?:` arm, or a 
 
 Generic and pointer type expressions retain a separate 64-level limit. Parser recursion and JSON containers have a 320-level guard; compilation has a 640-level expression-recursion guard. Cyclic ASTs are rejected. Errors remain located and do not prevent later compilations in the same process. The Java `Compiler.compileExpression` API also validates the tree and encoded depth. It can lower a statement array, but a standalone expression needing sibling statements reports `Expression requires statement-level spilling; store this operand in a local variable first`; place such work in a statement array or function.
 
-`getDepth()` reports implementation-defined runtime scope depth, not source brace nesting; compiler-generated scopes may affect it.
+Runtime scope depth is not observable: the former `getDepth()` was removed and `0x0abd0001` stays reserved and is never reassigned; scopes show only through object lifetimes, so the compiler may add, remove or merge them.
 
 ### Long operator chains
 

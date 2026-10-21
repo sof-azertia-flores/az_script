@@ -38,12 +38,12 @@ SourceFunction recursive(bool boundary=false) {
         boundary?call(0x76540001):literal(0)})),{INT_VALUE});
 }
 struct Callbacks final:ExecutionCallbacks {
-    std::function<Value(const CallTarget&,std::span<const Value>,const ExecutionPosition&,std::size_t)> body;
+    std::function<Value(const CallTarget&,std::span<const Value>,const ExecutionPosition&)> body;
     std::array<ExecutionPosition,64> trace{};
     std::size_t recorded=0,omitted=0;
     Value invoke_external(const CallTarget& target,std::span<const Value> arguments,
-            const ExecutionPosition& position,std::size_t lexical_depth) override {
-        return body(target,arguments,position,lexical_depth);
+            const ExecutionPosition& position) override {
+        return body(target,arguments,position);
     }
     void note_script_error(const ExecutionPosition& position) noexcept override {
         if(recorded<trace.size())trace[recorded++]=position;else ++omitted;
@@ -57,9 +57,9 @@ void recursion_and_depth() {
     std::uint64_t steps=0,max_steps=1000000;
     admission::accounting accounting(active,depth_limit,steps,max_steps);Callbacks callbacks;
     std::size_t deepest=0;
-    callbacks.body=[&](const CallTarget&,std::span<const Value> args,const ExecutionPosition&,std::size_t lexical_depth) {
+    callbacks.body=[&](const CallTarget&,std::span<const Value> args,const ExecutionPosition&) {
         auto admission=accounting.enter();deepest=active;
-        check(args.empty()&&lexical_depth==2,"Recursion must not change the lexical root depth");return Value(0);
+        check(args.empty(),"Recursion passes the host call's arguments");return Value(0);
     };
     ExecutionOptions options{&accounting,&callbacks};const std::array argument{Value(20000)};
     auto result=executor.invoke(0,argument,{},steps,nullptr,options);
@@ -99,7 +99,7 @@ void recursion_and_depth() {
     }
     check(active==0&&pool.size()==0,"Lifecycle anchors outlive VM-only frame unwinding");
 }
-void host_reentry_and_lexical_depth() {
+void host_reentry() {
     auto outer=function(10,returned(call(0x76540001,{literal(12),literal("preserved across native reentry")})));
     auto inner=function(11,returned(op(12,{slot(0),slot(255)})),std::vector<int>(256,INT_VALUE));
     auto nested=function(12,op(1,{op(1,{returned(call(0x76540002))})}));
@@ -107,12 +107,10 @@ void host_reentry_and_lexical_depth() {
     WorkspaceBudget workspace(4*1024*1024);SlotPool pool(workspace);ScalarExecutor executor(program,pool,workspace);
     std::size_t active=0,limit=8;std::uint64_t steps=0,max_steps=10000;
     admission::accounting accounting(active,limit,steps,max_steps);Callbacks callbacks;ExecutionOptions options{&accounting,&callbacks};
-    callbacks.body=[&](const CallTarget& target,std::span<const Value> args,const ExecutionPosition&,std::size_t depth) {
+    callbacks.body=[&](const CallTarget& target,std::span<const Value> args,const ExecutionPosition&) {
         auto host=accounting.enter();
-        if(target.function_id==0x76540002) {
-            check(depth==3,"A nested block adds one lexical scope but root block adds none");return Value(3);
-        }
-        check(depth==2&&active==2,"Host admission sees the caller root lexical depth and shared logical depth");
+        if(target.function_id==0x76540002)return Value(3);
+        check(active==2,"Host admission sees the shared logical depth");
         const auto* before=args.data();check(args.size()==2&&args[0].get<int>()==12,"Host receives all materialized arguments");
         std::array<Value,256> arguments;for(auto& value:arguments)value=Value(2);
         auto result=executor.invoke(1,arguments,{},steps,nullptr,options);
@@ -122,11 +120,11 @@ void host_reentry_and_lexical_depth() {
         return Value(args[0].get<int>()+result.get<int>());
     };
     check(executor.invoke(0,{}, {},steps,nullptr,options).get<int>()==16,"Outer caller resumes after host reentry");
-    check(executor.invoke(2,{}, {},steps,nullptr,options).get<int>()==3,"Lexical depth callback result is preserved");
+    check(executor.invoke(2,{}, {},steps,nullptr,options).get<int>()==3,"A host call in nested blocks returns its result");
     check(active==0&&pool.size()==0&&callbacks.recorded==0,"Host reentry releases every local and logical guard");
 
     // A failure caught by native code must unwind the nested root alone.
-    callbacks.body=[&](const CallTarget&,std::span<const Value>,const ExecutionPosition&,std::size_t) {
+    callbacks.body=[&](const CallTarget&,std::span<const Value>,const ExecutionPosition&) {
         auto host=accounting.enter();bool rejected=false;ExecutionPosition where;
         try{executor.invoke(1,{}, {},steps,&where,options);}
         catch(const std::runtime_error&){rejected=true;}
@@ -152,7 +150,7 @@ void cleanup_across_host_reentry() {
     std::size_t active=0,limit=8;std::uint64_t steps=0,max_steps=10000;
     admission::accounting accounting(active,limit,steps,max_steps);Callbacks callbacks;ExecutionOptions options{&accounting,&callbacks};
     std::vector<int> events;std::uint32_t reentered=1;bool rethrow=false;
-    callbacks.body=[&](const CallTarget& target,std::span<const Value> args,const ExecutionPosition&,std::size_t) {
+    callbacks.body=[&](const CallTarget& target,std::span<const Value> args,const ExecutionPosition&) {
         auto host=accounting.enter();
         if(target.function_id==0x76540003){events.push_back(args[0].get<int>());return Value{};}
         try{executor.invoke(reentered,{}, {},steps,nullptr,options);}
@@ -280,7 +278,7 @@ void workspace_failure_atomicity() {
 }
 }
 int main() {
-    try{recursion_and_depth();host_reentry_and_lexical_depth();cleanup_across_host_reentry();script_trace_and_conversion();large_slot_layouts();default_workspace_boundaries();workspace_failure_atomicity();
+    try{recursion_and_depth();host_reentry();cleanup_across_host_reentry();script_trace_and_conversion();large_slot_layouts();default_workspace_boundaries();workspace_failure_atomicity();
         std::cout<<"VM call checks passed: "<<checks<<'\n';}
     catch(const std::exception& error){std::cerr<<error.what()<<'\n';return 1;}
 }

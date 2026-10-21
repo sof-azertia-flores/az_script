@@ -648,7 +648,7 @@ def main():
             record = {'heap': candidate['objects'][0], 'literal': candidate['heap'][2],
                       'view': candidate['heap'][3]['slots'][0]}[location]
             if mutation == 'unknown-id': record['methods'][0]['id'] = 999
-            elif mutation == 'native-id': record['methods'][0]['id'] = 0x0ABD0001
+            elif mutation == 'native-id': record['methods'][0]['id'] = 0x0ABD0000
             elif mutation == 'missing-context': del record['methods'][1]['contexts']
             elif mutation == 'wrong-hidden-count': record['methods'][1]['contexts'] = []
             elif mutation == 'bad-factory': record['methods'][1]['contexts'][0]['factory'] = 600

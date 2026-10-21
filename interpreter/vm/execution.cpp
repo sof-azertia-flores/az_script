@@ -1338,7 +1338,7 @@ struct ScalarExecutor::State {
                             break;
                         }
                         trace_touched=true;
-                        const auto output=options.callbacks->invoke_external(target,snapshots.span(),position,2+frame.scope_count);
+                        const auto output=options.callbacks->invoke_external(target,snapshots.span(),position);
                         require_scalar_value(output);value(frame,instruction.result,output);
                     }
                     break;

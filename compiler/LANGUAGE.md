@@ -12,7 +12,7 @@
 
 O2（Java `Compiler.Optimization.ADVANCED`）在 O1 之后增加跨分支/回边的标量分析、公共表达式复用、不可达分支与死标量写入消除、有界直线标量函数内联，以及整数范围证明驱动的循环外提。内联实参按原顺序求值一次；可能报错的运算保留原源码位置。`--no-cfg-opt`、`--no-cse`、`--no-dce` 分别关闭控制流裁剪、公共表达式复用、死代码消除；原有 `--no-propagation`、`--no-inline`、`--no-loop-motion` 同时控制 O2 对应阶段。
 
-O2 保留结果、类型、副作用、对象生命周期、普通错误类别和出错源码位置，允许跨档位的错误调用栈缩短及资源耗尽位置变化，`getDepth()` 行为保持。未知调用、反射、对象清理及不满足分析上限的函数保守处理。O2 继续生成 exec v10，不选择 VM/JIT 或更改 JIT 阈值；同一产物的后端等价契约不变。具体边界与上限见 [O2 说明](../docs/compiler-optimization/O2.md)。
+O2 保留结果、类型、副作用、对象生命周期、普通错误类别和出错源码位置，允许跨档位的错误调用栈缩短及资源耗尽位置变化。未知调用、反射、对象清理及不满足分析上限的函数保守处理。O2 继续生成 exec v10，不选择 VM/JIT 或更改 JIT 阈值；同一产物的后端等价契约不变。具体边界与上限见 [O2 说明](../docs/compiler-optimization/O2.md)。
 
 优化会减少表达式与预算消耗。`max_steps` 用于阻止失控执行，不保证不同优化级别在同一源码位置耗尽；树与 VM 对同一产物仍按相同工作单位计费。VM 可在无调用、清理和控制转移的标量片段中一次验证最多 64 步的余额，逐步扣费；不足时回到逐点检查。默认 `max_call_depth=0` 关闭逻辑调用层数上限，正数可显式启用；原生栈与 workspace 限制仍生效。O1 可能消除实际调用，因此可选深度上限与资源耗尽位置不构成 O0/O1 等价保证；`getDepth()` 和正常错误的调用栈仍受保护。
 
@@ -97,12 +97,11 @@ float narrow(double value) { return float(value); }
 
 `#namespace_hint NAME` 声明独立库；库内普通函数（包括 `main`）以0000占位，0/1保留给生命周期，自动编号从2开始。`#assume_hint NAME abcd` 为调用声明假定 namespace，运行时在 `flush()` 中重定位。一个编译单元及其有效 include 最多包含一个 namespace 或 namespace_hint 指令。完整规则及可运行类库示例见 [多文件库与 hint 链接](../docs/HINT_LINKING.md)。
 
-二十个内置函数无需声明即可直接调用：
+十九个内置函数无需声明即可直接调用：
 
 | 名称 | 签名 | ID |
 | --- | --- | --- |
 | `print` | `void(any)` | `0x0abd0000` |
-| `getDepth` | `int()` | `0x0abd0001` |
 | `mem_free` | `boolean(address)` | `0x0abd0002` |
 | `alloc` | `address(int)` | `0x0abd0003` |
 | `make_free` | `void(address)` | `0x0abd0004` |
@@ -580,7 +579,7 @@ extern int host_add(int, int):0xccf0001;
 
 泛型及指针类型表达式仍有独立的 64 层上限。语法递归和 JSON 容器有 320 层防护，编译表达式递归有 640 层防护；循环 AST 会被拒绝。错误仍有位置，同一进程之后可以继续编译。Java `Compiler.compileExpression` API 同样校验代码树和编码深度，可以降级语句数组；独立表达式若需要兄弟语句，则报告 `Expression requires statement-level spilling; store this operand in a local variable first`，应把相关计算放进语句数组或函数。
 
-`getDepth()` 返回实现定义的运行时作用域深度，不等同于源码花括号层数，编译器生成的作用域也可能影响它。
+运行时作用域深度不可观察：曾经的 `getDepth()` 已删除，`0x0abd0001` 保留不再分配；作用域只通过对象生命周期体现，编译器可以增删或合并作用域。
 
 ### 长运算符链
 

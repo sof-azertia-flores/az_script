@@ -42,7 +42,6 @@ public class Compiler {
     private record BuiltinSpec(String name, int id, int returnType, List<Integer> paramTypes) {}
     private static final List<BuiltinSpec> BUILTINS = List.of(
             new BuiltinSpec("print", 0x0abd0000, AsTypes.VOID_VALUE, List.of(AsTypes.ANY_VALUE)),
-            new BuiltinSpec("getDepth", 0x0abd0001, AsTypes.INT_VALUE, List.of()),
             new BuiltinSpec("mem_free", 0x0abd0002, AsTypes.BOOLEAN_VALUE, List.of(AsTypes.ADDRESS_VALUE)),
             new BuiltinSpec("alloc", 0x0abd0003, AsTypes.ADDRESS_VALUE, List.of(AsTypes.INT_VALUE)),
             new BuiltinSpec("make_free", 0x0abd0004, AsTypes.VOID_VALUE, List.of(AsTypes.ADDRESS_VALUE)),

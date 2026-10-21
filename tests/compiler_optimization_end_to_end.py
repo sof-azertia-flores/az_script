@@ -12,7 +12,6 @@ CASES = (
     ('loop', 'int main(){int sum=0;for(int i=0;i<100;i++){sum+=(2+3)*(4+5);}return sum;}', 4500, '', None),
     ('inline-order', 'int value(int n){print(n);return n;}int bits(int a,int b){return a&b;}int main(){return bits(value(3),value(6));}', 2, '3\n6\n', None),
     ('inline-error-frame', 'int add(int a,int b){return a+b;}int main(){return add(2147483647,1);}', None, '', 'Integer overflow'),
-    ('inline-depth', 'int depth(){return getDepth();}int main(){return depth();}', 2, '', None),
     ('loop-motion', 'int run(int n){int sum=0;for(int i=0;i<100;i++){sum+=(n&7);}return sum;}int main(){return run(11);}', 300, '', None),
     ('zero-loop-trap', 'int run(int n){int sum=0;for(int i=0;i<0;i++){sum+=1/n;}return sum;}int main(){return run(0);}', 0, '', None),
     ('loop-alias-call', 'int n=3;int change(){n++;return n;}int main(){int sum=0;for(int i=0;i<3;i++){sum+=(n&7);change();}return sum;}', 12, '', None),

@@ -82,7 +82,7 @@ int main() {
 }
 ```
 
-内置函数 `print`、`getDepth`、`mem_free`、`alloc`、`make_free`、`mem_send_up`、`mem_get` 和 `load_extern_library` 由编译器直接提供，不需要 include 或声明。`str_*` [字符串函数](compiler/LANGUAGE.md#字符串函数) 同样无需声明，并提供按码点计算的方法和下标访问。`load_extern_library("xxx")` 按当前系统加载已签名的 `xxx.so` / `xxx.dylib` / `xxx.dll`，库内用现有的 C++ 宿主注册接口挂上外部函数。独立运行时从 `AZSCRIPT_TRUSTED_KEY` 或 `trusted_key.pem` 读取公钥；嵌入式宿主通过 C++ / Java API 提供公钥。完整约定见 [外部动态库](docs/EXTERN_LIBRARY.md)。include 先按所在源文件的目录解析，再依次查找各 `-I` 目录和包装脚本的标准库目录；绝对路径和离开这些根目录的路径需要 `--unrestricted-includes`（见[预处理](compiler/LANGUAGE.md#字符串注释与预处理)）。
+内置函数 `print`、`mem_free`、`alloc`、`make_free`、`mem_send_up`、`mem_get` 和 `load_extern_library` 由编译器直接提供，不需要 include 或声明。`str_*` [字符串函数](compiler/LANGUAGE.md#字符串函数) 同样无需声明，并提供按码点计算的方法和下标访问。`load_extern_library("xxx")` 按当前系统加载已签名的 `xxx.so` / `xxx.dylib` / `xxx.dll`，库内用现有的 C++ 宿主注册接口挂上外部函数。独立运行时从 `AZSCRIPT_TRUSTED_KEY` 或 `trusted_key.pem` 读取公钥；嵌入式宿主通过 C++ / Java API 提供公钥。完整约定见 [外部动态库](docs/EXTERN_LIBRARY.md)。include 先按所在源文件的目录解析，再依次查找各 `-I` 目录和包装脚本的标准库目录；绝对路径和离开这些根目录的路径需要 `--unrestricted-includes`（见[预处理](compiler/LANGUAGE.md#字符串注释与预处理)）。
 
 `address` 是独立的无符号 64 位地址类型，表示 slot 位置，空地址写作 `null`。例如 `address p = alloc(2); mem_get(p + 1) = 42; mem_free(p);`。地址支持与 int32 偏移加减并检查越界；对象引用也使用该运行时类型，类成员的静态类型检查和继承规则保持不变。地址值、变量槽编号、分配数量和函数 ID 是不同概念，后面三者仍使用既有 32 位表示。
 
