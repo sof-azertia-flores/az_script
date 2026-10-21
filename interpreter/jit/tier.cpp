@@ -7,10 +7,17 @@
 namespace azertian::jit {
 namespace {
 constexpr std::size_t operation_limit=std::size_t{1}<<22;
-// LLVM's compile time grows faster than linearly with a function's size
-// (about 1.6 s for 3,000 MIR operations, 46 s for 12,000 at O2); larger
-// functions stay with the VM.
-constexpr std::size_t native_operation_limit=2048;
+// LLVM's compile time grows faster than linearly with a function's
+// operations (about 1.6 s for 3,000 MIR operations, 46 s for 12,000 at O2)
+// and with its resume entries, each of which loads every slot (1.4 s for
+// 7,600 resume points times slots, 16.5 s for 43,000, as stress makes every
+// pc of a 100-term expression a resume point).
+constexpr std::size_t native_operation_limit=2048,native_resume_limit=8192;
+}
+bool fits_native(const Function& code) noexcept {
+    std::size_t resumes=0;
+    for(const auto op:code.resume)resumes+=op!=none;
+    return code.ops.size()<=native_operation_limit&&resumes*code.slots()<=native_resume_limit;
 }
 Tier::Tier(const vm::ExecutableProgram& program,const Config& config)
     :program_(program),config_(config),random_(config.seed) {
@@ -94,7 +101,7 @@ Tier::Compiled& Tier::compiled(std::uint32_t function) {
             compiled_operations_+=entry.code.ops.size();
             if(const char* path=std::getenv("AZSCRIPT_JIT_DUMP");path&&*path)
                 if(FILE* file=std::fopen(path,"a")){const auto text=dump(entry.code);std::fputs(text.c_str(),file);std::fclose(file);}
-            if(native_&&entry.code.ops.size()>native_operation_limit) {
+            if(native_&&!fits_native(entry.code)) {
                 ++refusals_["too large for native code"];
                 entry.state=Compiled::State::ineligible;entry_bounds_[function]=program_.functions[function].end;
                 compiled_operations_-=entry.code.ops.size();
