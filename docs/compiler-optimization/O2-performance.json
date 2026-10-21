@@ -2256,7 +2256,9 @@
   "joint_validation": {
     "status": "blocked",
     "record": "JIT-93b5dd0-validation.md",
-    "note": "The benchmark status covers these fixed workloads only; it is not full JIT acceptance."
+    "note": "The benchmark status covers these fixed workloads only; it is not full JIT acceptance.",
+    "scope": "Status at the recorded 93b5dd0 performance measurement; subsequently resolved in the main merge.",
+    "subsequent_validation": "O2-validation.json:main_merge_validation"
   },
   "initial_run_status": "regression-review",
   "independent_repeat": {

@@ -1,3 +1,11 @@
+# O2 与最终 JIT 合并 main 验收（2026-10-21）
+
+将 O2 `6325170` 与已并入 main 的 JIT `c9eada4` 整合，自动合并无冲突；执行器、JIT、公开头文件及 JNI 源码与该 main 完全一致。保留 O0 默认值、O1 原行为和 exec v10。修复发行文档资源遗漏：导出时同时包含 O2 正文引用的验收 JSON、性能 JSON 和 JIT 问题记录，22 项发行导出脚本测试通过。
+
+在独立输出目录完成 `tools/build_and_test.py --offline --jit` 的全部检查。统一驱动运行至 probe:7 重放后，剩余原命令分段调度：预算重放使用独立目录并行执行；保存当前检查点后，剩余后端对齐也并行执行，并将 limits 报告写入各模式独立目录；范围与判定不变。结果：375 项 Java 测试、19/19 CTest、Java/C++ ABD 往返、全部普通及真实 JNI 套件通过。O2 定向为 57 案例 / 1002 次观察 / 522 项预算检查；完整 O0/O1/O2 语料为 464 案例 / 6032 次观察。树/VM 完整预算差分及七种 JIT 模式重放各 464 案例 / 55781 次比较通过；七种模式后端对齐各 1376/1376 次调用一致，含原先受阻的 LLVM stress。原 O0 最小崩溃样例在五种配置下也全部正确，`78f6541` 的修复已在联合版本复验。
+
+新 JIT 的 2,048 操作及恢复点×槽数 8,192 上限保持原值。对保存的 15 组 O1/O2 负载，在 eager、stress、on:3 三种 LLVM 模式下执行返回值及实际进入统计检查：O2 没有新增规模拒绝或丢失 O1 原有编译资格。该检查不使用计时结果，本次没有重做性能测量、全量 sanitizer 或 AArch64 模拟；此前记录保留各自提交及范围。详细结果和摘要见 [O2 验证索引](docs/compiler-optimization/O2-validation.json) 的 `main_merge_validation`，日志位于联合工作树 `build/main-merge-validation/full-after-assets-fix.log`；分段执行的命令、结果和日志索引见同目录 `tail-report.json`。最初的发行资源测试失败保留在同目录 `full.log`，修复后重新构建并完成全部检查。LLVM eager/stress 的预算重放另曾因 inode 耗尽中断：旧 `build/runtime-perf` 已归档为 `build/runtime-perf-93b5dd0-archive.tar.gz`，归档逐文件比较通过后才清理原生成目录；完成的观察重新核对，未完成案例另行重放。上面的比较数为完整案例/预算组合数，重复进程数及原失败报告保留在索引 `segments` 中。
+
 # O2 编译优化与 JIT 联合验收（2026-10-20）
 
 从 main `1e0926d` 建立 `codex/compiler-o2`。实现显式 `-O2` / `Optimization.ADVANCED`、标量 CFG/范围/效果分析、传播/CSE/DCE、有界标量内联及安全循环外提。默认仍为 O0，O1 保持原集合及顺序，exec v10、运行时、JNI ABI、预算和 JIT 阈值均未修改。最终实现为 `a9d1e3e`，上限回归为 `b259460`；详细范围见 [O2 记录](docs/compiler-optimization/O2.md)。

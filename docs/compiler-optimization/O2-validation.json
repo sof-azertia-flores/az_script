@@ -213,5 +213,359 @@
     "path": "build/o2-sanitize-acceptance.json",
     "sha256": "feb2182f0913ac2a3550fcdb518dc144a0fb6d9754c071eb7b5b7228660a956d"
   },
-  "jit_blocker": "JIT-93b5dd0-validation.md"
+  "jit_blocker": "JIT-93b5dd0-validation.md",
+  "main_merge_validation": {
+    "status": "passed",
+    "date": "2026-10-21",
+    "main_jit": "c9eada4",
+    "o2_branch": "6325170",
+    "integration_and_assets_fix": "243f52b",
+    "runtime_sources_identical_to_main": true,
+    "driver": "tools/build_and_test.py --offline --jit",
+    "output_directory_override": "build/main-merge-validation",
+    "java_tests": 375,
+    "native_ctest": 19,
+    "full_log": {
+      "path": "build/main-merge-validation/full-after-assets-fix.log",
+      "sha256": "d9af7d8644bcc18bacba63bb85a216a917f41f35718be9fb6d0df8178cfa9873"
+    },
+    "tail_report": {
+      "path": "build/main-merge-validation/tail-report.json",
+      "sha256": "2c774578dd3c37e53c9b9d26071734ba973088fe4435014dbda144830af1c831"
+    },
+    "execution_method": "Unified driver through probe:7; independent remaining suite commands in segments. Replays use isolated work/stats directories. After preserving active checkpoints, remaining alignments run concurrently, with limits --report redirected per mode; all assertions unchanged.",
+    "o2_targeted": {
+      "cases": 57,
+      "observations": 1002,
+      "jit": {
+        "probe:7": {
+          "entries": 0,
+          "compiled": 0,
+          "sessions": 0
+        },
+        "eager": {
+          "entries": 654,
+          "compiled": 230,
+          "sessions": 86
+        },
+        "stress": {
+          "entries": 106018,
+          "compiled": 230,
+          "sessions": 86
+        },
+        "on:2+interp": {
+          "entries": 170,
+          "compiled": 123,
+          "sessions": 86
+        },
+        "eager+llvm": {
+          "entries": 654,
+          "compiled": 230,
+          "sessions": 86
+        },
+        "stress+llvm": {
+          "entries": 32998,
+          "compiled": 134,
+          "sessions": 86
+        },
+        "on:3+llvm": {
+          "entries": 138,
+          "compiled": 105,
+          "sessions": 86
+        }
+      },
+      "report": {
+        "path": "build/main-merge-validation/compiler-o2.json",
+        "sha256": "4e4d40d2b8b90868019c8b096a13bd924027a66699a4a80defbc0dacc0db02be"
+      },
+      "budget_checks": 522
+    },
+    "compiler_corpus": {
+      "cases": 464,
+      "observations": 6032,
+      "jit": {
+        "probe:7": {
+          "entries": 0,
+          "compiled": 0,
+          "sessions": 0
+        },
+        "eager": {
+          "entries": 1016,
+          "compiled": 181,
+          "sessions": 464
+        },
+        "stress": {
+          "entries": 28955,
+          "compiled": 181,
+          "sessions": 464
+        },
+        "on:2+interp": {
+          "entries": 599,
+          "compiled": 98,
+          "sessions": 464
+        },
+        "eager+llvm": {
+          "entries": 1016,
+          "compiled": 181,
+          "sessions": 464
+        },
+        "stress+llvm": {
+          "entries": 28229,
+          "compiled": 180,
+          "sessions": 464
+        },
+        "on:3+llvm": {
+          "entries": 472,
+          "compiled": 63,
+          "sessions": 464
+        }
+      },
+      "report": {
+        "path": "build/main-merge-validation/compiler-optimization-corpus/report.json",
+        "sha256": "afb76c641d2642935fa054940008734de2b4912d89612ad592ea79bc96e7e52e"
+      }
+    },
+    "budget_replays": {
+      "off": {
+        "cases": 464,
+        "comparisons": 55781,
+        "reported_candidate_processes": 55781,
+        "report": {
+          "path": "build/main-merge-validation/runtime-perf/vm-execution/report.json",
+          "sha256": "8122ce24db37a6ece5ed7c16b0b06761ebfb6d36ea7bf145db36b9b6940b0e2f"
+        }
+      },
+      "probe:7": {
+        "cases": 464,
+        "comparisons": 55781,
+        "reported_candidate_processes": 55781,
+        "report": {
+          "path": "build/main-merge-validation/runtime-perf/vm-execution-jit-probe7/report.json",
+          "sha256": "114a0155add26405913905237d13cdd0bc378e3b5737ae31622585bb7b0eb372"
+        }
+      },
+      "eager": {
+        "cases": 464,
+        "comparisons": 55781,
+        "reported_candidate_processes": 55781,
+        "report": {
+          "path": "build/main-merge-validation/runtime-perf/vm-execution-jit-eager/report.json",
+          "sha256": "114a0155add26405913905237d13cdd0bc378e3b5737ae31622585bb7b0eb372"
+        },
+        "compiled": 17960,
+        "entries": 121570,
+        "stats": {
+          "path": "build/main-merge-validation/runtime-perf/vm-execution-jit-eager.stats",
+          "sha256": "973ac39d75b58fe73e2c39ac7882f29f2244ca4bad1e7e7791a9e6f678c48c4f"
+        },
+        "jit_sessions": 55781
+      },
+      "stress": {
+        "cases": 464,
+        "comparisons": 55781,
+        "reported_candidate_processes": 55781,
+        "report": {
+          "path": "build/main-merge-validation/runtime-perf/vm-execution-jit-stress/report.json",
+          "sha256": "114a0155add26405913905237d13cdd0bc378e3b5737ae31622585bb7b0eb372"
+        },
+        "compiled": 17960,
+        "entries": 4387233,
+        "stats": {
+          "path": "build/main-merge-validation/runtime-perf/vm-execution-jit-stress.stats",
+          "sha256": "90f8e9a16943db7e4d7d13694bedccec514dc44b8a03bab59ad4ef48fd044514"
+        },
+        "jit_sessions": 55781
+      },
+      "on:2+interp": {
+        "cases": 464,
+        "comparisons": 55781,
+        "reported_candidate_processes": 55781,
+        "report": {
+          "path": "build/main-merge-validation/runtime-perf/vm-execution-jit-on2-interp/report.json",
+          "sha256": "114a0155add26405913905237d13cdd0bc378e3b5737ae31622585bb7b0eb372"
+        },
+        "compiled": 12283,
+        "entries": 81848,
+        "stats": {
+          "path": "build/main-merge-validation/runtime-perf/vm-execution-jit-on2-interp.stats",
+          "sha256": "9df865a78e23318410284984045dd6abc5306d4ffbf30aa48c2043335e4419ec"
+        },
+        "jit_sessions": 55781
+      },
+      "eager+llvm": {
+        "cases": 464,
+        "comparisons": 55781,
+        "reported_candidate_processes": 55939,
+        "report": {
+          "path": "build/main-merge-validation/runtime-perf/vm-execution-jit-eager-llvm/report.json",
+          "sha256": "940517ecaeea1af72cf9530ed0e129761c0c25cd7bcbfba84e1ab628b881a617"
+        },
+        "segments": [
+          {
+            "path": "/workspace/az_script_o2_jit/build/main-merge-validation/runtime-perf/vm-execution-jit-eager-llvm-segment1/report.json",
+            "sha256": "6bc8f940483a5f7c887111232d8eb5273a21e911e393caec503820211c9df1a6",
+            "completed_cases_rechecked": 460,
+            "environment_failure": "[Errno 28] No space left on device: '/workspace/az_script_o2_jit/build/main-merge-validation/runtime-perf/vm-execution-jit-eager-llvm/own-m3b-old-element-error-after-assignment-published/158.candidate.json'"
+          },
+          {
+            "path": "/workspace/az_script_o2_jit/build/main-merge-validation/runtime-perf/vm-execution-jit-eager-llvm-segment2/report.json",
+            "sha256": "13f9997fbc6539cd51725d25562cb0769083d54213d31f018ee70bdc042969fc",
+            "new_cases": 4
+          }
+        ],
+        "compiled": 17960,
+        "entries": 121570,
+        "stats": {
+          "path": "build/main-merge-validation/runtime-perf/vm-execution-jit-eager-llvm.stats",
+          "sha256": "2b26458dba7b79204ac4859ac6aa1fa6e080d4dc304a8509f78d8956a816eac9"
+        },
+        "jit_sessions": 55940
+      },
+      "stress+llvm": {
+        "cases": 464,
+        "comparisons": 55781,
+        "reported_candidate_processes": 55939,
+        "report": {
+          "path": "build/main-merge-validation/runtime-perf/vm-execution-jit-stress-llvm/report.json",
+          "sha256": "209766f51333a18309b884dc5c0947d76e3098c061e02f41c1f012b501881101"
+        },
+        "segments": [
+          {
+            "path": "/workspace/az_script_o2_jit/build/main-merge-validation/runtime-perf/vm-execution-jit-stress-llvm-segment1/report.json",
+            "sha256": "2974e0bc04ab14235ec4d6f3d5fec0e8d382d4c404017a3f3d691a5931227626",
+            "completed_cases_rechecked": 321,
+            "environment_failure": "[Errno 28] No space left on device: '/workspace/az_script_o2_jit/build/main-merge-validation/runtime-perf/vm-execution-jit-stress-llvm/own-heap-j5c-send-up-in-wrapped-destructor-held-by-root/158.candidate.json'"
+          },
+          {
+            "path": "/workspace/az_script_o2_jit/build/main-merge-validation/runtime-perf/vm-execution-jit-stress-llvm-segment2/report.json",
+            "sha256": "9e6ec3db80bb07ff03ac069890b349e1bf8d47eb0fb7485cfea914081381a70b",
+            "new_cases": 143
+          }
+        ],
+        "compiled": 17857,
+        "entries": 4332348,
+        "stats": {
+          "path": "build/main-merge-validation/runtime-perf/vm-execution-jit-stress-llvm.stats",
+          "sha256": "95d677adc6b31947f46136b1f8b337a2c56c03c6b8bb1b280e62f3617b967a2a"
+        },
+        "jit_sessions": 55940
+      },
+      "on:3+llvm": {
+        "cases": 464,
+        "comparisons": 55781,
+        "reported_candidate_processes": 55781,
+        "report": {
+          "path": "build/main-merge-validation/runtime-perf/vm-execution-jit-on3-llvm/report.json",
+          "sha256": "114a0155add26405913905237d13cdd0bc378e3b5737ae31622585bb7b0eb372"
+        },
+        "compiled": 8971,
+        "entries": 69095,
+        "stats": {
+          "path": "build/main-merge-validation/runtime-perf/vm-execution-jit-on3-llvm.stats",
+          "sha256": "93a9d947203d118cbadfe80bfe247a27dc55f499e0ce9826d7f046dc7f512cc5"
+        },
+        "jit_sessions": 55781
+      }
+    },
+    "backend_alignment": {
+      "probe:11": {
+        "suites": 19,
+        "invocations": 1376,
+        "identical": 1376,
+        "report": {
+          "path": "build/main-merge-validation/runtime-perf/alignment-probe11/report.json",
+          "sha256": "5dc3e8f3098b06bf4ce84e43a7641606478cc8d5e413b45c52ee4d0cc13dc07e"
+        }
+      },
+      "eager": {
+        "suites": 19,
+        "invocations": 1376,
+        "identical": 1376,
+        "report": {
+          "path": "build/main-merge-validation/runtime-perf/alignment-eager/report.json",
+          "sha256": "5dc3e8f3098b06bf4ce84e43a7641606478cc8d5e413b45c52ee4d0cc13dc07e"
+        }
+      },
+      "stress": {
+        "suites": 19,
+        "invocations": 1376,
+        "identical": 1376,
+        "report": {
+          "path": "build/main-merge-validation/runtime-perf/alignment-stress/report.json",
+          "sha256": "5dc3e8f3098b06bf4ce84e43a7641606478cc8d5e413b45c52ee4d0cc13dc07e"
+        }
+      },
+      "on:2+interp": {
+        "suites": 19,
+        "invocations": 1376,
+        "identical": 1376,
+        "report": {
+          "path": "build/main-merge-validation/runtime-perf/alignment-on2-interp/report.json",
+          "sha256": "5dc3e8f3098b06bf4ce84e43a7641606478cc8d5e413b45c52ee4d0cc13dc07e"
+        }
+      },
+      "eager+llvm": {
+        "suites": 19,
+        "invocations": 1376,
+        "identical": 1376,
+        "report": {
+          "path": "build/main-merge-validation/runtime-perf/alignment-eager-llvm/report.json",
+          "sha256": "5dc3e8f3098b06bf4ce84e43a7641606478cc8d5e413b45c52ee4d0cc13dc07e"
+        }
+      },
+      "stress+llvm": {
+        "suites": 19,
+        "invocations": 1376,
+        "identical": 1376,
+        "report": {
+          "path": "build/main-merge-validation/runtime-perf/alignment-stress-llvm/report.json",
+          "sha256": "5dc3e8f3098b06bf4ce84e43a7641606478cc8d5e413b45c52ee4d0cc13dc07e"
+        }
+      },
+      "on:3+llvm": {
+        "suites": 19,
+        "invocations": 1376,
+        "identical": 1376,
+        "report": {
+          "path": "build/main-merge-validation/runtime-perf/alignment-on3-llvm/report.json",
+          "sha256": "5dc3e8f3098b06bf4ce84e43a7641606478cc8d5e413b45c52ee4d0cc13dc07e"
+        }
+      }
+    },
+    "native_eligibility": {
+      "report": {
+        "path": "build/main-merge-validation/eligibility.json",
+        "sha256": "e095f1cffb3c4bb28bfafeb577fe1904ad6fbe30f3b5fefd50ea07ddc0862e1b"
+      },
+      "status": "passed",
+      "workloads": 15,
+      "llvm_modes": 3,
+      "timings_used": false
+    },
+    "baseline_reproducer": {
+      "report": {
+        "path": "build/main-merge-validation/baseline-repro.json",
+        "sha256": "38beee3cb14c587da0a9848b1ce10f0f0a6f9fa747769c565cbbeabe585a6f3f"
+      },
+      "status": "passed"
+    },
+    "llvm_stress_compiler_corpus": {
+      "cases": 464,
+      "observations": 1856,
+      "report": {
+        "path": "build/main-merge-validation/compiler-optimization-corpus-jit-stress-llvm/report.json",
+        "sha256": "30ba5a1d08d4d276cdf5efd78b73fa60356aa13b1abb10ac103032ee2b57d1c3"
+      },
+      "entries": 57071,
+      "compiled": 363,
+      "stats": {
+        "path": "build/main-merge-validation/compiler-optimization-corpus-jit-stress-llvm.stats",
+        "sha256": "9213e653e4be43b0b78bde25f3228ecb801f3e0816b6c159c796f71f0fb6ab85"
+      }
+    },
+    "environment_incident": "Inodes exhausted during LLVM eager/stress replay. Prior runtime-perf archived and tar-compared before removing unpacked generated files. Completed observations rechecked; unfinished cases rerun in separate segments.",
+    "archived_historical_reports": "build/runtime-perf-93b5dd0-archive.tar.gz"
+  },
+  "status_scope": "Original candidate on runtime 93b5dd0; main_merge_validation records the subsequent passing integration.",
+  "current_joint_status": "passed"
 }
