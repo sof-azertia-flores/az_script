@@ -11,6 +11,9 @@
 #include <vector>
 
 namespace azertian::jit {
+// Whether the LLVM backend compiles the function in bounded time; larger
+// functions stay with the VM, recorded as "too large for native code".
+bool fits_native(const Function& code) noexcept;
 // The dispatch loop's view of the JIT tier. Each frame keeps a bound
 // (FrameRecord::end) that the loop already checks before every instruction;
 // the tier lowers it to the next point where it may take over and is

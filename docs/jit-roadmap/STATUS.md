@@ -5,12 +5,12 @@
 | 阶段 | 当前状态 | 证据或下一步 |
 | --- | --- | --- |
 | J0 | 完成 | 设计、计划与本记录 |
-| J1 | 已提交，完整验证待运行 | 见下文“J1：VM 钩子与探针层” |
-| J2 | 已提交 | 见下文“J2–J3：分析与可移植原生层” |
-| J3 | 已提交，完整验证待运行 | 全部 463 个端到端案例在 eager 与 stress 下与树执行器一致 |
+| J1 | 完成 | 见下文“J1：VM 钩子与探针层”；完整验证见“合并 main 与完整验证” |
+| J2 | 完成 | 见下文“J2–J3：分析与可移植原生层” |
+| J3 | 完成 | 端到端语料在 eager 与 stress 下与树执行器一致；完整验证见“合并 main 与完整验证” |
 | J4 | 两轮已提交，进行中 | 见下文“J4 第一轮”与“J4 第二轮”；callgrind 下 integer_loop 为 VM 的 17.2 倍 |
-| J5 | 已提交，完整验证待运行 | 见下文“J5：LLVM ORC 后端”；全部 463 个端到端案例在 eager+llvm 与 stress+llvm 下一致 |
-| J6 | 已提交 | 见下文“J6：升层策略”；阈值 1–4 的全语料重放一致 |
+| J5 | 完成 | 见下文“J5：LLVM ORC 后端”；端到端语料与后端对齐在 eager+llvm、stress+llvm 下一致 |
+| J6 | 完成 | 见下文“J6：升层策略”；阈值 1–4 的全语料重放一致 |
 | J7 | 已提交 | 见下文“J7：AArch64（qemu 模拟）”；ctest 18/18 与 scalar/calls/objects 语料在模拟器下一致 |
 | J8 | 尚未开始 | |
 
@@ -156,3 +156,37 @@ callgrind（Release，n=512，eager+llvm 每调用指令数，相对第一轮）
 | call_0 | 2,349,080 | 2,256,306 | −3.9% |
 | call_1 | 2,828,761 | 2,703,396 | −4.4% |
 | call_16 | 9,019,511 | 8,440,796 | −6.4% |
+
+## 合并 main 与完整验证（2026-10-21）
+
+| 提交 | 内容 |
+| --- | --- |
+| `Merge main into the JIT branch` | main 带来编译期优化（`-O1`）、VM 批量预算检查、`azscript-run` 的后端与步数选项及默认不限逻辑调用深度。VM 的构造与调度循环同时保留层和预算批次。批次在直线段内不检查层的界限，可能越过阈值；层本来在任意 pc 都可被查询，DESIGN 已注明 |
+| `test: run the optimized compiler corpus under the JIT` | `build_and_test` 以 stress（有模块时为 stress+llvm）再运行一次 O1 编译语料，覆盖、编译错误与标签检查与重放相同（`check_jit_stats`）。合并前手工试过 stress、eager+llvm、stress+llvm、on:2+llvm 四种模式，全部一致 |
+| `docs: mention the JIT tier and the --jit build in the README` | README 说明默认关闭的 JIT 层、`AZSCRIPT_JIT=on` 与 `--jit` 构建；发行包暂不含模块 |
+| `fix(jit): load the tags of maybe-declared locals on LLVM resume` | 声明可能被 break、continue 或 return 跳过的局部，在之后的恢复点“可能已声明”，进入时可能缺失。LLVM 恢复块在分析只允许一种标签时用常量代替实际标签，使缺失的局部变成存在，退出写回到没有 cell 的局部而终止进程。现在只有进入时必定存在的寄存器沿用推定标签。新增语料案例 `flow-skips-declaration`：旧构建在 stress+llvm 下终止，修复后全部模式在完整预算扫描下与树一致 |
+| `test: run each alignment invocation's engines concurrently` | 对齐包装器原先在套件自己的单次超时内依次运行树、VM 和 JIT。sanitizer 下 `end_to_end` 的 `while(true){}` 运行到 1,000,000 步上限：树约 5.0 s、VM 1.4 s、stress 6.5 s，超过 10 s。各次运行互不依赖，现在并行，超时只需覆盖最慢的一次 |
+| `fix(jit): count resume entries in the native size cap` | 每个恢复点装入全部 slot；stress 下每个 pc 都是恢复点，LLVM 编译时间随恢复点数×slot 数超线性增长：100 项的 `1+…+1`（103 个寄存器、405 个恢复点、1,719 个操作，未超过操作上限）编译 16.5 s，超过 `end_to_end` 的 10 s。`fits_native` 另限恢复点×slot 不超过 8,192（约 1.4 s），超出者留给 VM，`jit-tier-tests` 检查两个上限 |
+
+两项缺陷都由完整验证中的后端对齐发现（stress+llvm 下 math、containers、virtual_methods、limits 套件终止；随后是上述编译超时），此前的定向重放语料中没有对应的代码形状。
+
+完整验证（`c77020b`，普通构建，`python3 tools/build_and_test.py --offline`，固定版本 LLVM 已在前缀中）：
+
+- 全部普通套件、`ctest` 19/19、O1 编译套件（28 个案例；语料 464 个案例 / 1,856 个观察）。
+- VM 对树：464 个案例 / 55,781 个独立进程（含完整预算扫描）一致。
+- 以树参考重放，全部一致、0 次标签越界、0 次编译失败：
+
+| 模式 | 编译函数 | 原生进入 |
+| --- | --- | --- |
+| probe:7 | — | — |
+| eager | 17,960 | 121,570 |
+| stress | 17,960 | 4,387,233 |
+| on:2+interp | 12,283 | 81,848 |
+| eager+llvm | 17,960 | 121,570 |
+| stress+llvm | 17,781 | 4,324,349 |
+| on:3+llvm | 8,971 | 69,095 |
+| O1 语料，stress+llvm | 363 | 57,071 |
+
+- 后端对齐：probe:11、eager、stress、on:2+interp、eager+llvm、stress+llvm、on:3+llvm 七种模式各 1,376/1,376 次调用逐字节一致。
+
+sanitizer（`--sanitize`，不构建 JIT 模块）：完整运行在合并头 `8c577c8` 上，除 stress 对齐因上述超时 1,359/1,360 外全部通过，其中包括 VM 对树（55,460 个进程）及 probe:7、eager、stress、on:2+interp 四种重放；改用并行包装器后重跑的 stress 与 on:2+interp 对齐各 1,376/1,376。此后的两项修复只改 LLVM 模块与原生规模上限（无模块时不生效），因此在 `c77020b` 上只重新构建 sanitizer 并运行 `ctest`（18/18），未再完整运行 sanitizer 语料（不含新增的 `flow-skips-declaration`）。
