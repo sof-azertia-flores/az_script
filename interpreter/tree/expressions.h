@@ -233,6 +233,16 @@ public:
         :slot(static_cast<std::size_t>(slot)),return_type(return_type),arguments(std::move(arguments)) {}
     V execute(E env) override;
 };
+// exec v11: whether a virtual call would reach function, without its errors.
+class guard_method_expression final:public expression {
+    std::shared_ptr<expression> receiver;
+    std::size_t slot;
+public:
+    int function_id;
+    guard_method_expression(std::shared_ptr<expression> receiver,int slot,int function_id)
+        :receiver(std::move(receiver)),slot(static_cast<std::size_t>(slot)),function_id(function_id) {}
+    V execute(E env) override;
+};
 class check_object_expression final:public expression {
     std::shared_ptr<expression> value;
     std::shared_ptr<context_spec> context;

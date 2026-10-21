@@ -30,6 +30,13 @@ V set_methods_expression::execute(E env) {
     if(context_free)cached=std::move(methods);
     return nil();
 }
+V guard_method_expression::execute(E env) {
+    tick(env);const auto value=blocks::materialize(run(receiver,env),env);
+    if(value->type_tag()!=ADDRESS_VALUE)return std::make_shared<variable>(false);
+    const auto methods=heap::find_methods(value->get<address>(),owner(env));
+    const bool bound=methods&&slot<methods->size()&&(*methods)[slot].function_id==function_id&&(*methods)[slot].contexts.empty();
+    return std::make_shared<variable>(bound);
+}
 V call_virtual_expression::execute(E env) {
     tick(env);std::vector<V> args;args.reserve(arguments.size());
     for(const auto& argument:arguments)args.push_back(blocks::materialize(run(argument,env),env));

@@ -309,6 +309,9 @@ std::shared_ptr<const method_table> methods_at(address pointer,const std::shared
     if(!methods||methods->empty())throw std::runtime_error("Object has no virtual method table");
     return methods;
 }
+std::shared_ptr<const method_table> find_methods(address pointer,const std::shared_ptr<script>& script) {
+    try {return methods_at(pointer,script);}catch(const std::runtime_error&) {return nullptr;}
+}
 std::size_t method_table_count() {
     std::lock_guard<std::recursive_mutex> lock(runtime_mutex());return method_tables.size();
 }

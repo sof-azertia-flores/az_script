@@ -71,6 +71,7 @@ final class ExecIr {
             case SET_METHODS -> EnumSet.of(Effect.WRITE_HEAP, Effect.THROW);
             case BLOCK, CLEANUP -> EnumSet.of(Effect.CONTROL, Effect.CLEANUP, Effect.CALL, Effect.THROW);
             case SEQ -> EnumSet.noneOf(Effect.class);
+            case GUARD_METHOD -> EnumSet.of(Effect.READ_HEAP);
             case RETURN_OBJECT -> EnumSet.of(Effect.CONTROL, Effect.CLEANUP, Effect.WRITE_HEAP, Effect.THROW);
             case RETURN, IF, WHILE, BREAK, CONTINUE, SELECT, AND, OR -> EnumSet.of(Effect.CONTROL, Effect.THROW);
             case ADD, SUBTRACT, MULTIPLY, DIVIDE, MODULO, GREATER, LESS, EQUAL, NOT_EQUAL,
@@ -89,7 +90,7 @@ final class ExecIr {
         if (source instanceof AcsAddress) return ADDRESS_VALUE;
         if (source instanceof AcsByteArray) return VOID_VALUE;
         return switch (opcode) {
-            case GREATER, LESS, EQUAL, NOT_EQUAL, GREATER_EQUAL, LESS_EQUAL, NOT, AND, OR -> BOOLEAN_VALUE;
+            case GREATER, LESS, EQUAL, NOT_EQUAL, GREATER_EQUAL, LESS_EQUAL, NOT, AND, OR, GUARD_METHOD -> BOOLEAN_VALUE;
             case CONTEXT_ABI, VALUE_COMPARE, BIT_AND, BIT_OR, BIT_XOR, SHIFT_LEFT, SHIFT_RIGHT, SHIFT_UNSIGNED -> INT_VALUE;
             case OBJECT_ADDRESS, BLOCK_ADDRESS -> ADDRESS_VALUE;
             case NEW_BLOCK, BUFFER_NEW -> OBJECT_VALUE;

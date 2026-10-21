@@ -239,6 +239,7 @@ final class ExecShape {
                 schema(node, "t c v entries", ""); direct(children, node, "v", Role.EAGER_VALUE);
                 list(children, node.mmp.get("entries"), "entries", 2, Role.METHOD_ENTRY); floor = 1;
             }
+            case 58 -> { schema(node, "t c v slot id", ""); integer(node, "slot"); integer(node, "id"); direct(children, node, "v", Role.EAGER_VALUE); }
             case 53 -> {
                 schema(node, "t c slot type param", ""); integer(node, "slot"); integer(node, "type");
                 list(children, node.mmp.get("param"), "param", 2, Role.EAGER_VALUE); floor = 1;

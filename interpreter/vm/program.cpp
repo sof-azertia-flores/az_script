@@ -323,6 +323,15 @@ void check_instruction(const ExecutableProgram& program,const FunctionRecord& fu
         if(call.immediate<0||static_cast<std::uint32_t>(call.immediate)>=max_slots||call.arguments.empty()||!type(call.return_type))bad("invalid virtual call layout");
         break;
     }
+    case Opcode::guard_method: {
+        output();input();const auto& guard=data();
+        if(guard.immediate<0||static_cast<std::uint32_t>(guard.immediate)>=max_slots||guard.methods.size()!=1||!guard.methods[0].contexts.empty())
+            bad("invalid method guard layout");
+        const auto& target=call_target(program,guard.methods[0].target);
+        if(target.kind!=TargetKind::script||target.entry_kind!=0||target.param_types.empty()||target.param_types[0]!=ADDRESS_VALUE||target.hidden_count)
+            bad("invalid method guard target");
+        break;
+    }
     default:bad("unknown instruction opcode");
     }
     if((!result&&instruction.result!=no_index)||(!left&&instruction.left!=no_index)||(!right&&instruction.right!=no_index)||
@@ -399,7 +408,7 @@ const char* opcode_name(Opcode opcode) noexcept {
         "call","set_return","function_end","cleanup_enter","cleanup_leave","cleanup_end",
         "member_get","object_address","object_register","object_delete","new_block","block_address","move_out","drop",
         "bind_context","context_abi","context_default","return_typed","check_type",
-        "buffer_new","buffer_operation","value_compare","check_object","check_method_receiver","set_methods","call_virtual"
+        "buffer_new","buffer_operation","value_compare","check_object","check_method_receiver","set_methods","call_virtual","guard_method"
     };
     static_assert(std::size(names)==static_cast<std::size_t>(Opcode::count));
     const auto index=static_cast<std::size_t>(opcode);return index<std::size(names)?names[index]:"unknown";

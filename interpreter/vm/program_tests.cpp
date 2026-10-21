@@ -109,7 +109,8 @@ void all_wire_operations() {
     auto virtual_call=node(53,{pointer()});virtual_call->return_type=VOID_VALUE;samples.push_back(virtual_call);
     samples.push_back(node(54,{node(5,{integer()}),integer()}));
     for(int opcode=55;opcode<=57;++opcode)samples.push_back(node(opcode,{integer(),integer()}));
-    expect(samples.size()==58,"sample for every wire opcode");
+    auto guard=node(58,{pointer()});guard->methods.push_back({0x0fff0020,{}});samples.push_back(guard);
+    expect(samples.size()==59,"sample for every wire opcode");
     auto root=node(1);for(const auto& sample:samples)root->children.push_back(sample);
     auto method=source_function(node(7),0x0fff0020);method.hidden_count=0;method.param_types={ADDRESS_VALUE};
     SourceProgram source;source.functions={source_function(root),method};
@@ -127,10 +128,12 @@ void all_wire_operations() {
     // Registration checks its receiver before charging each method entry.
     const auto receiver=find(program,Opcode::check_method_receiver);
     expect(program.instructions[receiver+1].opcode==Opcode::tick&&program.instructions[receiver+1].operand==static_cast<unsigned>(BudgetKind::method_entry),"method charges follow receiver validation");
-    auto corrupt=program;corrupt.functions[0].operations.back().arguments[0]=no_index;
+    auto corrupt=program;corrupt.functions[0].operations[program.instructions[find(program,Opcode::call_virtual)].operand].arguments[0]=no_index;
     rejects([&]{verify_program(corrupt);},"argument register");
     corrupt=program;corrupt.functions[0].cleanups[0].finalizer=0;
     rejects([&]{verify_program(corrupt);},"cleanup region");
+    corrupt=program;corrupt.functions[0].operations[program.instructions[find(program,Opcode::guard_method)].operand].methods.clear();
+    rejects([&]{verify_program(corrupt);},"invalid method guard layout");
 }
 void contexts_and_targets() {
     auto factory=source_function(integer(),0x0fff0021);factory.return_type=OBJECT_VALUE;factory.hidden_count=0;
@@ -173,7 +176,7 @@ void constant_fidelity_and_rejections() {
     corrupt=program;corrupt.instructions[0].result=0;rejects([&]{verify_program(corrupt);},"unused instruction operand");
     corrupt=program;corrupt.instructions[find(corrupt,Opcode::constant)].result=corrupt.functions[0].register_count;rejects([&]{verify_program(corrupt);},"register index");
     corrupt=program;corrupt.functions[0].global_offset=1048576;rejects([&]{verify_program(corrupt);},"function layout");
-    rejects([&]{lower(node(58));},"unsupported wire opcode");
+    rejects([&]{lower(node(59));},"unsupported wire opcode");
     rejects([&]{lower(node(54));},"invalid operand count for wire opcode 54");
     auto extra=integer();extra->contexts.push_back(scalar_context());
     rejects([&]{lower(extra);},"unexpected metadata");

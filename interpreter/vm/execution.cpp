@@ -36,7 +36,7 @@ constexpr std::array supported{
     Opcode::cleanup_enter,Opcode::cleanup_leave,Opcode::cleanup_end,
     Opcode::member_get,Opcode::object_address,Opcode::object_register,Opcode::object_delete,
     Opcode::new_block,Opcode::block_address,Opcode::move_out,Opcode::drop,
-    Opcode::check_method_receiver,Opcode::set_methods,Opcode::call_virtual,
+    Opcode::check_method_receiver,Opcode::set_methods,Opcode::call_virtual,Opcode::guard_method,
     Opcode::bind_context,Opcode::context_abi,Opcode::context_default,Opcode::return_typed,
     Opcode::check_type,Opcode::check_object,Opcode::buffer_new,Opcode::buffer_operation,Opcode::value_compare
 };
@@ -53,7 +53,7 @@ bool object_opcode(Opcode opcode) {
     case Opcode::member_get:case Opcode::object_address:case Opcode::object_register:
     case Opcode::object_delete:case Opcode::new_block:case Opcode::block_address:
     case Opcode::move_out:case Opcode::drop:case Opcode::check_method_receiver:
-    case Opcode::set_methods:case Opcode::call_virtual:return true;
+    case Opcode::set_methods:case Opcode::call_virtual:case Opcode::guard_method:return true;
     default:return false;
     }
 }
@@ -1459,6 +1459,19 @@ struct ScalarExecutor::State {
                         frames.top_id(),instruction.result,position,options,true,&method.contexts);
                     auto& callee=frames.top();callee.check_return=true;callee.checked_return_type=operation.return_type;
                     break;
+                }
+                case Opcode::guard_method: {
+                    // True exactly when call_virtual would enter this method;
+                    // every case in which it would fail is false instead.
+                    const auto& guard=function_of(frame).operations[instruction.operand];
+                    const auto& receiver=read(frame,instruction.left);bool bound=false;
+                    if(receiver.type_tag()==ADDRESS_VALUE)
+                        if(const auto table=heap::find_methods(receiver.get<address>(),host_of(options).owner())) {
+                            const auto slot=static_cast<std::size_t>(guard.immediate);
+                            bound=slot<table->size()&&(*table)[slot].contexts.empty()&&
+                                (*table)[slot].function_id==program.targets[guard.methods[0].target].function_id;
+                        }
+                    value(frame,instruction.result,Value(bound));break;
                 }
                 case Opcode::bind_context:
                     objects(frame).bound[instruction.result]=bind(frame,instruction.operand);break;

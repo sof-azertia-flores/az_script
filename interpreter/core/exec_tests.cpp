@@ -108,7 +108,7 @@ void built_by_tree(const B& body) {
 void all_opcodes() {
     const auto one=constant(1),two=constant(2),pointer=address_constant(1);
     const auto var=expression(3,{integer(0)}),empty=expression(1,{B{}}),context=fixed();
-    std::vector<B> inputs(58);
+    std::vector<B> inputs(59);
     inputs[0]=one;inputs[1]=expression(1,{stack({one,two})});inputs[2]=call(0x12340001,stack({one}));
     inputs[3]=var;inputs[4]=expression(4,{integer(0),integer(INT_VALUE),B{1},one});
     inputs[5]=expression(5,{integer(-1),one});inputs[6]=expression(6,{var,one});
@@ -132,7 +132,8 @@ void all_opcodes() {
     inputs[53]=expression(53,{integer(2),integer(ADDRESS_VALUE),stack({pointer,one})});
     inputs[54]=expression(54,{stack({expression(5,{integer(0),one}),expression(1,{stack({inputs[4]})})}),var});
     for(int op=55;op<=57;++op)inputs[op]=expression(op,{one,two});
-    for(int opcode=0;opcode<58;++opcode) {
+    inputs[58]=expression(58,{pointer,integer(1),integer(0x12340002)});
+    for(int opcode=0;opcode<59;++opcode) {
         built_by_tree(inputs[opcode]);
         auto parsed=read_body(inputs[opcode]);check(parsed->opcode==opcode,"every opcode decodes");
         check(parsed->node==0&&parsed->location==0,"root node numbering starts at zero");
@@ -160,6 +161,11 @@ void all_opcodes() {
     check(read_body(expression(52,{pointer,B{}}))->methods.empty(),"empty method phase retained");
     check(read_body(inputs[54])->children.size()==3,"sequence statements precede its value");
     check(read_body(expression(54,{B{},one}))->children.size()==1,"sequence without statements");
+    const auto guard=read_body(inputs[58]);
+    check(guard->immediate==1&&guard->methods.size()==1&&guard->methods[0].function_id==0x12340002&&guard->methods[0].contexts.empty(),
+        "method guard slot and target retained");
+    check(exec::references(guard).size()==1&&exec::references(guard)[0].kind==exec::reference_kind::method,"method guard target is a method reference");
+    rejects([&]{read_body(expression(58,{pointer,integer(-1),integer(0x12340002)}));},"negative guard slot rejected","Invalid virtual method slot");
 }
 // A sequence shares the enclosing scope, so it cannot declare there, leave a
 // loop it does not contain, return or own objects.
@@ -208,7 +214,7 @@ void constants_and_locations() {
     rejects([&]{read_body(constant(1),std::vector<std::uint32_t>{0,0});},"duplicate debug index rejected",
         "Exec debug location nodes must strictly increase");
     rejects([&]{read_body(B{1,2,3});},"truncated buffer rejected without reading past it","Missing or truncated exec field");
-    rejects([&]{read_body(expression(58));},"unknown opcode rejected","Unknown exec opcode: 58");
+    rejects([&]{read_body(expression(59));},"unknown opcode rejected","Unknown exec opcode: 59");
     rejects([&]{read_body(expression(3,{integer(0),integer(0)}));},"extra fields rejected","Unexpected extra exec fields");
 }
 

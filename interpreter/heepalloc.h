@@ -33,6 +33,8 @@ void check_object(address pointer,const std::vector<int>& slot_types);
 // Empty tables clear a binding; construction/destruction phase changes are allowed.
 void set_methods(address pointer,std::shared_ptr<const method_table> methods,const std::shared_ptr<script>& script);
 std::shared_ptr<const method_table> methods_at(address pointer,const std::shared_ptr<script>& script);
+// The table methods_at would return, or null wherever it would report an error.
+std::shared_ptr<const method_table> find_methods(address pointer,const std::shared_ptr<script>& script);
 std::size_t method_table_count();
 bool free(address startpos);
 std::shared_ptr<variable> getAt(address pointer);

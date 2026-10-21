@@ -330,6 +330,13 @@ Expression read_expression(raw_view view,const function_layout& layout,std::size
         for(const auto& part:node->children)check_sequence_part(*part,false,false);
         break;
     case 55:case 56:case 57:child();child();break;
+    case 58: {
+        // The guarded target is kept as a method entry without contexts, so
+        // discovery, relocation and linking check it as one.
+        child();const int slot=fields.integer();
+        if(slot<0||static_cast<std::size_t>(slot)>=max_slots)throw std::invalid_argument("Invalid virtual method slot");
+        node->immediate=slot;node->methods.push_back({fields.integer(),{}});break;
+    }
     case 7:case 8:if(opcode==8||fields.boolean())child();break;
     case 9: {
         child();const int offset=fields.integer();

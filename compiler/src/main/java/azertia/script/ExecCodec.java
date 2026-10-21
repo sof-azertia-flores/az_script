@@ -106,6 +106,7 @@ public final class ExecCodec {
             CONVERSION=KeySpec.of("t c type v",""),
             SELECT=KeySpec.of("t c v then else",""),
             SEQUENCE=KeySpec.of("t c statements v",""),
+            METHOD_GUARD=KeySpec.of("t c v slot id",""),
             CHECKED_OBJECT=KeySpec.of("t c v context slot-types",""),
             SET_METHODS=KeySpec.of("t c v entries",""),
             METHOD_ENTRY=KeySpec.of("id contexts",""),
@@ -549,6 +550,10 @@ public final class ExecCodec {
                 keys(object,SET_METHODS);fields.add(expression(object.mmp.get("v"),layout,level+1));
                 fields.add(methodEntries(object.mmp.get("entries"),layout,level+1));
             }
+            case ExecOpcodes.GUARD_METHOD -> {
+                keys(object,METHOD_GUARD);int slot=integer(object,"slot"),id=integer(object,"id");virtualSlot(slot);methodId(id);
+                fields.add(expression(object.mmp.get("v"),layout,level+1));fields.add(n(slot));fields.add(n(id));
+            }
             case ExecOpcodes.CALL_VIRTUAL -> {
                 keys(object,VIRTUAL_CALL);int slot=integer(object,"slot"),type=integer(object,"type");
                 virtualSlot(slot);type(type,false,false);AcsArray arguments=array(object.mmp.get("param"),"param");virtualArguments(arguments);
@@ -781,6 +786,10 @@ public final class ExecCodec {
             }
             case ExecOpcodes.SET_METHODS -> {
                 view.put("v",decodeExpression(record.next(),level+1));view.put("entries",decodeMethodEntries(record.next(),level+1));
+            }
+            case ExecOpcodes.GUARD_METHOD -> {
+                view.put("v",decodeExpression(record.next(),level+1));int slot=record.integer(),id=record.integer();
+                virtualSlot(slot);methodId(id);view.put("slot",slot);view.put("id",id);
             }
             case ExecOpcodes.CALL_VIRTUAL -> {
                 int slot=record.integer(),type=record.integer();virtualSlot(slot);type(type,false,false);

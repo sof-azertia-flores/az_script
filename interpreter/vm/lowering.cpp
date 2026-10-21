@@ -126,10 +126,10 @@ class Lowerer {
     Register expression(const std::shared_ptr<const exec::expression>& source,std::size_t depth,bool root=false) {
         if(!source||depth>=128)bad("null, cyclic or excessively nested expression");
         const auto& node=*source;
-        if(node.opcode<0||node.opcode>57)bad("unsupported wire opcode "+std::to_string(node.opcode));
+        if(node.opcode<0||node.opcode>58)bad("unsupported wire opcode "+std::to_string(node.opcode));
         if(next_node==no_index||node.node!=next_node++)bad("expression nodes are not in wire preorder");
         const bool has_contexts=node.opcode==2||node.opcode==10||(node.opcode>=36&&node.opcode<=40)||node.opcode==42||node.opcode==51;
-        if((!has_contexts&&!node.contexts.empty())||(node.opcode!=52&&!node.methods.empty())||
+        if((!has_contexts&&!node.contexts.empty())||(node.opcode!=52&&node.opcode!=58&&!node.methods.empty())||
            (node.opcode!=51&&!node.slot_types.empty())||(node.opcode!=10&&(node.destructor_id||node.manual))||
            (node.opcode!=31&&node.on_error)||(node.opcode!=53&&node.return_type!=VOID_VALUE)||
            (node.opcode!=0&&node.constant.type_tag()!=VOID_VALUE))bad("unexpected metadata for wire opcode "+std::to_string(node.opcode));
@@ -322,6 +322,12 @@ class Lowerer {
         case 53: {
             children(node,1,max_slots);OperationData data;data.immediate=node.immediate;data.return_type=node.return_type;
             arguments(node,0,depth,data);emit(Opcode::call_virtual,result,no_index,no_index,operation(std::move(data)));break;
+        }
+        case 58: {
+            children(node,1,1);if(node.methods.size()!=1||!node.methods[0].contexts.empty())bad("invalid method guard");
+            const auto receiver=child(node,0,depth);
+            OperationData data;data.immediate=node.immediate;data.methods.push_back({target(node.methods[0].function_id),{}});
+            emit(Opcode::guard_method,result,receiver,no_index,operation(std::move(data)));break;
         }
         default:bad("unsupported wire opcode "+std::to_string(node.opcode));
         }

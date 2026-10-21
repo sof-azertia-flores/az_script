@@ -25,7 +25,7 @@ OP_NAMES = {3: 'v', 4: 'vd', 5: 'vs', 6: 'm', 7: 'r', 8: 'ro', 9: 'oa',
             36: 'context_abi', 37: 'context_default', 38: 'return_typed', 39: 'check_type',
             40: 'buffer_new', 41: 'buffer_op', 42: 'value_compare',
             43: 'bit_and', 44: 'bit_or', 45: 'bit_xor', 46: 'shl', 47: 'shr', 48: 'ushr', 49: 'convert', 50: 'select', 51: 'check_object', 52: 'set_methods', 53: 'call_virtual',
-            54: 'seq', 55: 'wrap_add', 56: 'wrap_minus', 57: 'wrap_multiply'}
+            54: 'seq', 55: 'wrap_add', 56: 'wrap_minus', 57: 'wrap_multiply', 58: 'guard_method'}
 EXEC_VERSION = 10
 
 
@@ -283,6 +283,8 @@ def encode_compact_expression(value):
         fields = [integer(value['slot']), integer(value['type']), stack(*(encode_compact_expression(arg) for arg in value['param']))]
     elif opcode == 54:
         fields = [stack(*(encode_compact_expression(item) for item in value['statements'])), child('v')]
+    elif opcode == 58:
+        fields = [child('v'), integer(value['slot']), integer(value['id'])]
     else:
         assert opcode in (29, 30)
         fields = []
@@ -518,6 +520,11 @@ class WireReader:
         elif opcode == 54:
             assert len(fields) == 2
             result.update(statements=[self.expression(item) for item in frames(fields[0])], v=self.expression(fields[1]))
+        elif opcode == 58:
+            assert len(fields) == 3
+            slot = int_value(fields[1])
+            assert slot >= 0
+            result.update(v=self.expression(fields[0]), slot=slot, id=int_value(fields[2]))
         else:
             assert opcode in (29, 30) and not fields
         return result
@@ -1093,6 +1100,36 @@ def main():
                 ('raw-storage', [raw_allocation], set_methods(pointer, [(method_id, [])]))]:
             body = block(*setup, invocation)
             execute_wire('virtual-' + label, module([function(body, return_type=5, locals_count=1), method]), invalid=True)
+        # guard_method is true exactly when call_virtual would enter the named
+        # context-free method, and false, never an error, otherwise.
+        def guard(value, slot=0, ident=method_id):
+            return expression(58, value, integer(slot), integer(ident))
+
+        other_id = method_id + 2
+        other = function(returning(constant(5)), other_id, params=[7, 0])
+        for label, setup, check, expected in [
+                ('bound', [allocation, bind_manual, attach], guard(pointer), 'true'),
+                ('literal', [literal, set_methods(literal_pointer, [(method_id, [])])], guard(literal_pointer), 'true'),
+                ('other-method', [allocation, bind_manual, set_methods(pointer, [(other_id, [])])], guard(pointer), 'false'),
+                ('null', [], guard(constant(Address(0))), 'false'),
+                ('no-table', [allocation, bind_manual], guard(pointer), 'false'),
+                ('cleared-table', [allocation, bind_manual, attach, set_methods(pointer, [])], guard(pointer), 'false'),
+                ('freed', [allocation, bind_manual, attach, expression(11, pointer)], guard(pointer), 'false'),
+                ('slot-out-of-range', [allocation, bind_manual, attach], guard(pointer, 1), 'false'),
+                ('wrong-this', [], guard(constant(7)), 'false'),
+                ('raw-storage', [raw_allocation], guard(pointer), 'false'),
+                ('interior', [allocation, bind_manual, attach], guard(expression(12, pointer, constant(1))), 'false')]:
+            body = block(*setup, returning(check))
+            fields = module([function(body, return_type=4, locals_count=1), method, other])
+            payload = frame(stack(*fields))
+            assert encode_compact_module(WireReader().read(payload)) == payload, ('guard independent roundtrip', label)
+            execute_wire('guard-method-' + label, fields, expected=expected + '\n')
+        contextual_guard = block(allocation, bind_manual, set_methods(pointer, [(method_id, [{'abi': 0, 'kind': 0}])]),
+                                 returning(guard(pointer)))
+        execute_wire('guard-method-captured-context', module([function(contextual_guard, return_type=4, locals_count=1), contextual]),
+                     invalid=True, error='Generic context count does not match function')
+        execute_wire('guard-method-missing-target', module([function(returning(guard(constant(Address(0)), 0, method_id + 1)), return_type=4)]),
+                     invalid=True, error='Referenced script function is missing')
         for label, target, captured in [
                 ('missing-target', method_id + 1, []),
                 ('native-target', 0x0abd0000, []),
