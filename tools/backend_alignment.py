@@ -9,6 +9,10 @@ refusal while preparing the program, and each (suite, refusal message) pair
 must be listed with its exact count in tests/runtime_differences.json
 ("suite_refusals"); an unlisted refusal, a changed count or any other
 difference fails. JNI invocations are not dual-run: the JVM loads one engine.
+
+With --jit MODE[,MODE...] each invocation also runs on the VM once per mode
+with AZSCRIPT_JIT=MODE; each such run must be byte-identical to the plain VM
+run, refusals included, since the JIT tier is part of the VM engine.
 """
 import argparse
 import json
@@ -29,15 +33,22 @@ SUITES = ('math_library', 'containers_library', 'end_to_end', 'classes_end_to_en
           'compact_exec_end_to_end', 'hint_linking_end_to_end', 'extern_library_end_to_end')
 
 
-def wrapper(real, runner):
-    # Both runs read /dev/null; the suite receives the tree run's output.
+def wrapper(real, runner, modes=()):
+    # Every run reads /dev/null; the suite receives the tree run's output.
+    # The runs are concurrent, so the suite's per-invocation timeout covers
+    # the slowest of them rather than their sum (a script that runs to the
+    # step limit takes seconds per engine under the sanitizers).
     real = shlex.quote(str(real))
+    third = ''.join(f'(AZSCRIPT_EXPERIMENTAL_VM_BACKEND=1 AZSCRIPT_JIT={shlex.quote(mode)} {real} "$@" </dev/null '
+                    f'>"$d/jit{index}.out" 2>"$d/jit{index}.err"; echo $? > "$d/jit{index}.rc") &\n'
+                    for index, mode in enumerate(modes))
     return f'''#!/bin/bash
 mkdir -p "$AZSCRIPT_ALIGNMENT_RECORDS/{runner}"
 d=$(mktemp -d "$AZSCRIPT_ALIGNMENT_RECORDS/{runner}/run.XXXXXXXX")
 printf '%s\\0' "$@" > "$d/args"
-{real} "$@" </dev/null >"$d/tree.out" 2>"$d/tree.err"; echo $? > "$d/tree.rc"
-AZSCRIPT_EXPERIMENTAL_VM_BACKEND=1 {real} "$@" </dev/null >"$d/vm.out" 2>"$d/vm.err"; echo $? > "$d/vm.rc"
+(AZSCRIPT_EXPERIMENTAL_VM_BACKEND=1 {real} "$@" </dev/null >"$d/vm.out" 2>"$d/vm.err"; echo $? > "$d/vm.rc") &
+{third}{real} "$@" </dev/null >"$d/tree.out" 2>"$d/tree.err"; echo $? > "$d/tree.rc"
+wait
 cat "$d/tree.out"; cat "$d/tree.err" >&2; exit "$(cat "$d/tree.rc")"
 '''
 
@@ -49,11 +60,15 @@ def refusal(stderr):
     return None
 
 
-def collect(records, runner):
+def collect(records, runner, modes):
     result = []
     for folder in sorted(records.iterdir()):
         sides = {}
-        for side in ('tree', 'vm'):
+        for side in ('tree', 'vm', *(f'jit{index}' for index in range(len(modes)))):
+            # A run the suite's own timeout interrupted leaves no exit code.
+            if not (folder / f'{side}.rc').exists():
+                sides[side] = {'rc': -1, 'out': b'', 'err': b'(no exit status: the invocation was interrupted)'}
+                continue
             sides[side] = {'rc': int((folder / f'{side}.rc').read_text()),
                            'out': (folder / f'{side}.out').read_bytes(), 'err': (folder / f'{side}.err').read_bytes()}
         arguments = (folder / 'args').read_bytes().split(b'\0')[:-1]
@@ -69,7 +84,9 @@ def main():
     parser.add_argument('--work', type=Path, required=True, help='new directory for wrappers and records')
     parser.add_argument('--only', help='comma-separated suite names (refusal counts are checked for these only)')
     parser.add_argument('--suggest', type=Path, help='write observed refusals as registry entries for review')
+    parser.add_argument('--jit', help='also run each invocation on the VM with AZSCRIPT_JIT set to each of these comma-separated modes')
     args = parser.parse_args()
+    modes = args.jit.split(',') if args.jit else []
     native = args.native.resolve()
     work = args.work.resolve()
     work.mkdir(parents=True, exist_ok=False)
@@ -85,7 +102,7 @@ def main():
     runners = ('azscript-run', 'numeric-module-host')
     for name in runners:
         path = interpreter / name
-        path.write_text(wrapper(native / 'interpreter' / name, name), encoding='utf-8')
+        path.write_text(wrapper(native / 'interpreter' / name, name, modes), encoding='utf-8')
         path.chmod(0o755)
     signer = native / 'interpreter/azscript-sign-extern'
     run, host = interpreter / 'azscript-run', interpreter / 'numeric-module-host'
@@ -106,7 +123,7 @@ def main():
     if unknown:
         raise SystemExit(f'unknown suites: {unknown}')
     env = os.environ.copy()
-    for key in ('JAVA_TOOL_OPTIONS', 'JDK_JAVA_OPTIONS', '_JAVA_OPTIONS', 'AZSCRIPT_EXPERIMENTAL_VM_BACKEND'):
+    for key in ('JAVA_TOOL_OPTIONS', 'JDK_JAVA_OPTIONS', '_JAVA_OPTIONS', 'AZSCRIPT_EXPERIMENTAL_VM_BACKEND', 'AZSCRIPT_JIT'):
         env.pop(key, None)
     report = {'native': str(native), 'suites': {}, 'failures': []}
     for name in selected:
@@ -117,10 +134,18 @@ def main():
                                 capture_output=True, text=True)
         (work / f'{name}.out').write_text(result.stdout + '\n--- stderr ---\n' + result.stderr, encoding='utf-8')
         invocations = [item for runner in runners if (suite_records / runner).exists()
-                       for item in collect(suite_records / runner, runner)]
+                       for item in collect(suite_records / runner, runner, modes)]
         refused, mismatched = {}, []
         for item in invocations:
             tree, vm = item['tree'], item['vm']
+            differing = [(mode, item[f'jit{index}']) for index, mode in enumerate(modes)
+                         if (item[f'jit{index}']['rc'], item[f'jit{index}']['out'], item[f'jit{index}']['err']) != (vm['rc'], vm['out'], vm['err'])]
+            if differing:
+                mode, jit = differing[0]
+                mismatched.append({'runner': item['runner'], 'args': item['args'], 'records': item['folder'], 'jit_mode': mode,
+                                   'jit_exit': [vm['rc'], jit['rc']], 'stdout_equal': vm['out'] == jit['out'],
+                                   'stderr': [vm['err'][:400].decode('utf-8', 'replace'), jit['err'][:400].decode('utf-8', 'replace')]})
+                continue
             if (tree['rc'], tree['out'], tree['err']) == (vm['rc'], vm['out'], vm['err']):
                 continue
             message = refusal(vm['err']) if vm['rc'] else None
@@ -152,7 +177,8 @@ def main():
         args.suggest.write_text(json.dumps(suggestion, indent=2, ensure_ascii=False) + '\n', encoding='utf-8')
     total = sum(item['invocations'] for item in report['suites'].values())
     identical = sum(item['identical'] for item in report['suites'].values())
-    print(f'Backend alignment: {identical}/{total} invocations identical on both engines; report {work / "report.json"}')
+    sides = f'both engines and AZSCRIPT_JIT={args.jit}' if args.jit else 'both engines'
+    print(f'Backend alignment: {identical}/{total} invocations identical on {sides}; report {work / "report.json"}')
     for failure in report['failures']:
         print(f'  FAILED {failure}', file=sys.stderr)
     return 1 if report['failures'] else 0

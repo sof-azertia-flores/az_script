@@ -182,6 +182,10 @@ public:
     std::size_t backing_bytes() const noexcept {
         return page_count_*sizeof(Page)+directory_capacity_*sizeof(Page*);
     }
+    // Whether the next emplace must allocate (or fails for lack of identities).
+    bool emplace_grows() const noexcept {
+        return free_head_==invalid_slot_index&&(frontier_==max_slots_||static_cast<std::size_t>(frontier_)/PageSize==page_count_);
+    }
     template<class... Args> id_type emplace(Args&&... args) {
         if(free_head_!=invalid_slot_index) {
             const auto index=free_head_;auto& available=cell(index);

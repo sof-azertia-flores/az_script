@@ -1,6 +1,6 @@
 # 运行时性能重构执行计划
 
-2026-10-19 更新：从最新 main 开始的编译期优化以 [新计划](../compiler-optimization/PLAN.md) 为准。用户已允许调整计步方式/检查密度并取消逻辑调用深度限制；下文逐点预算等价及深度规则属于此前迁移约束，不再阻止新优化。运行库 API 的实际迁移另按新计划实施；本轮不做 JIT。
+2026-10-19 更新：从最新 main 开始的编译期优化以 [新计划](../compiler-optimization/PLAN.md) 为准。用户已允许调整计步方式/检查密度并取消逻辑调用深度限制；下文逐点预算等价及深度规则属于此前迁移约束，不再阻止新优化。运行库 API 的实际迁移另按新计划实施；编译期优化这一轮不做 JIT，JIT 作为独立项目见 [../jit-roadmap/](../jit-roadmap/DESIGN.md)。
 
 日期：2026-10-17（UTC）。状态：已在 `claude/runtime-performance-handoff-5mdt6h` 恢复实施，暂停时的交接见 [HANDOFF.md](HANDOFF.md)，实际进度和验证证据见 [STATUS.md](STATUS.md)。R11b 起的执行顺序、允许差异和验证方式以 [ENGINE_SPLIT.md](ENGINE_SPLIT.md) 为准，该文件与本计划冲突时以该文件为准；目标是解开两个执行器的交织，使 VM 证明可靠后可以只删除树组件；不做多库拆分或双引擎发行。
 
@@ -12,7 +12,7 @@
 - 已核对远端 main 为上述 SHA，并在现有 checkout 创建 `codex/runtime-performance`；没有创建额外 worktree。冻结源码保存在忽略目录 `build/runtime-perf/baseline-source/`。
 - 当前分析快照和机制探针在忽略目录 `build/performance-analysis/`；它们不是已经实现的优化，也不是完整运行基准。
 - 主线包含 Value/Slot、字节码、调用与清理栈、对象/泛型/虚调用、宿主/JNI/快照接入、类型特化和编译器内部 IR。
-- 多实例并行、JNI 批量调用 API、模块加载算法、Unicode 索引、容器算法、JIT/AOT、增量编译为后续独立项目。本轮仍可迁移这些边界，但不把它们的专项提速混入主线成果。
+- 多实例并行、JNI 批量调用 API、模块加载算法、Unicode 索引、容器算法、JIT/AOT、增量编译为后续独立项目。JIT 的设计、计划与进度见 [../jit-roadmap/](../jit-roadmap/DESIGN.md)。本轮仍可迁移这些边界，但不把它们的专项提速混入主线成果。
 - `decompiler` 当前未展开。本轮保持 exec wire v10；不声称外部反编译器已经验证兼容。如以后变更 wire，先取得固定提交的实际源码再协调生产/消费端。
 
 ## 2. 现在确定的架构决策

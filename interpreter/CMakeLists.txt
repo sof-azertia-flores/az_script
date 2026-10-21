@@ -8,9 +8,13 @@ find_package(Threads REQUIRED)
 if(NOT TARGET azertianBinaryData)
     add_subdirectory(../abdC "${CMAKE_CURRENT_BINARY_DIR}/abdC")
 endif()
-set(AZSCRIPT_RUNTIME_SOURCES core/trace.cpp core/admission.cpp core/types.cpp core/value_ops.cpp core/storage.cpp core/ownership.cpp core/statement.cpp core/lifecycle.cpp core/exec.cpp core/link.cpp library.cpp internelFunctions.cpp heepalloc.cpp blocks.cpp p256.cpp extern_library.cpp runtime_abi.cpp
+set(AZSCRIPT_RUNTIME_SOURCES core/trace.cpp core/admission.cpp core/types.cpp core/value_ops.cpp core/storage.cpp core/ownership.cpp core/statement.cpp core/lifecycle.cpp core/exec.cpp core/link.cpp script.cpp script_modules.cpp script_link.cpp host_functions.cpp type_contexts.cpp variable.cpp tree/values.cpp tree/variables.cpp tree/control.cpp tree/calls.cpp tree/objects.cpp tree/generics.cpp tree/builder.cpp tree/function.cpp tree/scope.cpp internelFunctions.cpp heepalloc.cpp blocks.cpp p256.cpp extern_library.cpp runtime_abi.cpp
     vm/frames.cpp vm/program.cpp vm/lowering.cpp vm/loader.cpp
-    vm/execution.cpp vm/session.cpp vm/host_bridge.cpp vm/cleanup.cpp)
+    vm/execution.cpp vm/session.cpp vm/host_bridge.cpp vm/cleanup.cpp
+    jit/config.cpp jit/tier.cpp jit/analysis.cpp jit/mir_builder.cpp jit/operations.cpp jit/backend.cpp jit/native.cpp)
+if(AZSCRIPT_JIT_MODULE)
+    add_subdirectory(jit/llvm)
+endif()
 add_library(abdInvoker SHARED ${AZSCRIPT_RUNTIME_SOURCES})
 add_library(abdInvokero STATIC ${AZSCRIPT_RUNTIME_SOURCES})
 foreach(target abdInvoker abdInvokero)
@@ -91,11 +95,14 @@ if(BUILD_TESTING)
             "vm-program-tests:vm/program_tests.cpp"
             "exec-model-tests:core/exec_tests.cpp"
             "lifecycle-tests:core/lifecycle_tests.cpp"
-            "operations-tests:operations_tests.cpp"
-            "scalar-vm-tests:scalar_vm_tests.cpp"
+            "operations-tests:core/value_ops_tests.cpp"
+            "scalar-vm-tests:vm/scalar_tests.cpp"
             "vm-call-tests:../tests/vm_call_tests.cpp"
-            "vm-session-tests:vm_session_tests.cpp"
-            "vm-cleanup-tests:vm/cleanup_tests.cpp")
+            "vm-session-tests:vm/session_tests.cpp"
+            "vm-cleanup-tests:vm/cleanup_tests.cpp"
+            "jit-tier-tests:jit/tier_tests.cpp"
+            "jit-analysis-tests:jit/analysis_tests.cpp"
+            "jit-operation-tests:jit/operations_tests.cpp")
         string(REPLACE ":" ";" vm_test_parts "${vm_test}")
         list(GET vm_test_parts 0 vm_test_name)
         list(GET vm_test_parts 1 vm_test_source)

@@ -1,4 +1,5 @@
 #include "library.h"
+#include "tree/expressions.h"
 #include "blocks.h"
 #include "core/trace.h"
 #include "core/statement.h"

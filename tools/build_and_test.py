@@ -76,7 +76,8 @@ def check_error_storage():
     # pointers outside pending_error would silently lose the latter on unwind.
     # Every runtime source of both engines and the shared core is checked.
     interpreter = ROOT/'interpreter'
-    sources = sorted(path for pattern in ('*.h', '*.cpp', 'core/*.h', 'core/*.cpp', 'vm/*.h', 'vm/*.cpp')
+    sources = sorted(path for pattern in ('*.h', '*.cpp', 'core/*.h', 'core/*.cpp', 'tree/*.h', 'tree/*.cpp',
+                                          'vm/*.h', 'vm/*.cpp', 'jit/*.h', 'jit/*.cpp')
                      for path in interpreter.glob(pattern) if not path.stem.endswith('_tests'))
     for path in sources:
         text = path.read_text(encoding='utf-8')
@@ -88,12 +89,26 @@ def check_error_storage():
             raise RuntimeError(f'Raw exception storage outside pending_error in {path.relative_to(ROOT)}')
     print(f'Error trace storage check passed ({len(sources)} runtime sources).', flush=True)
 
+def check_jit_stats(mode,stats):
+    # A pass where native code never ran would prove nothing.
+    sessions=[json.loads(line) for line in stats.read_text(encoding='utf-8').splitlines()] if stats.exists() else []
+    entries=sum(item['entries'] for item in sessions)
+    if not entries:raise RuntimeError(f'AZSCRIPT_JIT={mode} ran no native code')
+    # Only analysis refusals are expected; a compiler error or a value
+    # outside the analysis' tags is a defect.
+    failures=sorted({reason for item in sessions for reason in item['refusals'] if reason.startswith('compiler error')})
+    if failures:raise RuntimeError(f'AZSCRIPT_JIT={mode} failed to compile functions: {failures[:3]}')
+    if sum(item['violations'] for item in sessions):raise RuntimeError(f'AZSCRIPT_JIT={mode} saw values outside the analysis')
+    print(f'JIT {mode}: {len(sessions)} sessions, {sum(item["compiled"] for item in sessions)} functions compiled, '
+          f'{entries} native entries, {sum(item["operations"] for item in sessions)} operations', flush=True)
+
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--offline',action='store_true')
     parser.add_argument('--skip-jni',action='store_true')
     parser.add_argument('--skip-tests',action='store_true')
     parser.add_argument('--sanitize',action='store_true',help='Address/UB sanitizers on native tests (builds without JNI)')
+    parser.add_argument('--jit',action='store_true',help='build the pinned LLVM first (tools/build_llvm.py), so the JIT module is built and tested')
     args=parser.parse_args()
     check_error_storage()
     BUILD.mkdir(exist_ok=True)
@@ -106,6 +121,8 @@ def main():
     (BUILD/'java/classpath.txt').write_text(classpath,encoding='utf-8')
     native=BUILD/('sanitize' if args.sanitize else 'native')
     jni=not (args.skip_jni or args.sanitize)
+    if args.jit and not args.sanitize:
+        run([sys.executable,ROOT/'tools/build_llvm.py',*(['--offline'] if args.offline else [])])
     run(['cmake','-S',ROOT,'-B',native,'-DCMAKE_BUILD_TYPE=Debug',f'-DAZSCRIPT_BUILD_JNI={"ON" if jni else "OFF"}',f'-DAZSCRIPT_SANITIZE={"ON" if args.sanitize else "OFF"}'])
     run(['cmake','--build',native,'--parallel',min(os.cpu_count() or 2,8)])
     if args.skip_tests:
@@ -234,11 +251,48 @@ def main():
     run([sys.executable, ROOT/'tests/vm_execution_end_to_end.py', '--classpath', classpath,
          '--reference-host', native/'interpreter/observation-host', '--reference-engine', 'tree',
          '--candidate-host', native/'interpreter/observation-host', '--candidate-engine', 'vm', '--work', vm_work])
+    # The JIT tier, replayed against the same reference: probing moves the
+    # points where frames consult the tier, eager runs eligible functions
+    # natively, stress one instruction per entry. None may change anything.
+    # The LLVM backend runs too when this build has the JIT module.
+    jit_module=native/'interpreter'/('libazscript-jit.dylib' if sys.platform=='darwin' else 'libazscript-jit.so')
+    # on:N compiles after N entries or back-edges, so replays cross tier-up
+    # and on-stack replacement at loop heads.
+    jit_modes=('probe:7', 'eager', 'stress', 'on:2+interp')+(('eager+llvm', 'stress+llvm', 'on:3+llvm') if jit_module.exists() else ())
+    print(f'JIT module: {jit_module if jit_module.exists() else "not built"}', flush=True)
+    for mode in jit_modes:
+        jit_work=BUILD/'runtime-perf'/(f'vm-execution-jit-{mode.replace(":","").replace("+","-")}'+('-sanitize' if args.sanitize else ''))
+        if jit_work.exists():shutil.rmtree(jit_work)
+        stats=jit_work.with_name(jit_work.name+'.stats')
+        stats.unlink(missing_ok=True)
+        run([sys.executable, ROOT/'tests/vm_execution_end_to_end.py', '--reference-work', vm_work,
+             '--candidate-host', native/'interpreter/observation-host', '--candidate-engine', 'vm', '--work', jit_work],
+            env={**os.environ, 'AZSCRIPT_JIT': mode, 'AZSCRIPT_JIT_STATS': str(stats)})
+        if mode != 'probe:7':check_jit_stats(mode,stats)
+    # The optimized (O1) corpus has code shapes the compiler emits only when
+    # optimizing; every instruction runs natively and must match the tree.
+    if not args.sanitize:
+        mode='stress+llvm' if jit_module.exists() else 'stress'
+        optimized_work=BUILD/f'compiler-optimization-corpus-jit-{mode.replace("+","-")}'
+        if optimized_work.exists():shutil.rmtree(optimized_work)
+        stats=optimized_work.with_name(optimized_work.name+'.stats')
+        stats.unlink(missing_ok=True)
+        run([sys.executable, ROOT/'tests/compiler_optimization_corpus.py', '--classpath', classpath,
+             '--host', native/'interpreter/observation-host', '--work', optimized_work],
+            env={**os.environ, 'AZSCRIPT_JIT': mode, 'AZSCRIPT_JIT_STATS': str(stats)})
+        check_jit_stats(f'{mode} (compiler corpus)',stats)
     # Every end-to-end runner invocation, run again with the VM forced: outputs
     # must be byte-identical or a refusal listed with its exact count.
-    align_work=BUILD/'runtime-perf'/('alignment-sanitize' if args.sanitize else 'alignment')
-    if align_work.exists():shutil.rmtree(align_work)
-    run([sys.executable, ROOT/'tools/backend_alignment.py', '--native', native, '--classpath', classpath, '--work', align_work])
+    # One JIT mode per pass keeps each invocation (tree, VM, JIT) within the
+    # suites' own timeouts. The slower sanitizer build runs stress (every
+    # entry and exit point) and the policy; the replays above cover the rest.
+    align_modes=('stress', 'on:2+interp') if args.sanitize else \
+        ('probe:11', 'eager', 'stress', 'on:2+interp')+(('eager+llvm', 'stress+llvm', 'on:3+llvm') if jit_module.exists() else ())
+    for mode in align_modes:
+        align_work=BUILD/'runtime-perf'/(f'alignment-{mode.replace(":","").replace("+","-")}'+('-sanitize' if args.sanitize else ''))
+        if align_work.exists():shutil.rmtree(align_work)
+        run([sys.executable, ROOT/'tools/backend_alignment.py', '--native', native, '--classpath', classpath, '--work', align_work,
+             '--jit', mode])
     print('Build and all selected tests passed. Use ./azscript --help.')
 
 if __name__=='__main__':

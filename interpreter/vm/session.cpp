@@ -39,11 +39,11 @@ struct Session::Prepared final:HostBoundary {
     std::uint64_t invocations=0;
     bool export_allowed=false,publication_deferred=false;
 
-    Prepared(CompiledScript source,std::size_t workspace_limit,const script& owner)
+    Prepared(CompiledScript source,std::size_t workspace_limit,const script& owner,const jit::Config& tier)
         :compiled(std::move(source)),budget_owner(std::make_shared<WorkspaceBudget>(workspace_limit)),
          budget(*budget_owner),ownership_storage(ownership::Arena::create(budget_owner)),slots(budget),
          globals(budget),arguments(budget),bindings(budget),identities(budget),
-         incoming(budget),next_globals(budget),executor(compiled.program,slots,budget) {
+         incoming(budget),next_globals(budget),executor(compiled.program,slots,budget,tier) {
         require_scalar_host_targets(compiled.program);
         for(const auto& function:compiled.program.functions)
             minimum_globals=std::max(minimum_globals,static_cast<std::size_t>(function.global_offset)+function.global_count);
@@ -184,11 +184,11 @@ struct Session::Prepared final:HostBoundary {
     }
 };
 
-Session::Session(script& owner,std::size_t workspace_limit)
-    :owner_(owner),workspace_limit_(workspace_limit) {}
+Session::Session(script& owner,std::size_t workspace_limit,const jit::Config& tier)
+    :owner_(owner),workspace_limit_(workspace_limit),tier_(tier) {}
 Session::~Session()=default;
 void Session::prepare() {
-    auto next=std::make_unique<Prepared>(compile_script(owner_),workspace_limit_,owner_);
+    auto next=std::make_unique<Prepared>(compile_script(owner_),workspace_limit_,owner_,tier_);
     prepared_.swap(next);
 }
 const CompiledScript& Session::compiled() const {

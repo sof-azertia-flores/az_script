@@ -8,6 +8,7 @@
 #include "../heepalloc.h"
 #include "../core/ids.h"
 #include "../core/trace.h"
+#include "../jit/tier.h"
 #include <algorithm>
 #include <array>
 #include <bit>
@@ -213,10 +214,13 @@ struct ScalarExecutor::State {
     std::unordered_map<int,std::uint32_t> script_functions;
     std::vector<std::vector<std::shared_ptr<const method_table>>> method_tables;
     std::uint32_t free_cell=no_index;
+    // Frames consult the tier only when they reach their bound.
+    jit::Tier tier;
 
-    State(const ExecutableProgram& source,SlotPool& storage,WorkspaceBudget& budget)
+    State(const ExecutableProgram& source,SlotPool& storage,WorkspaceBudget& budget,const jit::Config& tier_config)
         :program(source),pool(storage),workspace(budget),registers(budget),cells(budget,no_index),
-         locals(budget),declared(budget),scopes(budget),frames(budget),layouts(budget),budget_batches(budget),regions(budget) {
+         locals(budget),declared(budget),scopes(budget),frames(budget),layouts(budget),budget_batches(budget),regions(budget),
+         tier(source,tier_config) {
         verify_program(program);
         require_capabilities(program,scalar_capabilities());
         budget_batches.append_default(program.instructions.size());
@@ -280,6 +284,7 @@ struct ScalarExecutor::State {
             const auto callee=work.back();work.pop_back();
             for(const auto caller:callers[callee])if(!object_function[caller]){object_function[caller]=true;work.push_back(caller);}
         }
+        tier.classify(object_function);
         layouts.reserve(count);
         for(std::uint32_t index=0;index<count;++index) {
             auto layout=frame_layout(program,index);
@@ -886,7 +891,7 @@ struct ScalarExecutor::State {
             const bool objects=object_function[index];
             validate_arguments(function,count,argument,objects);
             const auto layout=layouts[index];
-            frame.pc=function.begin;frame.end=function.end;
+            frame.pc=function.begin;frame.end=tier.entry_bound(index);
             frame.registers={registers.size(),layout.registers};frame.locals={locals.size(),layout.locals};
             frame.declared={declared.size(),layout.locals};frame.scope_marks={scopes.size(),layout.scope_marks};
             // Preflight every backing array before publishing any live range.
@@ -1030,6 +1035,114 @@ struct ScalarExecutor::State {
         if(value.type_tag()!=ADDRESS_VALUE)throw std::runtime_error(message);
         return value.get<address>();
     }
+    // A scalar frame as the JIT tier's native code sees it: each operation is
+    // the corresponding instruction's own, with failure reported, not thrown.
+    class TierFrame final:public jit::FrameAccess {
+        State& vm;
+        FrameRecord& frame;
+        std::uint64_t& steps_;
+        std::span<const SlotId> globals;
+        RegisterValue& reg(std::uint32_t index) const noexcept{return vm.registers[frame.registers.begin+index];}
+        std::uint32_t& local(std::uint32_t index) const noexcept{return vm.locals[frame.locals.begin+index];}
+        Value& cell_value(std::uint32_t cell) const noexcept {
+            auto* value=vm.pool.try_resolve(vm.cells[cell].slot);
+            if(!value)std::terminate();
+            return *value;
+        }
+    public:
+        TierFrame(State& state,FrameRecord& record,std::uint64_t& steps,std::span<const SlotId> slots) noexcept
+            :vm(state),frame(record),steps_(steps),globals(slots) {}
+        bool register_shadow(std::uint32_t index,std::optional<jit::Shadow>& out) const noexcept override {
+            const auto& value=reg(index);
+            if(value.reference)return false;
+            out=jit::shadow_of(value.value);return true;
+        }
+        void set_register_shadow(std::uint32_t index,const jit::Shadow& value) noexcept override {
+            auto& target=reg(index);
+            if(target.reference)std::terminate();
+            target.value=jit::value_of(value);
+        }
+        bool local_shadow(std::uint32_t index,std::optional<jit::Shadow>& out) const noexcept override {
+            const auto cell=local(index);
+            if(cell==no_index)return false;
+            out=jit::shadow_of(cell_value(cell));return true;
+        }
+        void set_local_shadow(std::uint32_t index,const jit::Shadow& value) noexcept override {
+            const auto cell=local(index);
+            if(cell==no_index)std::terminate();
+            cell_value(cell)=jit::value_of(value);
+        }
+        std::uint8_t flags() const noexcept override {
+            return static_cast<std::uint8_t>(frame.returned|frame.broken<<1|frame.continued<<2);
+        }
+        void set_flags(std::uint8_t flags) noexcept override {
+            frame.returned=flags&1;frame.broken=flags&2;frame.continued=flags&4;
+        }
+        std::uint64_t steps() const noexcept override{return steps_;}
+        void set_steps(std::uint64_t steps) noexcept override{steps_=steps;}
+        void set_depths(std::uint32_t statement,std::uint32_t loop) noexcept override {
+            frame.statement_depth=statement;frame.loop_depth=loop;
+        }
+        void set_pc(ProgramCounter pc) noexcept override{frame.pc=pc;}
+        bool reference_local(std::uint32_t index,std::uint32_t slot) noexcept override {
+            if(slot>=frame.locals.count||local(slot)==no_index)return false;
+            vm.reference(frame,index,{},local(slot));return true;
+        }
+        bool reference_global(std::uint32_t index,std::uint32_t relative) noexcept override {
+            const auto& function=vm.function_of(frame);
+            if(relative>=function.global_count||function.global_offset>globals.size()||
+               relative>=globals.size()-function.global_offset)return false;
+            vm.reference(frame,index,globals[function.global_offset+relative],no_index);return true;
+        }
+        void copy_reference(std::uint32_t destination,std::uint32_t source) noexcept override {
+            if(!reg(source).reference||reg(source).host)std::terminate();
+            vm.copy(frame,destination,source);
+        }
+        void drop_reference(std::uint32_t index) noexcept override {
+            if(auto& target=reg(index);target.reference)vm.drop_reference(target);
+        }
+        bool read_reference(std::uint32_t index,Value& out) const noexcept override {
+            const auto& source=reg(index);
+            if(!source.reference||source.host)return false;
+            const auto* value=vm.pool.try_resolve(source.cell==no_index?source.global:vm.cells[source.cell].slot);
+            if(!value)return false;
+            out=*value;return true;
+        }
+        bool write_reference(std::uint32_t index,const Value& value) noexcept override {
+            const auto& target=reg(index);
+            if(!target.reference||target.host)return false;
+            auto* storage=vm.pool.try_resolve(target.cell==no_index?target.global:vm.cells[target.cell].slot);
+            if(!storage)return false;
+            *storage=value;return true;
+        }
+        bool declare(std::uint32_t slot,const Value& initial) noexcept override {
+            // Only without growth: an allocation that charges the workspace
+            // (or fails) is the VM's to perform.
+            if((vm.free_cell==no_index&&vm.cells.size()==vm.cells.capacity())||vm.pool.emplace_grows())return false;
+            const auto cell=vm.allocate(initial);
+            if(local(slot)!=no_index)vm.release(local(slot));
+            else vm.declared[frame.declared.begin+frame.declared_count++]=slot;
+            local(slot)=cell;return true;
+        }
+        void enter_scope() noexcept override {
+            if(frame.scope_count==frame.scope_marks.count)std::terminate();
+            vm.scopes[frame.scope_marks.begin+frame.scope_count++]=static_cast<std::uint32_t>(frame.declared_count);
+        }
+        void leave_scope() noexcept override{vm.leave_scope(frame);}
+        bool undeclared(std::uint32_t slot) const noexcept override{return slot<frame.locals.count&&local(slot)==no_index;}
+        void set_result(const Value& value,std::uint32_t location) noexcept override {
+            frame.result=value;frame.return_location=location;
+        }
+    };
+    // The frame reached its bound, FrameRecord::end. Only at the function's
+    // real end is that the verified "every function ends" invariant failing.
+    // True when native code ran: the frame's pc and bound then changed.
+    [[gnu::noinline,gnu::cold]] bool reach_bound(FrameRecord& frame,std::uint64_t& steps,std::span<const SlotId> globals) {
+        if(frame.pc>=program.functions[frame.function].end)throw std::logic_error("Scalar VM function did not terminate");
+        TierFrame access(*this,frame,steps,globals);
+        const auto reached=tier.reached(frame.function,frame.pc,access);
+        frame.end=reached.bound;return reached.ran;
+    }
     static bool batch_opcode(Opcode opcode) noexcept {
         switch(opcode) {
         case Opcode::tick:case Opcode::constant:case Opcode::load_slot:
@@ -1074,7 +1187,7 @@ struct ScalarExecutor::State {
             if(drive_pending)resume(std::exchange(drive_pending,FrameId{}),position,options);
             while(frames.size()>mark) {
                 auto& frame=frames.top();
-                if(frame.pc>=frame.end)throw std::logic_error("Scalar VM function did not terminate");
+                if(frame.pc>=frame.end)[[unlikely]]{if(reach_bound(frame,steps,globals))continue;}
                 const auto& instruction=program.instructions[frame.pc];
                 const auto& source=program.sources[frame.pc];
                 frame.node=source.node;frame.location=source.location;++frame.pc;
@@ -1189,6 +1302,7 @@ struct ScalarExecutor::State {
                 case Opcode::loop_next:
                     if(frame.broken){frame.broken=false;frame.pc=instruction.operand;}
                     else {frame.continued=false;frame.pc=instruction.target;}
+                    if(tier.reports_backedges())[[unlikely]]frame.end=tier.backedge(frame.function,frame.pc,frame.end);
                     break;
                 case Opcode::set_break:
                     if(!frame.loop_depth)throw std::runtime_error("Break outside loop");
@@ -1445,8 +1559,8 @@ struct ScalarExecutor::State {
     }
 };
 
-ScalarExecutor::ScalarExecutor(const ExecutableProgram& program,SlotPool& slots,WorkspaceBudget& workspace)
-    :state_(std::make_unique<State>(program,slots,workspace)) {}
+ScalarExecutor::ScalarExecutor(const ExecutableProgram& program,SlotPool& slots,WorkspaceBudget& workspace,const jit::Config& tier)
+    :state_(std::make_unique<State>(program,slots,workspace,tier)) {}
 ScalarExecutor::~ScalarExecutor()=default;
 Value ScalarExecutor::invoke(std::uint32_t function,std::span<const Value> arguments,
         std::span<const SlotId> globals,std::uint64_t& remaining_steps,ExecutionPosition* position,ExecutionOptions options) {

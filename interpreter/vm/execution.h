@@ -4,6 +4,7 @@
 #include "program.h"
 #include "frames.h"
 #include "../core/ownership.h"
+#include "../jit/config.h"
 #include <memory>
 #include <span>
 
@@ -82,7 +83,7 @@ class ScalarExecutor {
     struct State;
     std::unique_ptr<State> state_;
 public:
-    ScalarExecutor(const ExecutableProgram& program,SlotPool& slots,WorkspaceBudget& workspace);
+    ScalarExecutor(const ExecutableProgram& program,SlotPool& slots,WorkspaceBudget& workspace,const jit::Config& tier={});
     ~ScalarExecutor();
     ScalarExecutor(const ScalarExecutor&)=delete;
     ScalarExecutor& operator=(const ScalarExecutor&)=delete;
