@@ -27,7 +27,10 @@ class ExecPipelineTest {
                 Compiler.OptimizationPass.COMMON_SUBEXPRESSIONS,Compiler.OptimizationPass.DEAD_CODE,
                 Compiler.OptimizationPass.SCALAR_INLINING,Compiler.OptimizationPass.RANGE_LOOP_MOTION,
                 Compiler.OptimizationPass.FLOW_PROPAGATION),Compiler.optimizationPasses(Compiler.Optimization.ADVANCED));
-        assertTrue(Compiler.optimizationPasses(Compiler.Optimization.AGGRESSIVE).containsAll(Compiler.optimizationPasses(Compiler.Optimization.ADVANCED)));
+        var aggressive=EnumSet.copyOf(Compiler.optimizationPasses(Compiler.Optimization.ADVANCED));
+        aggressive.remove(Compiler.OptimizationPass.SCALAR_INLINING);aggressive.add(Compiler.OptimizationPass.SEQUENCE_INLINING);
+        aggressive.add(Compiler.OptimizationPass.SLOT_COMPACTION);
+        assertEquals(aggressive,Compiler.optimizationPasses(Compiler.Optimization.AGGRESSIVE));
         assertEquals(Compiler.Optimization.AGGRESSIVE,Main.parseCompileArguments(List.of("compile","x.azs","-O2","-O3")).optimization());
         assertEquals(Compiler.Optimization.ADVANCED,Main.parseCompileArguments(List.of("compile","x.azs","-O3","-O2")).optimization());
         var args=Main.parseCompileArguments(List.of("compile","x.azs","-O3","--no-inline"));

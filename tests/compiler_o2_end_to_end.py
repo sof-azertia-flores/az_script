@@ -84,6 +84,25 @@ CASES = O1_CASES + (
     ('o2-cse-backedge', 'int f(int n){int a=7/n;while(7/n>0){n=0;}return a;}int main(){return f(1);}', None, '', 'Division by zero'),
     ('o2-cse-loop-storage', 'int f(int n){int a=n*7;int i=0;while(i<2&&n*7>0){a=0;i++;}return i;}int main(){return f(1);}', 2, '', None),
     ('o2-cse-loop-stable', 'int f(int n){int a=7/n;int i=0;while(i<2&&7/n>0){int b=7/n;i++;}return a+i;}int main(){return f(1);}', 9, '', None),
+    # O3 inlining through seq: operands, early returns, loops, conditions,
+    # lazy operands, nested frames, written parameters, depth and callers
+    # holding objects. With -g, O3 frames must equal O0's.
+    ('o3-operand', 'int f(int x){return x*3+1;}int main(){int t=0;for(int i=0;i<5;i++){t=t+f(i)*2;}return t;}', 70, '', None),
+    ('o3-early-return', 'int sign(int x){if(x<0){return -1;}if(x==0){return 0;}return 1;}'
+     'int main(){return sign(-5)*100+sign(0)*10+sign(7);}', -99, '', None),
+    ('o3-loop-callee', 'int sum(int n){int s=0;int i=0;while(i<n){if(i==5){break;}s+=i;i++;}return s;}'
+     'int main(){return sum(3)+sum(10);}', 13, '', None),
+    ('o3-condition', 'boolean even(int x){return x%2==0;}int main(){int c=0;int i=0;while(even(i)||i<5){c+=1;i++;}return c;}', 5, '', None),
+    ('o3-lazy', 'int f(int x){return 10/x;}int main(){int a=0;boolean b=(a!=0)&&(f(a)>1);return b?1:2;}', 2, '', None),
+    ('o3-nested-error', 'int g(int x){\n return 100/x;\n}\nint f(int x){\n return g(x-1)+1;\n}\nint main(){\n return f(1)*2;\n}',
+     None, '', 'Division by zero'),
+    ('o3-written-param', 'int f(int x){x=x*2;return x+1;}int main(){int y=4;int r=f(y);return r*10+y;}', 94, '', None),
+    ('o3-depth', 'int f6(int x){return x+1;}int f5(int x){return f6(x)+1;}int f4(int x){return f5(x)+1;}'
+     'int f3(int x){return f4(x)+1;}int f2(int x){return f3(x)+1;}int f1(int x){return f2(x)+1;}int main(){return f1(0);}', 6, '', None),
+    ('o3-object-caller', 'class P{int v;P(int n){v=n;}~P(){}}int f(int x){return x+1;}int main(){P p(3);int r=f(p.v);return r;}', 4, '', None),
+    ('o3-overflow-loop', 'int f(int x){\n return x*65536;\n}\nint main(){int s=0;for(int i=0;i<100000;i+=30000){s=f(i);}return s;}',
+     None, '', 'Integer overflow'),
+    ('o3-sibling-slots', 'int f(int a,int b){int c=a*b;return c-a;}int main(){int x=f(3,4)+f(5,6)+f(7,8);return x;}', 9+25+49, '', None),
     generated_flow_case(),
 )
 
@@ -106,6 +125,27 @@ def semantic(observation):
                 if item['message'] != 'Script execution step limit exceeded':
                     script = next((frame for frame in frames if not frame['native']), None)
                     item['origin'] = {key: script[key] for key in ('file', 'line', 'column')} if script else None
+            for child in item.values():
+                errors(child)
+        elif isinstance(item, list):
+            for child in item:
+                errors(child)
+    errors(value)
+    return value
+
+
+def framed(observation):
+    """O3 with -g restores inlined frames: across levels only the budget may differ."""
+    value = copy.deepcopy(observation)
+    value.pop('engine', None)
+    value.pop('remaining_steps', None)
+
+    def errors(item):
+        if isinstance(item, dict):
+            item.pop('remaining_steps', None)
+            if {'category', 'message', 'trace', 'described'} <= item.keys() \
+                    and item['message'] == 'Script execution step limit exceeded':
+                item.pop('trace'); item.pop('described')
             for child in item.values():
                 errors(child)
         elif isinstance(item, list):
@@ -196,6 +236,11 @@ def main():
                     report['observations'] += 1
                 assert not compare_engines(*observations, 'tree', 'vm'), (name, level, observations)
                 levels.append(semantic(observations[0]))
+                if level == 'O0':
+                    reference_frames = framed(observations[0])
+                elif level == 'O3':
+                    assert not differences(reference_frames, framed(observations[0])), \
+                        (name, 'O0/O3 frames', differences(reference_frames, framed(observations[0])))
                 if level in ('O2', 'O3'):
                     # O3 may use exec v11 constructs, which a v10 runtime refuses.
                     if args.baseline_host and level == 'O2':

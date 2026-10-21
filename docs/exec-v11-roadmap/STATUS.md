@@ -5,11 +5,11 @@
 | 阶段 | 当前状态 | 证据或下一步 |
 | --- | --- | --- |
 | V0 | 完成 | 设计、计划与本记录 |
-| V1 | 尚未开始 | 删除 `getDepth` |
-| V2 | 尚未开始 | JIT 规模上限 |
-| V3 | 尚未开始 | 格式增补 |
-| V4 | 尚未开始 | O3 档位骨架 |
-| V5 | 尚未开始 | O3-a 内联与槽压缩 |
+| V1 | 完成（完整验证见下） | `a5d6ba0` |
+| V2 | 完成（完整验证见下） | `fd52bd4`，测量见下 |
+| V3 | 完成，定向验证 | `38330c1`、`5c4caa5`、`7ab4af0`、`9004673` |
+| V4 | 完成，定向验证 | `f22357a` |
+| V5 | 完成，定向验证 | 内联、槽压缩与测量见下 |
 | V6 | 尚未开始 | O3-b 专用化 |
 | V7 | 尚未开始 | O3-c 对象 |
 | V8 | 尚未开始 | 无检查运算 |
@@ -21,3 +21,47 @@
 用户询问 O3 的可行性后决定：O3 及需要格式变化的优化放入下一个大版本 exec v11，同时包含内联、专用化与对象优化，彻底删除 `getDepth`；先完成完整计划，再由 Claude 自行实施。开发分支 `exec_v11_main`，每个大的更新合入该分支，开发期不改 exec 版本号。
 
 依据：三份只读调查（`getDepth` 与 exec 版本的全部位置；VM/JIT 中新 opcode、虚调用、trace 与规模上限涉及的代码；O2 编译器基础设施）。主要结论已写入 DESIGN 第 1 节和第 4–7 节。
+
+## V1：删除 `getDepth`（2026-10-21）
+
+`a5d6ba0` 从编译器内建表、运行时内建实现、`ownership::depth` 与 VM 宿主桥的伪造作用域链中删除 `getDepth`；内建 ID `0x0abd0001` 保留为空位，加载时拒绝。所有权语料、`lifecycle_fuzz`、一致性变异体（删去 depth-counts-callers）与相关文档同步改写，作用域深度不再可观察。`0aca80c` 为 sanitizer 下的 `end_to_end` 增加 60 秒看门狗（负载高时 `while(true)` 到达步数上限前可能超时）。
+
+定向检查：Java 375/375，ctest 19/19，language_ops 360、compact_exec 404 个 wire 用例、compiler_optimization 27 例、lifecycle_fuzz 自检通过。
+
+## V2：JIT 规模（2026-10-21）
+
+`fd52bd4`：JIT ABI 2，退出只写回活跃且已写的 slot，写入过的 slot 在入口块初始化为缺失；超过 2,048 个操作的函数使用轻量 LLVM 流水线（sroa、early-cse、instcombine、simplifycfg 与 CodeGenOpt None）。原生规模上限提高到 6,144 个操作、65,536 个恢复单元。
+
+测量：stress 模式下 100 项表达式 16.5 s → 0.4–0.5 s；eager 模式 8,522 个操作的长链 O2 流水线 5.7 s → 分层 1.1 s，约 6,100 个操作 0.71 s。callgrind（V1 对 V2，JIT）：integer_loop −11.6%，branch_loop −9.0%，调用约 −2.5%；VM 不变。
+
+## V1+V2 完整验证
+
+在 `/home/user/az_script-jitval`（`0aca80c`）顺序运行 `build_and_test.py --offline --jit` 与 `--offline --sanitize`。结果：运行中，完成后在此记录。
+
+## V3：格式增补（2026-10-21）
+
+- `38330c1`：opcode 54 `seq`（读取端拒绝序列层的声明、跳出序列的 break/continue、return 及对象所有权 opcode）与 55–57 回绕整数运算；树、VM lowering（无作用域的 statement_enter/leave 加 copy）、两个 JIT 后端。
+- `5c4caa5`：`entry_kind=2` 私有函数：宿主调用与反射视为不存在，`hasFunction` 为假，签名不能声明，导入与其他模块（含 hint 映射）的调用在 flush 时拒绝；main 与生命周期函数不能私有；VM 按普通帧分类。
+- `7ab4af0`：opcode 58 `guard_method`；目标作为无上下文的方法表项读入，因而随 namespace 重定位并按方法表项校验；`heap::find_methods` 为 `methods_at` 的不报错形式；VM 新增对象帧指令。
+- `9004673`：七字段扩展调试记录（每个位置的内联下标、内联表、display id），由两引擎共用的 `trace::note_script_frame` 先输出被内联帧；ID 在 trace 时取函数装载后的 namespace，不参与重定位。
+
+验证：每项都有 C++ 读取/拒绝测试、Java 编解码测试与 compact_exec 独立 wire 用例（最终 447 个，树与 VM 均通过）；`seq` 与 `guard_method` 程序在全部预算点上树、VM、JIT stress/eager（interp 与 LLVM）逐字节一致；hint 模块中的内联帧 ID 随装载 namespace 变化，两引擎一致。旧 v10 样本未改动。
+
+## V4：O3 档位骨架（2026-10-21）
+
+`f22357a`：`Optimization.AGGRESSIVE` / `-O3`，O2 阶段集合改为显式列表；`compiler_o2_end_to_end.py`、`compiler_optimization_corpus.py` 增加 `--o3`（v10 运行库检查只用于 O2），`bench_compiler_o2.py --levels` 比较任意两个档位，完整构建以 `--o3` 运行 O2 测试。O0/O1/O2 产物与前一编译器逐字节相同（O2 测试源码 168 次编译）。
+
+## V5：O3-a 内联与槽压缩（2026-10-21）
+
+- `ExecSequenceInliner`（阶段 `SEQUENCE_INLINING`）在 O2 之后运行：把封闭标量函数（O2 的安全集合，因此无递归、无全局、无宿主）内联到任意表达式位置，包括运算数、条件、循环条件和惰性分支；链深 4；被调者节点 ≤256、调用者节点上限 `min(2048, max(3n, n+512))`，槽 ≤256。实参与返回值类型由标量分析证明，类型无法证明的调用（如对象字段实参）保持调用，以保留运行时实参检查及其错误消息。
+- 被调者可含 if/while/break/continue 与多个 return：提前 return 通过把其后的语句移入另一分支变为尾部（需复制的尾部 ≤16 个节点），尾部写入结果槽；循环内的 return 不内联。未写的参数以常量或调用者局部量直接代入，其余参数写入快照槽。
+- 被内联的槽在调用者根块以常量初值声明一次；互不嵌套的序列共享同类型的槽。`ExecSlotCompaction`（`SLOT_COMPACTION`，`--no-slot-compaction`）另外合并调用者自身在互不嵌套块中声明一次的标量局部量（例：两个 for 循环的函数 8 → 4 个局部量）。
+- O3 不再运行 O2 的语句根内联（`SCALAR_INLINING`）：它会丢失被内联帧；序列内联覆盖其位置并生成内联调试记录，`-g` 时 O3 的 trace 帧、函数 ID 与位置和 O0 相同。O1 的内联保留（被调者不会出错）。生命周期钩子（namespace 0）不内联其他 namespace 的函数。
+- 可能出错的被调者只内联到不持有对象的调用者：错误在调用者自身展开期间运行的析构函数中，宿主回调看到的是错误离开失败函数入口时发布的 trace，而被内联的函数没有入口（语料 `own-g13b` 发现）。经标量分析证明不会出错的被调者不受此限。
+- 标量分析新增：清理区域的受保护体在原位分析（调用者须保证清理体不写局部量；O2 的封闭区域不含清理区域，O2 产物不变），以及非整数/布尔常量不产生事实。
+
+验证：Java 392/392（新增 `ExecO3InliningTest` 10 项）；`compiler_o2_end_to_end.py --o3`：56+11 个用例，O0/O3 语义一致且（新增检查）除预算耗尽外 trace 帧完全一致，JIT eager 与 stress+llvm 重放一致；O0/O1/O2 与前一编译器逐字节相同（213 次编译，含基准源码）。语料（`compiler_optimization_corpus.py --o2 --o3`，461 例）运行中，结果待记录；此前一次运行发现 `own-g13b`（见上条规则）并已修复，修复后该组用例在 O0–O3 通过。
+
+性能（Release，负载较高时的快速测量，3 轮×3 批，O3/O2 耗时）：call_1 VM 0.66、LLVM 0.057；call_4 0.69、0.043；call_16 0.77、0.027；scalar_call 1.00、0.68；integer_loop（无调用，函数相同）1.05、1.10 为噪声。调用负载达到 ≤0.8 的目标；正式 7×5 测量待机器空闲时运行。
+
+未实现（相对 DESIGN 第 6.1 节）：递归强连通分量展开一层；循环内 return 的内联。

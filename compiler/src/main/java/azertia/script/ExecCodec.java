@@ -31,7 +31,22 @@ public final class ExecCodec {
         final Map<AcsElement,int[]> positions;
         final AcsArray located=new AcsArray();
         int[] inherited;
+        // exec v11 inlining: each location's inline record, and the records by site.
+        ExecInlineSites sites;
+        int current;
+        final List<int[]> entries=new ArrayList<>(),inlined=new ArrayList<>();
+        final Map<Integer,Integer> records=new HashMap<>(),callSites=new HashMap<>();
         Numbering(Map<AcsElement,int[]> positions) {this.positions=positions;}
+        /** The 1-based inline record of site, created at its first location; 0 outside inlined code. */
+        int record(int site) {
+            if(site==0||sites==null)return 0;
+            Integer known=records.get(site);
+            if(known!=null)return known;
+            // A call site without a location cannot anchor its frames.
+            Integer at=callSites.get(site);
+            if(at==null||at==0)return 0;
+            inlined.add(new int[]{sites.callee(site),at});records.put(site,inlined.size());return inlined.size();
+        }
     }
     private static void depth(int depth) {
         if(depth>128)throw new IllegalArgumentException("Exec ABD nesting exceeds 128 levels");
@@ -382,6 +397,29 @@ public final class ExecCodec {
                 optionalInteger(function,"hidden-count",0),numbering),4);
         return numbering.located;
     }
+    /**
+     * The debug locations of a compiled function view and, when O3 inlined calls
+     * into it, the exec v11 inline records: {@code locations} then hold a fifth
+     * inline index and {@code inlined} names each inlined function and its call
+     * site. {@code names} gives the display names of functions by id.
+     */
+    static AcsObject debugLocations(AcsObject function,int globals,Map<AcsElement,int[]> positions,
+                                    ExecInlineSites sites,Map<Integer,String> names) {
+        Numbering numbering=new Numbering(positions);numbering.sites=sites;
+        expression(function.mmp.get("script"),new Layout(globals,integer(function,"param-count"),integer(function,"local-count"),
+                optionalInteger(function,"hidden-count",0),numbering),4);
+        AcsObject result=new AcsObject();
+        if(numbering.inlined.isEmpty()){result.mmp.put("locations",numbering.located);return result;}
+        AcsArray locations=new AcsArray(),inlined=new AcsArray();
+        for(int[] entry:numbering.entries)
+            locations.acsa.add(new AcsStringElement(location(entry[0],entry[1],entry[2],entry[3])+":"+entry[4]));
+        for(int[] record:numbering.inlined) {
+            AcsObject value=new AcsObject();value.put("id",record[0]);
+            value.put("name",names.getOrDefault(record[0],Diagnostic.hexId(record[0])));value.put("call-site",record[1]);
+            inlined.acsa.add(value);
+        }
+        result.mmp.put("locations",locations);result.mmp.put("inlined",inlined);return result;
+    }
     private static void hint(String name) {
         if(!SourceRules.isHint(name))throw invalid("invalid hint name");
     }
@@ -437,13 +475,21 @@ public final class ExecCodec {
     private static AbdValue expression(AcsElement value,Layout layout,int level) {
         Numbering numbering=layout.numbering();int node=numbering.next++;
         if(numbering.positions==null)return expressionBody(value,layout,level);
-        int[] outer=numbering.inherited,at=numbering.positions.get(value);
+        int[] outer=numbering.inherited,at=numbering.positions.get(value);int outerLocation=numbering.current;
         if(at!=null) {
-            if(!Arrays.equals(at,outer))numbering.located.acsa.add(new AcsStringElement(location(node,at[0],at[1],at[2])));
+            if(!Arrays.equals(at,outer)) {
+                numbering.located.acsa.add(new AcsStringElement(location(node,at[0],at[1],at[2])));
+                numbering.entries.add(new int[]{node,at[0],at[1],at[2],numbering.record(ExecInlineSites.site(at))});
+                numbering.current=numbering.entries.size();
+            }
             numbering.inherited=at;
         }
+        if(numbering.sites!=null) {
+            Integer site=numbering.sites.siteOf(value);
+            if(site!=null)numbering.callSites.put(site,numbering.current);
+        }
         try {return expressionBody(value,layout,level);}
-        finally {numbering.inherited=outer;}
+        finally {numbering.inherited=outer;numbering.current=outerLocation;}
     }
     private static AbdValue expressionBody(AcsElement value,Layout layout,int level) {
         depth(level);

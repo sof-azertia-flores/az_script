@@ -13,7 +13,9 @@ public class Compiler {
      */
     public enum Optimization { NONE, CONSTANTS, STANDARD, ADVANCED, AGGRESSIVE }
     public enum OptimizationPass { CONSTANTS, PROPAGATION, INLINING, LOOP_MOTION,
-        CONTROL_FLOW, COMMON_SUBEXPRESSIONS, DEAD_CODE, SCALAR_INLINING, RANGE_LOOP_MOTION, FLOW_PROPAGATION }
+        CONTROL_FLOW, COMMON_SUBEXPRESSIONS, DEAD_CODE, SCALAR_INLINING, RANGE_LOOP_MOTION, FLOW_PROPAGATION,
+        // O3 (exec v11) only.
+        SEQUENCE_INLINING, SLOT_COMPACTION }
     // O2 is listed explicitly, so passes added for O3 never change its output.
     private static final Set<OptimizationPass> ADVANCED_PASSES = Set.of(OptimizationPass.CONSTANTS,
             OptimizationPass.PROPAGATION, OptimizationPass.INLINING, OptimizationPass.LOOP_MOTION,
@@ -26,8 +28,10 @@ public class Compiler {
             case STANDARD -> Set.of(OptimizationPass.CONSTANTS, OptimizationPass.PROPAGATION,
                     OptimizationPass.INLINING, OptimizationPass.LOOP_MOTION);
             case ADVANCED -> ADVANCED_PASSES;
-            // exec v11 work in progress: O3 currently runs the O2 passes.
-            case AGGRESSIVE -> Set.of(OptimizationPass.values());
+            // Sequence inlining replaces O2's statement-root inliner: it also
+            // records inlined frames, which O3 restores with -g. O1's inliner
+            // stays, as its callees cannot fail.
+            case AGGRESSIVE -> EnumSet.complementOf(EnumSet.of(OptimizationPass.SCALAR_INLINING));
         };
     }
     // Mutable holders: the depth changes at every node, and updating a holder avoids a ThreadLocal.set each time.
@@ -171,6 +175,8 @@ public class Compiler {
          * object or block, the first (innermost) one recorded winning; null without debug info.
          */
         IdentityHashMap<AcsElement,int[]> positions;
+        /** With debug info: the call sites O3 inlined, which positions of inlined nodes name. */
+        ExecInlineSites inlineSites;
         /** With debug info: the exec debug file table, and the index of each source unit's name in it. */
         List<String> debugFiles = List.of();
         int[] unitFiles;
@@ -183,7 +189,7 @@ public class Compiler {
          * with unsafe characters replaced, in unit order.
          */
         void enableDebugInfo() {
-            positions = new IdentityHashMap<>(); unitFiles = new int[sources.unitCount()];
+            positions = new IdentityHashMap<>(); inlineSites = new ExecInlineSites(); unitFiles = new int[sources.unitCount()];
             Map<String,Integer> indexes = new LinkedHashMap<>();
             for (int unit = 0; unit < unitFiles.length; unit++) {
                 String name = SourceRules.debugText(sources.name(unit));
@@ -3326,13 +3332,19 @@ public class Compiler {
             if (!passes.isEmpty()) ExecShape.requireFits(compiled.mmp.get("script"), 4, state.abdLimit);
         }
         ExecO2.optimize(output, passes, state.positions, state.abdLimit);
+        if (passes.contains(OptimizationPass.SEQUENCE_INLINING))
+            ExecSequenceInliner.optimize(output, state.positions, state.inlineSites, state.abdLimit);
+        if (passes.contains(OptimizationPass.SLOT_COMPACTION)) ExecSlotCompaction.optimize(output);
         AcsArray debugFiles = new AcsArray();
         for (String file : state.debugFiles) debugFiles.acsa.add(new AcsStringElement(file));
         result.put("debug-files", debugFiles);
         // Every function compiled, so the outputs are in function order.
+        Map<Integer,String> names = new HashMap<>();
+        if (state.positions != null) for (int i = 0; i < functions.size(); i++)
+            names.put(((AcsObject) output.acsa.get(i)).getAsInt("id"), SourceRules.debugText(debugName(functions.get(i).name())));
         if (state.positions != null) for (int i = 0; i < functions.size(); i++) {
             AcsObject compiled = (AcsObject) output.acsa.get(i);
-            compiled.put("debug", debugRecord(functions.get(i), compiled, globals, global));
+            compiled.put("debug", debugRecord(functions.get(i), compiled, globals, global, names));
         }
         return result;
     }
@@ -3341,7 +3353,8 @@ public class Compiler {
      * declaration (the class declaration for a synthesized class function, 0:0 when
      * unknown) and the positions of its nodes.
      */
-    private static AcsObject debugRecord(Function function, AcsObject compiled, int globals, LogicEnvironment global) {
+    private static AcsObject debugRecord(Function function, AcsObject compiled, int globals, LogicEnvironment global,
+                                         Map<Integer,String> names) {
         CompilationState state = global.state(); JsonObject meta = function.metadata();
         int[] header = state.debugPosition(meta);
         ClassInfo owner = meta.has("owner-class") ? global.classes.get(meta.get("owner-class").getAsString()) : null;
@@ -3350,7 +3363,12 @@ public class Compiler {
         AcsObject debug = new AcsObject();
         debug.put("name", SourceRules.debugText(debugName(function.name())));
         debug.put("file", header[0]); debug.put("line", header[1]); debug.put("column", header[2]);
-        debug.put("locations", ExecCodec.locations(compiled, globals, state.positions));
+        AcsObject located = ExecCodec.debugLocations(compiled, globals, state.positions, state.inlineSites, names);
+        debug.mmp.put("locations", located.mmp.get("locations"));
+        // exec v11: frames of functions O3 inlined here.
+        if (located.mmp.containsKey("inlined")) {
+            debug.mmp.put("inlined", located.mmp.get("inlined")); debug.put("display-id", compiled.getAsInt("id"));
+        }
         return debug;
     }
     /**

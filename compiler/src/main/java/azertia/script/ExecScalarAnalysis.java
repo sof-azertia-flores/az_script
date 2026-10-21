@@ -165,6 +165,10 @@ final class ExecScalarAnalysis {
             for (int i = items.size(); i-- > 0;) next = region(items.get(i), next, broken, continued);
             return next;
         }
+        // O3 callers may hold cleanup regions; O2's closed regions never do.
+        // The protected body is analyzed in place. Callers ensure the cleanup
+        // body writes no local, so it changes no fact on any path.
+        if (op == CLEANUP) return region(field(source, "v"), next, broken, continued);
         if (op == IF || op == WHILE) {
             Block condition = add(source, true);
             if (op == WHILE) {
@@ -280,6 +284,8 @@ final class ExecScalarAnalysis {
         if (source == null) return UNKNOWN;
         if (source instanceof AcsIntegerElement n) return integer(n.s, n.s, true);
         if (source instanceof AcsBooleanElement b) return new Value(BOOLEAN_VALUE, b.on ? 1 : 0, b.on ? 1 : 0, true);
+        // Other constants (O3 callers only) carry no scalar fact.
+        if (!(source instanceof AcsObject)) return UNKNOWN;
         int op = opcode(source);
         if (op == VARIABLE) return facts.getOrDefault(number(source, "v"), UNKNOWN);
         if (op == CALL) return new Value(returns.getOrDefault(number(source, "id"), -1),

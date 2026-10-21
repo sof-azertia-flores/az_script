@@ -250,7 +250,7 @@ def main():
     compiler_corpus=BUILD/('compiler-optimization-corpus-sanitize' if args.sanitize else 'compiler-optimization-corpus')
     if compiler_corpus.exists():shutil.rmtree(compiler_corpus)
     run([sys.executable, ROOT/'tests/compiler_optimization_corpus.py', '--classpath', classpath,
-         '--host', native/'interpreter/observation-host', '--work', compiler_corpus, '--o2', *o2_replay])
+         '--host', native/'interpreter/observation-host', '--work', compiler_corpus, '--o2', '--o3', *o2_replay])
     run([sys.executable, ROOT/'tests/vm_program_end_to_end.py', '--classpath', classpath,
          '--host', native/'interpreter/vm-loader-host'])
     vm_work=BUILD/'runtime-perf'/('vm-execution-sanitize' if args.sanitize else 'vm-execution')
