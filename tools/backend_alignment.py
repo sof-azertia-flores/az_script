@@ -35,17 +35,21 @@ SUITES = ('math_library', 'containers_library', 'end_to_end', 'classes_end_to_en
 
 def wrapper(real, runner, modes=()):
     # Every run reads /dev/null; the suite receives the tree run's output.
+    # The runs are concurrent, so the suite's per-invocation timeout covers
+    # the slowest of them rather than their sum (a script that runs to the
+    # step limit takes seconds per engine under the sanitizers).
     real = shlex.quote(str(real))
-    third = ''.join(f'AZSCRIPT_EXPERIMENTAL_VM_BACKEND=1 AZSCRIPT_JIT={shlex.quote(mode)} {real} "$@" </dev/null '
-                    f'>"$d/jit{index}.out" 2>"$d/jit{index}.err"; echo $? > "$d/jit{index}.rc"\n'
+    third = ''.join(f'(AZSCRIPT_EXPERIMENTAL_VM_BACKEND=1 AZSCRIPT_JIT={shlex.quote(mode)} {real} "$@" </dev/null '
+                    f'>"$d/jit{index}.out" 2>"$d/jit{index}.err"; echo $? > "$d/jit{index}.rc") &\n'
                     for index, mode in enumerate(modes))
     return f'''#!/bin/bash
 mkdir -p "$AZSCRIPT_ALIGNMENT_RECORDS/{runner}"
 d=$(mktemp -d "$AZSCRIPT_ALIGNMENT_RECORDS/{runner}/run.XXXXXXXX")
 printf '%s\\0' "$@" > "$d/args"
-{real} "$@" </dev/null >"$d/tree.out" 2>"$d/tree.err"; echo $? > "$d/tree.rc"
-AZSCRIPT_EXPERIMENTAL_VM_BACKEND=1 {real} "$@" </dev/null >"$d/vm.out" 2>"$d/vm.err"; echo $? > "$d/vm.rc"
-{third}cat "$d/tree.out"; cat "$d/tree.err" >&2; exit "$(cat "$d/tree.rc")"
+(AZSCRIPT_EXPERIMENTAL_VM_BACKEND=1 {real} "$@" </dev/null >"$d/vm.out" 2>"$d/vm.err"; echo $? > "$d/vm.rc") &
+{third}{real} "$@" </dev/null >"$d/tree.out" 2>"$d/tree.err"; echo $? > "$d/tree.rc"
+wait
+cat "$d/tree.out"; cat "$d/tree.err" >&2; exit "$(cat "$d/tree.rc")"
 '''
 
 
