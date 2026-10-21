@@ -72,6 +72,7 @@ final class ExecIr {
             case BLOCK, CLEANUP -> EnumSet.of(Effect.CONTROL, Effect.CLEANUP, Effect.CALL, Effect.THROW);
             case SEQ -> EnumSet.noneOf(Effect.class);
             case GUARD_METHOD -> EnumSet.of(Effect.READ_HEAP);
+            case RESERVE_BLOCK -> EnumSet.of(Effect.WRITE_HEAP);
             case RETURN_OBJECT -> EnumSet.of(Effect.CONTROL, Effect.CLEANUP, Effect.WRITE_HEAP, Effect.THROW);
             case RETURN, IF, WHILE, BREAK, CONTINUE, SELECT, AND, OR -> EnumSet.of(Effect.CONTROL, Effect.THROW);
             case ADD, SUBTRACT, MULTIPLY, DIVIDE, MODULO, GREATER, LESS, EQUAL, NOT_EQUAL,
@@ -95,7 +96,7 @@ final class ExecIr {
             case OBJECT_ADDRESS, BLOCK_ADDRESS -> ADDRESS_VALUE;
             case NEW_BLOCK, BUFFER_NEW -> OBJECT_VALUE;
             case CONVERT -> ((AcsObject) source).getAsInt("type");
-            case DEFINE, BLOCK, RETURN, RETURN_OBJECT, RETURN_TYPED, BREAK, CONTINUE -> VOID_VALUE;
+            case DEFINE, BLOCK, RETURN, RETURN_OBJECT, RETURN_TYPED, BREAK, CONTINUE, RESERVE_BLOCK -> VOID_VALUE;
             case SEQ -> children.get(children.size() - 1).value.type;
             case ADD, SUBTRACT, MULTIPLY, DIVIDE, MODULO, NEGATE, WRAP_ADD, WRAP_SUBTRACT, WRAP_MULTIPLY -> {
                 int first = children.isEmpty() ? ANY_VALUE : children.get(0).value.type;

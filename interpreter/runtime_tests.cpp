@@ -2732,7 +2732,7 @@ int main(){try{
         auto twenty=rc(n(20));auto zero=rc(n(0));
         auto compact=load_raw(rmodule({rfn(10,INT_VALUE,rx(7,{rb(true),rx(12,{twenty,rc(n(22))})}))}));
         check(integer(compact->invoke(10))==42,"raw exec directly executes native arithmetic expressions");
-        for(int opcode=0;opcode<=58;++opcode)if(opcode!=29&&opcode!=30)
+        for(int opcode=0;opcode<=59;++opcode)if(opcode!=29&&opcode!=30&&opcode!=59)
             rejects([&]{load_raw(rmodule({rfn(10,VOID_VALUE,rx(opcode))}));},"exec opcode rejects missing fields");
         auto byte=[](unsigned char value){return std::make_shared<AbdValue>(&value,1);};
         const unsigned char bad_text[]={0xed,0xa0,0x80};

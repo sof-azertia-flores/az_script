@@ -323,6 +323,7 @@ void check_instruction(const ExecutableProgram& program,const FunctionRecord& fu
         if(call.immediate<0||static_cast<std::uint32_t>(call.immediate)>=max_slots||call.arguments.empty()||!type(call.return_type))bad("invalid virtual call layout");
         break;
     }
+    case Opcode::reserve_block:output();break;
     case Opcode::guard_method: {
         output();input();const auto& guard=data();
         if(guard.immediate<0||static_cast<std::uint32_t>(guard.immediate)>=max_slots||guard.methods.size()!=1||!guard.methods[0].contexts.empty())
@@ -408,7 +409,7 @@ const char* opcode_name(Opcode opcode) noexcept {
         "call","set_return","function_end","cleanup_enter","cleanup_leave","cleanup_end",
         "member_get","object_address","object_register","object_delete","new_block","block_address","move_out","drop",
         "bind_context","context_abi","context_default","return_typed","check_type",
-        "buffer_new","buffer_operation","value_compare","check_object","check_method_receiver","set_methods","call_virtual","guard_method"
+        "buffer_new","buffer_operation","value_compare","check_object","check_method_receiver","set_methods","call_virtual","guard_method","reserve_block"
     };
     static_assert(std::size(names)==static_cast<std::size_t>(Opcode::count));
     const auto index=static_cast<std::size_t>(opcode);return index<std::size(names)?names[index]:"unknown";

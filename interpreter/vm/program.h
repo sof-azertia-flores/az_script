@@ -31,7 +31,7 @@ enum class Opcode : std::uint16_t {
     new_block, block_address, move_out, drop,
     bind_context, context_abi, context_default, return_typed, check_type,
     buffer_new, buffer_operation, value_compare, check_object,
-    check_method_receiver, set_methods, call_virtual, guard_method,
+    check_method_receiver, set_methods, call_virtual, guard_method, reserve_block,
     count
 };
 enum class BudgetKind : std::uint32_t { expression, loop_iteration, method_entry };
@@ -54,7 +54,8 @@ enum class BudgetKind : std::uint32_t { expression, loop_iteration, method_entry
 //   return_typed/check_type(r,a=value,b=bound context register);
 //   value_compare(r,a,b,k=bound context register);
 //   check_object(r,a=value,b=bound context register,k=OperationData);
-//   guard_method(r,a=receiver,k=OperationData with the slot and one method).
+//   guard_method(r,a=receiver,k=OperationData with the slot and one method);
+//   reserve_block(r).
 //
 // Control setters only set frame flags and evaluate to void. Only explicit
 // branch_flow/branch_returned/loop_next consume them: even hand-written v10

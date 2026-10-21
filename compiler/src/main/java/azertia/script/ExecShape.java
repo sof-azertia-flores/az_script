@@ -198,7 +198,7 @@ final class ExecShape {
                 schema(node, "t c v val", "");
                 direct(children, node, "v", Role.LOOP_CONDITION); direct(children, node, "val", Role.BLOCK);
             }
-            case 29, 30 -> schema(node, "t c", "");
+            case 29, 30, 59 -> schema(node, "t c", "");
             case 31 -> {
                 schema(node, "t c v val on-error", "");
                 if (!(node.mmp.get("on-error") instanceof AcsBooleanElement)) throw invalid("on-error must be boolean");

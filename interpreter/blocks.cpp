@@ -241,6 +241,10 @@ std::shared_ptr<slot_block> create(std::size_t size,std::weak_ptr<script> owner)
     std::lock_guard<std::recursive_mutex> lock(runtime_mutex());
     return make_block(size,std::move(owner));
 }
+void reserve() {
+    std::lock_guard<std::recursive_mutex> lock(runtime_mutex());
+    allocate_id();
+}
 std::shared_ptr<slot_block> create_buffer(std::shared_ptr<const type_context> element,std::weak_ptr<script> owner) {
     std::lock_guard<std::recursive_mutex> lock(runtime_mutex());
     validate_type_contexts({element},owner.lock());

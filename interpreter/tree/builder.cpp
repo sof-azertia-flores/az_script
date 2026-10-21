@@ -97,6 +97,7 @@ public:
             result=std::move(node);break;
         }
         case 53:result=std::make_shared<call_virtual_expression>(source.immediate,source.return_type,expressions(source));break;
+        case 59:result=std::make_shared<reserve_block_expression>();break;
         case 58: {
             auto node=std::make_shared<guard_method_expression>(child(0),source.immediate,source.methods.at(0).function_id);
             references.push_back({node->function_id,&node->function_id,false,0,false,false,true});

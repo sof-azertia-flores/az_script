@@ -110,7 +110,8 @@ void all_wire_operations() {
     samples.push_back(node(54,{node(5,{integer()}),integer()}));
     for(int opcode=55;opcode<=57;++opcode)samples.push_back(node(opcode,{integer(),integer()}));
     auto guard=node(58,{pointer()});guard->methods.push_back({0x0fff0020,{}});samples.push_back(guard);
-    expect(samples.size()==59,"sample for every wire opcode");
+    samples.push_back(node(59));
+    expect(samples.size()==60,"sample for every wire opcode");
     auto root=node(1);for(const auto& sample:samples)root->children.push_back(sample);
     auto method=source_function(node(7),0x0fff0020);method.hidden_count=0;method.param_types={ADDRESS_VALUE};
     SourceProgram source;source.functions={source_function(root),method};
@@ -176,7 +177,7 @@ void constant_fidelity_and_rejections() {
     corrupt=program;corrupt.instructions[0].result=0;rejects([&]{verify_program(corrupt);},"unused instruction operand");
     corrupt=program;corrupt.instructions[find(corrupt,Opcode::constant)].result=corrupt.functions[0].register_count;rejects([&]{verify_program(corrupt);},"register index");
     corrupt=program;corrupt.functions[0].global_offset=1048576;rejects([&]{verify_program(corrupt);},"function layout");
-    rejects([&]{lower(node(59));},"unsupported wire opcode");
+    rejects([&]{lower(node(60));},"unsupported wire opcode");
     rejects([&]{lower(node(54));},"invalid operand count for wire opcode 54");
     auto extra=integer();extra->contexts.push_back(scalar_context());
     rejects([&]{lower(extra);},"unexpected metadata");

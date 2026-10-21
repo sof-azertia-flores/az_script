@@ -233,6 +233,11 @@ public:
         :slot(static_cast<std::size_t>(slot)),return_type(return_type),arguments(std::move(arguments)) {}
     V execute(E env) override;
 };
+// exec v11: consumes the literal block id an object scalar-replaced by O3 took.
+class reserve_block_expression final:public expression {
+public:
+    V execute(E env) override;
+};
 // exec v11: whether a virtual call would reach function, without its errors.
 class guard_method_expression final:public expression {
     std::shared_ptr<expression> receiver;

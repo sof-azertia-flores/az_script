@@ -36,7 +36,7 @@ constexpr std::array supported{
     Opcode::cleanup_enter,Opcode::cleanup_leave,Opcode::cleanup_end,
     Opcode::member_get,Opcode::object_address,Opcode::object_register,Opcode::object_delete,
     Opcode::new_block,Opcode::block_address,Opcode::move_out,Opcode::drop,
-    Opcode::check_method_receiver,Opcode::set_methods,Opcode::call_virtual,Opcode::guard_method,
+    Opcode::check_method_receiver,Opcode::set_methods,Opcode::call_virtual,Opcode::guard_method,Opcode::reserve_block,
     Opcode::bind_context,Opcode::context_abi,Opcode::context_default,Opcode::return_typed,
     Opcode::check_type,Opcode::check_object,Opcode::buffer_new,Opcode::buffer_operation,Opcode::value_compare
 };
@@ -1460,6 +1460,7 @@ struct ScalarExecutor::State {
                     auto& callee=frames.top();callee.check_return=true;callee.checked_return_type=operation.return_type;
                     break;
                 }
+                case Opcode::reserve_block:blocks::reserve();value(frame,instruction.result,Value{});break;
                 case Opcode::guard_method: {
                     // True exactly when call_virtual would enter this method;
                     // every case in which it would fail is false instead.

@@ -557,7 +557,7 @@ public final class ExecCodec {
                 keys(object,CLEANUP);fields.add(expression(object.mmp.get("v"),layout,level+1));
                 fields.add(expression(object.mmp.get("val"),layout,level+1));fields.add(b(bool(object.mmp.get("on-error"),"on-error")));
             }
-            case ExecOpcodes.BREAK,ExecOpcodes.CONTINUE -> keys(object,JUMP);
+            case ExecOpcodes.BREAK,ExecOpcodes.CONTINUE,ExecOpcodes.RESERVE_BLOCK -> keys(object,JUMP);
             case ExecOpcodes.NEW_BLOCK -> {
                 keys(object,NEW_BLOCK);int size=integer(object,"size");
                 if(size<1||size>MAX_SLOTS)throw invalid("object slot count is outside 1.."+MAX_SLOTS);
@@ -832,7 +832,7 @@ public final class ExecCodec {
                 if(record.bool())view.put("else",decodeExpression(record.next(),level+1));
             }
             case ExecOpcodes.WHILE -> {view.put("v",decodeExpression(record.next(),level+1));view.put("val",decodeExpression(record.next(),level+1));}
-            case ExecOpcodes.BREAK,ExecOpcodes.CONTINUE -> {}
+            case ExecOpcodes.BREAK,ExecOpcodes.CONTINUE,ExecOpcodes.RESERVE_BLOCK -> {}
             case ExecOpcodes.NEW_BLOCK -> view.put("size",record.integer());
             case ExecOpcodes.MOVE_OUT -> view.put("v",record.integer());
             case ExecOpcodes.BLOCK_ADDRESS,ExecOpcodes.DROP -> view.put("v",decodeExpression(record.next(),level+1));

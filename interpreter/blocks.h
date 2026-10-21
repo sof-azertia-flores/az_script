@@ -42,6 +42,8 @@ bool is_block_address(address pointer) noexcept;
 // Host API. A created block is host-held: no destructor runs for it, and its
 // address expires when the last handle is released.
 std::shared_ptr<slot_block> create(std::size_t size,std::weak_ptr<script> owner={});
+// Consumes the id create would take next, without a block (exec v11 reserve_block).
+void reserve();
 std::shared_ptr<slot_block> create_buffer(std::shared_ptr<const type_context> element,std::weak_ptr<script> owner={});
 // Restore creates storage and views only, never constructors. The decoder fills
 // the first length element slots, reusing any pre-created class view.

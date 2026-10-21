@@ -89,6 +89,7 @@ Each expression is also a raw stack, beginning with an int32 opcode. `E` denotes
 | 56 | wrap_minus | `left:E, right:E` (v11 in development) |
 | 57 | wrap_multiply | `left:E, right:E` (v11 in development) |
 | 58 | guard_method | `receiver:E, slot:int, function_id:int` (v11 in development) |
+| 59 | reserve_block | no fields (v11 in development) |
 
 `if`/`wi`/`select` conditions and every evaluated operand of `and`/`or`/`not` must have BOOLEAN_VALUE (4). Numeric zero/nonzero and void are not truth values; a wrong tag throws `Condition must be boolean, got <type>`. `and`/`or` remain left-to-right and short-circuit, so a skipped right operand is not evaluated or checked at runtime. Source compilation also rejects statically known non-boolean operands, including the lowered `for` condition.
 
@@ -198,7 +199,7 @@ Inspection JSON is `{"t":0,"c":52,"v":address,"entries":[{"id":functionId,"conte
 
 Flush relocates every method function ID and function reference recursively within its contexts under the defining module's assumptions; method slot numbers are not relocatable IDs. Each entry must name an ordinary script function whose first parameter is address and whose hidden count matches the supplied contexts. Native/Java bindings cannot supply entries. These checks do not verify nominal class identity or agreement between independently compiled header slot orders. These opcodes extend exec v10 without changing its version, root, or function record.
 
-## v11 additions in development (opcodes 54–58 and private functions)
+## v11 additions in development (opcodes 54–59 and private functions)
 
 These records belong to the [exec v11 plan](exec-v11-roadmap/DESIGN.md). Readers and writers on `exec_v11_main` support them, but the exec version stays 10 until the v11 release stage; O0/O1/O2 compilation never emits them.
 
@@ -206,6 +207,7 @@ These records belong to the [exec v11 plan](exec-v11-roadmap/DESIGN.md). Readers
 [54, statements:Es, value:E]
 [55|56|57, left:E, right:E]
 [58, receiver:E, slot:int, function_id:int]
+[59]
 ```
 
 The inspection JSON of `seq` is `{"t":0,"c":54,"statements":[...],"v":value}`. The statements run in order, each statement's temporaries end with it (as in a block), and then `value` is evaluated and returned. A sequence creates no scope, so readers reject: a variable declaration (opcode 4) outside a nested block; `brk`/`cont` leaving a loop that is not inside the sequence, including a jump in the condition of a loop inside it; `r`/`ro`; and the object ownership and cleanup opcodes 10, 11, 31, 32, 34, 35, 40 and 52. Nested blocks and complete `wi` loops may appear, and sequences may nest. Statements cost the same steps as in a block, and the sequence itself costs one step.
@@ -215,6 +217,8 @@ Private functions (`entry_kind=2`) are compiler-generated clones and specializat
 The inspection JSON of `guard_method` is `{"t":0,"c":58,"v":receiver,"slot":slot,"id":functionId}` and its result is a boolean: true when `call_virtual` with the same receiver and slot would enter `function_id` through an entry without bound contexts. Every case in which `call_virtual` would fail (not an address, null, stale, interior address, no table, another script's object, slot out of range) yields false instead of an error. The receiver is evaluated once and the record itself costs one step. Readers keep the target as a context-free method entry, so it is relocated with its namespace and flush checks it as one: an existing ordinary script function with an address first parameter and no hidden contexts. The compiler combines it with `select` into "the guarded direct call, otherwise the original virtual call", so the failing path keeps the original errors and trace. It reads the heap, so the VM runs it in object frames.
 
 `wrap_add`, `wrap_minus` and `wrap_multiply` wrap in int32 two's complement when both operands are int and never report overflow; every other operand combination behaves exactly like opcodes 12–14, including string concatenation, float overflow and type errors. The compiler emits them only where it has proved the result cannot overflow, or where wrapping is the intended meaning.
+
+The inspection JSON of `reserve_block` is `{"t":0,"c":59}` and its result is void. It costs one step and takes the next literal block ID exactly as `new_block` would, without creating a block; when IDs run out it reports the same error as `new_block`. O3 scalar replacement emits it in place of a literal object split into locals, so every later literal and copied object keeps its O0 address. It is not an ownership opcode, may appear in a sequence, and does not make a VM object frame.
 
 
 

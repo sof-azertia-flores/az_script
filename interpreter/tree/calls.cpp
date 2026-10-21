@@ -30,6 +30,7 @@ V set_methods_expression::execute(E env) {
     if(context_free)cached=std::move(methods);
     return nil();
 }
+V reserve_block_expression::execute(E env) {tick(env);blocks::reserve();return nil();}
 V guard_method_expression::execute(E env) {
     tick(env);const auto value=blocks::materialize(run(receiver,env),env);
     if(value->type_tag()!=ADDRESS_VALUE)return std::make_shared<variable>(false);

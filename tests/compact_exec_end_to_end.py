@@ -25,7 +25,8 @@ OP_NAMES = {3: 'v', 4: 'vd', 5: 'vs', 6: 'm', 7: 'r', 8: 'ro', 9: 'oa',
             36: 'context_abi', 37: 'context_default', 38: 'return_typed', 39: 'check_type',
             40: 'buffer_new', 41: 'buffer_op', 42: 'value_compare',
             43: 'bit_and', 44: 'bit_or', 45: 'bit_xor', 46: 'shl', 47: 'shr', 48: 'ushr', 49: 'convert', 50: 'select', 51: 'check_object', 52: 'set_methods', 53: 'call_virtual',
-            54: 'seq', 55: 'wrap_add', 56: 'wrap_minus', 57: 'wrap_multiply', 58: 'guard_method'}
+            54: 'seq', 55: 'wrap_add', 56: 'wrap_minus', 57: 'wrap_multiply', 58: 'guard_method',
+            59: 'reserve_block'}
 EXEC_VERSION = 10
 
 
@@ -291,7 +292,7 @@ def encode_compact_expression(value):
     elif opcode == 58:
         fields = [child('v'), integer(value['slot']), integer(value['id'])]
     else:
-        assert opcode in (29, 30)
+        assert opcode in (29, 30, 59)
         fields = []
     return expression(opcode, *fields)
 
@@ -534,7 +535,7 @@ class WireReader:
             assert slot >= 0
             result.update(v=self.expression(fields[0]), slot=slot, id=int_value(fields[2]))
         else:
-            assert opcode in (29, 30) and not fields
+            assert opcode in (29, 30, 59) and not fields
         return result
 
     @staticmethod
@@ -1029,6 +1030,21 @@ def main():
             fields = module([function(inlined_body, debug=debug_record('main', 0, 1, 1, locations, inlined, display))],
                             debug_files=('inline.azs',))
             execute_wire('inline-debug-reject-' + name, fields, invalid=True, error=error)
+        # reserve_block consumes the next literal block id without a block: the
+        # literal created after it has the id after the reserved one.
+        literal_one = expression(4, integer(0), integer(8), b'\1', expression(32, integer(1)))
+        literal_two = expression(4, integer(1), integer(8), b'\1', expression(32, integer(1)))
+        convert_address = lambda slot: expression(49, integer(1), expression(33, expression(3, integer(slot))))
+        for name, statements in [('without', []), ('with', [expression(59), expression(54, stack(expression(59)), constant(0))])]:
+            body = block(literal_one, *statements, literal_two,
+                         returning(expression(12, convert_address(0), expression(12, constant(' '), convert_address(1)))))
+            fields = module([function(body, return_type=1, locals_count=2)])
+            payload = frame(stack(*fields))
+            assert encode_compact_module(WireReader().read(payload)) == payload, ('reserve_block roundtrip', name)
+            # Literal addresses are the tag bit plus the id above 24 offset bits; a
+            # fresh runtime starts at id 1.
+            second = 4 if statements else 2
+            execute_wire('reserve-block-' + name, fields, expected=f'{(1 << 63) + (1 << 24)} {(1 << 63) + (second << 24)}\n')
         # Wrapping arithmetic wraps int32 and otherwise behaves as the checked operator.
         for opcode, left, right, kind, expected in [
                 (55, 2147483647, 1, 0, '-2147483648'), (56, -2147483648, 1, 0, '2147483647'),

@@ -52,7 +52,7 @@ class ExecShapeTest {
             }
             case 27 -> { result.put("v", true); result.put("val", array()); result.put("else", array()); }
             case 28 -> { result.put("v", true); result.put("val", array()); }
-            case 29, 30 -> {}
+            case 29, 30, 59 -> {}
             case 31 -> { result.put("v", array()); result.put("val", array()); result.put("on-error", true); }
             case 32 -> result.put("size", 1);
             case 35 -> result.put("v", variable());
@@ -119,12 +119,12 @@ class ExecShapeTest {
     }
 
     @Test void everyWireOpcodeAgreesWithTheCodecAtItsExactBoundary() {
-        for (int opcode = 0; opcode <= 58; opcode++) {
+        for (int opcode = 0; opcode <= 59; opcode++) {
             final int code = opcode;
             assertDoesNotThrow(() -> ExecOpcodes.name(code));
             boundary(specimen(opcode), "opcode " + opcode);
         }
-        assertThrows(IllegalArgumentException.class, () -> ExecOpcodes.name(59));
+        assertThrows(IllegalArgumentException.class, () -> ExecOpcodes.name(60));
     }
 
     @Test void emptyListsAndOptionalFieldsStillCountTheirEncodedRecords() {

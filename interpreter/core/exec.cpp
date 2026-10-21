@@ -330,6 +330,7 @@ Expression read_expression(raw_view view,const function_layout& layout,std::size
         for(const auto& part:node->children)check_sequence_part(*part,false,false);
         break;
     case 55:case 56:case 57:child();child();break;
+    case 59:break;
     case 58: {
         // The guarded target is kept as a method entry without contexts, so
         // discovery, relocation and linking check it as one.
