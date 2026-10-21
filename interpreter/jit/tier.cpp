@@ -8,11 +8,11 @@ namespace azertian::jit {
 namespace {
 constexpr std::size_t operation_limit=std::size_t{1}<<22;
 // LLVM's compile time grows faster than linearly with a function's
-// operations (about 1.6 s for 3,000 MIR operations, 46 s for 12,000 at O2)
-// and with its resume entries, each of which loads every slot (1.4 s for
-// 7,600 resume points times slots, 16.5 s for 43,000, as stress makes every
-// pc of a 100-term expression a resume point).
-constexpr std::size_t native_operation_limit=2048,native_resume_limit=8192;
+// operations and with its resume entries (resume points times slots). With
+// only live slots written back and the fast code generator above 2,048
+// operations, 6,100 operations take about 0.7 s (3.6 s in stress mode, where
+// every pc resumes) and a 43,000-entry stress function 0.4 s.
+constexpr std::size_t native_operation_limit=6144,native_resume_limit=65536;
 }
 bool fits_native(const Function& code) noexcept {
     std::size_t resumes=0;

@@ -111,14 +111,14 @@ void bounds() {
 }
 }
 void native_size() {
-    Function code;code.registers=8;code.ops.resize(2048);code.resume.assign(2000,none);
-    for(std::uint32_t pc=0;pc<1024;++pc)code.resume[pc]=pc;
-    check(fits_native(code),"2,048 operations and 1,024 resume points of 8 slots fit");
+    Function code;code.registers=8;code.ops.resize(6144);code.resume.assign(9000,none);
+    for(std::uint32_t pc=0;pc<8192;++pc)code.resume[pc]=pc;
+    check(fits_native(code),"6,144 operations and 8,192 resume points of 8 slots fit");
     code.ops.emplace_back();
     check(!fits_native(code),"one more operation does not fit");
     code.ops.pop_back();code.temporaries=1;
     check(!fits_native(code),"one more slot at every resume point does not fit");
-    code.temporaries=0;code.resume[1500]=1500;
+    code.temporaries=0;code.resume[8500]=8500;
     check(!fits_native(code),"one more resume point does not fit");
 }
 int main() {

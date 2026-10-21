@@ -2,6 +2,8 @@
 // no runtime header and reaches the runtime only through the helper table.
 #include "../abi.h"
 #include <llvm/ExecutionEngine/JITLink/JITLinkMemoryManager.h>
+#include <llvm/ExecutionEngine/Orc/CompileUtils.h>
+#include <llvm/ExecutionEngine/Orc/IRCompileLayer.h>
 #include <llvm/ExecutionEngine/Orc/ExecutionUtils.h>
 #include <llvm/ExecutionEngine/Orc/JITTargetMachineBuilder.h>
 #include <llvm/ExecutionEngine/Orc/LLJIT.h>
@@ -27,6 +29,10 @@ namespace {
 using namespace llvm;
 constexpr std::uint32_t max_ops=1u<<16;
 constexpr std::uint64_t max_resume_cells=1u<<22;
+// Larger functions take a light IR pipeline and LLVM's fast code generator:
+// at O2 compile time grows faster than linearly with the size, about 5.7 s
+// for 8,500 operations against 1.1 s.
+constexpr std::uint32_t full_ops=2048;
 
 struct Code {
     orc::JITDylib* library=nullptr;
@@ -36,6 +42,18 @@ struct Host {
     std::unique_ptr<orc::LLJIT> jit;
     std::unique_ptr<TargetMachine> machine;
     std::string failure;
+};
+// Compiles a module flagged "azjit.fast" with the fast code generator and
+// every other one as before. Compilation is serialized by the runtime.
+class TieredCompiler final:public orc::IRCompileLayer::IRCompiler {
+    std::unique_ptr<TargetMachine> full,fast;
+public:
+    TieredCompiler(std::unique_ptr<TargetMachine> optimized,std::unique_ptr<TargetMachine> quick)
+        :IRCompiler(orc::irManglingOptionsFromTargetOptions(optimized->Options)),
+         full(std::move(optimized)),fast(std::move(quick)) {}
+    Expected<std::unique_ptr<MemoryBuffer>> operator()(Module& module) override {
+        return orc::SimpleCompiler(module.getModuleFlag("azjit.fast")?*fast:*full)(module);
+    }
 };
 Host& host() {
     static Host instance;
@@ -49,7 +67,16 @@ Host& host() {
         if(!machine){instance.failure=toString(machine.takeError());return;}
         instance.machine=std::move(*machine);
         orc::LLJITBuilder builder;
-        builder.setJITTargetMachineBuilder(std::move(*target));
+        builder.setJITTargetMachineBuilder(*target);
+        builder.setCompileFunctionCreator([](orc::JITTargetMachineBuilder machines)
+                -> Expected<std::unique_ptr<orc::IRCompileLayer::IRCompiler>> {
+            auto optimized=machines.createTargetMachine();
+            if(!optimized)return optimized.takeError();
+            machines.setCodeGenOptLevel(CodeGenOptLevel::None);
+            auto quick=machines.createTargetMachine();
+            if(!quick)return quick.takeError();
+            return std::make_unique<TieredCompiler>(std::move(*optimized),std::move(*quick));
+        });
         // JITLink maps code writable, then executable (never both).
         builder.setObjectLinkingLayerCreator([](orc::ExecutionSession& session,const Triple&)
                 -> Expected<std::unique_ptr<orc::ObjectLayer>> {
@@ -77,6 +104,9 @@ class Generator {
     AllocaInst *steps=nullptr,*flags=nullptr,*site=nullptr,*out=nullptr;
     std::vector<BasicBlock*> blocks,exits;
     BasicBlock* leave=nullptr;
+    // Slots some op writes. Only these can differ from what the runtime
+    // filled, so only these are stored back, and only where they are read.
+    std::vector<bool> written;
 
     Constant* c8(std::uint64_t value){return ConstantInt::get(i8,value);}
     Constant* c32(std::uint64_t value){return ConstantInt::get(i32,value);}
@@ -96,7 +126,17 @@ class Generator {
         if(!exits[exit]) {
             const auto saved=b.saveIP();
             exits[exit]=BasicBlock::Create(context,"exit",function);
-            b.SetInsertPoint(exits[exit]);b.CreateStore(c32(exit),site);b.CreateBr(leave);
+            b.SetInsertPoint(exits[exit]);
+            // The runtime writes back this site's live registers and every
+            // local; a slot no op writes still holds what it filled.
+            const auto store=[&](std::uint32_t slot) {
+                if(!written[slot])return;
+                b.CreateStore(load_bits(slot),slot_field(c32(slot),0));
+                b.CreateStore(load_tag(slot),slot_field(c32(slot),1));
+            };
+            for(auto at=source.exit_live_offsets[exit];at<source.exit_live_offsets[exit+1];++at)store(source.exit_live[at]);
+            for(std::uint32_t local=0;local<source.locals;++local)store(source.registers+local);
+            b.CreateStore(c32(exit),site);b.CreateBr(leave);
             b.restoreIP(saved);
         }
         return exits[exit];
@@ -127,6 +167,10 @@ class Generator {
             bits.push_back(b.CreateAlloca(i64));tags.push_back(b.CreateAlloca(i8));
         }
         steps=b.CreateAlloca(i64);flags=b.CreateAlloca(i8);site=b.CreateAlloca(i32);out=b.CreateAlloca(shadow_type);
+        // A written slot an entry does not fill starts absent, once for all
+        // resume points.
+        for(std::uint32_t slot=0;slot<source.slots;++slot)
+            if(written[slot]){b.CreateStore(c64(0),bits[slot]);b.CreateStore(c8(AZJIT_ABSENT),tags[slot]);}
         b.CreateStore(b.CreateLoad(i64,b.CreateStructGEP(state_type,state,2)),steps);
         b.CreateStore(b.CreateLoad(i8,b.CreateStructGEP(state_type,state,4)),flags);
         for(std::uint32_t op=0;op<source.op_count;++op)blocks.push_back(BasicBlock::Create(context,"op",function));
@@ -143,7 +187,7 @@ class Generator {
             b.SetInsertPoint(block);
             for(std::uint32_t slot=0;slot<source.slots;++slot) {
                 const auto allowed=source.resume_tags[std::size_t{id}*source.slots+slot];
-                if(!allowed){b.CreateStore(c64(0),bits[slot]);b.CreateStore(c8(AZJIT_ABSENT),tags[slot]);continue;}
+                if(!allowed)continue;
                 b.CreateStore(b.CreateLoad(i64,slot_field(c32(slot),0)),bits[slot]);
                 // A register present here is always loaded, but a local that
                 // may be undeclared (a break or return skipped its declaration)
@@ -157,12 +201,8 @@ class Generator {
         b.SetInsertPoint(unreachable);b.CreateUnreachable();
         b.SetInsertPoint(blocks.back());
         b.CreateCall(Intrinsic::getDeclaration(&module,Intrinsic::trap));b.CreateUnreachable();
-        // Every exit writes the shadows back for the runtime's exit map.
+        // Each exit block stored its shadows; every exit leaves through here.
         b.SetInsertPoint(leave);
-        for(std::uint32_t slot=0;slot<source.slots;++slot) {
-            b.CreateStore(load_bits(slot),slot_field(c32(slot),0));
-            b.CreateStore(load_tag(slot),slot_field(c32(slot),1));
-        }
         b.CreateStore(b.CreateLoad(i64,steps),b.CreateStructGEP(state_type,state,2));
         b.CreateStore(b.CreateLoad(i8,flags),b.CreateStructGEP(state_type,state,4));
         b.CreateRet(b.CreateLoad(i32,site));
@@ -338,6 +378,21 @@ public:
         state_type=StructType::create(context,{ptr,ptr,i64,i32,i8},"azjit_state");
     }
     void generate() {
+        written.assign(source.slots,false);
+        for(std::uint32_t index=0;index<source.op_count;++index) {
+            const auto& op=source.ops[index];
+            switch(op.code) {
+            case AZJIT_SET:case AZJIT_COPY:case AZJIT_FORGET:case AZJIT_READ_REFERENCE:case AZJIT_BINARY:
+            case AZJIT_UNARY:case AZJIT_CONVERT:case AZJIT_REFERENCE_LOCAL:case AZJIT_REFERENCE_GLOBAL:
+            case AZJIT_COPY_REFERENCE:
+                if(op.a<source.slots)written[op.a]=true;
+                break;
+            case AZJIT_DECLARE:
+                if(source.registers+op.a<source.slots)written[source.registers+op.a]=true;
+                break;
+            default:break;
+            }
+        }
         auto* type=FunctionType::get(i32,{ptr},false);
         function=Function::Create(type,GlobalValue::ExternalLinkage,source.name,module);
         function->setDoesNotThrow();
@@ -356,6 +411,13 @@ void* compile(const azjit_function* function,char* error,std::size_t capacity) {
     if(function->op_count>max_ops||std::uint64_t{function->resume_count}*function->slots>max_resume_cells)
         return fail("function is too large for native code");
     if(!function->op_count||!function->resume_count)return fail("function has no code");
+    if(function->registers+function->locals>function->slots||!function->exit_live_offsets||
+       function->exit_live_offsets[0]!=0)return fail("invalid exit live sets");
+    for(std::uint32_t exit=0;exit<function->exit_count;++exit) {
+        const auto begin=function->exit_live_offsets[exit],end=function->exit_live_offsets[exit+1];
+        if(end<begin)return fail("invalid exit live sets");
+        for(auto at=begin;at<end;++at)if(function->exit_live[at]>=function->registers)return fail("invalid exit live sets");
+    }
     auto& jit=host();
     if(!jit.jit)return fail("LLVM JIT unavailable: "+jit.failure);
     auto context=std::make_unique<LLVMContext>();
@@ -371,7 +433,13 @@ void* compile(const azjit_function* function,char* error,std::size_t capacity) {
         passes.registerModuleAnalyses(modules);passes.registerCGSCCAnalyses(calls);
         passes.registerFunctionAnalyses(functions);passes.registerLoopAnalyses(loops);
         passes.crossRegisterProxies(loops,functions,calls,modules);
-        passes.buildPerModuleDefaultPipeline(OptimizationLevel::O2).run(*module,modules);
+        if(function->op_count>full_ops) {
+            ModulePassManager light;
+            if(auto error=passes.parsePassPipeline(light,"function(sroa,early-cse,instcombine,simplifycfg)"))
+                return fail(toString(std::move(error)));
+            light.run(*module,modules);
+            module->addModuleFlag(Module::Warning,"azjit.fast",1);
+        } else passes.buildPerModuleDefaultPipeline(OptimizationLevel::O2).run(*module,modules);
     }
     static std::atomic<unsigned> counter{0};
     auto& library=jit.jit->getExecutionSession().createBareJITDylib(std::string(function->name)+"."+std::to_string(counter++));

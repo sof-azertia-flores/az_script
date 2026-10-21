@@ -21,6 +21,7 @@ class NativeCode {
     std::vector<azjit_op> ops_;
     std::vector<std::uint32_t> resume_ops_,resume_ids_;
     std::vector<std::uint16_t> resume_tags_;
+    std::vector<std::uint32_t> exit_live_offsets_,exit_live_;
 public:
     NativeCode(const azjit_backend& backend,const Function& function);
     ~NativeCode();

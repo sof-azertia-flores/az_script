@@ -105,10 +105,17 @@ NativeCode::NativeCode(const azjit_backend& backend,const Function& function):ba
         const auto& tags=function.resume_tags[index];
         resume_tags_.insert(resume_tags_.end(),tags.begin(),tags.end());
     }
+    exit_live_offsets_.reserve(function.exits.size()+1);
+    for(const auto& live:function.exit_registers) {
+        exit_live_offsets_.push_back(static_cast<std::uint32_t>(exit_live_.size()));
+        exit_live_.insert(exit_live_.end(),live.begin(),live.end());
+    }
+    exit_live_offsets_.push_back(static_cast<std::uint32_t>(exit_live_.size()));
     const std::string name="azscript_function_"+std::to_string(function.function);
-    const azjit_function data{AZJIT_ABI_VERSION,function.slots(),function.registers,static_cast<std::uint32_t>(ops_.size()),ops_.data(),
+    const azjit_function data{AZJIT_ABI_VERSION,function.slots(),function.registers,function.locals,
+        static_cast<std::uint32_t>(ops_.size()),ops_.data(),
         static_cast<std::uint32_t>(resume_ops_.size()),resume_ops_.data(),resume_tags_.data(),
-        static_cast<std::uint32_t>(function.exits.size()),&helpers,name.c_str()};
+        static_cast<std::uint32_t>(function.exits.size()),exit_live_offsets_.data(),exit_live_.data(),&helpers,name.c_str()};
     char message[512]{};
     code_=backend.compile(&data,message,sizeof message);
     if(!code_){error=message[0]?message:"the JIT module refused the function";return;}

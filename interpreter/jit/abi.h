@@ -12,7 +12,7 @@
 extern "C" {
 #endif
 
-#define AZJIT_ABI_VERSION 1u
+#define AZJIT_ABI_VERSION 2u
 #define AZJIT_ABSENT 0xffu
 /* Public value tags (INT_VALUE...) a shadow can carry. */
 #define AZJIT_TAG_INT 0u
@@ -68,7 +68,8 @@ typedef struct azjit_helpers {
 
 typedef struct azjit_function {
     uint32_t abi;
-    uint32_t slots,registers;
+    /* Slots are the registers, then the locals, then native temporaries. */
+    uint32_t slots,registers,locals;
     uint32_t op_count;
     const azjit_op* ops;
     /* Resume points: the op each starts at and, per slot, the tags its shadow
@@ -76,7 +77,12 @@ typedef struct azjit_function {
     uint32_t resume_count;
     const uint32_t* resume_ops;
     const uint16_t* resume_tags;
+    /* Per exit site, the registers live at its pc: exit_live[exit_live_offsets[s]
+     * .. exit_live_offsets[s+1]). The runtime writes back only these registers
+     * and every local, so native code stores nothing else. */
     uint32_t exit_count;
+    const uint32_t* exit_live_offsets;
+    const uint32_t* exit_live;
     const azjit_helpers* helpers;
     const char* name;
 } azjit_function;
