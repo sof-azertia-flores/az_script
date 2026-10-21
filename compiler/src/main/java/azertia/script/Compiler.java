@@ -15,7 +15,7 @@ public class Compiler {
     public enum OptimizationPass { CONSTANTS, PROPAGATION, INLINING, LOOP_MOTION,
         CONTROL_FLOW, COMMON_SUBEXPRESSIONS, DEAD_CODE, SCALAR_INLINING, RANGE_LOOP_MOTION, FLOW_PROPAGATION,
         // O3 (exec v11) only.
-        SPECIALIZATION, SEQUENCE_INLINING, DEVIRTUALIZATION, SCALAR_REPLACEMENT, SLOT_COMPACTION }
+        SPECIALIZATION, SEQUENCE_INLINING, DEVIRTUALIZATION, SCALAR_REPLACEMENT, UNCHECKED_ARITHMETIC, SLOT_COMPACTION }
     // O2 is listed explicitly, so passes added for O3 never change its output.
     private static final Set<OptimizationPass> ADVANCED_PASSES = Set.of(OptimizationPass.CONSTANTS,
             OptimizationPass.PROPAGATION, OptimizationPass.INLINING, OptimizationPass.LOOP_MOTION,
@@ -3342,6 +3342,7 @@ public class Compiler {
             ExecSequenceInliner.optimize(output, state.positions, state.inlineSites, state.abdLimit, originals,
                     passes.contains(OptimizationPass.SEQUENCE_INLINING), passes.contains(OptimizationPass.DEVIRTUALIZATION));
         if (passes.contains(OptimizationPass.SCALAR_REPLACEMENT)) ExecScalarReplacement.optimize(output, state.positions);
+        if (passes.contains(OptimizationPass.UNCHECKED_ARITHMETIC)) ExecUncheckedArithmetic.optimize(output);
         if (passes.contains(OptimizationPass.SLOT_COMPACTION)) ExecSlotCompaction.optimize(output);
         AcsArray debugFiles = new AcsArray();
         for (String file : state.debugFiles) debugFiles.acsa.add(new AcsStringElement(file));

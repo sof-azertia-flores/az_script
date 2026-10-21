@@ -2,6 +2,7 @@
 """O2 v10 compatibility, semantic observations and optional JIT execution."""
 import argparse
 import copy
+import functools
 import json
 import os
 from pathlib import Path
@@ -135,6 +136,15 @@ CASES = O1_CASES + (
      'int main(){return run(4);}', 15, '', None),
     ('o3-scalar-argument-error', 'class Cell{int value;Cell(int n){value=n;}int read(){return value;}}'
      'int run(int n){\n Cell a(1);\n Cell b(10/n);\n return a.read()+b.read();\n}\nint main(){\n return run(0);\n}', None, '', 'Division by zero'),
+    # O3 unchecked arithmetic: only proven operations wrap; every edge still overflows where O0 does.
+    ('o3-unchecked-loop', 'int run(int n){int total=0;int i=0;while(i<n){total=(total*7+i%13)%10007;i=i+1;}return total;}'
+     'int main(){return run(300);}', functools.reduce(lambda t, i: (t * 7 + i % 13) % 10007, range(300), 0), '', None),
+    ('o3-unchecked-edge', 'int run(int a){if(a<=2147483646){return a+1;}return 0;}int main(){return run(2147483646);}',
+     2147483647, '', None),
+    ('o3-unchecked-overflow', 'int run(int a){\n if(a<=2147483647){\n return a+1;\n }\n return 0;\n}\nint main(){\n return run(2147483647);\n}',
+     None, '', 'Integer overflow'),
+    ('o3-unchecked-loop-overflow', 'int run(int n){\n int t=2147483600;\n int i=0;\n while(i<n){\n t=t+1;\n i=i+1;\n }\n return t;\n}\n'
+     'int main(){\n return run(100);\n}', None, '', 'Integer overflow'),
     generated_flow_case(),
 )
 

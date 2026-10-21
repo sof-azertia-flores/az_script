@@ -12,7 +12,7 @@
 | V5 | 完成，定向验证 | 内联、槽压缩与测量见下 |
 | V6 | 完成，定向验证 | 常量实参与泛型上下文专用化 |
 | V7 | 进行中 | 守卫去虚化、标量替换完成；字段缓存进行中 |
-| V8 | 尚未开始 | 无检查运算 |
+| V8 | 完成，定向验证 | 区间证明的无检查运算 |
 | V9 | 尚未开始 | JIT 消费 v11 构造 |
 | V10 | 不在本轮 | 发布收尾 |
 
@@ -94,3 +94,11 @@
 - 构造函数与方法是 1 号入口（类内部函数）；只内联其函数体，入口类别不影响改写。
 
 验证：Java 404/404（新增 `ExecScalarReplacementTest` 6 例：字段与方法、复制、借用对象保留、计算型方法与虚方法保留、计算型构造函数保留、开关）；O2/O3 测试全量 79 例、1438 次观测、684 次预算检查通过（JIT probe:7、eager、stress、on:2+interp 重放），新增 `o3-scalar-fields`、`o3-scalar-copy`、`o3-scalar-borrowed`、`o3-scalar-argument-error`（构造实参除零，`-g` 帧与 O0 一致）。全量运行用的是改定位之前的编译器；改定位后 `--only o3-` 23 例（probe:7、eager、stress）重新通过。`lifecycle_fuzz` 种子 0–199 的生成程序（临时脚本：O0 与 O3 均带 `-g`，树与 VM 各运行一次，按 `framed()` 比较）全部一致。性能（Release 快速测量，3×3，O3/O2）：VM object_fields 0.149、object_copy 0.205、virtual_monomorphic 0.635、call_4 0.566；on:3+llvm object_fields 0.164、object_copy 0.168。
+
+## V8：无检查运算（2026-10-21）
+
+- `UNCHECKED_ARITHMETIC`（`--no-unchecked-arithmetic`）在标量替换之后、槽压缩之前运行（`ExecUncheckedArithmetic`）。对每个 `analyzable` 的函数（槽数与节点数在 O2 区域上限内）建立精确模式的 `ExecScalarAnalysis`，两个操作数都是 int、按区间计算结果在 int32 内的 add/minus/multiply 改为 opcode 55–57。判断全部在原树上完成后再改写；清理体不访问，序列中的语句使用所在语句的事实（序列不写局部变量）。
+- 精确模式只供 O3 使用，O2 的分析结果不变：除法结果不超过被除数，余数小于除数且与被除数同号；比较的另一侧为 int 局部变量时按其区间收紧（原先只接受常量）；加宽后的不动点再做至多 8 轮不加宽的下降迭代（Jacobi），恢复循环中被加宽丢掉的界（例如 `total=(total*7+i%13)%10007`）。分析也识别回绕运算：范围外结果为任意 int，但不会失败。
+- 回绕运算的其他操作数组合与有检查运算相同，所以只省去溢出检查；证明不了的运算保持原样，边界上的溢出错误与 trace 不变。
+
+验证：Java 408/408（新增 `ExecUncheckedArithmeticTest` 4 例；`ExecO2LoopTest` 一例以 `allOf` 选择阶段，改为排除本阶段，以保持其循环外提检查的原意）；O2/O3 测试 `--only o3-` 27 例（probe:7、eager、stress），新增 `o3-unchecked-loop`、`o3-unchecked-edge`（`a<=2147483646` 时 `a+1` 回绕且得到 2147483647）、`o3-unchecked-overflow`、`o3-unchecked-loop-overflow`（溢出仍按 O0 报告）。O1/O2 产物与 V7b 编译器的逐字节对比（200 个生成程序、示例与 O3 草稿源码）提交时仍在运行，结果另行记录。性能（Release 快速测量，3×3，O3/O2，含 V5–V7 的全部 O3 阶段）：VM integer_loop 0.864、branch_loop 0.751、scalar_call 0.862、range_local 1.012、call_4 0.554；on:3+llvm integer_loop 0.894、branch_loop 1.000、scalar_call 0.670、range_local 1.108、call_4 0.070。LLVM 后端的 int 快速路径（V3）已把回绕运算编为不带溢出退出的 add/sub/mul；其余 JIT 消费与上限测量留到 V9。

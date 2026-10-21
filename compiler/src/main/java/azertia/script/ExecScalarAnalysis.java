@@ -142,14 +142,18 @@ final class ExecScalarAnalysis {
     final IdentityHashMap<AcsElement,Block> sites = new IdentityHashMap<>();
     final Map<Integer,Integer> returns;
     final Block entry, exit;
-    ExecScalarAnalysis(AcsObject function, Map<Integer,Integer> returns) {
-        this.returns = returns;
+    private final boolean precise;
+    ExecScalarAnalysis(AcsObject function, Map<Integer,Integer> returns) { this(function, returns, false); }
+    /** precise (O3 only, so O2 output never changes): division and remainder results are bounded too. */
+    ExecScalarAnalysis(AcsObject function, Map<Integer,Integer> returns, boolean precise) {
+        this.returns = returns; this.precise = precise;
         exit = add(null, false);
         entry = region(function.mmp.get("script"), exit, exit, exit);
         var initial = new HashMap<Integer,Value>();
         var params = function.getAsAcsArray("param-types").acsa;
         for (int i = 0; i < params.size(); i++) initial.put(i, full(((AcsIntegerElement)params.get(i)).s));
         solve(initial);
+        if (precise) for (int round = 0; round < 8 && narrow(initial); round++) { }
         liveness();
         dominance();
     }
@@ -204,6 +208,29 @@ final class ExecScalarAnalysis {
                 }
             }
         }
+    }
+    /**
+     * One descending step from the widened fixed point: every reached block takes
+     * the join of its predecessors' outputs without widening. Applied to a post
+     * fixed point, the monotone transfer keeps every state sound and only
+     * recovers bounds that widening dropped (a remainder after a loop-carried product).
+     */
+    private boolean narrow(Map<Integer,Value> initial) {
+        Map<Block,Map<Integer,Value>> next = new IdentityHashMap<>();
+        next.put(entry, initial);
+        for (Block block : blocks) {
+            if (block.in == null) continue;
+            Map<Integer,Value> out = transfer(block);
+            for (int i = 0; i < block.next.size(); i++) {
+                Block target = block.next.get(i);
+                var incoming = new HashMap<>(out);
+                if (block.condition && !refine(field(block.source, "v"), i == 0, incoming)) continue;
+                next.merge(target, incoming, (x, y) -> join(x, y, false));
+            }
+        }
+        boolean changed = false;
+        for (Block block : blocks) if (block.in != null && !block.in.equals(next.get(block))) { block.in = next.get(block); changed = true; }
+        return changed;
     }
     static Map<Integer,Value> join(Map<Integer,Value> a, Map<Integer,Value> b, boolean widen) {
         Map<Integer,Value> result = new HashMap<>();
@@ -345,12 +372,13 @@ final class ExecScalarAnalysis {
                 return new Value(folded.type, folded.low, folded.high, total);
             }
         }
+        boolean wraps = op == WRAP_ADD || op == WRAP_SUBTRACT || op == WRAP_MULTIPLY;
         return switch (op) {
-            case ADD -> checked(a.low+b.low, a.high+b.high, total);
-            case SUBTRACT -> checked(a.low-b.high, a.high-b.low, total);
-            case MULTIPLY -> {
+            case ADD, WRAP_ADD -> checked(a.low+b.low, a.high+b.high, total, wraps);
+            case SUBTRACT, WRAP_SUBTRACT -> checked(a.low-b.high, a.high-b.low, total, wraps);
+            case MULTIPLY, WRAP_MULTIPLY -> {
                 long[] products = {a.low*b.low, a.low*b.high, a.high*b.low, a.high*b.high};
-                yield checked(Arrays.stream(products).min().orElseThrow(), Arrays.stream(products).max().orElseThrow(), total);
+                yield checked(Arrays.stream(products).min().orElseThrow(), Arrays.stream(products).max().orElseThrow(), total, wraps);
             }
             case BIT_AND -> a.low >= 0 || b.low >= 0
                     ? integer(0, b.low >= 0 ? b.high : a.high, total)
@@ -358,15 +386,24 @@ final class ExecScalarAnalysis {
             case BIT_OR, BIT_XOR -> integer(Integer.MIN_VALUE, Integer.MAX_VALUE, total);
             case SHIFT_LEFT, SHIFT_RIGHT, SHIFT_UNSIGNED -> integer(Integer.MIN_VALUE,Integer.MAX_VALUE,
                     total && b.low >= 0 && b.high <= 31);
-            case DIVIDE, MODULO -> integer(Integer.MIN_VALUE,Integer.MAX_VALUE,
-                    total && (b.low > 0 || b.high < 0)
-                            && (op == MODULO || a.low > Integer.MIN_VALUE || b.low > -1 || b.high < -1));
+            case DIVIDE, MODULO -> quotient(op, a, b, total && (b.low > 0 || b.high < 0)
+                    && (op == MODULO || a.low > Integer.MIN_VALUE || b.low > -1 || b.high < -1));
             default -> UNKNOWN;
         };
     }
-    private static Value checked(long low, long high, boolean total) {
+    private static Value checked(long low, long high, boolean total) { return checked(low, high, total, false); }
+    /** A wrapping operation never fails; out of range, its result is any int. */
+    private static Value checked(long low, long high, boolean total, boolean wraps) {
         return low >= Integer.MIN_VALUE && high <= Integer.MAX_VALUE ? integer(low,high,total)
-                : integer(Integer.MIN_VALUE,Integer.MAX_VALUE,false);
+                : integer(Integer.MIN_VALUE,Integer.MAX_VALUE,wraps && total);
+    }
+    /** A successful quotient is no larger than the dividend; a remainder also stays below the divisor, signed as the dividend. */
+    private Value quotient(int op, Value a, Value b, boolean total) {
+        if (!precise) return integer(Integer.MIN_VALUE,Integer.MAX_VALUE,total);
+        long bound = Math.max(Math.abs(a.low), Math.abs(a.high));
+        if (op == MODULO) bound = Math.max(0, Math.min(bound, Math.max(Math.abs(b.low), Math.abs(b.high)) - 1));
+        long low = op == MODULO && a.low >= 0 ? 0 : -bound, high = op == MODULO && a.high <= 0 ? 0 : bound;
+        return integer(Math.max(low, Integer.MIN_VALUE), Math.min(high, Integer.MAX_VALUE), total);
     }
     boolean refine(AcsElement source, boolean truth, Map<Integer,Value> facts) {
         Value test = evaluate(source, facts);
@@ -380,17 +417,23 @@ final class ExecScalarAnalysis {
         }
         if (op < GREATER || op > LESS_EQUAL) return true;
         AcsElement left = field(source,"v1"), right = field(source,"v2");
-        if (opcode(left) != VARIABLE || !(right instanceof AcsIntegerElement constant)) return true;
+        if (opcode(left) != VARIABLE) return true;
+        // The bound is a constant, or (precise only) the range of another int local.
+        long n, m;
+        if (right instanceof AcsIntegerElement constant) n = m = constant.s;
+        else if (precise && opcode(right) == VARIABLE && facts.getOrDefault(number(right,"v"),UNKNOWN).type == INT_VALUE) {
+            Value bound = facts.get(number(right,"v")); n = bound.low; m = bound.high;
+        } else return true;
         int slot = number(left,"v"); Value value = facts.getOrDefault(slot,UNKNOWN);
         if (value.type != INT_VALUE) return true;
-        long low = value.low, high = value.high, n = constant.s;
+        long low = value.low, high = value.high;
         switch (op) {
-            case LESS -> { if (truth) high=Math.min(high,n-1); else low=Math.max(low,n); }
-            case LESS_EQUAL -> { if (truth) high=Math.min(high,n); else low=Math.max(low,n+1); }
-            case GREATER -> { if (truth) low=Math.max(low,n+1); else high=Math.min(high,n); }
-            case GREATER_EQUAL -> { if (truth) low=Math.max(low,n); else high=Math.min(high,n-1); }
-            case EQUAL -> { if (truth) { low=Math.max(low,n); high=Math.min(high,n); } }
-            case NOT_EQUAL -> { if (!truth) { low=Math.max(low,n); high=Math.min(high,n); } }
+            case LESS -> { if (truth) high=Math.min(high,m-1); else low=Math.max(low,n); }
+            case LESS_EQUAL -> { if (truth) high=Math.min(high,m); else low=Math.max(low,n+1); }
+            case GREATER -> { if (truth) low=Math.max(low,n+1); else high=Math.min(high,m); }
+            case GREATER_EQUAL -> { if (truth) low=Math.max(low,n); else high=Math.min(high,m-1); }
+            case EQUAL -> { if (truth) { low=Math.max(low,n); high=Math.min(high,m); } }
+            case NOT_EQUAL -> { if (!truth) { low=Math.max(low,n); high=Math.min(high,m); } }
             default -> { }
         }
         if (low > high) return false;
