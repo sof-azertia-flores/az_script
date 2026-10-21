@@ -7,17 +7,27 @@ import java.util.*;
 
 /** Resolves symbols and lowers the readable JSON AST to numeric-slot ABD instructions. */
 public class Compiler {
-    /** NONE preserves lowering; STANDARD and ADVANCED select the O1 and O2 pipelines. */
-    public enum Optimization { NONE, CONSTANTS, STANDARD, ADVANCED }
+    /**
+     * NONE preserves lowering; STANDARD, ADVANCED and AGGRESSIVE select the O1, O2 and
+     * O3 pipelines. O3 may use exec v11 constructs, so its output needs a v11 runtime.
+     */
+    public enum Optimization { NONE, CONSTANTS, STANDARD, ADVANCED, AGGRESSIVE }
     public enum OptimizationPass { CONSTANTS, PROPAGATION, INLINING, LOOP_MOTION,
         CONTROL_FLOW, COMMON_SUBEXPRESSIONS, DEAD_CODE, SCALAR_INLINING, RANGE_LOOP_MOTION, FLOW_PROPAGATION }
+    // O2 is listed explicitly, so passes added for O3 never change its output.
+    private static final Set<OptimizationPass> ADVANCED_PASSES = Set.of(OptimizationPass.CONSTANTS,
+            OptimizationPass.PROPAGATION, OptimizationPass.INLINING, OptimizationPass.LOOP_MOTION,
+            OptimizationPass.CONTROL_FLOW, OptimizationPass.COMMON_SUBEXPRESSIONS, OptimizationPass.DEAD_CODE,
+            OptimizationPass.SCALAR_INLINING, OptimizationPass.RANGE_LOOP_MOTION, OptimizationPass.FLOW_PROPAGATION);
     public static Set<OptimizationPass> optimizationPasses(Optimization optimization) {
         return switch (Objects.requireNonNull(optimization)) {
             case NONE -> Set.of();
             case CONSTANTS -> Set.of(OptimizationPass.CONSTANTS);
             case STANDARD -> Set.of(OptimizationPass.CONSTANTS, OptimizationPass.PROPAGATION,
                     OptimizationPass.INLINING, OptimizationPass.LOOP_MOTION);
-            case ADVANCED -> Set.of(OptimizationPass.values());
+            case ADVANCED -> ADVANCED_PASSES;
+            // exec v11 work in progress: O3 currently runs the O2 passes.
+            case AGGRESSIVE -> Set.of(OptimizationPass.values());
         };
     }
     // Mutable holders: the depth changes at every node, and updating a holder avoids a ThreadLocal.set each time.

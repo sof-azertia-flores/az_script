@@ -6,7 +6,7 @@
 
 ## 编译与嵌入
 
-`compile` 和 `compile-json` 支持 `-O0`（默认）、`-O1` 和 `-O2`，最后一个选项生效。O1 在语义检查后进行整数/布尔常量折叠、保守的标量传播、无错小函数内联、固定标量上下文的泛型内联专用化，以及不会引入提前报错的循环不变量外提。溢出、除零及非法移位仍在运行时报告；浮点、字符串和可观察的对象生命周期不做代数消除。可读 AST 不变；AST 再编译要指定相同优化选项才能得到相同 ABD。debug 编号在优化后生成。
+`compile` 和 `compile-json` 支持 `-O0`（默认）、`-O1` 和 `-O2`，最后一个选项生效。`-O3` 属于开发中的 exec v11（见 [exec v11 计划](../docs/exec-v11-roadmap/PLAN.md)），产物需要 v11 运行库；目前与 `-O2` 相同。O1 在语义检查后进行整数/布尔常量折叠、保守的标量传播、无错小函数内联、固定标量上下文的泛型内联专用化，以及不会引入提前报错的循环不变量外提。溢出、除零及非法移位仍在运行时报告；浮点、字符串和可观察的对象生命周期不做代数消除。可读 AST 不变；AST 再编译要指定相同优化选项才能得到相同 ABD。debug 编号在优化后生成。
 
 `--no-fold`、`--no-propagation`、`--no-inline`、`--no-loop-motion` 分别关闭对应阶段；传播和内联阶段仍可计算其新产生的常量结果。Java 可使用 `Compiler.Optimization.STANDARD`，或向 `Compiler.compile(ast, diagnostics, debugInfo, Set<Compiler.OptimizationPass>)` 传入精确阶段集合；`CONSTANTS` 仅开启常量折叠，已有重载保持 O0。
 

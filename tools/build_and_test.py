@@ -245,7 +245,7 @@ def main():
         if module.exists():modes+=['eager+llvm','stress+llvm','on:3+llvm']
         o2_replay=['--jit-modes',','.join(modes)]
     run([sys.executable, ROOT/'tests/compiler_o2_end_to_end.py', '--classpath', classpath,
-         '--host', native/'interpreter/observation-host', *o2_replay,
+         '--host', native/'interpreter/observation-host', '--o3', *o2_replay,
          '--report', BUILD/('compiler-o2-sanitize.json' if args.sanitize else 'compiler-o2.json')])
     compiler_corpus=BUILD/('compiler-optimization-corpus-sanitize' if args.sanitize else 'compiler-optimization-corpus')
     if compiler_corpus.exists():shutil.rmtree(compiler_corpus)

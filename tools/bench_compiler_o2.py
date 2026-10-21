@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""O1/O2 result-checked VM/LLVM measurements. Run without other builds or tests."""
+"""Result-checked VM/LLVM measurements of two optimization levels (O1/O2 by default). Run without other builds or tests."""
 import argparse
 import hashlib
 import json
@@ -57,6 +57,7 @@ def main():
     parser.add_argument('--target-seconds', type=float, default=.1)
     parser.add_argument('--argument', type=int, default=4096)
     parser.add_argument('--only', default=','.join(CASES))
+    parser.add_argument('--levels', default='O1,O2', help='base,candidate levels, e.g. O2,O3')
     parser.add_argument('--runtime-revision', default='', help='commit used to build the measured native host')
     args = parser.parse_args()
     if min(args.rounds, args.batches, args.argument, args.target_seconds) <= 0:
@@ -64,6 +65,10 @@ def main():
     names, modes = args.only.split(','), args.modes.split(',')
     if not set(names) <= set(CASES):
         parser.error('unknown workload')
+    levels = args.levels.split(',')
+    if len(levels) != 2 or len(set(levels)) != 2 or not set(levels) <= {'O0', 'O1', 'O2', 'O3'}:
+        parser.error('--levels needs two distinct levels among O0-O3')
+    base, candidate = levels
     args.native = args.native.resolve()
     args.work = args.work.resolve()
     args.work.mkdir(parents=True, exist_ok=False)
@@ -115,7 +120,7 @@ def main():
             path.write_text(source(name))
             report['artifacts'][name] = {}
             for round_number in range(args.rounds):
-                for level in (('O1', 'O2') if round_number % 2 == 0 else ('O2', 'O1')):
+                for level in ((base, candidate) if round_number % 2 == 0 else (candidate, base)):
                     binary, code = args.work / f'{name}-{level}.abd', args.work / f'{name}-{level}.json'
                     start = time.perf_counter()
                     run(['java', '-cp', args.classpath, 'azertia.Main', 'compile', path, '-' + level,
@@ -130,14 +135,14 @@ def main():
         report['compile_summary'] = {
             name: {level: statistics.median(record['seconds'] for record in report['compile_records']
                                             if record['case'] == name and record['level'] == level)
-                   for level in ('O1', 'O2')} for name in names}
+                   for level in (base, candidate)} for name in names}
         for name in names:
             calls = {}
             for mode in modes:
-                calibrated, _ = measure(name, 'O1', mode, 1, 1, 'calibration')
+                calibrated, _ = measure(name, base, mode, 1, 1, 'calibration')
                 calls[mode] = max(1, min(1000000, math.ceil(
                     args.target_seconds / calibrated['batches'][0]['timing']['wall_seconds'])))
-            variants = [(level, mode) for mode in modes for level in ('O1', 'O2')]
+            variants = [(level, mode) for mode in modes for level in (base, candidate)]
             medians = {mode: [] for mode in modes}
             for round_number in range(args.rounds):
                 order = variants[round_number % len(variants):] + variants[:round_number % len(variants)]
@@ -155,20 +160,20 @@ def main():
                 save()
             report['summary'][name] = {}
             for mode in modes:
-                ratio = math.exp(statistics.mean(math.log(pair['O2'] / pair['O1']) for pair in medians[mode]))
+                ratio = math.exp(statistics.mean(math.log(pair[candidate] / pair[base]) for pair in medians[mode]))
                 selected = [record for record in report['records'] if record['case'] == name and record['mode'] == mode]
                 report['summary'][name][mode] = {
-                    'O2_over_O1_hot': ratio, 'round_medians': medians[mode], 'calls_per_batch': calls[mode],
+                    f'{candidate}_over_{base}_hot': ratio, 'round_medians': medians[mode], 'calls_per_batch': calls[mode],
                     'cold_seconds': {level: statistics.median(
                         record['observation']['phases']['cold_to_first_invoke']['wall_seconds']
-                        for record in selected if record['level'] == level) for level in ('O1', 'O2')}}
+                        for record in selected if record['level'] == level) for level in (base, candidate)}}
                 if ratio > 1.05:
-                    report['regressions'].append({'case': name, 'mode': mode, 'O2_over_O1': ratio})
+                    report['regressions'].append({'case': name, 'mode': mode, f'{candidate}_over_{base}': ratio})
                 refusals = {level: sum(session['refusals'].get('too large for native code', 0)
                                        for record in selected if record['level'] == level for session in record['jit'])
-                            for level in ('O1', 'O2')}
-                assert refusals['O2'] <= refusals['O1'], (name, mode, 'O2 lost native compilation eligibility', refusals)
-                print(name, mode, f'O2/O1 hot: {ratio:.3f}', flush=True)
+                            for level in (base, candidate)}
+                assert refusals[candidate] <= refusals[base], (name, mode, f'{candidate} lost native compilation eligibility', refusals)
+                print(name, mode, f'{candidate}/{base} hot: {ratio:.3f}', flush=True)
             save()
         report['status'] = 'regression-review' if report['regressions'] else 'passed'
     except Exception as error:

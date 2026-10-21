@@ -138,6 +138,7 @@ def main():
     parser.add_argument('--host', type=Path, required=True)
     parser.add_argument('--baseline-classpath', help='frozen pre-O2 compiler, to check O0/O1 ABD identity')
     parser.add_argument('--baseline-host', type=Path, help='frozen v10 runtime, to check O2 compatibility')
+    parser.add_argument('--o3', action='store_true', help='also run O3 (needs an exec v11 runtime) with the O2 checks')
     parser.add_argument('--jit-modes', default='', help='comma-separated existing AZSCRIPT_JIT modes')
     parser.add_argument('--report', type=Path, required=True)
     parser.add_argument('--only', help='run cases whose names contain this text')
@@ -170,6 +171,8 @@ def main():
             variants = [('O0', []), ('O1', []), ('O2', [])]
             if name.startswith('o2-'):
                 variants.append(('O2', ['--no-inline']))
+            if args.o3:
+                variants.append(('O3', []))
             for index, (level, options) in enumerate(variants):
                 abd, ast = work / f'{name}-{index}.abd', work / f'{name}-{index}.json'
                 java = ['java', '-cp', args.classpath, 'azertia.Main']
@@ -177,7 +180,7 @@ def main():
                 rebuilt = work / 'rebuilt.abd'
                 run(java + ['compile-json', ast, '-g', '-' + level, *options, '-o', rebuilt])
                 assert abd.read_bytes() == rebuilt.read_bytes(), (name, level, 'AST identity')
-                if args.baseline_classpath and level != 'O2':
+                if args.baseline_classpath and level not in ('O2', 'O3'):
                     run(['java', '-cp', args.baseline_classpath, 'azertia.Main', 'compile', path,
                          '-g', '-' + level, '-o', rebuilt])
                     assert abd.read_bytes() == rebuilt.read_bytes(), (name, level, 'old compiler identity')
@@ -193,8 +196,9 @@ def main():
                     report['observations'] += 1
                 assert not compare_engines(*observations, 'tree', 'vm'), (name, level, observations)
                 levels.append(semantic(observations[0]))
-                if level == 'O2':
-                    if args.baseline_host:
+                if level in ('O2', 'O3'):
+                    # O3 may use exec v11 constructs, which a v10 runtime refuses.
+                    if args.baseline_host and level == 'O2':
                         for engine in ('tree', 'vm'):
                             old = checked_observation(run([args.baseline_host, abd, '--engine', engine, '--steps', '1000000']))
                             assert not compare_engines(observations[0], old, 'tree', engine), (name, 'v10 compatibility', old)
@@ -206,7 +210,7 @@ def main():
                         # larger wall-clock allowance than individual cases.
                         generated = name.startswith('o2-generated-flow')
                         if generated:
-                            print(f'O2 generated flow: {mode}, options={options}', flush=True)
+                            print(f'{level} generated flow: {mode}, options={options}', flush=True)
                         result = checked_observation(run([args.host, abd, '--engine', 'vm', '--steps', '1000000'],
                                 {'AZSCRIPT_JIT': mode, 'AZSCRIPT_JIT_STATS': str(stats)},
                                 timeout=600 if generated else 90))

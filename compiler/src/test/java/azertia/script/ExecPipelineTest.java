@@ -20,6 +20,20 @@ class ExecPipelineTest {
         var node=ExecIr.read(source,null);long result=node.opcode()==opcode?1:0;
         for(var edge:node.children())result+=count(edge.value().source(),opcode);return result;
     }
+    @Test void aggressiveLevelContainsTheExplicitAdvancedPasses() throws Exception {
+        // O2 is a fixed list: passes added for O3 must not join it.
+        assertEquals(EnumSet.of(Compiler.OptimizationPass.CONSTANTS,Compiler.OptimizationPass.PROPAGATION,
+                Compiler.OptimizationPass.INLINING,Compiler.OptimizationPass.LOOP_MOTION,Compiler.OptimizationPass.CONTROL_FLOW,
+                Compiler.OptimizationPass.COMMON_SUBEXPRESSIONS,Compiler.OptimizationPass.DEAD_CODE,
+                Compiler.OptimizationPass.SCALAR_INLINING,Compiler.OptimizationPass.RANGE_LOOP_MOTION,
+                Compiler.OptimizationPass.FLOW_PROPAGATION),Compiler.optimizationPasses(Compiler.Optimization.ADVANCED));
+        assertTrue(Compiler.optimizationPasses(Compiler.Optimization.AGGRESSIVE).containsAll(Compiler.optimizationPasses(Compiler.Optimization.ADVANCED)));
+        assertEquals(Compiler.Optimization.AGGRESSIVE,Main.parseCompileArguments(List.of("compile","x.azs","-O2","-O3")).optimization());
+        assertEquals(Compiler.Optimization.ADVANCED,Main.parseCompileArguments(List.of("compile","x.azs","-O3","-O2")).optimization());
+        var args=Main.parseCompileArguments(List.of("compile","x.azs","-O3","--no-inline"));
+        assertFalse(args.optimizationPasses().contains(Compiler.OptimizationPass.INLINING));
+        assertFalse(args.optimizationPasses().contains(Compiler.OptimizationPass.SCALAR_INLINING));
+    }
     @Test void passesCanBeDisabledIndependently() throws Exception {
         var args=Main.parseCompileArguments(List.of("compile","x.azs","-O1","--no-fold","--no-propagation","--no-inline","--no-loop-motion"));
         assertTrue(args.optimizationPasses().isEmpty());

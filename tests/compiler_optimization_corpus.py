@@ -33,6 +33,7 @@ def main():
     parser.add_argument('--work', type=Path, required=True)
     parser.add_argument('--only')
     parser.add_argument('--o2', action='store_true', help='also compare O2 with its documented inline-frame contract')
+    parser.add_argument('--o3', action='store_true', help='with --o2, also compare O3 (needs an exec v11 runtime)')
     parser.add_argument('--jit-modes', default='', help='replay the O2 artifact in these AZSCRIPT_JIT modes')
     args = parser.parse_args()
     args.work.mkdir(parents=True, exist_ok=False)
@@ -42,6 +43,8 @@ def main():
     modes = [mode for mode in args.jit_modes.split(',') if mode]
     if modes and not args.o2:
         parser.error('--jit-modes requires --o2')
+    if args.o3 and not args.o2:
+        parser.error('--o3 requires --o2')
     # Explicit replay modes need an unmodified VM reference. Otherwise retain
     # the existing JIT driver's environment (including its statistics file).
     if modes:
@@ -56,7 +59,7 @@ def main():
             if args.only and args.only not in item.name:
                 continue
             levels = []
-            for level in (('O0', 'O1', 'O2') if args.o2 else ('O0', 'O1')):
+            for level in ('O0', 'O1') + (('O2',) if args.o2 else ()) + (('O3',) if args.o3 else ()):
                 folder = args.work / item.name / level
                 folder.mkdir(parents=True)
                 binary = compile_source(compiler, item.source, item.name, folder, env, '-' + level)
@@ -80,7 +83,7 @@ def main():
                 engine_difference = differences({k:v for k,v in observations[0].items() if k != 'engine'},
                                                 {k:v for k,v in observations[1].items() if k != 'engine'})
                 assert not engine_difference, (item.name, level, engine_difference)
-                if level == 'O2':
+                if level in ('O2', 'O3'):
                     for mode in modes:
                         stats = args.work / (mode.replace(':', '-').replace('+', '-') + '.stats')
                         result = subprocess.run(command, cwd=ROOT,
@@ -93,9 +96,9 @@ def main():
                 levels.append(observations[0])
             changed = differences(neutral(levels[0]), neutral(levels[1]))
             assert not changed, (item.name, 'O0/O1', changed)
-            if args.o2:
-                changed = differences(semantic(levels[0]), semantic(levels[2]))
-                assert not changed, (item.name, 'O0/O2', changed)
+            for index, level in enumerate(('O2', 'O3')[:len(levels) - 2], 2):
+                changed = differences(semantic(levels[0]), semantic(levels[index]))
+                assert not changed, (item.name, 'O0/' + level, changed)
             report['cases'].append(item.name)
             report_path.write_text(json.dumps(report, indent=2) + '\n')
         assert report['cases'], 'No fixtures selected'
