@@ -271,7 +271,7 @@ void check_instruction(const ExecutableProgram& program,const FunctionRecord& fu
     case Opcode::member_get:case Opcode::object_delete:case Opcode::block_address:case Opcode::drop:
         output();input();break;
     case Opcode::unary:output();input();operand=true;if(instruction.operand>1)bad("unknown unary operation");break;
-    case Opcode::binary:output();input();second();operand=true;if(instruction.operand>static_cast<std::uint32_t>(BinaryOperation::unsigned_shift_right))bad("unknown binary operation");break;
+    case Opcode::binary:output();input();second();operand=true;if(instruction.operand>static_cast<std::uint32_t>(BinaryOperation::wrapping_multiply))bad("unknown binary operation");break;
     case Opcode::convert:output();input();operand=true;if(instruction.operand!=INT_VALUE&&instruction.operand!=STRING_VALUE&&instruction.operand!=FLOAT_VALUE&&instruction.operand!=DOUBLE_VALUE&&instruction.operand!=ADDRESS_VALUE)bad("invalid conversion target");break;
     case Opcode::jump:case Opcode::branch_flow:case Opcode::branch_returned:destination();break;
     case Opcode::branch_false:input();destination();break;

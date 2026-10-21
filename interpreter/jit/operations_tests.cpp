@@ -38,7 +38,7 @@ template<class Expected,class Actual> void agree(Expected expected,Actual actual
     if(reference)check(*reference==*result,what+": result differs");
 }
 void binaries(const std::vector<Value>& values) {
-    for(std::uint32_t code=0;code<=static_cast<std::uint32_t>(BinaryOperation::unsigned_shift_right);++code) {
+    for(std::uint32_t code=0;code<=static_cast<std::uint32_t>(BinaryOperation::wrapping_multiply);++code) {
         const auto operation=static_cast<BinaryOperation>(code);
         for(const auto& left:values)for(const auto& right:values)
             agree([&]{return value_ops::binary(operation,left,right);},

@@ -102,6 +102,7 @@ public final class ExecCodec {
             VALUE_COMPARE=KeySpec.of("t c context v1 v2",""),
             CONVERSION=KeySpec.of("t c type v",""),
             SELECT=KeySpec.of("t c v then else",""),
+            SEQUENCE=KeySpec.of("t c statements v",""),
             CHECKED_OBJECT=KeySpec.of("t c v context slot-types",""),
             SET_METHODS=KeySpec.of("t c v entries",""),
             METHOD_ENTRY=KeySpec.of("id contexts",""),
@@ -372,7 +373,40 @@ public final class ExecCodec {
     }
     private static boolean binaryOpcode(int op) {
         return op==ExecOpcodes.MOVE||op>=ExecOpcodes.ADD&&op<=ExecOpcodes.OR
-                ||op>=ExecOpcodes.BIT_AND&&op<=ExecOpcodes.SHIFT_UNSIGNED;
+                ||op>=ExecOpcodes.BIT_AND&&op<=ExecOpcodes.SHIFT_UNSIGNED
+                ||op>=ExecOpcodes.WRAP_ADD&&op<=ExecOpcodes.WRAP_MULTIPLY;
+    }
+    /** A sequence runs statements in the enclosing scope, then its value: it may
+     * not declare outside a nested block, leave a loop it does not contain,
+     * return or own objects (the runtime readers apply the same rule). */
+    private static void sequencePart(AcsElement value,boolean loop,boolean block) {
+        if(value instanceof AcsArray nested){for(AcsElement item:nested.acsa)sequencePart(item,loop,true);return;}
+        if(!(value instanceof AcsObject object))return;
+        if(integer(object,"t")==1) {
+            for(AcsElement argument:array(object.mmp.get("param"),"param").acsa)sequencePart(argument,loop,block);
+            return;
+        }
+        int op=integer(object,"c");
+        switch(op) {
+            case ExecOpcodes.DEFINE -> {if(!block)throw invalid("a sequence cannot declare a variable outside a nested block");}
+            case ExecOpcodes.BREAK,ExecOpcodes.CONTINUE -> {if(!loop)throw invalid("a sequence cannot break or continue a loop outside it");}
+            case ExecOpcodes.RETURN,ExecOpcodes.RETURN_OBJECT -> throw invalid("a sequence cannot return");
+            case ExecOpcodes.OBJECT_BIND,ExecOpcodes.OBJECT_DELETE,ExecOpcodes.CLEANUP,ExecOpcodes.NEW_BLOCK,
+                 ExecOpcodes.MOVE_OUT,ExecOpcodes.DROP,ExecOpcodes.BUFFER_NEW,ExecOpcodes.SET_METHODS ->
+                throw invalid("a sequence cannot own, release or clean up objects");
+            default -> {}
+        }
+        for(ExecShape.Child child:ExecShape.children(object)) {
+            if(child.role()==ExecShape.Role.CONTEXT||child.role()==ExecShape.Role.METHOD_ENTRY)continue;
+            boolean body=op==ExecOpcodes.WHILE&&"val".equals(child.field());
+            boolean statements=op==ExecOpcodes.SEQ&&"statements".equals(child.field());
+            // A sequence's own statements share its scope; only a block nests one.
+            sequencePart(child.value(),loop||body,block&&!statements||child.value() instanceof AcsArray);
+        }
+    }
+    private static void sequence(AcsArray statements,AcsElement value) {
+        for(AcsElement statement:statements.acsa)sequencePart(statement,false,false);
+        sequencePart(value,false,false);
     }
     private static AbdValue expression(AcsElement value,Layout layout,int level) {
         Numbering numbering=layout.numbering();int node=numbering.next++;
@@ -492,6 +526,11 @@ public final class ExecCodec {
             case ExecOpcodes.CONVERT -> {
                 keys(object,CONVERSION);int type=integer(object,"type");conversionType(type);
                 fields.add(n(type));fields.add(expression(object.mmp.get("v"),layout,level+1));
+            }
+            case ExecOpcodes.SEQ -> {
+                keys(object,SEQUENCE);AcsArray statements=array(object.mmp.get("statements"),"statements");
+                sequence(statements,object.mmp.get("v"));
+                fields.add(expressions(statements,layout,level+1));fields.add(expression(object.mmp.get("v"),layout,level+1));
             }
             case ExecOpcodes.SELECT -> {
                 keys(object,SELECT);fields.add(expression(object.mmp.get("v"),layout,level+1));
@@ -723,6 +762,10 @@ public final class ExecCodec {
             case ExecOpcodes.CONVERT -> {
                 int type=record.integer();conversionType(type);view.put("type",type);
                 view.put("v",decodeExpression(record.next(),level+1));
+            }
+            case ExecOpcodes.SEQ -> {
+                AcsArray statements=decodeExpressions(record.next(),level+1);AcsElement result=decodeExpression(record.next(),level+1);
+                sequence(statements,result);view.put("statements",statements);view.put("v",result);
             }
             case ExecOpcodes.SELECT -> {
                 view.put("v",decodeExpression(record.next(),level+1));view.put("then",decodeExpression(record.next(),level+1));

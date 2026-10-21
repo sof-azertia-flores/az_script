@@ -84,6 +84,10 @@ Each expression is also a raw stack, beginning with an int32 opcode. `E` denotes
 | 51 | check_object | `value:E, context:Context, slot_types:Stack<int>` |
 | 52 | set_methods | `address:E, entries:Stack<[function_id:int, contexts:Stack<Context>]>` |
 | 53 | call_virtual | `slot:int, return_type:int, args:Es` |
+| 54 | seq | `statements:Es, value:E` (v11 in development) |
+| 55 | wrap_add | `left:E, right:E` (v11 in development) |
+| 56 | wrap_minus | `left:E, right:E` (v11 in development) |
+| 57 | wrap_multiply | `left:E, right:E` (v11 in development) |
 
 `if`/`wi`/`select` conditions and every evaluated operand of `and`/`or`/`not` must have BOOLEAN_VALUE (4). Numeric zero/nonzero and void are not truth values; a wrong tag throws `Condition must be boolean, got <type>`. `and`/`or` remain left-to-right and short-circuit, so a skipped right operand is not evaluated or checked at runtime. Source compilation also rejects statically known non-boolean operands, including the lowered `for` condition.
 
@@ -193,7 +197,20 @@ Inspection JSON is `{"t":0,"c":52,"v":address,"entries":[{"id":functionId,"conte
 
 Flush relocates every method function ID and function reference recursively within its contexts under the defining module's assumptions; method slot numbers are not relocatable IDs. Each entry must name an ordinary script function whose first parameter is address and whose hidden count matches the supplied contexts. Native/Java bindings cannot supply entries. These checks do not verify nominal class identity or agreement between independently compiled header slot orders. These opcodes extend exec v10 without changing its version, root, or function record.
 
-## JNI snapshot v10 method records
+## v11 additions in development (opcodes 54–57)
+
+These records belong to the [exec v11 plan](exec-v11-roadmap/DESIGN.md). Readers and writers on `exec_v11_main` support them, but the exec version stays 10 until the v11 release stage; O0/O1/O2 compilation never emits them.
+
+```text
+[54, statements:Es, value:E]
+[55|56|57, left:E, right:E]
+```
+
+The inspection JSON of `seq` is `{"t":0,"c":54,"statements":[...],"v":value}`. The statements run in order, each statement's temporaries end with it (as in a block), and then `value` is evaluated and returned. A sequence creates no scope, so readers reject: a variable declaration (opcode 4) outside a nested block; `brk`/`cont` leaving a loop that is not inside the sequence, including a jump in the condition of a loop inside it; `r`/`ro`; and the object ownership and cleanup opcodes 10, 11, 31, 32, 34, 35, 40 and 52. Nested blocks and complete `wi` loops may appear, and sequences may nest. Statements cost the same steps as in a block, and the sequence itself costs one step.
+
+`wrap_add`, `wrap_minus` and `wrap_multiply` wrap in int32 two's complement when both operands are int and never report overflow; every other operand combination behaves exactly like opcodes 12–14, including string concatenation, float overflow and type errors. The compiler emits them only where it has proved the result cannot overflow, or where wrapping is the intended meaning.
+
+
 
 Every heap-object entry and literal/view record requires `methods:[{"id":functionId,"contexts":[context,...]}]`, with contexts encoded as the existing serialized context maps. `[]` means no method table and is required on buffer records; class element views may carry bindings. Bound contexts are data, never native pointers or references to expired frames.
 

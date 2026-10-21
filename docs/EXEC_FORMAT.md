@@ -84,6 +84,10 @@ stack 的成员数量由其 frame 边界确定；固定记录必须恰好包含�
 | 51 | check_object | `value:E, context:Context, slot_types:Stack<int>` |
 | 52 | set_methods | `address:E, entries:Stack<[function_id:int, contexts:Stack<Context>]>` |
 | 53 | call_virtual | `slot:int, return_type:int, args:Es` |
+| 54 | seq | `statements:Es, value:E`（v11 开发中） |
+| 55 | wrap_add | `left:E, right:E`（v11 开发中） |
+| 56 | wrap_minus | `left:E, right:E`（v11 开发中） |
+| 57 | wrap_multiply | `left:E, right:E`（v11 开发中） |
 
 `if`/`wi`/`select` 的条件，以及 `and`/`or`/`not` 中实际求值的每个操作数，必须为 BOOLEAN_VALUE（4）。数值零/非零与 void 不再表示真假；类型错误时抛出 `Condition must be boolean, got <type>`。`and`/`or` 仍从左到右短路，被跳过的右操作数在运行时不求值也不检查。源码编译还会拒绝静态已知的非布尔操作数，包括降级后的 `for` 条件。
 
@@ -193,7 +197,20 @@ buffer 元素上下文按 ABI、类别、宽度及递归嵌套的元素上下文
 
 Flush 按定义模块的 assume 表重定位方法函数 ID 及其上下文中递归出现的函数引用；方法槽号不是可重定位函数 ID。每项必须指向首参数为 address 的普通脚本函数，且隐藏数量与上下文数一致；原生/Java 回调不能作为表项。这些检查不证明名义类身份，也不证明独立编译的头文件槽顺序一致。新增指令不改变 exec v10 版本、根或函数记录。
 
-## JNI 快照 v10 方法记录
+## v11 开发中的增补（opcode 54–57）
+
+以下指令属于 [exec v11 计划](exec-v11-roadmap/DESIGN.md)，在 `exec_v11_main` 开发期间读写端已支持，但执行文件版本仍为 10，直到 v11 发布收尾；O0/O1/O2 编译不会生成它们。
+
+```text
+[54, statements:Es, value:E]
+[55|56|57, left:E, right:E]
+```
+
+`seq` 的检查 JSON 为 `{"t":0,"c":54,"statements":[...],"v":value}`。语句依次执行，每条语句的临时值随语句结束（与块中的语句相同），随后求值并返回 `value`。它不创建作用域，因此读取端拒绝以下内容：不在嵌套块中的变量声明（opcode 4）；跳出不在 `seq` 内部的循环的 `brk`/`cont`，包括 `seq` 内部循环条件中的跳转；`r`/`ro`；以及对象所有权和清理相关的 opcode 10、11、31、32、34、35、40、52。嵌套块和完整的 `wi` 可以出现，`seq` 也可以嵌套。语句执行时每条语句消耗的步数与块中相同，`seq` 本身消耗一步。
+
+`wrap_add`、`wrap_minus`、`wrap_multiply` 在两个操作数都为 int 时按 int32 补码回绕，不报告溢出；其他操作数组合与 opcode 12–14 完全一致，包括字符串连接、浮点溢出和类型错误。编译器只在证明结果不会溢出、或语义本身要求回绕时生成它们。
+
+
 
 每个堆对象及字面量/视图记录必须有 `methods:[{"id":functionId,"contexts":[context,...]}]`，上下文使用既有序列化 context map。`[]` 表示无方法表，buffer 记录必须为空；类元素视图可带绑定。已绑定上下文保存为数据，不保存原生指针或已退出调用帧引用。
 

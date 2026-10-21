@@ -7,10 +7,14 @@
 namespace azertian {
 // Operations of the exec format's unary, binary and bitwise opcodes.
 enum class UnaryOperation : std::uint32_t { logical_not, negate };
+// The wrapping operations (exec v11) compute int32 results in two's
+// complement without an overflow check; other operands behave as add,
+// subtract and multiply.
 enum class BinaryOperation : std::uint32_t {
     add, subtract, multiply, divide, remainder, greater, less, equal,
     not_equal, greater_equal, less_equal, bit_and, bit_or, bit_xor,
-    shift_left, shift_right, unsigned_shift_right
+    shift_left, shift_right, unsigned_shift_right,
+    wrapping_add, wrapping_subtract, wrapping_multiply
 };
 }
 // The runtime's one implementation of value arithmetic, comparison,

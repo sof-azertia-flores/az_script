@@ -70,11 +70,12 @@ final class ExecIr {
             case OBJECT_ADDRESS, BLOCK_ADDRESS, CHECK_OBJECT -> EnumSet.of(Effect.READ_HEAP, Effect.THROW);
             case SET_METHODS -> EnumSet.of(Effect.WRITE_HEAP, Effect.THROW);
             case BLOCK, CLEANUP -> EnumSet.of(Effect.CONTROL, Effect.CLEANUP, Effect.CALL, Effect.THROW);
+            case SEQ -> EnumSet.noneOf(Effect.class);
             case RETURN_OBJECT -> EnumSet.of(Effect.CONTROL, Effect.CLEANUP, Effect.WRITE_HEAP, Effect.THROW);
             case RETURN, IF, WHILE, BREAK, CONTINUE, SELECT, AND, OR -> EnumSet.of(Effect.CONTROL, Effect.THROW);
             case ADD, SUBTRACT, MULTIPLY, DIVIDE, MODULO, GREATER, LESS, EQUAL, NOT_EQUAL,
                  GREATER_EQUAL, LESS_EQUAL, NOT, NEGATE, CONTEXT_ABI, BIT_AND, BIT_OR, BIT_XOR,
-                 SHIFT_LEFT, SHIFT_RIGHT, SHIFT_UNSIGNED, CONVERT -> EnumSet.of(Effect.THROW);
+                 SHIFT_LEFT, SHIFT_RIGHT, SHIFT_UNSIGNED, CONVERT, WRAP_ADD, WRAP_SUBTRACT, WRAP_MULTIPLY -> EnumSet.of(Effect.THROW);
             default -> throw new IllegalArgumentException("Unclassified exec opcode " + opcode);
         };
     }
@@ -94,7 +95,8 @@ final class ExecIr {
             case NEW_BLOCK, BUFFER_NEW -> OBJECT_VALUE;
             case CONVERT -> ((AcsObject) source).getAsInt("type");
             case DEFINE, BLOCK, RETURN, RETURN_OBJECT, RETURN_TYPED, BREAK, CONTINUE -> VOID_VALUE;
-            case ADD, SUBTRACT, MULTIPLY, DIVIDE, MODULO, NEGATE -> {
+            case SEQ -> children.get(children.size() - 1).value.type;
+            case ADD, SUBTRACT, MULTIPLY, DIVIDE, MODULO, NEGATE, WRAP_ADD, WRAP_SUBTRACT, WRAP_MULTIPLY -> {
                 int first = children.isEmpty() ? ANY_VALUE : children.get(0).value.type;
                 yield (first == INT_VALUE || first == FLOAT_VALUE || first == DOUBLE_VALUE || (opcode == ADD && first == STRING_VALUE))
                         && children.stream().allMatch(edge -> edge.value.type == first) ? first : ANY_VALUE;

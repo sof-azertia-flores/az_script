@@ -19,6 +19,9 @@ std::optional<Shadow> binary(BinaryOperation operation,const Shadow& left,const 
         case BinaryOperation::add:if(__builtin_add_overflow(a,b,&result))return std::nullopt;return integer(result);
         case BinaryOperation::subtract:if(__builtin_sub_overflow(a,b,&result))return std::nullopt;return integer(result);
         case BinaryOperation::multiply:if(__builtin_mul_overflow(a,b,&result))return std::nullopt;return integer(result);
+        case BinaryOperation::wrapping_add:return integer(std::bit_cast<std::int32_t>(std::bit_cast<std::uint32_t>(a)+std::bit_cast<std::uint32_t>(b)));
+        case BinaryOperation::wrapping_subtract:return integer(std::bit_cast<std::int32_t>(std::bit_cast<std::uint32_t>(a)-std::bit_cast<std::uint32_t>(b)));
+        case BinaryOperation::wrapping_multiply:return integer(std::bit_cast<std::int32_t>(std::bit_cast<std::uint32_t>(a)*std::bit_cast<std::uint32_t>(b)));
         case BinaryOperation::divide:
             // In 64 bits as value_ops computes it: INT_MIN/-1 overflows.
             if(!b||(a==INT32_MIN&&b==-1))return std::nullopt;

@@ -47,7 +47,7 @@ class ExecShapeTest {
                 result.put("contexts", array(reference()));
             }
             case 11, 25, 26, 33 -> result.put("v", 1);
-            case 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 43, 44, 45, 46, 47, 48 -> {
+            case 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 43, 44, 45, 46, 47, 48, 55, 56, 57 -> {
                 result.put("v1", 1); result.put("v2", 1);
             }
             case 27 -> { result.put("v", true); result.put("val", array()); result.put("else", array()); }
@@ -65,6 +65,7 @@ class ExecShapeTest {
             case 51 -> { result.put("v", new AcsAddress(0)); result.put("context", fixed(7, 2)); result.put("slot-types", array(new AcsIntegerElement(0))); }
             case 52 -> { result.put("v", new AcsAddress(0)); result.put("entries", array(method(reference()))); }
             case 53 -> { result.put("slot", 0); result.put("type", 0); result.put("param", array(new AcsAddress(0))); }
+            case 54 -> { result.put("statements", array(new AcsIntegerElement(1), array())); result.put("v", 2); }
             default -> throw new AssertionError("Missing specimen for " + opcode);
         }
         return result;
@@ -117,12 +118,12 @@ class ExecShapeTest {
     }
 
     @Test void everyWireOpcodeAgreesWithTheCodecAtItsExactBoundary() {
-        for (int opcode = 0; opcode <= 53; opcode++) {
+        for (int opcode = 0; opcode <= 57; opcode++) {
             final int code = opcode;
             assertDoesNotThrow(() -> ExecOpcodes.name(code));
             boundary(specimen(opcode), "opcode " + opcode);
         }
-        assertThrows(IllegalArgumentException.class, () -> ExecOpcodes.name(54));
+        assertThrows(IllegalArgumentException.class, () -> ExecOpcodes.name(58));
     }
 
     @Test void emptyListsAndOptionalFieldsStillCountTheirEncodedRecords() {

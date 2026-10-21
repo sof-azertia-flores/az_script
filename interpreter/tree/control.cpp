@@ -41,6 +41,16 @@ V complex_expression::execute(E env) {
     auto scope=std::make_shared<environment>(env->ownership_arena(),env,ownership::ScopeId{},env->frame);scope->script=env->script;
     return with_cleanup(scope,[&]{at_location location(scope,this->location);return execute_body(scope);});
 }
+// Each statement's temporaries end with it, as in a block, but no scope is
+// created; the value is part of the enclosing statement.
+V sequence_expression::execute(E env) {
+    tick(env);
+    for(auto& e:statements) {
+        at_location location(env,e->location);
+        statement_scope(env,[&]{return run(e,env);});
+    }
+    return run(value,env);
+}
 namespace {
 // Temporaries of a condition end once its truth value is known.
 bool condition(const std::shared_ptr<expression>& test,const E& env) {

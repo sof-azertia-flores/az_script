@@ -208,7 +208,8 @@ class Generator {
         b.CreateRet(b.CreateLoad(i32,site));
     }
     // Operations inlined for two ints, as value_ops computes them.
-    static bool fast_binary(std::uint32_t operation){return operation<=10;}  // add .. less_equal
+    // add .. less_equal, and the wrapping add, subtract and multiply.
+    static bool fast_binary(std::uint32_t operation){return operation<=10||(operation>=17&&operation<=19);}
     void binary(const azjit_op& op,std::uint32_t index) {
         const auto next=index+1;
         auto* left_tag=load_tag(op.b);auto* right_tag=load_tag(op.c);
@@ -231,6 +232,9 @@ class Generator {
                 return b.CreateExtractValue(pair,0);
             };
             switch(op.tag) {
+            case 17:result=b.CreateAdd(x,y);break;
+            case 18:result=b.CreateSub(x,y);break;
+            case 19:result=b.CreateMul(x,y);break;
             case 0:result=checked(Intrinsic::sadd_with_overflow);break;
             case 1:result=checked(Intrinsic::ssub_with_overflow);break;
             case 2:result=checked(Intrinsic::smul_with_overflow);break;

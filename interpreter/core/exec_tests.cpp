@@ -108,7 +108,7 @@ void built_by_tree(const B& body) {
 void all_opcodes() {
     const auto one=constant(1),two=constant(2),pointer=address_constant(1);
     const auto var=expression(3,{integer(0)}),empty=expression(1,{B{}}),context=fixed();
-    std::vector<B> inputs(54);
+    std::vector<B> inputs(58);
     inputs[0]=one;inputs[1]=expression(1,{stack({one,two})});inputs[2]=call(0x12340001,stack({one}));
     inputs[3]=var;inputs[4]=expression(4,{integer(0),integer(INT_VALUE),B{1},one});
     inputs[5]=expression(5,{integer(-1),one});inputs[6]=expression(6,{var,one});
@@ -130,9 +130,11 @@ void all_opcodes() {
     inputs[51]=expression(51,{pointer,fixed(ADDRESS_VALUE,2),stack({integer(INT_VALUE)})});
     inputs[52]=expression(52,{pointer,stack({stack({integer(0x12340003),stack({context})})})});
     inputs[53]=expression(53,{integer(2),integer(ADDRESS_VALUE),stack({pointer,one})});
-    for(int opcode=0;opcode<54;++opcode) {
+    inputs[54]=expression(54,{stack({expression(5,{integer(0),one}),expression(1,{stack({inputs[4]})})}),var});
+    for(int op=55;op<=57;++op)inputs[op]=expression(op,{one,two});
+    for(int opcode=0;opcode<58;++opcode) {
         built_by_tree(inputs[opcode]);
-        auto parsed=read_body(inputs[opcode]);check(parsed->opcode==opcode,"every v10 opcode decodes");
+        auto parsed=read_body(inputs[opcode]);check(parsed->opcode==opcode,"every opcode decodes");
         check(parsed->node==0&&parsed->location==0,"root node numbering starts at zero");
         // Traversal and relocation must work for every record, including ones
         // containing only contexts and no ordinary expression operands.
@@ -156,6 +158,30 @@ void all_opcodes() {
     check(read_body(expression(27,{one,empty,B{0}}))->children.size()==2,"absent else");
     check(!read_body(expression(10,{pointer,B{0},B{0},B{}}))->destructor_id,"absent destructor");
     check(read_body(expression(52,{pointer,B{}}))->methods.empty(),"empty method phase retained");
+    check(read_body(inputs[54])->children.size()==3,"sequence statements precede its value");
+    check(read_body(expression(54,{B{},one}))->children.size()==1,"sequence without statements");
+}
+// A sequence shares the enclosing scope, so it cannot declare there, leave a
+// loop it does not contain, return or own objects.
+void sequence_rules() {
+    const auto one=constant(1),var=expression(3,{integer(0)}),empty=expression(1,{B{}});
+    const auto define=expression(4,{integer(0),integer(INT_VALUE),B{1},one});
+    const auto loop=[&](const B& body){return expression(28,{one,expression(1,{stack({body})})});};
+    const auto sequence=[&](const B& statement){return expression(54,{stack({statement}),var});};
+    read_body(sequence(expression(1,{stack({define})})));
+    read_body(sequence(loop(expression(29))));read_body(sequence(loop(expression(30))));
+    rejects([&]{read_body(expression(28,{one,expression(1,{stack({sequence(expression(29))})})}));},
+        "break leaving a sequence rejected even inside a loop","A sequence cannot break or continue a loop outside it");
+    rejects([&]{read_body(sequence(define));},"sequence-level declaration rejected",
+        "A sequence cannot declare a variable outside a nested block");
+    rejects([&]{read_body(expression(54,{B{},define}));},"declaring value rejected",
+        "A sequence cannot declare a variable outside a nested block");
+    rejects([&]{read_body(sequence(expression(28,{expression(29),empty})));},"break in a loop condition rejected",
+        "A sequence cannot break or continue a loop outside it");
+    rejects([&]{read_body(sequence(expression(7,{B{1},one})));},"return rejected","A sequence cannot return");
+    rejects([&]{read_body(sequence(expression(1,{stack({expression(32,{integer(1)})})})));},"object allocation rejected",
+        "A sequence cannot own, release or clean up objects");
+    rejects([&]{read_body(expression(54,{B{}}));},"missing value rejected");
 }
 
 void constants_and_locations() {
@@ -182,7 +208,7 @@ void constants_and_locations() {
     rejects([&]{read_body(constant(1),std::vector<std::uint32_t>{0,0});},"duplicate debug index rejected",
         "Exec debug location nodes must strictly increase");
     rejects([&]{read_body(B{1,2,3});},"truncated buffer rejected without reading past it","Missing or truncated exec field");
-    rejects([&]{read_body(expression(54));},"unknown opcode rejected","Unknown exec opcode: 54");
+    rejects([&]{read_body(expression(58));},"unknown opcode rejected","Unknown exec opcode: 58");
     rejects([&]{read_body(expression(3,{integer(0),integer(0)}));},"extra fields rejected","Unexpected extra exec fields");
 }
 
@@ -368,7 +394,7 @@ void lowered_metadata() {
 
 int main() {
     try {
-        all_opcodes();constants_and_locations();reference_binding();module_sources();rejected_modules();lowered_metadata();
+        all_opcodes();sequence_rules();constants_and_locations();reference_binding();module_sources();rejected_modules();lowered_metadata();
         std::cout<<"Exec model checks passed: "<<checks<<"\n";return 0;
     } catch(const std::exception& error) {std::cerr<<error.what()<<'\n';return 1;}
 }

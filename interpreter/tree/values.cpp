@@ -44,6 +44,12 @@ V bitwise_expression::execute(E env) {
     auto a=run(left,env)->deepCopy();auto b=run(right,env);
     return bitwise(opcode,a,b);
 }
+V wrapping_expression::execute(E env) {
+    tick(env);
+    auto a=run(left,env)->deepCopy();auto b=run(right,env);
+    const auto operation=static_cast<int>(BinaryOperation::wrapping_add)+opcode-55;
+    return wrap(value_ops::binary(static_cast<BinaryOperation>(operation),value_of(a),value_of(b)));
+}
 V extra_expression::execute(E env) {
     tick(env);
     auto x=run(a,env)->deepCopy();

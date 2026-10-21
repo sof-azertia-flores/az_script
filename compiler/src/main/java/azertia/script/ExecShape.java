@@ -176,7 +176,12 @@ final class ExecShape {
                 direct(children, node, "v", Role.EAGER_VALUE); optionalContexts(children, node, "contexts"); floor = 1;
             }
             case 11, 25, 26, 33 -> { schema(node, "t c v", ""); direct(children, node, "v", Role.EAGER_VALUE); }
-            case 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 43, 44, 45, 46, 47, 48 -> {
+            case 54 -> {
+                schema(node, "t c statements v", "");
+                list(children, node.mmp.get("statements"), "statements", 2, Role.BLOCK);
+                direct(children, node, "v", Role.EAGER_VALUE);
+            }
+            case 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 43, 44, 45, 46, 47, 48, 55, 56, 57 -> {
                 schema(node, "t c v1 v2", "");
                 direct(children, node, "v1", Role.EAGER_VALUE); direct(children, node, "v2", Role.EAGER_VALUE);
             }

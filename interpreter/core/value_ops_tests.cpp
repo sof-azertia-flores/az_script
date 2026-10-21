@@ -131,6 +131,18 @@ void conversion_locale() {
     rejects<std::runtime_error>([]{convert(Value("1,5"),DOUBLE_VALUE);},"Cannot convert string \"1,5\" to double: invalid decimal number");
     check(host_locale==std::setlocale(LC_NUMERIC,nullptr),"numeric parsing preserves the host locale");
 }
+void wrapping() {
+    const int max=std::numeric_limits<int>::max(),min=std::numeric_limits<int>::min();
+    check(binary(Op::wrapping_add,Value(max),Value(1)).get<int>()==min,"wrapping add wraps past the maximum");
+    check(binary(Op::wrapping_subtract,Value(min),Value(1)).get<int>()==max,"wrapping subtract wraps past the minimum");
+    check(binary(Op::wrapping_multiply,Value(65536),Value(65536)).get<int>()==0,"wrapping multiply keeps the low 32 bits");
+    check(binary(Op::wrapping_multiply,Value(-3),Value(7)).get<int>()==-21,"wrapping multiply is signed in range");
+    // Other operands are those of add, subtract and multiply, with their errors.
+    check(binary(Op::wrapping_add,Value(1.5f),Value(1)).get<float>()==2.5f,"wrapping add of a float adds");
+    check(binary(Op::wrapping_add,Value("a"),Value(1)).get<std::string>()=="a1","wrapping add of a string concatenates");
+    rejects<std::overflow_error>([]{binary(Op::wrapping_add,Value(address{std::numeric_limits<std::uint64_t>::max()}),Value(1));},"Address overflow");
+    rejects<std::runtime_error>([]{binary(Op::wrapping_multiply,Value(true),Value(1));},"Unsupported operands for multiply");
+}
 void no_scalar_allocations() {
     Value value(0),one(1);allocations=0;counting=true;
     for(int i=0;i<100000;++i) {
@@ -148,7 +160,7 @@ void no_scalar_allocations() {
 }
 int main() {
     try {
-        numeric_operations();address_and_bits();text_and_conversion();type_errors();conversion_locale();no_scalar_allocations();
+        numeric_operations();address_and_bits();text_and_conversion();type_errors();conversion_locale();wrapping();no_scalar_allocations();
         std::cout<<"Value operations checks="<<checks<<'\n';return 0;
     }catch(const std::exception& error) {
         counting=false;std::cerr<<"Value operations failed: "<<error.what()<<'\n';return 1;

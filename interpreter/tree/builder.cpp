@@ -101,6 +101,14 @@ public:
             auto value=child(0);auto spec=context(*source.contexts[0]);
             result=std::make_shared<check_object_expression>(std::move(value),std::move(spec),source.slot_types);break;
         }
+        case 54: {
+            auto statements=expressions(source);auto value=std::move(statements.back());statements.pop_back();
+            result=std::make_shared<sequence_expression>(std::move(statements),std::move(value));break;
+        }
+        case 55:case 56:case 57: {
+            auto left=child(0);auto right=child(1);
+            result=std::make_shared<wrapping_expression>(opcode,std::move(left),std::move(right));break;
+        }
         case 50: {
             auto condition=child(0);auto when_true=child(1);auto when_false=child(2);
             result=std::make_shared<select_expression>(std::move(condition),std::move(when_true),std::move(when_false));break;

@@ -205,6 +205,22 @@ bool member_access(const expression& node) {
 bool storage_target(const expression& node) {
     return node.opcode==3||(node.opcode==2&&node.immediate==ids::id(ids::builtin::mem_get));
 }
+// A sequence (exec v11) runs statements in the enclosing scope and then
+// yields its value. It may not declare outside a nested block, leave a loop
+// it does not contain, return or own objects: none of these could keep the
+// meaning they have in a block.
+void check_sequence_part(const expression& node,bool loop,bool block) {
+    switch(node.opcode) {
+    case 4:if(!block)throw std::invalid_argument("A sequence cannot declare a variable outside a nested block");break;
+    case 29:case 30:if(!loop)throw std::invalid_argument("A sequence cannot break or continue a loop outside it");break;
+    case 7:case 8:throw std::invalid_argument("A sequence cannot return");
+    case 10:case 11:case 31:case 32:case 34:case 35:case 40:case 52:
+        throw std::invalid_argument("A sequence cannot own, release or clean up objects");
+    default:break;
+    }
+    for(std::size_t i=0;i<node.children.size();++i)
+        check_sequence_part(*node.children[i],loop||(node.opcode==28&&i==1),block||node.opcode==1);
+}
 Expression read_expression(raw_view view,const function_layout& layout,std::size_t logical_depth) {
     auto node=std::make_shared<expression>();
     if(auto* numbering=layout.numbering) {
@@ -309,6 +325,11 @@ Expression read_expression(raw_view view,const function_layout& layout,std::size
         break;
     }
     case 50:child();child();child();break;
+    case 54:
+        children(logical_depth+1);child();
+        for(const auto& part:node->children)check_sequence_part(*part,false,false);
+        break;
+    case 55:case 56:case 57:child();child();break;
     case 7:case 8:if(opcode==8||fields.boolean())child();break;
     case 9: {
         child();const int offset=fields.integer();

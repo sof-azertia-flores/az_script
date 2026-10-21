@@ -97,6 +97,14 @@ const char* operation_name(BinaryOperation operation) {
 }
 }
 Value binary(BinaryOperation operation,const Value& a,const Value& b) {
+    if(operation>=BinaryOperation::wrapping_add&&operation<=BinaryOperation::wrapping_multiply) {
+        if(a.type_tag()==INT_VALUE&&b.type_tag()==INT_VALUE) {
+            const auto x=std::bit_cast<std::uint32_t>(a.get<int>()),y=std::bit_cast<std::uint32_t>(b.get<int>());
+            const auto result=operation==BinaryOperation::wrapping_add?x+y:operation==BinaryOperation::wrapping_subtract?x-y:x*y;
+            return Value(std::bit_cast<int>(result));
+        }
+        operation=static_cast<BinaryOperation>(static_cast<std::uint32_t>(operation)-static_cast<std::uint32_t>(BinaryOperation::wrapping_add));
+    }
     if(operation>=BinaryOperation::bit_and&&operation<=BinaryOperation::unsigned_shift_right)
         return bitwise(43+static_cast<int>(operation)-static_cast<int>(BinaryOperation::bit_and),a,b);
     const std::string_view op=operation_name(operation);

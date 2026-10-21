@@ -126,7 +126,7 @@ class Lowerer {
     Register expression(const std::shared_ptr<const exec::expression>& source,std::size_t depth,bool root=false) {
         if(!source||depth>=128)bad("null, cyclic or excessively nested expression");
         const auto& node=*source;
-        if(node.opcode<0||node.opcode>53)bad("unsupported wire opcode "+std::to_string(node.opcode));
+        if(node.opcode<0||node.opcode>57)bad("unsupported wire opcode "+std::to_string(node.opcode));
         if(next_node==no_index||node.node!=next_node++)bad("expression nodes are not in wire preorder");
         const bool has_contexts=node.opcode==2||node.opcode==10||(node.opcode>=36&&node.opcode<=40)||node.opcode==42||node.opcode==51;
         if((!has_contexts&&!node.contexts.empty())||(node.opcode!=52&&!node.methods.empty())||
@@ -206,6 +206,22 @@ class Lowerer {
             const auto right=child(node,1,depth);
             const auto op=node.opcode<=22?node.opcode-12:node.opcode-43+11;
             emit(Opcode::binary,result,left,right,static_cast<std::uint32_t>(op));break;
+        }
+        case 55:case 56:case 57: {
+            children(node,2,2);const auto left=child(node,0,depth);emit(Opcode::snapshot,left,left);
+            const auto right=child(node,1,depth);
+            const auto op=static_cast<std::uint32_t>(BinaryOperation::wrapping_add)+static_cast<std::uint32_t>(node.opcode-55);
+            emit(Opcode::binary,result,left,right,op);break;
+        }
+        case 54: {
+            // The statements of a block, without its scope, then the value.
+            children(node,1,max_slots);
+            for(std::size_t i=0;i+1<node.children.size();++i) {
+                site.location=child_location(node,i);emit(Opcode::statement_enter);site=parent;
+                child(node,i,depth);site.location=child_location(node,i);emit(Opcode::statement_leave);site=parent;
+                next_register=result+1;
+            }
+            copy(result,child(node,node.children.size()-1,depth));break;
         }
         case 23:case 24: {
             children(node,2,2);const auto left=child(node,0,depth);

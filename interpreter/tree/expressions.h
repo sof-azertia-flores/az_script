@@ -118,6 +118,24 @@ public:
         :opcode(opcode),left(std::move(left)),right(std::move(right)) {}
     V execute(E env) override;
 };
+// exec v11: the wrapping int32 add, subtract and multiply (wire 55-57).
+class wrapping_expression final:public expression {
+    int opcode;
+    std::shared_ptr<expression> left,right;
+public:
+    wrapping_expression(int opcode,std::shared_ptr<expression> left,std::shared_ptr<expression> right)
+        :opcode(opcode),left(std::move(left)),right(std::move(right)) {}
+    V execute(E env) override;
+};
+// exec v11: statements run in the enclosing scope, then the value (wire 54).
+class sequence_expression final:public expression {
+    std::vector<std::shared_ptr<expression>> statements;
+    std::shared_ptr<expression> value;
+public:
+    sequence_expression(std::vector<std::shared_ptr<expression>> statements,std::shared_ptr<expression> value)
+        :statements(std::move(statements)),value(std::move(value)) {}
+    V execute(E env) override;
+};
 class extra_expression final:public expression {
     std::string op;
     std::shared_ptr<expression> a,b;

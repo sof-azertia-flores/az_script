@@ -24,7 +24,8 @@ OP_NAMES = {3: 'v', 4: 'vd', 5: 'vs', 6: 'm', 7: 'r', 8: 'ro', 9: 'oa',
             32: 'new_block', 33: 'block_address', 34: 'mv', 35: 'drop',
             36: 'context_abi', 37: 'context_default', 38: 'return_typed', 39: 'check_type',
             40: 'buffer_new', 41: 'buffer_op', 42: 'value_compare',
-            43: 'bit_and', 44: 'bit_or', 45: 'bit_xor', 46: 'shl', 47: 'shr', 48: 'ushr', 49: 'convert', 50: 'select', 51: 'check_object', 52: 'set_methods', 53: 'call_virtual'}
+            43: 'bit_and', 44: 'bit_or', 45: 'bit_xor', 46: 'shl', 47: 'shr', 48: 'ushr', 49: 'convert', 50: 'select', 51: 'check_object', 52: 'set_methods', 53: 'call_virtual',
+            54: 'seq', 55: 'wrap_add', 56: 'wrap_minus', 57: 'wrap_multiply'}
 EXEC_VERSION = 10
 
 
@@ -232,7 +233,7 @@ def encode_compact_expression(value):
             fields.append(child('val'))
     elif opcode == 5:
         fields = [integer(value['v']), child('val')]
-    elif opcode == 6 or 12 <= opcode <= 24 or 43 <= opcode <= 48:
+    elif opcode == 6 or 12 <= opcode <= 24 or 43 <= opcode <= 48 or 55 <= opcode <= 57:
         fields = [child('v1'), child('v2')]
     elif opcode == 7:
         fields = [bytes(['r' in value])] + ([child('r')] if 'r' in value else [])
@@ -280,6 +281,8 @@ def encode_compact_expression(value):
         fields = [child('v'), stack(*entries)]
     elif opcode == 53:
         fields = [integer(value['slot']), integer(value['type']), stack(*(encode_compact_expression(arg) for arg in value['param']))]
+    elif opcode == 54:
+        fields = [stack(*(encode_compact_expression(item) for item in value['statements'])), child('v')]
     else:
         assert opcode in (29, 30)
         fields = []
@@ -421,7 +424,7 @@ class WireReader:
         elif opcode == 5:
             assert len(fields) == 2
             result.update(v=int_value(fields[0]), val=self.expression(fields[1]))
-        elif opcode == 6 or 12 <= opcode <= 24 or 43 <= opcode <= 48:
+        elif opcode == 6 or 12 <= opcode <= 24 or 43 <= opcode <= 48 or 55 <= opcode <= 57:
             assert len(fields) == 2
             result.update(v1=self.expression(fields[0]), v2=self.expression(fields[1]))
         elif opcode == 7:
@@ -512,6 +515,9 @@ class WireReader:
             slot, kind = int_value(fields[0]), int_value(fields[1])
             assert slot >= 0 and 0 <= kind <= 8
             result.update(slot=slot, type=kind, param=[self.expression(arg) for arg in frames(fields[2])])
+        elif opcode == 54:
+            assert len(fields) == 2
+            result.update(statements=[self.expression(item) for item in frames(fields[0])], v=self.expression(fields[1]))
         else:
             assert opcode in (29, 30) and not fields
         return result
@@ -919,6 +925,52 @@ def main():
             body = returning(expression(50, constant(condition), constant(2), constant(3)))
             execute_wire('select-condition-' + str(index), module([function(body)]), invalid=True,
                          error='Condition must be boolean')
+
+        # exec v11 sequences run their statements in the enclosing scope and
+        # yield the value; their statement temporaries end per statement.
+        local = expression(3, integer(0))
+        declare = expression(4, integer(0), integer(0), b'\1', constant(1))
+        printed = lambda text: expression(2, integer(0x0abd0000), stack(constant(text)), stack())
+        loop = expression(28, expression(18, local, constant(5)),
+                          block(expression(5, integer(0), expression(12, local, constant(1))),
+                                expression(27, expression(19, local, constant(3)), block(expression(29)), b'\0')))
+        nested_declaration = block(expression(4, integer(1), integer(0), b'\1', constant(40)),
+                                   expression(5, integer(0), expression(12, local, expression(3, integer(1)))))
+        for name, statements, value, expected in [
+                ('order', [printed('a'), expression(5, integer(0), constant(41))], expression(12, local, constant(1)), 'a\n42\n'),
+                ('empty', [], constant(7), '7\n'),
+                ('loop', [loop], local, '3\n'),
+                ('nested-block', [nested_declaration], local, '41\n'),
+                ('nested', [expression(5, integer(0), expression(54, stack(printed('b')), constant(9)))],
+                 expression(13, local, constant(2)), 'b\n7\n')]:
+            sequence = expression(54, stack(*statements), value)
+            body = block(declare, returning(expression(12, sequence, constant(0))))
+            fields = module([function(body, locals_count=2)])
+            payload = frame(stack(*fields))
+            assert encode_compact_module(WireReader().read(payload)) == payload, ('sequence independent roundtrip', name)
+            execute_wire('sequence-' + name, fields, expected=expected)
+        for name, statement, error in [
+                ('declaration', declare, 'declare a variable'),
+                ('break', expression(29), 'break or continue'),
+                ('return', returning(constant(1)), 'cannot return'),
+                ('new-block', block(expression(32, integer(1))), 'own, release or clean up')]:
+            body = block(declare, expression(28, constant(True), block(returning(expression(54, stack(statement), local)))))
+            execute_wire('sequence-reject-' + name, module([function(body, locals_count=1)]), invalid=True, error=error)
+        # Wrapping arithmetic wraps int32 and otherwise behaves as the checked operator.
+        for opcode, left, right, kind, expected in [
+                (55, 2147483647, 1, 0, '-2147483648'), (56, -2147483648, 1, 0, '2147483647'),
+                (57, 65536, 65536, 0, '0'), (57, -2147483648, -1, 0, '-2147483648'), (55, 2, 3, 0, '5'),
+                (55, 'a', 'b', 1, 'ab'), (57, f64(1.5), f64(2), 3, '3')]:
+            body = returning(expression(opcode, constant(left), constant(right)))
+            fields = module([function(body, return_type=kind)])
+            payload = frame(stack(*fields))
+            assert encode_compact_module(WireReader().read(payload)) == payload, ('wrapping independent roundtrip', opcode)
+            execute_wire(f'wrapping-{opcode}-{checks}', fields, expected=expected + '\n')
+        for opcode, left, right, kind, error in [(55, f32(3e38), f32(3e38), 2, 'Float overflow'), (56, 'a', 'b', 1, ''),
+                                                 (57, True, 1, 0, '')]:
+            body = returning(expression(opcode, constant(left), constant(right)))
+            execute_wire(f'wrapping-error-{opcode}-{checks}', module([function(body, return_type=kind)]), invalid=True,
+                         error=error or None)
 
         # Builtins retain the ordinary CALL wire record and strict UTF-8
         # constants, including NUL and a supplementary Unicode scalar.
