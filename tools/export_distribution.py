@@ -80,7 +80,8 @@ def check_destination(raw, force):
 def copy_assets(package):
     (package / 'docs').mkdir()
     (package / 'docs/compiler-optimization').mkdir()
-    shutil.copy2(ROOT / 'docs/compiler-optimization/O2.md', package / 'docs/compiler-optimization/O2.md')
+    for name in ('O2.md', 'O2-validation.json', 'O2-performance.json', 'JIT-93b5dd0-validation.md'):
+        shutil.copy2(ROOT / 'docs/compiler-optimization' / name, package / 'docs/compiler-optimization' / name)
     for name in ('USAGE.md', 'QUICKSTART.md', 'USAGE.en.md', 'QUICKSTART.en.md'):
         shutil.copy2(TEMPLATES / name, package / 'docs' / name)
     for name in ('EXEC_FORMAT.md', 'HINT_LINKING.md', 'EXTERN_LIBRARY.md', 'RUNTIME_ABI.md',
