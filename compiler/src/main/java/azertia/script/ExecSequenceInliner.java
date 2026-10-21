@@ -24,7 +24,7 @@ final class ExecSequenceInliner {
     /** A lifted callee: returns only at the tail of each path. */
     private record Candidate(AcsObject function, AcsArray body, ExecScalarAnalysis analysis, int params,
                              int returnType, boolean simpleTail, Set<Integer> writtenParams,
-                             Map<Integer,Integer> hoisted, Map<Integer,Integer> scoped, int nodes, boolean total) {}
+                             Map<Integer,Integer> hoisted, Map<Integer,Integer> scoped, int nodes, boolean total, int display) {}
     private record Owned(int slot, int type, boolean hoisted) {}
     private record Context(ExecScalarAnalysis analysis, Map<Integer,Integer> rename,
                            Map<Integer,AcsElement> substitutes, int depth, int site) {}
@@ -42,9 +42,20 @@ final class ExecSequenceInliner {
         this.candidates = candidates; this.positions = positions; this.sites = sites; this.originals = originals;
     }
 
+    /** A method whose receiver is used only by leading object_address checks. */
+    private record Method(Candidate body, List<Integer> checks) {}
+    private Map<Integer,Method> methods = Map.of();
+    private Map<Integer,Integer> slotTargets = Map.of();
+    private Map<Integer,List<Integer>> factoryTables = Map.of();
+
     /** originals maps O3 specializations to the functions their frames show. */
     static void optimize(AcsArray functions, Map<AcsElement,int[]> positions, ExecInlineSites sites, int abdLimit,
                          Map<Integer,Integer> originals) {
+        optimize(functions, positions, sites, abdLimit, originals, true, false);
+    }
+    /** inline expands calls; devirtualize gives virtual calls a guarded inlined target (O3 objects). */
+    static void optimize(AcsArray functions, Map<AcsElement,int[]> positions, ExecInlineSites sites, int abdLimit,
+                         Map<Integer,Integer> originals, boolean inline, boolean devirtualize) {
         Map<Integer,Integer> returns = new HashMap<>();
         for (var item : functions.acsa) {
             var function = (AcsObject)item; returns.put(function.getAsInt("id"),function.getAsInt("return-type"));
@@ -55,14 +66,24 @@ final class ExecSequenceInliner {
         Map<Integer,Candidate> candidates = new HashMap<>();
         for (var item : functions.acsa) {
             var function = (AcsObject)item;
-            if (!safe.contains(function.getAsInt("id"))) continue;
+            if (!inline || !safe.contains(function.getAsInt("id"))) continue;
             Candidate candidate = candidate(function,returns,positions);
             if (candidate != null) candidates.put(function.getAsInt("id"),candidate);
         }
-        if (candidates.isEmpty()) return;
+        Map<Integer,Method> methods = new HashMap<>(); Map<Integer,Integer> slotTargets = new HashMap<>();
+        Map<Integer,List<Integer>> factoryTables = new HashMap<>();
+        if (devirtualize) {
+            for (var item : functions.acsa) {
+                Method method = method((AcsObject)item, returns, safe, positions);
+                if (method != null) methods.put(((AcsObject)item).getAsInt("id"), method);
+            }
+            targets(functions, slotTargets, factoryTables);
+        }
+        if (candidates.isEmpty() && methods.isEmpty()) return;
         for (var item : functions.acsa) {
             var function = (AcsObject)item;
             var pass = new ExecSequenceInliner(candidates,positions,sites,originals);
+            pass.methods = methods; pass.slotTargets = slotTargets; pass.factoryTables = factoryTables;
             AcsElement body = pass.caller(function,returns);
             if (body == null) continue;
             if (4L + ExecShape.height(body) > abdLimit) continue;
@@ -107,7 +128,87 @@ final class ExecSequenceInliner {
             if (slot >= params && !hoisted.containsKey(slot) && !scoped.containsKey(slot)) return null;
         boolean simpleTail = returnType != VOID_VALUE && returned.size() == 1 && body.acsa.get(body.acsa.size() - 1) == returned.get(0);
         var frozen = new AcsObject(); function.mmp.forEach(frozen.mmp::put);
-        return new Candidate(frozen,body,analysis,params,returnType,simpleTail,writtenParams,hoisted,scoped,count(body),total(analysis));
+        return new Candidate(frozen,body,analysis,params,returnType,simpleTail,writtenParams,hoisted,scoped,count(body),total(analysis),
+                function.getAsInt("id"));
+    }
+    /**
+     * A method candidate: a receiver (address) followed by closed scalar
+     * parameters, whose body checks the receiver with leading object_address
+     * statements and never uses it again. The rest is inlined as a function of
+     * the other parameters; the checks are kept.
+     */
+    private static Method method(AcsObject function, Map<Integer,Integer> returns, Set<Integer> safe, Map<AcsElement,int[]> positions) {
+        var types = function.getAsAcsArray("param-types").acsa;
+        if (types.isEmpty() || ((AcsIntegerElement)types.get(0)).s != ADDRESS_VALUE || function.getAsInt("hidden-count") != 0
+                || function.getAsInt("entry-kind") == 1 || !(function.mmp.get("script") instanceof AcsArray body)) return null;
+        List<Integer> checks = new ArrayList<>(); int first = 0;
+        for (; first < body.acsa.size(); first++) {
+            AcsElement item = body.acsa.get(first);
+            if (opcode(item) != OBJECT_ADDRESS || opcode(field(item,"v")) != VARIABLE || number(field(item,"v"),"v") != 0) break;
+            checks.add(number(item,"offset"));
+        }
+        var rest = new AcsArray();
+        for (int i = first; i < body.acsa.size(); i++) rest.acsa.add(ExecO2.copy(body.acsa.get(i), positions));
+        if (reads(rest).contains(0)) return null;
+        Set<Integer> written = new HashSet<>(); writes(rest, written);
+        if (written.contains(0) || !shift(rest)) return null;
+        var view = new AcsObject(); function.mmp.forEach(view.mmp::put);
+        var params = new AcsArray(); params.acsa.addAll(types.subList(1, types.size()));
+        view.mmp.put("param-types", params); view.put("param-count", types.size() - 1); view.mmp.put("script", rest);
+        if (!eligible(view, safe)) return null;
+        Candidate candidate = candidate(view, returns, positions);
+        return candidate == null ? null : new Method(candidate, checks);
+    }
+    /** Renumbers slots one down, past the dropped receiver; false if a global appears. */
+    private static boolean shift(AcsElement value) {
+        if (value instanceof AcsObject object && (expression(object, VARIABLE) || expression(object, DEFINE) || expression(object, SET))) {
+            if (object.getAsInt("v") < 1) return false;
+            object.put("v", object.getAsInt("v") - 1);
+        }
+        for (var child : ExecShape.children(value))
+            if (child.role() != ExecShape.Role.CONTEXT && child.role() != ExecShape.Role.METHOD_ENTRY && !shift(child.value())) return false;
+        return true;
+    }
+    /**
+     * Likely targets of virtual calls: a slot bound to one function by every
+     * method table of the module, and the table each factory's constructor
+     * installs last. A guard makes a wrong guess cost only time.
+     */
+    private static void targets(AcsArray functions, Map<Integer,Integer> slotTargets, Map<Integer,List<Integer>> factoryTables) {
+        Map<Integer,AcsObject> byId = new HashMap<>();
+        for (var item : functions.acsa) byId.put(((AcsObject)item).getAsInt("id"), (AcsObject)item);
+        Map<Integer,Set<Integer>> bound = new HashMap<>();
+        for (var item : functions.acsa) {
+            List<AcsElement> tables = new ArrayList<>(); collect(((AcsObject)item).mmp.get("script"), SET_METHODS, tables);
+            for (var table : tables) {
+                var entries = ((AcsObject)table).getAsAcsArray("entries").acsa;
+                for (int i = 0; i < entries.size(); i++) {
+                    var entry = (AcsObject)entries.get(i);
+                    bound.computeIfAbsent(i, ignored -> new HashSet<>())
+                            .add(entry.getAsAcsArray("contexts").acsa.isEmpty() ? entry.getAsInt("id") : -1);
+                }
+            }
+        }
+        bound.forEach((slot, ids) -> { if (ids.size() == 1 && !ids.contains(-1)) slotTargets.put(slot, ids.iterator().next()); });
+        for (var item : functions.acsa) {
+            var factory = (AcsObject)item;
+            if (!(factory.mmp.get("script") instanceof AcsArray body) || body.acsa.isEmpty() || opcode(body.acsa.get(0)) != DEFINE) continue;
+            int object = number(body.acsa.get(0), "v");
+            for (var statement : body.acsa) {
+                if (opcode(statement) != CALL) continue;
+                var arguments = ((AcsObject)statement).getAsAcsArray("param").acsa;
+                if (arguments.isEmpty() || opcode(arguments.get(0)) != VARIABLE || number(arguments.get(0),"v") != object) continue;
+                AcsObject constructor = byId.get(((AcsObject)statement).getAsInt("id"));
+                if (constructor == null) continue;
+                List<AcsElement> tables = new ArrayList<>(); collect(constructor.mmp.get("script"), SET_METHODS, tables);
+                tables.removeIf(table -> opcode(field(table,"v")) != VARIABLE || number(field(table,"v"),"v") != 0);
+                if (tables.isEmpty()) continue;
+                List<Integer> ids = new ArrayList<>();
+                for (var entry : ((AcsObject)tables.get(tables.size() - 1)).getAsAcsArray("entries").acsa)
+                    ids.add(((AcsObject)entry).getAsAcsArray("contexts").acsa.isEmpty() ? ((AcsObject)entry).getAsInt("id") : -1);
+                factoryTables.put(factory.getAsInt("id"), ids);
+            }
+        }
     }
     /** Whether no reachable statement of the callee can raise an error (the budget aside). */
     private static boolean total(ExecScalarAnalysis analysis) {
@@ -209,6 +310,7 @@ final class ExecSequenceInliner {
         if (originalNodes > MAX_CALLER_NODES || base > MAX_SLOTS || !analyzable(original)) return null;
         nodes = originalNodes; limit = Math.min(MAX_CALLER_NODES, Math.max(originalNodes * 3, originalNodes + 512));
         objects = holdsObjects(original, returns);
+        if (!methods.isEmpty()) factories(original);
         var context = new Context(new ExecScalarAnalysis(function,returns), null, Map.of(), 1, 0);
         var body = (AcsArray)clone(original, context);
         body = (AcsArray)statement(original, body, context);
@@ -289,7 +391,85 @@ final class ExecSequenceInliner {
             AcsElement sequence = inline(original, copy, context, facts, root);
             if (sequence != null) return sequence;
         }
+        if (opcode(original) == CALL_VIRTUAL && !methods.isEmpty()) {
+            AcsElement guarded = devirtualize(original, copy, context, facts);
+            if (guarded != null) return guarded;
+        }
         return copy;
+    }
+    /**
+     * select(guard_method(r, slot, T), the inlined T, the original call): the
+     * guard is false wherever the call would not enter T or would fail, so that
+     * path keeps every error. Arguments are pure, so neither path sees a table
+     * the other would not.
+     */
+    private AcsElement devirtualize(AcsElement original, AcsElement copy, Context context, Map<Integer,Value> facts) {
+        if (context.rename != null) return null;
+        var call = (AcsObject)original;
+        var arguments = call.getAsAcsArray("param").acsa;
+        if (arguments.isEmpty() || opcode(arguments.get(0)) != VARIABLE) return null;
+        int slot = call.getAsInt("slot"), receiver = number(arguments.get(0), "v");
+        Integer target = target(receiver, slot);
+        Method method = target == null ? null : methods.get(target);
+        if (method == null || target >>> 16 != namespace) return null;
+        Candidate callee = method.body;
+        int type = call.getAsInt("type");
+        if (type != ANY_VALUE && type != callee.returnType || callee.returnType == VOID_VALUE) return null;
+        if (objects && !callee.total || arguments.size() - 1 != callee.params) return null;
+        var types = callee.function.getAsAcsArray("param-types").acsa;
+        var copied = ((AcsObject)copy).getAsAcsArray("param").acsa;
+        for (int i = 1; i < arguments.size(); i++) {
+            if (!ExecO2.reusable(copied.get(i))) return null;
+            if (context.analysis.evaluate(arguments.get(i), facts).type() != ((AcsIntegerElement)types.get(i - 1)).s) return null;
+        }
+        if (nodes + 2 * callee.nodes + 4 * arguments.size() + 6 > limit) return null;
+        var plain = new Context(null, null, Map.of(), 0, 0);
+        List<AcsElement> rest = new ArrayList<>();
+        for (int i = 1; i < copied.size(); i++) rest.add(clone(copied.get(i), plain));
+        List<AcsElement> checks = new ArrayList<>();
+        for (int offset : method.checks) {
+            var check = new AcsObject(); check.put("t",0); check.put("c",OBJECT_ADDRESS);
+            check.mmp.put("v", clone(copied.get(0), plain)); check.put("offset", offset);
+            checks.add(ExecO2.locate(check, copy, positions));
+        }
+        var guard = new AcsObject(); guard.put("t",0); guard.put("c",GUARD_METHOD);
+        guard.mmp.put("v", clone(copied.get(0), plain)); guard.put("slot", slot); guard.put("id", target.intValue());
+        ExecO2.locate(guard, copy, positions);
+        var choice = new AcsObject(); choice.put("t",0); choice.put("c",SELECT);
+        choice.mmp.put("v", guard);
+        choice.mmp.put("then", build(callee, rest, copy, context, checks));
+        choice.mmp.put("else", copy);
+        // The original call stays on the other path.
+        nodes += count(copy) + count(guard) + 1;
+        return ExecO2.locate(choice, copy, positions);
+    }
+    /** The receiver's class from its factory when it is assigned once, else the slot's only binding. */
+    private Integer target(int receiver, int slot) {
+        if (receiver >= 0) {
+            Integer factory = singleFactory.get(receiver);
+            List<Integer> table = factory == null ? null : factoryTables.get(factory);
+            if (table != null && slot < table.size() && table.get(slot) >= 0) return table.get(slot);
+        }
+        return slotTargets.get(slot);
+    }
+    private final Map<Integer,Integer> singleFactory = new HashMap<>();
+    /** Locals stored exactly once, by a definition from a call: the call's function. */
+    private void factories(AcsElement body) {
+        Map<Integer,Integer> stores = new HashMap<>();
+        countStores(body, stores);
+        List<AcsElement> definitions = new ArrayList<>(); collect(body, DEFINE, definitions);
+        for (var definition : definitions) {
+            int slot = number(definition, "v");
+            AcsElement value = field(definition, "val");
+            if (stores.getOrDefault(slot, 0) == 1 && value != null && opcode(value) == CALL) singleFactory.put(slot, number(value, "id"));
+        }
+    }
+    private static void countStores(AcsElement value, Map<Integer,Integer> stores) {
+        int slot = written(value);
+        if (slot >= 0) stores.merge(slot, 1, Integer::sum);
+        if (opcode(value) == MOVE_OUT) stores.merge(number(value, "v"), 2, Integer::sum);
+        for (var child : ExecShape.children(value))
+            if (child.role() != ExecShape.Role.CONTEXT && child.role() != ExecShape.Role.METHOD_ENTRY) countStores(child.value(), stores);
     }
     private AcsElement inline(AcsElement original, AcsElement copy, Context context, Map<Integer,Value> facts, boolean root) {
         if (context.depth > MAX_DEPTH) return null;
@@ -305,14 +485,20 @@ final class ExecSequenceInliner {
         for (int i = 0; i < arguments.size(); i++)
             if (context.analysis.evaluate(arguments.get(i), facts).type() != ((AcsIntegerElement)types.get(i)).s) return null;
         if (nodes + callee.nodes + 2 * arguments.size() + 2 > limit) return null;
+        return build(callee, ((AcsObject)copy).getAsAcsArray("param").acsa, copy, context, List.of());
+    }
+    /**
+     * The sequence of callee at a call, from the call's (copied, expanded)
+     * arguments; checks run after the argument snapshots, before the body.
+     */
+    private AcsObject build(Candidate callee, List<AcsElement> copied, AcsElement copy, Context context, List<AcsElement> checks) {
         int before = nodes;
-
-        int id = callee.function.getAsInt("id");
+        var types = callee.function.getAsAcsArray("param-types").acsa;
+        int id = callee.display;
         int site = sites == null ? 0 : sites.add(originals.getOrDefault(id, id));
         List<Owned> slots = new ArrayList<>();
         Map<Integer,Integer> rename = new HashMap<>(); Map<Integer,AcsElement> substitutes = new HashMap<>();
         List<AcsElement> statements = new ArrayList<>();
-        var copied = ((AcsObject)copy).getAsAcsArray("param").acsa;
         for (int i = 0; i < copied.size(); i++) {
             AcsElement argument = copied.get(i); int op = opcode(argument);
             // A constant or local stands for an unwritten parameter: nothing in
@@ -322,6 +508,7 @@ final class ExecSequenceInliner {
             rename.put(i, slot);
             statements.add(set(slot, argument, copy));
         }
+        for (var check : checks) statements.add(clone(check, new Context(null, null, Map.of(), 0, site)));
         callee.hoisted.forEach((slot, type) -> rename.put(slot, virtual(slots, type, true)));
         callee.scoped.forEach((slot, type) -> rename.put(slot, virtual(slots, type, false)));
         int result = callee.simpleTail || callee.returnType == VOID_VALUE ? -1 : virtual(slots, callee.returnType, true);

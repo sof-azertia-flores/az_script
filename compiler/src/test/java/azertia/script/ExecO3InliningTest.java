@@ -103,6 +103,32 @@ class ExecO3InliningTest {
         var args = azertia.Main.parseCompileArguments(List.of("compile", "x.azs", "-O3", "--no-slot-compaction"));
         assertFalse(args.optimizationPasses().contains(SLOT_COMPACTION));
     }
+    @Test void virtualCallsGetAGuardedInlinedTargetAndKeepTheCall() throws Exception {
+        String source = "class B{int m;virtual int v(int n){return n%17+1;}}class C:B{override int v(int n){return n%17+3;}}"
+                + "int run(int n){B* b=new C();int t=0;for(int i=0;i<n;i++){t=t+b.v(i);}delete b;return t;}int main(){return run(40);}";
+        var program = ExecO2OptimizerTest.compile(source, Set.of(DEVIRTUALIZATION));
+        var run = program.getAsAcsArray("f").acsa.stream().map(AcsObject.class::cast)
+                .filter(f -> f.getAsAcsObject("debug").getAsString("name").equals("run")).findFirst().orElseThrow();
+        assertEquals(1, count(run, GUARD_METHOD));
+        assertEquals(1, count(run, CALL_VIRTUAL), "the failing path keeps the virtual call");
+        assertEquals(1, count(run, OBJECT_ADDRESS), "the method's receiver check stays");
+        var guard = (AcsObject) ((AcsObject) findSelect(run.mmp.get("script"))).mmp.get("v");
+        var target = program.getAsAcsArray("f").acsa.stream().map(AcsObject.class::cast)
+                .filter(f -> f.getAsAcsObject("debug").getAsString("name").equals("C::v")).findFirst().orElseThrow();
+        assertEquals(target.getAsInt("id"), guard.getAsInt("id"), "the factory's class decides the target");
+        assertDoesNotThrow(program::toValue);
+        var plain = ExecO2OptimizerTest.compile(source, Set.of());
+        assertEquals(0, count(function(plain, run.getAsInt("id")), GUARD_METHOD));
+    }
+    private static AcsElement findSelect(AcsElement value) {
+        if (ExecScalarAnalysis.opcode(value) == SELECT) return value;
+        for (var child : ExecShape.children(value)) {
+            if (child.role() == ExecShape.Role.CONTEXT || child.role() == ExecShape.Role.METHOD_ENTRY) continue;
+            AcsElement found = findSelect(child.value());
+            if (found != null) return found;
+        }
+        return null;
+    }
     @Test void plainCompilationHasTheSameInstructions() throws Exception {
         String source = "int f(int x){return x*3+1;}int main(){int t=0;for(int i=0;i<5;i++){t=t+f(i);}return t;}";
         var parser = new GeneraterJson.AzScript(); parser.execute(source);

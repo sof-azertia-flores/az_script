@@ -112,6 +112,17 @@ CASES = O1_CASES + (
      'int main(){int x=pick(true,3,4);boolean y=pick(false,true,false);int z=count(5,10)+count(true,3);return y?0:x+z;}', 51, '', None),
     ('o3-virtual-class-caller', 'class B{int m;virtual int v(int n){return n+1;}}class C:B{override int v(int n){return n+2;}}'
      'int f(int x){return x*2;}int main(){B* b=new C();int r=f(3)+b.v(4);delete b;return r;}', 12, '', None),
+    # O3 devirtualization: a guarded inlined target, the original call otherwise.
+    ('o3-devirtualize', 'class B{int m;virtual int v(int n){return n%17+1;}}class C:B{override int v(int n){return n%17+3;}}'
+     'int run(int n){B* b=new C();int t=0;for(int i=0;i<n;i++){t=t+b.v(i);}delete b;return t;}int main(){return run(40);}',
+     sum(i % 17 + 3 for i in range(40)), '', None),
+    ('o3-devirtualize-alternating', 'class B{int m;virtual int v(int n){return n+1;}}class C:B{override int v(int n){return n+3;}}'
+     'int run(int n){B* a=new B();B* c=new C();int t=0;for(int i=0;i<n;i++){B* p=c;if(i%2==0){p=a;}t=t+p.v(i);}delete a;delete c;return t;}'
+     'int main(){return run(10);}', sum(i + 1 if i % 2 == 0 else i + 3 for i in range(10)), '', None),
+    ('o3-devirtualize-freed', 'class B{int m;virtual int v(int n){return n+1;}}class C:B{override int v(int n){\n return 100/n;\n}}'
+     'int run(int n){\n B* b=new C();\n int t=b.v(n);\n delete b;\n return t+b.v(n);\n}\nint main(){return run(5);}', None, '', 'Virtual call'),
+    ('o3-devirtualize-error', 'class B{int m;virtual int v(int n){return n+1;}}class C:B{override int v(int n){\n return 100/n;\n}}'
+     'int run(int n){\n B* b=new C();\n int t=b.v(n);\n delete b;\n return t;\n}\nint main(){\n return run(0);\n}', None, '', 'Division by zero'),
     generated_flow_case(),
 )
 

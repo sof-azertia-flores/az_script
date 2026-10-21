@@ -30,6 +30,7 @@ class ExecPipelineTest {
         var aggressive=EnumSet.copyOf(Compiler.optimizationPasses(Compiler.Optimization.ADVANCED));
         aggressive.remove(Compiler.OptimizationPass.SCALAR_INLINING);aggressive.add(Compiler.OptimizationPass.SEQUENCE_INLINING);
         aggressive.add(Compiler.OptimizationPass.SLOT_COMPACTION);aggressive.add(Compiler.OptimizationPass.SPECIALIZATION);
+        aggressive.add(Compiler.OptimizationPass.DEVIRTUALIZATION);
         assertEquals(aggressive,Compiler.optimizationPasses(Compiler.Optimization.AGGRESSIVE));
         assertEquals(Compiler.Optimization.AGGRESSIVE,Main.parseCompileArguments(List.of("compile","x.azs","-O2","-O3")).optimization());
         assertEquals(Compiler.Optimization.ADVANCED,Main.parseCompileArguments(List.of("compile","x.azs","-O3","-O2")).optimization());
