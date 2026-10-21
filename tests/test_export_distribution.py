@@ -112,6 +112,18 @@ class DistributionOutputTests(unittest.TestCase):
         self.assertEqual(manifest['jniSnapshotVersion'], snapshot_reader,
                          'Keep the snapshot reader and writer versions consistent')
 
+    def test_manifest_records_the_jit_module_only_when_shipped(self):
+        arguments = SimpleNamespace(system_java=True, cmake_arg=[])
+        exporter.write_manifest(self.root, arguments, {}, {}, {})
+        self.assertIsNone(json.loads((self.root / 'manifest.json').read_text(encoding='utf-8'))['jit'])
+        module = self.root / exporter.JIT_MODULE
+        module.parent.mkdir(parents=True)
+        module.write_bytes(b'module')
+        exporter.write_manifest(self.root, arguments, {}, {}, {})
+        manifest = json.loads((self.root / 'manifest.json').read_text(encoding='utf-8'))
+        self.assertEqual(manifest['jit'], {'module': exporter.JIT_MODULE, 'llvmVersion': exporter.build_llvm.VERSION})
+        self.assertIn(exporter.JIT_MODULE, manifest['files'])
+
 
 class ExportDestinationTests(unittest.TestCase):
     def setUp(self):

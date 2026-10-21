@@ -3,6 +3,8 @@
 
 Requires Python 3.9+, CMake 3.20+, a C++20 compiler and JDK 17+ (with jlink
 unless --system-java is selected). Builds for the current OS and architecture.
+--jit also builds the pinned LLVM (tools/build_llvm.py, cached in build/deps)
+and ships the JIT module; without it the package has no JIT module.
 """
 import argparse
 from datetime import datetime, timezone
@@ -18,11 +20,13 @@ import sys
 import tempfile
 
 import build_and_test as build_support
+import build_llvm
 
 ROOT = Path(__file__).resolve().parents[1]
 TEMPLATES = ROOT / 'tools/distribution'
 FORMAT = 'AzScriptDistribution'
 EXE = '.exe' if os.name == 'nt' else ''
+JIT_MODULE = 'lib/libazscript-jit.dylib' if sys.platform == 'darwin' else 'lib/libazscript-jit.so'
 
 
 def run(command, **kwargs):
@@ -169,13 +173,17 @@ def build_package(package, work, args, jdk):
     launcher = work / 'launcher.jar'
     run([jdk / 'bin' / ('jar' + EXE), '--create', '--file', launcher, '-C', launcher_classes, '.'])
     native = work / 'native'
+    if args.jit:
+        run([sys.executable, ROOT / 'tools/build_llvm.py', *(['--offline'] if args.offline else [])])
     run(['cmake', '-S', ROOT, '-B', native, *args.cmake_arg,
-         '-DCMAKE_BUILD_TYPE=Release', '-DBUILD_TESTING=OFF',
+         '-DCMAKE_BUILD_TYPE=Release', '-DBUILD_TESTING=OFF', f'-DAZSCRIPT_JIT={"ON" if args.jit else "OFF"}',
          '-DAZSCRIPT_BUILD_JNI=ON', '-DAZSCRIPT_BUILD_EXAMPLES=OFF',
          '-DAZSCRIPT_SANITIZE=OFF', '-DCMAKE_INSTALL_BINDIR=bin',
          '-DCMAKE_INSTALL_LIBDIR=lib', '-DCMAKE_INSTALL_INCLUDEDIR=include'])
     run(['cmake', '--build', native, '--config', 'Release', '--parallel', args.jobs])
     run(['cmake', '--install', native, '--config', 'Release', '--prefix', package])
+    if (package / JIT_MODULE).is_file() != args.jit:
+        raise RuntimeError(f'The package {"lacks" if args.jit else "unexpectedly contains"} {JIT_MODULE}')
     (package / 'compiler/lib').mkdir(parents=True)
     for artifact in (launcher, compiler, data, gson):
         shutil.copy2(artifact, package / 'compiler/lib' / artifact.name)
@@ -248,6 +256,7 @@ def write_manifest(package, args, java_version, native_details, tests):
                  'buildVersion': java_version,
                  'bundledModules': [] if args.system_java else
                      ['java.base', 'java.sql', 'jdk.unsupported', 'jdk.compiler']},
+        'jit': {'module': JIT_MODULE, 'llvmVersion': build_llvm.VERSION} if (package / JIT_MODULE).is_file() else None,
         'cmakeArguments': args.cmake_arg,
         'validation': tests, 'files': files,
     }
@@ -289,12 +298,15 @@ def main():
     parser.add_argument('--offline', action='store_true', help='use cached, checksum-verified Gson only')
     parser.add_argument('--system-java', action='store_true', help='omit bundled runtime; destination needs Java 17+')
     parser.add_argument('--force', action='store_true', help='replace a previous AzScript export after validation')
+    parser.add_argument('--jit', action='store_true', help='build the pinned LLVM and ship the JIT module (not on Windows)')
     parser.add_argument('--jobs', type=int, default=min(os.cpu_count() or 2, 8))
     parser.add_argument('--cmake-arg', action='append', default=[],
                         help='extra native configuration, e.g. --cmake-arg=-DCMAKE_OSX_DEPLOYMENT_TARGET=13.0')
     args = parser.parse_args()
     if args.jobs < 1:
         parser.error('--jobs must be positive')
+    if args.jit and os.name == 'nt':
+        parser.error('--jit is not available on Windows; the VM runs without the JIT there')
     destination = check_destination(args.output, args.force)
     jdk, java_version = java_home(not args.system_java)
     os.environ['JAVA_HOME'] = str(jdk)

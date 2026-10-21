@@ -27,7 +27,7 @@ Tier::Tier(const vm::ExecutableProgram& program,const Config& config)
         // On runs without the tier when the module is missing; every
         // other mode that asks for it fails instead of testing nothing.
         if(!native_&&config.mode==Mode::on){config_.mode=Mode::off;unavailable_=error;++refusals_["module unavailable: "+error];}
-        else if(!native_)throw std::runtime_error("AZSCRIPT_JIT_BACKEND=llvm: "+error);
+        else if(!native_)throw std::runtime_error("The LLVM JIT backend is unavailable: "+error);
     }
     entry_bounds_.reserve(program.functions.size());
     // A probing frame consults the tier at its first instruction; compiling

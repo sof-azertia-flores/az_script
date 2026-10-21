@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <bit>
 #include <cstdint>
+#include <cstdlib>
 #include <fstream>
 #include <iostream>
 #include <iterator>
@@ -48,16 +49,28 @@ std::uint64_t step_limit(const std::string& value) {
         throw std::invalid_argument("Invalid step limit: "+value+" (expected a positive integer or unlimited)");
     return result;
 }
+// The JIT policy modes; eager, stress and probe remain AZSCRIPT_JIT test modes.
+std::string jit_mode(const std::string& value) {
+    const auto mode=value.substr(0,value.find(':'));
+    const auto threshold=value.size()>mode.size()?value.substr(mode.size()+1):std::string();
+    const bool counted=threshold.empty()||(threshold.size()<=19&&threshold.find_first_not_of("0123456789")==std::string::npos&&
+                                          threshold.find_first_not_of('0')!=std::string::npos);
+    if(mode=="off"?value!="off":(mode!="on"&&mode!="require")||!counted||value.size()==mode.size()+1)
+        throw std::invalid_argument("Invalid JIT mode: "+value+" (expected on, require or off; on:N and require:N set the threshold)");
+    return value;
+}
 }
 int main(int argc,char* argv[]) {
     std::shared_ptr<azertian::script> script;
     try {
-        if(argc<2){std::cerr<<"Usage: azscript-run script.exec.abd [function-id] [--insert library.exec.abd]... [--backend tree|vm] [--max-steps count|unlimited] [--max-call-depth N] [--max-stack-bytes N]\n";return 2;}
+        if(argc<2){std::cerr<<"Usage: azscript-run script.exec.abd [function-id] [--insert library.exec.abd]... [--backend tree|vm] [--max-steps count|unlimited] [--max-call-depth N] [--max-stack-bytes N] [--jit[=on|require|off]]\n";return 2;}
         std::optional<std::uint64_t> depth,stack;
         std::string source;std::vector<std::string> additions;int id=0x0fff0000;bool explicit_id=false;
         // The tree executor stays the default; the VM refuses unsupported programs
         // while preparing them and never falls back to the tree executor.
         std::string backend;std::optional<std::uint64_t> max_steps;
+        // --jit runs hot functions of the VM natively; it implies --vm.
+        std::optional<std::string> jit;
         const auto choose_steps=[&](const std::string& value) {
             const auto parsed=step_limit(value);
             if(max_steps&&*max_steps!=parsed)throw std::invalid_argument("Conflicting step limits: "+value);
@@ -68,9 +81,16 @@ int main(int argc,char* argv[]) {
             if(!backend.empty()&&backend!=value)throw std::invalid_argument("Conflicting backend options: "+backend+" and "+value);
             backend=value;
         };
+        const auto choose_jit=[&](const std::string& value) {
+            const auto mode=jit_mode(value);
+            if(jit&&*jit!=mode)throw std::invalid_argument("Conflicting JIT options: "+*jit+" and "+mode);
+            jit=mode;
+        };
         for(int i=1;i<argc;++i) {
             const std::string argument=argv[i];
-            if(argument=="--backend") {
+            if(argument=="--jit")choose_jit("on");
+            else if(argument.starts_with("--jit="))choose_jit(argument.substr(6));
+            else if(argument=="--backend") {
                 if(++i==argc)throw std::invalid_argument("--backend requires tree or vm");
                 choose_backend(argv[i]);
             } else if(argument.starts_with("--backend="))choose_backend(argument.substr(10));
@@ -93,6 +113,19 @@ int main(int argc,char* argv[]) {
             else throw std::invalid_argument("Unexpected interpreter argument: "+argument);
         }
         if(source.empty())throw std::invalid_argument("A primary script path is required");
+        if(jit&&*jit!="off") {
+            if(backend=="tree")throw std::invalid_argument("--jit runs on the VM backend and conflicts with --backend tree");
+            backend="vm";
+        }
+        // The VM session reads AZSCRIPT_JIT when it is created; the option
+        // takes precedence over the inherited environment.
+        if(jit) {
+#if defined(_WIN32)
+            _putenv_s("AZSCRIPT_JIT",jit->c_str());
+#else
+            setenv("AZSCRIPT_JIT",jit->c_str(),1);
+#endif
+        }
         azertian::load_standalone_trusted_keys();
         auto bytes=read_script(source);script=azertian::load_script(bytes.data(),bytes.size());
         if(max_steps)script->max_steps=*max_steps;

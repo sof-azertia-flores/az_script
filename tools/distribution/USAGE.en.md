@@ -64,6 +64,13 @@ The runner uses the classic tree interpreter by default. `--backend vm` (short f
 
 The VM uses a 128 MiB default workspace. A program it cannot run is rejected while it is prepared, with no fallback to the tree interpreter. Unknown values or conflicting options return a nonzero exit status.
 
+`--jit` (that is, `--jit=on`) enables the JIT tier on the VM: once a function's entries and loop back-edges reach a threshold (1000 by default), scalar functions run as native code, with results, errors, traces and remaining steps identical to the VM; functions that use objects, generics and similar features stay interpreted by the VM. `--jit` implies `--vm` and conflicts with `--tree`; `--jit=on:N` sets the threshold to N and `--jit=off` turns the tier off. The native code is compiled by `lib/libazscript-jit.so` (`.dylib` on macOS), which only packages exported with `--jit` contain; see the `jit` field of `manifest.json`. Without the module, `--jit` runs on the VM as usual, while `--jit=require` (or `require:N`) reports `The LLVM JIT backend is unavailable` and returns a nonzero exit status. Windows packages have no JIT.
+
+```sh
+./run.sh long-loop.exec.abd --jit --max-steps unlimited
+./run.sh long-loop.exec.abd --jit=require
+```
+
 By default each top-level entry (onload, the entry function, destructors) may execute at most 1,000,000 steps; exceeding it reports `Script execution step limit exceeded`. `--max-steps N` (or `--max-steps=N`) changes the limit to the positive decimal integer N, and `--max-steps unlimited` removes the practical limit. Both backends honor it:
 
 ```sh

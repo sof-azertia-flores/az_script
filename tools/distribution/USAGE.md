@@ -66,6 +66,13 @@ AST 包含 extern 优先的名称绑定；普通定义的独立 ID 由 body name
 
 VM 使用 128 MiB 默认工作区；不支持的程序在准备阶段报错，不会回退到树解释器。未知取值或相互冲突的选项返回非零退出码。
 
+`--jit`（即 `--jit=on`）在 VM 上启用 JIT 层：函数入口与循环回边次数达到阈值（默认 1000）后，标量函数编译为本机代码运行，结果、错误、调用栈和剩余步数与 VM 完全一致；使用对象、泛型等的函数仍由 VM 解释。`--jit` 隐含 `--vm`，与 `--tree` 冲突；`--jit=on:N` 把阈值改为 N，`--jit=off` 关闭。本机代码由 `lib/libazscript-jit.so`（macOS 为 `.dylib`）编译，只有以 `--jit` 导出的发行包含该模块，可查看 `manifest.json` 的 `jit` 字段；模块缺失时 `--jit` 照常以 VM 运行，`--jit=require`（或 `require:N`）则报告 `The LLVM JIT backend is unavailable` 并返回非零退出码。Windows 发行包不含 JIT。
+
+```sh
+./run.sh long-loop.exec.abd --jit --max-steps unlimited
+./run.sh long-loop.exec.abd --jit=require
+```
+
 默认每次顶层进入（onload、入口函数、析构等）最多执行 1,000,000 步，超出时报告 `Script execution step limit exceeded`。`--max-steps N`（或 `--max-steps=N`）把该上限改为十进制正整数 N，`--max-steps unlimited` 取消实际限制；两种后端均适用：
 
 ```sh

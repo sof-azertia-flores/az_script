@@ -190,3 +190,11 @@ callgrind（Release，n=512，eager+llvm 每调用指令数，相对第一轮）
 - 后端对齐：probe:11、eager、stress、on:2+interp、eager+llvm、stress+llvm、on:3+llvm 七种模式各 1,376/1,376 次调用逐字节一致。
 
 sanitizer（`--sanitize`，不构建 JIT 模块）：完整运行在合并头 `8c577c8` 上，除 stress 对齐因上述超时 1,359/1,360 外全部通过，其中包括 VM 对树（55,460 个进程）及 probe:7、eager、stress、on:2+interp 四种重放；改用并行包装器后重跑的 stress 与 on:2+interp 对齐各 1,376/1,376。此后的两项修复只改 LLVM 模块与原生规模上限（无模块时不生效），因此在 `c77020b` 上只重新构建 sanitizer 并运行 `ctest`（18/18），未再完整运行 sanitizer 语料（不含新增的 `flow-skips-declaration`）。
+
+## 发行包中的 JIT（2026-10-21）
+
+用户询问如何在发行包中启用 JIT，并选择“导出时以 `--jit` 显式包含”和“运行器增加选项”。此前发行包是否含模块取决于 `build/deps` 中是否恰好有固定版本 LLVM（CMake `AUTO`），既无文档也无验证；运行时只能设置环境变量。
+
+| 提交 | 内容 |
+| --- | --- |
+| `feat(distribution): ship the JIT with --jit and enable it with run --jit` | `azscript-run --jit[=on|require|off]`（`on:N`、`require:N` 设阈值），隐含 `--vm`，与 `--tree` 冲突，优先于继承的 `AZSCRIPT_JIT`；`require` 缺少模块时的错误改为 `The LLVM JIT backend is unavailable: …`。`export_distribution.py --jit` 构建固定版本 LLVM 并要求包内有模块，否则以 `AZSCRIPT_JIT=OFF` 构建；`manifest.json` 增加 `jit`；第三方说明增加 LLVM，附 `licenses/LLVM-LICENSE.txt`（原样取自已校验的源码包，`.gitattributes` 对许可证文本不做空白检查）。`test_distribution.py` 按包内是否有模块检查 `--jit`、`--jit=on:2`、`--jit=require` 及错误选项，并清除继承的 JIT 环境变量 |

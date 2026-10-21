@@ -10,3 +10,6 @@ gradlew text eol=lf
 # Serialized regression fixtures and Gradle bootstrap archives are binary.
 *.abd binary
 *.jar binary
+
+# Third-party license texts are kept byte for byte.
+tools/distribution/licenses/*.txt -whitespace

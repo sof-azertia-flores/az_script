@@ -50,7 +50,9 @@ def _clean_environment(package: Path) -> dict:
     environment = os.environ.copy()
     for name in ("CLASSPATH", "LD_LIBRARY_PATH", "LD_PRELOAD", "DYLD_LIBRARY_PATH",
                  "DYLD_FALLBACK_LIBRARY_PATH", "DYLD_INSERT_LIBRARIES", "JAVA_TOOL_OPTIONS",
-                 "JDK_JAVA_OPTIONS", "_JAVA_OPTIONS", "CMAKE_PREFIX_PATH", "AzScript_DIR"):
+                 "JDK_JAVA_OPTIONS", "_JAVA_OPTIONS", "CMAKE_PREFIX_PATH", "AzScript_DIR",
+                 "AZSCRIPT_JIT", "AZSCRIPT_JIT_BACKEND", "AZSCRIPT_JIT_MODULE", "AZSCRIPT_JIT_STATS",
+                 "AZSCRIPT_JIT_DUMP", "AZSCRIPT_EXPERIMENTAL_VM_BACKEND"):
         environment.pop(name, None)
     if WINDOWS:
         environment["PATH"] = str(package / "bin") + os.pathsep + environment.get("PATH", "")
@@ -405,6 +407,38 @@ def verify(package: Path, java: Optional[Path] = None) -> Dict[str, object]:
             failure = _run([runner, default_abd, *options], cwd, environment, succeeds=False)
             _require(message in failure.stderr, f"Step options {options} were not rejected: {failure.stderr!r}")
         passed("run wrapper changes the execution step limit on both backends")
+
+        # --jit runs the VM with the JIT tier. With the module, the hot loop
+        # compiles and runs natively; without it, on keeps the VM and require fails.
+        jit_module = package / "lib" / ("libazscript-jit.dylib" if sys.platform == "darwin" else "libazscript-jit.so")
+        jit_stats = cwd / "jit stats.json"
+        # The option overrides an inherited AZSCRIPT_JIT (stress would run
+        # natively even without the module).
+        jit_environment = {**environment, "AZSCRIPT_JIT_STATS": str(jit_stats), "AZSCRIPT_JIT": "stress"}
+        for options in (["--jit"], ["--jit=on:2", "--vm"], ["--jit=require"]):
+            jit_stats.unlink(missing_ok=True)
+            if not jit_module.is_file() and options == ["--jit=require"]:
+                failure = _run([runner, steps_abd, *options, "--max-steps=unlimited"], cwd, jit_environment, succeeds=False)
+                _require("The LLVM JIT backend is unavailable" in failure.stderr and not failure.stdout,
+                         f"--jit=require without the module was not rejected: {failure.stderr!r}")
+                continue
+            result = _run([runner, steps_abd, *options, "--max-steps=unlimited"], cwd, jit_environment)
+            _require(result.stdout.splitlines() == ["1199997"], f"JIT {options} produced: {result.stdout!r}")
+            sessions = [json.loads(line) for line in jit_stats.read_text(encoding="utf-8").splitlines()]
+            entries = sum(item["entries"] for item in sessions)
+            unavailable = any(reason.startswith("module unavailable") for item in sessions for reason in item["refusals"])
+            _require((entries > 0) == jit_module.is_file() and unavailable != jit_module.is_file(),
+                     f"JIT {options} statistics do not match the package: {sessions!r}")
+        result = _run([runner, default_abd, "--jit=off", "--tree"], cwd, environment)
+        _require(result.stdout.splitlines() == ["Hello, AzScript!", "42"], f"--jit=off produced: {result.stdout!r}")
+        for options, message in ((["--jit=stress"], "Invalid JIT mode: stress"), (["--jit=on:0"], "Invalid JIT mode: on:0"),
+                                 (["--jit", "--tree"], "conflicts with --backend tree"),
+                                 (["--jit", "--jit=off"], "Conflicting JIT options")):
+            failure = _run([runner, default_abd, *options], cwd, environment, succeeds=False)
+            _require(message in failure.stderr and not failure.stdout,
+                     f"JIT option {options} was not rejected: {failure.stderr!r}")
+        passed("run wrapper --jit " + ("runs hot functions natively" if jit_module.is_file() else
+                                       "keeps the VM without the JIT module and require fails"))
 
         classes_abd = cwd / "class output/classes.exec.abd"
         _run([compiler, package / "examples/classes.azs", "-o", classes_abd], cwd,
