@@ -369,6 +369,8 @@ class Generator {
             call(helper(h->set_result,Type::getVoidTy(context),{ptr,i64,i32,i32}),
                 {frame,load_bits(op.a),b.CreateZExt(load_tag(op.a),i32),c32(op.imm)});
             b.CreateStore(b.CreateOr(b.CreateLoad(i8,flags),c8(AZJIT_RETURNED)),flags);fallthrough();return;
+        case AZJIT_RESERVE_BLOCK:
+            exit_if(b.CreateICmpEQ(call(helper(h->reserve_block,i32,{}),{}),c32(0)),op.exit,next);return;
         case AZJIT_EXIT:b.CreateBr(exit_block(op.exit));return;
         default:report_fatal_error("unknown MIR code");
         }

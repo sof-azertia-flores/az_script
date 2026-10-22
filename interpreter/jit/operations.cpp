@@ -1,4 +1,5 @@
 #include "operations.h"
+#include "../blocks.h"
 #include <cstdint>
 
 namespace azertian::jit {
@@ -50,5 +51,9 @@ std::optional<Shadow> unary(UnaryOperation operation,const Shadow& operand) noex
 std::optional<Shadow> convert(int target,const Shadow& operand) noexcept {
     if(operand.tag==target)return operand;
     return general([&]{return value_ops::convert(value_of(operand),target);});
+}
+bool reserve_block() noexcept {
+    try{blocks::reserve();return true;}
+    catch(...){return false;}
 }
 }

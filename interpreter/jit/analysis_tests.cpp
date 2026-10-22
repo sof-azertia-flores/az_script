@@ -1,4 +1,5 @@
 #include "jit/analysis.h"
+#include "jit/mir.h"
 #include "vm/lowering.h"
 #include <iostream>
 #include <stdexcept>
@@ -128,8 +129,17 @@ void refusals() {
         if(failing.program.instructions[pc].opcode==Opcode::load_slot)
             check(analysis.reached[pc-analysis.begin]&&!analysis.reached[pc+1-analysis.begin],"code after an always-failing load is not reached");
 }
+void reservations() {
+    // O3 scalar replacement leaves reserve_block in scalar frames: native code takes the id.
+    const auto lowered=lower(block({op(59,{}),returned(literal(Value(1)))}));
+    check(lowered.analysis.eligible,"reserve_block is eligible: "+lowered.analysis.reason);
+    const auto function=build(lowered.program,lowered.analysis,false);
+    bool reserved=false;
+    for(const auto& op:function.ops)reserved|=op.code==Code::reserve_block&&op.exit!=none;
+    check(reserved,"reserve_block runs natively and exits when the id space is exhausted");
+}
 }
 int main() {
-    try{tags();loops();strings();parameters_and_globals();refusals();std::cout<<"JIT analysis checks passed: "<<checks<<'\n';}
+    try{tags();loops();strings();parameters_and_globals();refusals();reservations();std::cout<<"JIT analysis checks passed: "<<checks<<'\n';}
     catch(const std::exception& error){std::cerr<<error.what()<<'\n';return 1;}
 }

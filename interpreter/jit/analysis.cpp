@@ -232,6 +232,7 @@ public:
             write_value(state,instruction.result,tags);
             queue(next,state);return;
         }
+        case Opcode::reserve_block:write_value(state,instruction.result,tag_bit(VOID_VALUE));queue(next,state);return;
         case Opcode::set_return:
             if(instruction.operand)refuse("owned return");
             check_register(instruction.left);
@@ -267,7 +268,7 @@ public:
         switch(instruction.opcode) {
         case Opcode::constant:case Opcode::load_slot:case Opcode::store:case Opcode::snapshot:case Opcode::materialize:
         case Opcode::copy_reference:case Opcode::truth:case Opcode::unary:case Opcode::binary:case Opcode::convert:
-        case Opcode::call:
+        case Opcode::call:case Opcode::reserve_block:
             return instruction.result;
         default:return no_index;
         }

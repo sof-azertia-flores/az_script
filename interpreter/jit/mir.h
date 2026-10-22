@@ -49,6 +49,7 @@ enum class Code : std::uint8_t {
     leave_scope,
     check_undeclared, // exit unless local a is undeclared
     set_result,       // the frame's result = V[a], return location imm; flags |= returned
+    reserve_block,    // take the next literal block id; exit if the id space is exhausted
     exit              // unconditional exit
 };
 inline constexpr std::uint32_t none=0xffffffffu;

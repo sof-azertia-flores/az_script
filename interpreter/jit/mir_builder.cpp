@@ -246,6 +246,12 @@ class Builder {
             if(value==none)return step(pc);
             auto result=op(Code::set_result,pc);result.a=value;result.imm=program.sources[pc].location;emit(result);return;
         }
+        case Opcode::reserve_block: {
+            if(!writable(instruction.result))return step(pc);
+            auto reserve=op(Code::reserve_block,pc);reserve.exit=site(pc,ExitKind::redo);emit(reserve);
+            auto set=op(Code::set,pc);set.a=T0;set.imm=0;set.tag=VOID_VALUE;set.tags=tag_bit(VOID_VALUE);emit(set);
+            write(pc,instruction.result,T0,set.tags);return;
+        }
         default:return step(pc);  // calls, function_end
         }
     }
@@ -356,7 +362,7 @@ std::string dump(const Function& function) {
     static constexpr const char* names[]{"steps","tick","set","copy","forget","read_reference","write_reference","truth",
         "branch_false","jump","branch_flags","set_flags","loop_next","binary","unary","convert","reference_local",
         "reference_global","copy_reference","drop_reference","declare","flush_local","enter_scope","leave_scope",
-        "check_undeclared","set_result","exit"};
+        "check_undeclared","set_result","reserve_block","exit"};
     std::string text="function "+std::to_string(function.function)+": "+std::to_string(function.registers)+" registers, "+
         std::to_string(function.locals)+" locals\n";
     const auto operand=[](std::uint32_t value){return value==none?std::string("-"):std::to_string(value);};

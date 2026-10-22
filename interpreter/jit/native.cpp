@@ -13,7 +13,8 @@ namespace azertian::jit {
 static_assert(sizeof(Shadow)==sizeof(azjit_shadow)&&offsetof(Shadow,bits)==offsetof(azjit_shadow,bits)&&
               offsetof(Shadow,tag)==offsetof(azjit_shadow,tag),"shadows are passed to native code as they are");
 static_assert(static_cast<int>(Code::exit)==AZJIT_EXIT&&static_cast<int>(Code::binary)==AZJIT_BINARY&&
-              static_cast<int>(Code::set_result)==AZJIT_SET_RESULT,"MIR codes are the module's");
+              static_cast<int>(Code::set_result)==AZJIT_SET_RESULT&&
+              static_cast<int>(Code::reserve_block)==AZJIT_RESERVE_BLOCK,"MIR codes are the module's");
 static_assert(none==AZJIT_NONE&&absent==AZJIT_ABSENT);
 static_assert(INT_VALUE==AZJIT_TAG_INT&&FLOAT_VALUE==AZJIT_TAG_FLOAT&&DOUBLE_VALUE==AZJIT_TAG_DOUBLE&&
               BOOLEAN_VALUE==AZJIT_TAG_BOOLEAN&&VOID_VALUE==AZJIT_TAG_VOID&&ADDRESS_VALUE==AZJIT_TAG_ADDRESS);
@@ -52,6 +53,7 @@ const azjit_helpers helpers{
     [](std::uint32_t target,std::uint64_t operand,std::uint32_t tag,azjit_shadow* out)->int {
         return store(convert(static_cast<int>(target),shadow(operand,tag)),out);
     },
+    []()->int{return reserve_block();},
 };
 const azjit_backend* load(std::string& error) {
 #if defined(_WIN32)

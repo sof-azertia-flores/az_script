@@ -130,6 +130,7 @@ Outcome interpret(const Function& function,vm::ProgramCounter pc,FrameAccess& fr
         case Code::set_result:
             frame.set_result(value_of(V[op.a]),static_cast<std::uint32_t>(op.imm));
             activation.flags|=returned_flag;break;
+        case Code::reserve_block:if(!reserve_block())return leave(op.exit);break;
         case Code::exit:return leave(op.exit);
         }
         // The written value against the tags the analysis allowed.

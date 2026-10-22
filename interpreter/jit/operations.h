@@ -13,5 +13,7 @@ namespace azertian::jit {
 std::optional<Shadow> binary(BinaryOperation operation,const Shadow& left,const Shadow& right) noexcept;
 std::optional<Shadow> unary(UnaryOperation operation,const Shadow& operand) noexcept;
 std::optional<Shadow> convert(int target,const Shadow& operand) noexcept;
+// blocks::reserve: false when the id space is exhausted (nothing taken).
+bool reserve_block() noexcept;
 }
 #endif

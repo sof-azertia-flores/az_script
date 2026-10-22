@@ -5,15 +5,15 @@
 | 阶段 | 当前状态 | 证据或下一步 |
 | --- | --- | --- |
 | V0 | 完成 | 设计、计划与本记录 |
-| V1 | 完成（完整验证见下） | `a5d6ba0` |
-| V2 | 完成（完整验证见下） | `fd52bd4`，测量见下 |
+| V1 | 完成，定向验证（完整验证未完成，见下） | `a5d6ba0` |
+| V2 | 完成，定向验证（完整验证未完成，见下） | `fd52bd4`，测量见下 |
 | V3 | 完成，定向验证 | `38330c1`、`5c4caa5`、`7ab4af0`、`9004673` |
 | V4 | 完成，定向验证 | `f22357a` |
 | V5 | 完成，定向验证 | 内联、槽压缩与测量见下 |
 | V6 | 完成，定向验证 | 常量实参与泛型上下文专用化 |
-| V7 | 进行中 | 守卫去虚化、标量替换完成；字段缓存进行中 |
+| V7 | 部分完成，定向验证 | 守卫去虚化、标量替换完成；字段缓存未开始 |
 | V8 | 完成，定向验证 | 区间证明的无检查运算 |
-| V9 | 尚未开始 | JIT 消费 v11 构造 |
+| V9 | 部分完成，定向验证 | 原生 `reserve_block`；上限重新测量未开始 |
 | V10 | 不在本轮 | 发布收尾 |
 
 ## V0：设计与计划（2026-10-21）
@@ -36,7 +36,9 @@
 
 ## V1+V2 完整验证
 
-在 `/home/user/az_script-jitval`（`0aca80c`）顺序运行 `build_and_test.py --offline --jit` 与 `--offline --sanitize`。结果：运行中，完成后在此记录。
+第一次在 `0aca80c` 上顺序运行 `build_and_test.py --offline --jit` 与 `--offline --sanitize`，普通构建通过到 JNI 与各端到端阶段后被容器重启中断，无失败但不计为通过。
+
+第二次在 `f585b55`（V1–V8）上运行：两次构建都在第一个测试阶段 `tests/test_export_distribution.py` 失败——`LANGUAGE` 与 `EXEC_FORMAT` 链接到 `docs/exec-v11-roadmap/`，而发行包不含该目录（5 处链接不可重定位）。已在 V9 提交中改为不带链接的源码路径，该测试 23/23 通过；之后的阶段均未运行。**V1–V9 的完整验证（普通 `--jit` 与 `--sanitize`）仍待运行。**
 
 ## V3：格式增补（2026-10-21）
 
@@ -102,3 +104,19 @@
 - 回绕运算的其他操作数组合与有检查运算相同，所以只省去溢出检查；证明不了的运算保持原样，边界上的溢出错误与 trace 不变。
 
 验证：Java 408/408（新增 `ExecUncheckedArithmeticTest` 4 例；`ExecO2LoopTest` 一例以 `allOf` 选择阶段，改为排除本阶段，以保持其循环外提检查的原意）；O2/O3 测试 `--only o3-` 27 例（probe:7、eager、stress），新增 `o3-unchecked-loop`、`o3-unchecked-edge`（`a<=2147483646` 时 `a+1` 回绕且得到 2147483647）、`o3-unchecked-overflow`、`o3-unchecked-loop-overflow`（溢出仍按 O0 报告）。O1/O2 产物（`-g`）与 V7b 编译器逐字节相同：200 个生成程序、示例与 O3 草稿源码共 472 次编译。性能（Release 快速测量，3×3，O3/O2，含 V5–V7 的全部 O3 阶段）：VM integer_loop 0.864、branch_loop 0.751、scalar_call 0.862、range_local 1.012、call_4 0.554；on:3+llvm integer_loop 0.894、branch_loop 1.000、scalar_call 0.670、range_local 1.108、call_4 0.070。LLVM 后端的 int 快速路径（V3）已把回绕运算编为不带溢出退出的 add/sub/mul；其余 JIT 消费与上限测量留到 V9。
+
+## V9：JIT 消费 v11 构造（部分，2026-10-22）
+
+- 回绕运算：V3 起两个后端已支持；LLVM 的 int 快速路径不带溢出退出（无需改动）。`seq` 在 VM lowering 中消失，私有函数是普通帧。
+- `reserve_block`：JIT 分析原先以“unsupported opcode”拒绝含该指令的函数，标量替换后的循环因而只能在 VM 中执行。现在分析把结果寄存器记为 void；MIR 新增 `reserve_block` 操作，调用不抛出的 `reserve_block` 辅助函数（`blocks::reserve`，ID 用尽时返回 0），失败则 redo 退出，由 VM 重新执行并报告同样的错误；解释后端与 LLVM 后端都已实现。新增辅助函数与 MIR 代码改变布局，`AZJIT_ABI_VERSION` 升为 3。
+- 未做：按 O3 产物重新测量原生上限（`native_operation_limit`、`native_resume_limit`）；`guard_method` 仍只出现在对象帧中，JIT 不处理。
+
+验证：ctest 19/19（`jit-analysis-tests` 新增 `reservations`：含 `reserve_block` 的函数可编译，且该操作带退出点）；O2/O3 测试 `--only o3-` 27 例，JIT 模式 probe:7、eager、stress、eager+llvm、stress+llvm，486 次观测；object_fields 的 O3 产物在 eager 下 2 个函数原生编译、结果与 `next_block` 与 VM 相同。性能（Release 快速测量，3×3，O3/O2）：VM object_fields 0.132、object_copy 0.160；on:3+llvm object_fields 0.021、object_copy 0.031（V7b 时 LLVM 为 0.164、0.168，当时这两个函数未进入 JIT）。
+
+## 交接（2026-10-22）
+
+本轮在此暂停，之后在本地继续。分支 `claude/runtime-performance-handoff-5mdt6h` 包含 V1–V9（部分）的全部提交；`exec_v11_main` 尚未更新。
+
+1. 在干净工作区顺序运行 `python3 tools/build_and_test.py --offline --jit` 与 `--offline --sanitize`（V1 以来尚无一次完整通过），通过后补记本文件并把 `exec_v11_main` 快进到该提交。
+2. 未完成：V7 字段缓存；V9 的原生上限重新测量；正式 7×5 Release 基准（以上测量均为 3×3 快速测量）。
+3. 一次性检查脚本未入库：O0/O3 生命周期模糊比较（`lifecycle_fuzz.py --print-source` 生成、两档 `-g` 编译、树与 VM 运行、`framed()` 比较）与 O1/O2 逐字节对比（两份编译器 jar 分别编译同一批源码后 `cmp`）。需要时可按此描述重写，或加入 `tools/`。

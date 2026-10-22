@@ -12,7 +12,7 @@
 extern "C" {
 #endif
 
-#define AZJIT_ABI_VERSION 2u
+#define AZJIT_ABI_VERSION 3u
 #define AZJIT_ABSENT 0xffu
 /* Public value tags (INT_VALUE...) a shadow can carry. */
 #define AZJIT_TAG_INT 0u
@@ -34,7 +34,7 @@ enum {
     AZJIT_TRUTH,AZJIT_BRANCH_FALSE,AZJIT_JUMP,AZJIT_BRANCH_FLAGS,AZJIT_SET_FLAGS,AZJIT_LOOP_NEXT,
     AZJIT_BINARY,AZJIT_UNARY,AZJIT_CONVERT,AZJIT_REFERENCE_LOCAL,AZJIT_REFERENCE_GLOBAL,AZJIT_COPY_REFERENCE,
     AZJIT_DROP_REFERENCE,AZJIT_DECLARE,AZJIT_FLUSH_LOCAL,AZJIT_ENTER_SCOPE,AZJIT_LEAVE_SCOPE,
-    AZJIT_CHECK_UNDECLARED,AZJIT_SET_RESULT,AZJIT_EXIT
+    AZJIT_CHECK_UNDECLARED,AZJIT_SET_RESULT,AZJIT_RESERVE_BLOCK,AZJIT_EXIT
 };
 #define AZJIT_NONE 0xffffffffu
 
@@ -64,6 +64,7 @@ typedef struct azjit_helpers {
     int (*binary)(uint32_t operation,uint64_t left,uint32_t left_tag,uint64_t right,uint32_t right_tag,azjit_shadow* out);
     int (*unary)(uint32_t operation,uint64_t operand,uint32_t tag,azjit_shadow* out);
     int (*convert)(uint32_t target,uint64_t operand,uint32_t tag,azjit_shadow* out);
+    int (*reserve_block)(void);
 } azjit_helpers;
 
 typedef struct azjit_function {
