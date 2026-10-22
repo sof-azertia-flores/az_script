@@ -201,7 +201,7 @@ Flush 按定义模块的 assume 表重定位方法函数 ID 及其上下文中�
 
 ## v11 开发中的增补（opcode 54–59 与私有函数）
 
-以下指令属于 [exec v11 计划](exec-v11-roadmap/DESIGN.md)，在 `exec_v11_main` 开发期间读写端已支持，但执行文件版本仍为 10，直到 v11 发布收尾；O0/O1/O2 编译不会生成它们。
+以下指令属于 exec v11 计划（源码仓库的 `docs/exec-v11-roadmap/DESIGN.md`），在 `exec_v11_main` 开发期间读写端已支持，但执行文件版本仍为 10，直到 v11 发布收尾；O0/O1/O2 编译不会生成它们。
 
 ```text
 [54, statements:Es, value:E]

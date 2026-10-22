@@ -201,7 +201,7 @@ Flush relocates every method function ID and function reference recursively with
 
 ## v11 additions in development (opcodes 54–59 and private functions)
 
-These records belong to the [exec v11 plan](exec-v11-roadmap/DESIGN.md). Readers and writers on `exec_v11_main` support them, but the exec version stays 10 until the v11 release stage; O0/O1/O2 compilation never emits them.
+These records belong to the exec v11 plan (`docs/exec-v11-roadmap/DESIGN.md` in the source repository). Readers and writers on `exec_v11_main` support them, but the exec version stays 10 until the v11 release stage; O0/O1/O2 compilation never emits them.
 
 ```text
 [54, statements:Es, value:E]
