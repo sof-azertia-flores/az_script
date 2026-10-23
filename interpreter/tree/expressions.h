@@ -30,6 +30,9 @@ public:
     int function_id=0;
     functionInvocationExpression()=default;
     std::shared_ptr<variable> execute(std::shared_ptr<environment> env) override;
+private:
+    std::shared_ptr<variable> invoke_target(const std::shared_ptr<script>& script,
+        const std::shared_ptr<environment>& env,std::vector<std::shared_ptr<variable>> arguments,type_contexts contexts);
 };
 class varDefineExpression : public expression {
 public:
@@ -96,6 +99,24 @@ public:
 namespace tree {
 using V=std::shared_ptr<variable>;
 using E=std::shared_ptr<environment>;
+class sequence_expression final:public expression {
+public:
+    std::vector<std::shared_ptr<expression>> children;
+    V execute(E env) override;
+};
+class unchecked_expression final:public expression {
+public:
+    int opcode=55,delta=0;
+    bool prefix=false;
+    std::shared_ptr<expression> left,right;
+    V execute(E env) override;
+};
+class guard_method_expression final:public expression {
+public:
+    int slot=0,function_id=0;
+    std::shared_ptr<expression> receiver;
+    V execute(E env) override;
+};
 class select_expression final:public expression {
     std::shared_ptr<expression> condition,when_true,when_false;
 public:

@@ -35,13 +35,12 @@ public:
 
 // The embedding adapter performs external lookup and the native/depth guard.
 // Arguments are immutable snapshots in separate budgeted backing, valid even
-// if the callback reenters this executor. lexical_depth is the complete old
-// environment::parent-chain depth (function root=2), not the call-stack depth.
+// if the callback reenters this executor.
 class ExecutionCallbacks {
 public:
     virtual ~ExecutionCallbacks()=default;
     virtual Value invoke_external(const CallTarget& target,std::span<const Value> arguments,
-        const ExecutionPosition& caller,std::size_t lexical_depth)=0;
+        const ExecutionPosition& caller)=0;
     // Called once per failing script entry, innermost first, including entries
     // which fail admission/argument validation before acquiring a frame.
     virtual void note_script_error(const ExecutionPosition&) noexcept {}

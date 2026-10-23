@@ -36,7 +36,7 @@ constexpr std::array supported{
     Opcode::cleanup_enter,Opcode::cleanup_leave,Opcode::cleanup_end,
     Opcode::member_get,Opcode::object_address,Opcode::object_register,Opcode::object_delete,
     Opcode::new_block,Opcode::block_address,Opcode::move_out,Opcode::drop,
-    Opcode::check_method_receiver,Opcode::set_methods,Opcode::call_virtual,
+    Opcode::check_method_receiver,Opcode::set_methods,Opcode::call_virtual,Opcode::guard_method,
     Opcode::bind_context,Opcode::context_abi,Opcode::context_default,Opcode::return_typed,
     Opcode::check_type,Opcode::check_object,Opcode::buffer_new,Opcode::buffer_operation,Opcode::value_compare
 };
@@ -53,7 +53,7 @@ bool object_opcode(Opcode opcode) {
     case Opcode::member_get:case Opcode::object_address:case Opcode::object_register:
     case Opcode::object_delete:case Opcode::new_block:case Opcode::block_address:
     case Opcode::move_out:case Opcode::drop:case Opcode::check_method_receiver:
-    case Opcode::set_methods:case Opcode::call_virtual:return true;
+    case Opcode::set_methods:case Opcode::call_virtual:case Opcode::guard_method:return true;
     default:return false;
     }
 }
@@ -253,7 +253,7 @@ struct ScalarExecutor::State {
             const auto& function=program.functions[index];
             // Generic functions keep their hidden and bound contexts in an
             // object frame.
-            bool objects=(function.entry_kind&&!function.lifecycle)||object_signature(function.return_type,function.param_types)||
+            bool objects=(function.entry_kind==1&&!function.lifecycle)||object_signature(function.return_type,function.param_types)||
                 function.hidden_count||function.bound_context_count;
             for(auto pc=function.begin;pc<function.end;++pc) {
                 const auto& instruction=program.instructions[pc];
@@ -265,7 +265,7 @@ struct ScalarExecutor::State {
                         throw std::invalid_argument("Scalar VM does not support generic or object call contexts");
                     if(object_signature(target.return_type,target.param_types))objects=true;
                     if(target.kind==TargetKind::script) {
-                        if(target.entry_kind)objects=true;
+                        if(target.entry_kind==1)objects=true;
                         callers[target.function].push_back(index);
                     } else if(ids::is_heap_builtin(target.function_id)||
                             target.function_id==ids::id(ids::builtin::reflect_invoke_function)) {
@@ -1338,7 +1338,7 @@ struct ScalarExecutor::State {
                             break;
                         }
                         trace_touched=true;
-                        const auto output=options.callbacks->invoke_external(target,snapshots.span(),position,2+frame.scope_count);
+                        const auto output=options.callbacks->invoke_external(target,snapshots.span(),position);
                         require_scalar_value(output);value(frame,instruction.result,output);
                     }
                     break;
@@ -1444,6 +1444,14 @@ struct ScalarExecutor::State {
                     heap::set_methods(pointer(read(frame,instruction.left),"Virtual method receiver must be address"),
                         methods(frame,instruction.operand),host_of(options).owner());
                     value(frame,instruction.result,Value{});break;
+                case Opcode::guard_method: {
+                    const auto& operation=function_of(frame).operations[instruction.operand];
+                    const auto& receiver=read(frame,instruction.left);
+                    const auto id=program.targets[*operation.target].function_id;
+                    value(frame,instruction.result,Value(receiver.type_tag()==ADDRESS_VALUE&&
+                        heap::guard_method(receiver.get<address>(),static_cast<std::size_t>(operation.immediate),id,host_of(options).owner())));
+                    break;
+                }
                 case Opcode::call_virtual: {
                     const auto& operation=function_of(frame).operations[instruction.operand];
                     if(operation.arguments.empty())throw std::runtime_error("Virtual method receiver must be address");

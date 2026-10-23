@@ -510,7 +510,7 @@ void set_destructor(address pointer,std::optional<int> destructor,bool manual,S 
     if(destructor) {
         auto found=script->functions.find(*destructor);
         auto function=found==script->functions.end()?nullptr:std::dynamic_pointer_cast<ofunction>(found->second);
-        if(!function||function->rett!=VOID_VALUE||function->param_count!=1||function->param_types!=std::vector<int>{ADDRESS_VALUE}||
+        if(!function||function->entry_kind==2||function->rett!=VOID_VALUE||function->param_count!=1||function->param_types!=std::vector<int>{ADDRESS_VALUE}||
            static_cast<std::size_t>(function->hidden_count)!=contexts.size())
             throw std::invalid_argument("Object destructor must be a script function void(address)");
     }

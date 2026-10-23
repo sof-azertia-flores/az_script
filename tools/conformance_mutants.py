@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Negative controls for the ownership conformance corpus.
 
-Each mutant is the committed runtime with one deliberate lifecycle fault. It is
+Each mutant is a snapshot of the selected runtime with one deliberate lifecycle fault. It is
 built into its own observation host and run through the corpus as the
 reference. Its own expectations must fail (the corpus states expected
 behaviour independently of any engine). With --f0-work, the mutant is also
@@ -9,11 +9,13 @@ replayed against a recorded F0 reference collection and must differ there. A
 mutant that passes is a gap in the corpus and fails this tool. The VM does not
 run every corpus case (registered differences), so a VM mutant is judged not
 by its expectations but by comparing its own build's tree engine with its VM
-over the current corpus, which applies the difference registry. Its replay is
-reported too; the frozen F0 collection lacks cases added since, so it does not
+over the current corpus, which applies the difference registry. Its replay,
+when --f0-work is given, is reported too; the frozen F0 collection lacks cases
+added since (and keeps the getDepth cases removed in exec v11), so it does not
 decide.
 """
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -29,7 +31,7 @@ CONTROL = ('control', [])
 VM_CONTROL = ('control-vm', [], 'vm')
 # Each mutant is (name, [(path, old, new), ...][, engine]); every old text must
 # occur exactly once, so a mutant whose anchors moved with the code fails
-# loudly. The engine (default tree) is the one patched; 'vm' requires --f0-work.
+# loudly. The engine (default tree) is the one patched.
 MUTANTS = [
     # The traversal yields the destructor only after the members have ended.
     ('destructor-after-fields', [
@@ -140,11 +142,6 @@ MUTANTS = [
          'if(unwind.region){unwind.mode=Unwind::Mode::finished;continue;}',
          ''),
     ], 'vm'),
-    ('depth-counts-callers', [
-        ('interpreter/core/ownership.cpp',
-         'for(auto id=scope;const auto* record=find(id);id=record->parent)++result;',
-         'for(auto id=scope;const auto* record=find(id);id=find(record->caller)?record->caller:record->parent)++result;'),
-    ]),
 ]
 
 
@@ -160,6 +157,8 @@ def main():
     parser.add_argument('--f0-work', type=Path, help='completed F0 reference collection (stage ownership)')
     parser.add_argument('--only', help='comma-separated mutant names')
     parser.add_argument('--jobs', type=int, default=3)
+    parser.add_argument('--source', choices=('head', 'workspace'), default='head',
+                        help='snapshot committed HEAD or current tracked/non-ignored workspace files')
     args = parser.parse_args()
     work = args.work.resolve(); work.mkdir(parents=True, exist_ok=False)
     env = os.environ.copy()
@@ -167,16 +166,32 @@ def main():
         env.pop(key, None)
     chosen = [m for m in MUTANTS if not args.only or m[0] in args.only.split(',')]
     vm_chosen = any(len(m) > 2 for m in chosen)
-    if vm_chosen and not args.f0_work:
-        raise SystemExit('VM mutants are judged by the F0 replay: pass --f0-work')
     selected = [CONTROL] + ([VM_CONTROL] if vm_chosen else []) + chosen
-    report = {'mutants': {}}
+    snapshot = work / 'source-base'
+    snapshot.mkdir()
+    if args.source == 'head':
+        archive = subprocess.run(['git', 'archive', 'HEAD'], cwd=ROOT, capture_output=True, check=True).stdout
+        subprocess.run(['tar', '-x', '-C', snapshot], input=archive, check=True)
+    else:
+        paths = subprocess.check_output(
+            ['git', 'ls-files', '--cached', '--others', '--exclude-standard', '-z'], cwd=ROOT)
+        for name in paths.decode().split('\0'):
+            if not name:
+                continue
+            original = ROOT / name
+            if not original.is_file():
+                continue  # Submodule checkouts are not inputs to this repository's CMake build.
+            target = snapshot / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(original, target, follow_symlinks=False)
+    manifest = {path.relative_to(snapshot).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest()
+                for path in sorted(snapshot.rglob('*')) if path.is_file()}
+    report = {'source': args.source, 'source_files': manifest, 'mutants': {}}
     survivors = []
     for name, patches, *rest in selected:
         engine = rest[0] if rest else 'tree'
-        folder = work / name; source = folder / 'source'; source.mkdir(parents=True)
-        archive = subprocess.run(['git', 'archive', 'HEAD'], cwd=ROOT, capture_output=True, check=True).stdout
-        subprocess.run(['tar', '-x', '-C', source], input=archive, check=True)
+        folder = work / name; source = folder / 'source'
+        shutil.copytree(snapshot, source)
         for path, old, new in patches:
             target = source / path; text = target.read_text(encoding='utf-8')
             if text.count(old) != 1:

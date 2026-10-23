@@ -28,7 +28,7 @@ V1、V2 互不依赖；V5–V8 依赖 V3、V4；V9 依赖 V2 与 V8。
 - **跨档位：** O0 对 O3 按 DESIGN 第 2 节比较；带 `-g` 时 trace 帧与位置相同。
 - **兼容：** O0/O1/O2 产物在 V1 之外的阶段逐字节不变（V1 只影响使用 `getDepth` 的程序），并可在 main 的 v10 运行库执行。
 - **性能：** 扩展后的 `tools/bench_compiler_o2.py`，Release 构建，7 轮 × 5 批；几何平均回退不超过 5%，不得新增原生规模拒绝；VM 与 LLVM 分别报告。目标：调用负载（`call_1/4/16`）O3/O2 耗时不超过 0.8，对象负载（`object_fields`、`object_copy`）不超过 0.8，`virtual_monomorphic` 不超过 0.9。
-- **规模：** 验证随改动而定。小改动与文档只做定向检查；阶段合入前运行 `python3 tools/build_and_test.py --offline`（含 JIT 模块）；V1 与 V7 另运行 `--sanitize`。
+- **规模：** 验证随改动而定。小改动与文档只做定向检查。用户于 2026-10-22 调整：阶段之间只运行定向回归与 `python3 tools/build_and_test.py --offline --jit --quick`（全部套件，JIT 重放、O2 与对齐只用 stress 模式）；完整的 `--offline --jit` 与 `--sanitize` 只在整个 V1–V9 任务结束前运行一次。各阶段的退出条件中“普通完整验证与 sanitizer”据此推迟到最后，STATUS 记录每个阶段实际运行的检查。
 
 ## 3. 与其他计划的关系
 

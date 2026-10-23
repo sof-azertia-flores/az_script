@@ -31,8 +31,8 @@ class ExecPipelineTest {
     }
     @Test void inliningPreservesPotentialFailuresAndArgumentOrder() throws Exception {
         var passes=Set.of(Compiler.OptimizationPass.INLINING);
-        for(var test:Map.of("return x+1;",2147483647,"return getDepth();",2147483647,"return 1/x;",0).entrySet()) {
-            var bodyMain=main(compile("int leaf(int x){"+test.getKey()+"}int main(){return leaf("+test.getValue()+");}",passes)).mmp.get("script");
+        for(var test:Map.of("return x+1;",2147483647,"return host();",2147483647,"return 1/x;",0).entrySet()) {
+            var bodyMain=main(compile("extern int host():0x12340001;int leaf(int x){"+test.getKey()+"}int main(){return leaf("+test.getValue()+");}",passes)).mmp.get("script");
             assertEquals(1,count(bodyMain,CALL));
         }
         var repeated=main(compile("int leaf(int x){return x&x;}int main(){return leaf(3);}",passes));

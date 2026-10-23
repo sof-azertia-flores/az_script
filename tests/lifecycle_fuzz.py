@@ -6,7 +6,7 @@ random.Random(seed) alone (no global random state, time or hash order). The
 programs combine classes with literal-object and pointer fields, inheritance
 chains of up to three levels, explicit and synthesized destructors that emit
 event()/probe(), sometimes fail (division by zero, integer overflow, host
-failure, a failing Bad field) or call getDepth/alloc/mem_send_up/mem_free/
+failure, a failing Bad field) or call alloc/mem_send_up/mem_free/
 make_free/delete, functions returning locals, parameters, fields and
 temporaries by value, statement and condition temporaries, objects in loops
 with break/continue/return, switch sections, nested blocks, automatic and
@@ -559,7 +559,7 @@ class Generator:
     def recursion_helper(self, cls):
         def build(name):
             body = [stmt(self.literal_decl(cls, 't', 'd')), stmt('t.n = d;'),
-                    Item(['if (d <= 0) {', [stmt('probe(getDepth());'), stmt('return t.n;', fixed=True)], '}'], 'if'),
+                    Item(['if (d <= 0) {', [stmt('probe(d);'), stmt('return t.n;', fixed=True)], '}'], 'if'),
                     stmt(f'return {name}(d - 1) + t.n;', fixed=True)]
             return Item([f'int {name}(int d) {{', body, '}'], 'func', name=name)
         return self.helper(('rec', cls.name), f'rec{cls.name}', build)
@@ -673,7 +673,7 @@ class Generator:
 
         def probe():
             self.feature(f'probe-in-{where}')
-            return [stmt(rng.choice(('probe(getDepth());', 'probe(n);', 'event(getDepth());')))]
+            return [stmt(rng.choice(('probe(n);', 'event(n);')))]
 
         def nested():
             other = self.some_class(level)
@@ -779,7 +779,6 @@ class Generator:
             (3, lambda: str(self.small())),
             (3, lambda: self.pick_var(fn, 'int')),
             (4, lambda: self.member_read(fn)),
-            (1, lambda: 'getDepth()'),
             (0.6 if self.g0 else 0, lambda: 'g0'),
         ])
 
@@ -1322,7 +1321,7 @@ class Generator:
             (6, delete),
             (1.5, alias),
             (5, lambda: [stmt(f'event({self.int_expr(fn)});')]),
-            (1.5, lambda: [stmt('probe(getDepth());' if self.chance(0.5) else f'probe({self.int_expr(fn)});')]),
+            (1.5, lambda: [stmt(f'probe({self.int_expr(fn)});')]),
             (0.4, lambda: [stmt(f'print({self.int_expr(fn)});')]),
             (1.5, assign_int),
             (4, assign_object),
@@ -1513,10 +1512,11 @@ class Fuzzer:
             with self.lock:
                 print(text, flush=True)
 
-    def compile(self, program, folder, name='program'):
+    def compile(self, program, folder, name='program', optimization=None):
         folder.mkdir(parents=True, exist_ok=True)
         try:
-            record = compile_source(self.compiler, program.source, name, folder, self.env)
+            record = compile_source(self.compiler, program.source, name, folder, self.env,
+                                    '-' + (optimization or self.args.optimization))
         except (AssertionError, subprocess.SubprocessError, OSError) as error:
             raise CompileFailure(str(error)) from error
         write_json(folder / f'{name}.options.json', {'host_options': program.options, 'seed': program.seed})
@@ -1612,6 +1612,34 @@ class Fuzzer:
             write_json(folder / 'result.json', result)
             return result
         found = [] if status == 'equal' else [(DEFAULT_STEPS, status, detail, full, candidate)]
+        if self.args.compare_optimization and 'host_failure' not in full:
+            # Budget sweeps always compare the same artifact exactly. Across
+            # levels only the ample-budget run is comparable, and resource
+            # exhaustion is explicitly outside the optimization contract.
+            from compiler_o2_end_to_end import semantic
+            baseline = self.compile(program, folder / self.args.compare_optimization,
+                                    optimization=self.args.compare_optimization)
+            previous = self.observe('reference', baseline, program.options, DEFAULT_STEPS)
+            write_json(folder / 'optimization-baseline.json', previous)
+            write_json(folder / 'optimization-candidate.json', full)
+            if 'host_failure' in previous:
+                changed = ['baseline host failure: ' + str(previous['host_failure'])]
+                found.append((DEFAULT_STEPS, 'host-failure', changed, previous, full))
+                result['optimization_comparison'] = 'host-failure'
+            else:
+                resource_messages = ('Script execution step limit exceeded', 'Script call depth limit exceeded',
+                                     'Script native stack limit exceeded')
+                limited = any(any(message in str((value.get('error') or {}).get('message', ''))
+                                  for message in resource_messages) for value in (previous, full))
+                if limited:
+                    result['optimization_comparison'] = 'resource-limited'
+                else:
+                    from runtime_differential import differences
+                    changed = differences(
+                        semantic(previous, preserve_frames=True), semantic(full, preserve_frames=True))
+                    result['optimization_comparison'] = 'mismatch' if changed else 'passed'
+                    if changed:
+                        found.append((DEFAULT_STEPS, 'mismatch', changed, previous, full))
         if 'host_failure' not in full:
             more, budgets, mode, threshold = self.sweep(seed, binary, program.options, full)
             found += more
@@ -1626,7 +1654,7 @@ class Fuzzer:
         result['mismatch_dir'] = str(self.record_mismatch(seed, program, binary, found))
         write_json(folder / 'result.json', result)
         self.log(f'seed {seed}: MISMATCH at budgets {result["mismatching_budgets"][:12]}; {result["mismatch_dir"]}')
-        if self.args.shrink:
+        if self.args.shrink and result.get('optimization_comparison') not in ('mismatch', 'host-failure'):
             result['shrunk'] = self.shrink_seed(seed, program, found)
             write_json(folder / 'result.json', result)
         return result
@@ -1713,10 +1741,13 @@ def summarize(results, fuzzer, started):
               'independent_candidate_processes': fuzzer.processes['candidate'],
               'passed': 0, 'refused': {}, 'mismatches': [], 'host_failures': [], 'generator_failures': [],
               'internal_errors': [], 'budget_points_compared': 0, 'sweeps': {'full': 0, 'sampled': 0}, 'outcomes': {},
-              'teardown_errors': {}, 'feature_programs': {}}
+              'teardown_errors': {}, 'feature_programs': {}, 'optimization_comparisons': {}}
     known = known_refusals()
     steps = []
     for result in results:
+        comparison = result.get('optimization_comparison')
+        if comparison:
+            report['optimization_comparisons'][comparison] = report['optimization_comparisons'].get(comparison, 0) + 1
         for name in result.get('features', {}):
             report['feature_programs'][name] = report['feature_programs'].get(name, 0) + 1
         status = result['status']
@@ -1958,6 +1989,10 @@ def main():
     parser.add_argument('--candidate-host', type=Path)
     parser.add_argument('--candidate-engine', choices=['tree', 'vm'], default='tree')
     parser.add_argument('--classpath', default=None, help='compiler classpath (default: build/java/classpath.txt)')
+    parser.add_argument('--optimization', choices=('O0', 'O1', 'O2', 'O3'), default='O0',
+                        help='level of the artifact used by both engines and all budget sweeps')
+    parser.add_argument('--compare-optimization', choices=('O0', 'O1', 'O2', 'O3'),
+                        help='also compare ample-budget tree observations against this level')
     parser.add_argument('--work', type=Path, help='new directory (default build/runtime-perf/fuzz-<engine>-<n>)')
     parser.add_argument('--jobs', type=int, default=3)
     parser.add_argument('--sweep-max', type=int, default=256, help='full budget sweep when T+1 is at most this')
@@ -1971,6 +2006,8 @@ def main():
     parser.add_argument('--digest', action='store_true', help='print the generation digest of the seed range')
     parser.add_argument('--quiet', action='store_true')
     args = parser.parse_args()
+    if args.compare_optimization == args.optimization:
+        parser.error('--compare-optimization must differ from --optimization')
     if args.print_source is not None:
         program = generate(args.print_source)
         print(program.source, end='')
@@ -2017,7 +2054,8 @@ def main():
         'compiler_inputs': [{'path': entry, 'sha256': digest(entry)} for entry in args.classpath.split(os.pathsep)
                             if entry and Path(entry).is_file()],
         'settings': {key: value for key, value in vars(args).items()
-                     if key in ('jobs', 'sweep_max', 'sweep_samples', 'timeout', 'shrink', 'shrink_attempts')},
+                     if key in ('jobs', 'sweep_max', 'sweep_samples', 'timeout', 'shrink', 'shrink_attempts',
+                                'optimization', 'compare_optimization')},
         'started_unix': started})
     with ThreadPoolExecutor(max_workers=args.jobs) as pool:
         results = list(pool.map(fuzzer.run_seed, seeds))

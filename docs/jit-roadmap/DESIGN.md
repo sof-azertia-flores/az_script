@@ -91,3 +91,11 @@ uint32_t entry(azjit_frame*);   // 返回 STEP | REDO | DEOPT | REJECT | YIELD
 ## 11. 风险
 
 LLVM 构建时间与模块体积（每个目标约 20–40 MB）；编译延迟（O2 下每函数 10–100 ms，因此阈值较高，eager 只用于测试）；LLVM 内存不足或致命错误会终止进程；可执行内存被拒绝（SELinux execmem、加固的 macOS）时只用 VM；valgrind 需要 `--smc-check=all`；qemu 较慢；VM 仍在演进，钩子限定在四处。
+
+## exec v11 开发中的 JIT 更新
+
+V2 的模块 ABI 为 2。`azjit_function` 增加按退出点索引的 `exit_slot_begin` 和 `exit_slots`；LLVM 每个退出块只写该集合，公共返回块只写步数、控制标志和退出编号。局部活跃性按寄存器引用跟踪，未知引用及 orphan 引用保守地视为读取全部局部，不在重新声明或作用域结束时截断活跃性。恢复时只装入活跃且可能绑定的局部，退出时只写回活跃且可能绑定的局部；其余影子显式初始化为 absent，仍需保留 maybe-declared 局部的实际标签。
+
+LLVM 对不超过 1,024 个 MIR 操作的函数使用 O2，其余使用 O1。2026-10-22 的 Release 测量支持把操作数上限从 2,048 提高到 4,096；恢复点数乘 slot 数仍限 8,192。很多同时活跃的局部仍使编译时间超线性增长，两个规模上限只是准入策略，不构成约一秒的耗时保证，测量和限制见 [STATUS](STATUS.md)。诊断工具 `tools/bench_jit_compile.py` 支持编译档位、重复次数及两种流水线对比；`AZSCRIPT_JIT_NATIVE_LIMITS` 与 `AZSCRIPT_JIT_LLVM_O2_LIMIT` 仅用于测量时覆盖默认准入上限和流水线阈值。
+
+V9 把静态类型均为 int 的四种无检查运算降为不含失败退出的 `binary_i32` MIR。LLVM 使用不带 `nsw`/`nuw` 的普通 `add`、`sub`、`mul`，左移的计数取低 5 位，所有结果均按 int32 回绕；可移植后端使用 uint32 运算实现相同结果。操作数类型不确定或错误的手写 exec 仍交给 VM 执行类型检查。`seq` 在 VM lowering 中消失，私有入口仍按普通函数分析，`guard_method` 在对象帧支持之前由 VM 执行。

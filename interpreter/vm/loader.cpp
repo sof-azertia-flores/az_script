@@ -44,8 +44,9 @@ CompiledScript compile_script(const azertian::script& script) {
                 else compiled.modules[index].pre_destroy=position;
             } else {
                 if(manifest.actual_namespace)function.function_id=ids::relocate(function.function_id,*manifest.actual_namespace);
-                if(!compiled.public_functions.emplace(function.function_id,position).second)
+                if(!compiled.functions.emplace(function.function_id,position).second)
                     throw std::logic_error("VM public function differs from validated linkage");
+                if(function.entry_kind!=2)compiled.public_functions.emplace(function.function_id,position);
             }
             function.body=exec::relocate(definition.body,[&](const exec::reference&) {
                 if(next>=resolved.size())throw std::logic_error("VM references differ from validated linkage");

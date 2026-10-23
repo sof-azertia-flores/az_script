@@ -32,7 +32,7 @@ struct function_reference {
     int* target;
     bool destructor=false;
     int hidden_count=0;
-    bool factory=false,placement=false,method=false;
+    bool factory=false,placement=false,method=false,guard_method=false;
 };
 struct parsed_module {
     std::shared_ptr<AbdMap> meta;
@@ -152,7 +152,8 @@ V scoped_execute(const std::shared_ptr<expression>& body,E env) {
 }
 exec::reference_kind reference_kind(const function_reference& reference) noexcept {
     return reference.destructor?exec::reference_kind::destructor:reference.factory?exec::reference_kind::factory:
-        reference.placement?exec::reference_kind::placement:reference.method?exec::reference_kind::method:exec::reference_kind::call;
+        reference.placement?exec::reference_kind::placement:reference.method?exec::reference_kind::method:
+        reference.guard_method?exec::reference_kind::guard_method:exec::reference_kind::call;
 }
 }
 namespace {

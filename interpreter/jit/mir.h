@@ -49,6 +49,7 @@ enum class Code : std::uint8_t {
     leave_scope,
     check_undeclared, // exit unless local a is undeclared
     set_result,       // the frame's result = V[a], return location imm; flags |= returned
+    binary_i32,       // unchecked int32 V[a] = V[b] (tag=BinaryOperation) V[c]; no exit
     exit              // unconditional exit
 };
 inline constexpr std::uint32_t none=0xffffffffu;
@@ -75,12 +76,15 @@ struct Function {
     // The analysis state at each resume point, for filling shadows.
     std::vector<bool> fill_registers,fill_locals;   // per slot: may hold a shadow at all
     // Per pc-begin with a resume point, the tags each slot's shadow may have
-    // on entry (0 when the slot enters absent: dead registers, unbound or
-    // memory-resident locals); empty elsewhere.
+    // on entry (0 when the slot enters absent: dead registers/locals,
+    // unbound or memory-resident locals); empty elsewhere.
     std::vector<std::vector<TagSet>> resume_tags;
     // Per exit site, the shadowable registers live at its pc: the VM reads no
     // other register before writing it, so only these are written back.
     std::vector<std::vector<std::uint32_t>> exit_registers;
+    // Per exit site, the shadowable locals whose value may still be read
+    // from its pc on (analysis live_locals); no other local is written back.
+    std::vector<std::vector<std::uint32_t>> exit_locals;
     const FunctionAnalysis* analysis=nullptr;
     vm::ProgramCounter begin=0,end=0;
     std::uint32_t slots() const noexcept{return registers+locals+temporaries;}

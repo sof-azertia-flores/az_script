@@ -94,6 +94,7 @@ if(BUILD_TESTING)
             "vm-frame-tests:../tests/vm_frame_tests.cpp"
             "vm-program-tests:vm/program_tests.cpp"
             "exec-model-tests:core/exec_tests.cpp"
+            "exec-v11-tests:core/exec_v11_tests.cpp"
             "lifecycle-tests:core/lifecycle_tests.cpp"
             "operations-tests:core/value_ops_tests.cpp"
             "scalar-vm-tests:vm/scalar_tests.cpp"
@@ -116,4 +117,6 @@ if(BUILD_TESTING)
     # engine is chosen per process with --engine and reported by the runtime.
     add_executable(observation-host ../tests/observation_host.cpp)
     target_link_libraries(observation-host PRIVATE abdInvokero)
+    add_executable(o3-heap-observation-host ../tests/o3_heap_observation_host.cpp)
+    target_link_libraries(o3-heap-observation-host PRIVATE abdInvokero)
 endif()

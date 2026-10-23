@@ -17,6 +17,8 @@
 #include <llvm/Support/raw_ostream.h>
 #include <llvm/Target/TargetMachine.h>
 #include <atomic>
+#include <charconv>
+#include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <mutex>
@@ -27,6 +29,8 @@ namespace {
 using namespace llvm;
 constexpr std::uint32_t max_ops=1u<<16;
 constexpr std::uint64_t max_resume_cells=1u<<22;
+// Above this many operations use the less expensive O1 pipeline.
+constexpr std::uint32_t large_function_ops=1024;
 
 struct Code {
     orc::JITDylib* library=nullptr;
@@ -92,11 +96,19 @@ class Generator {
         auto* result=b.CreateCall(callee,arguments);result->setDoesNotThrow();return result;
     }
     Value* slot_field(Value* index,unsigned field){return b.CreateGEP(shadow_type,slots,{index,c32(field)});}
+    // Each exit writes back only the shadows the runtime reads there, so a
+    // slot's value stays live only up to the exits that need it.
     BasicBlock* exit_block(std::uint32_t exit) {
         if(!exits[exit]) {
             const auto saved=b.saveIP();
             exits[exit]=BasicBlock::Create(context,"exit",function);
-            b.SetInsertPoint(exits[exit]);b.CreateStore(c32(exit),site);b.CreateBr(leave);
+            b.SetInsertPoint(exits[exit]);
+            for(auto index=source.exit_slot_begin[exit];index<source.exit_slot_begin[exit+1];++index) {
+                const auto slot=source.exit_slots[index];
+                b.CreateStore(load_bits(slot),slot_field(c32(slot),0));
+                b.CreateStore(load_tag(slot),slot_field(c32(slot),1));
+            }
+            b.CreateStore(c32(exit),site);b.CreateBr(leave);
             b.restoreIP(saved);
         }
         return exits[exit];
@@ -157,12 +169,7 @@ class Generator {
         b.SetInsertPoint(unreachable);b.CreateUnreachable();
         b.SetInsertPoint(blocks.back());
         b.CreateCall(Intrinsic::getDeclaration(&module,Intrinsic::trap));b.CreateUnreachable();
-        // Every exit writes the shadows back for the runtime's exit map.
         b.SetInsertPoint(leave);
-        for(std::uint32_t slot=0;slot<source.slots;++slot) {
-            b.CreateStore(load_bits(slot),slot_field(c32(slot),0));
-            b.CreateStore(load_tag(slot),slot_field(c32(slot),1));
-        }
         b.CreateStore(b.CreateLoad(i64,steps),b.CreateStructGEP(state_type,state,2));
         b.CreateStore(b.CreateLoad(i8,flags),b.CreateStructGEP(state_type,state,4));
         b.CreateRet(b.CreateLoad(i32,site));
@@ -262,6 +269,18 @@ class Generator {
         case AZJIT_TICK:b.CreateStore(b.CreateSub(b.CreateLoad(i64,steps),c64(1)),steps);fallthrough();return;
         case AZJIT_SET:b.CreateStore(c64(op.imm),bits[op.a]);b.CreateStore(c8(op.tag),tags[op.a]);fallthrough();return;
         case AZJIT_COPY:store_result(op.a,load_bits(op.b),load_tag(op.b),op.tags);fallthrough();return;
+        case AZJIT_BINARY_I32: {
+            auto* left=b.CreateTrunc(load_bits(op.b),i32);auto* right=b.CreateTrunc(load_bits(op.c),i32);
+            Value* result=nullptr;
+            switch(op.tag) {
+            case 17:result=b.CreateAdd(left,right);break;
+            case 18:result=b.CreateSub(left,right);break;
+            case 19:result=b.CreateMul(left,right);break;
+            case 20:result=b.CreateShl(left,b.CreateAnd(right,c32(31)));break;
+            default:report_fatal_error("unknown unchecked integer operation");
+            }
+            store_result(op.a,b.CreateZExt(result,i64),c8(AZJIT_TAG_INT),op.tags);fallthrough();return;
+        }
         case AZJIT_FORGET:b.CreateStore(c8(AZJIT_ABSENT),tags[op.a]);fallthrough();return;
         case AZJIT_READ_REFERENCE:
             generic(op,index,helper(h->read_reference,i32,{ptr,i32,ptr}),{frame,c32(op.b),out});return;
@@ -353,9 +372,22 @@ void* compile(const azjit_function* function,char* error,std::size_t capacity) {
         return nullptr;
     };
     if(!function||function->abi!=AZJIT_ABI_VERSION)return fail("JIT module ABI mismatch");
+    auto o2_limit=large_function_ops;
+    if(const char* value=std::getenv("AZSCRIPT_JIT_LLVM_O2_LIMIT");value&&*value) {
+        const auto* end=value+std::strlen(value);
+        const auto [parsed,error]=std::from_chars(value,end,o2_limit);
+        if(error!=std::errc{}||parsed!=end)return fail("Invalid AZSCRIPT_JIT_LLVM_O2_LIMIT");
+    }
     if(function->op_count>max_ops||std::uint64_t{function->resume_count}*function->slots>max_resume_cells)
         return fail("function is too large for native code");
     if(!function->op_count||!function->resume_count)return fail("function has no code");
+    if(!function->exit_slot_begin||function->exit_slot_begin[0]!=0)return fail("malformed exit slot table");
+    if(function->exit_slot_begin[function->exit_count]&&!function->exit_slots)return fail("missing exit slots");
+    for(std::uint32_t exit=0;exit<function->exit_count;++exit) {
+        if(function->exit_slot_begin[exit+1]<function->exit_slot_begin[exit])return fail("malformed exit slot table");
+        for(auto index=function->exit_slot_begin[exit];index<function->exit_slot_begin[exit+1];++index)
+            if(function->exit_slots[index]>=function->slots)return fail("exit slot outside the function");
+    }
     auto& jit=host();
     if(!jit.jit)return fail("LLVM JIT unavailable: "+jit.failure);
     auto context=std::make_unique<LLVMContext>();
@@ -371,7 +403,8 @@ void* compile(const azjit_function* function,char* error,std::size_t capacity) {
         passes.registerModuleAnalyses(modules);passes.registerCGSCCAnalyses(calls);
         passes.registerFunctionAnalyses(functions);passes.registerLoopAnalyses(loops);
         passes.crossRegisterProxies(loops,functions,calls,modules);
-        passes.buildPerModuleDefaultPipeline(OptimizationLevel::O2).run(*module,modules);
+        const auto level=function->op_count>o2_limit?OptimizationLevel::O1:OptimizationLevel::O2;
+        passes.buildPerModuleDefaultPipeline(level).run(*module,modules);
     }
     static std::atomic<unsigned> counter{0};
     auto& library=jit.jit->getExecutionSession().createBareJITDylib(std::string(function->name)+"."+std::to_string(counter++));

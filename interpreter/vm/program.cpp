@@ -53,7 +53,23 @@ void debug_info(const DebugInfo& debug) {
     const auto position=[&](const SourcePosition& position,bool header) {
         if(position.file>=debug.files->size()||(position.line==0)!=(position.column==0)||(!header&&!position.line))bad("invalid source position");
     };
-    position(debug.header,true);for(const auto& at:debug.locations)position(at,false);
+    position(debug.header,true);for(const auto& at:debug.locations) {
+        position(at,false);if(at.inline_index>debug.inlined.size())bad("invalid inline index");
+    }
+    if(debug.inlined.size()>max_slots)bad("oversized inline table");
+    for(const auto& item:debug.inlined) {
+        if(item.name.empty())bad("empty inline function name");valid_utf8(item.name,true);position(item.header,true);
+        if(item.call_site>=debug.locations.size())bad("inline call site outside locations");
+    }
+    std::vector<unsigned char> colors(debug.inlined.size());
+    for(std::uint32_t first=0;first<debug.inlined.size();++first) {
+        std::vector<std::uint32_t> path;auto current=first+1;
+        while(current&&colors[current-1]==0) {
+            colors[current-1]=1;path.push_back(current-1);current=debug.locations[debug.inlined[current-1].call_site].inline_index;
+        }
+        if(current&&colors[current-1]==1)bad("cyclic inline records");
+        for(auto index:path)colors[index]=2;
+    }
 }
 const CallTarget& call_target(const ExecutableProgram& program,std::uint32_t index) {
     if(index>=program.targets.size())bad("call target index outside table");
@@ -80,7 +96,7 @@ void check_contexts(const ExecutableProgram& program,const FunctionRecord& funct
             if((context.kind==4)!=context.element.has_value())bad("buffer context element mismatch");
             if(context.factory) {
                 const auto& target=call_target(program,*context.factory);
-                if(target.kind!=TargetKind::script||target.return_type!=OBJECT_VALUE||!target.param_types.empty()||target.hidden_count!=context.contexts.size())bad("invalid factory target signature");
+                if(target.kind!=TargetKind::script||target.entry_kind==2||target.return_type!=OBJECT_VALUE||!target.param_types.empty()||target.hidden_count!=context.contexts.size())bad("invalid factory target signature");
             }
             if(context.placement) {
                 const auto& target=call_target(program,*context.placement);
@@ -271,7 +287,7 @@ void check_instruction(const ExecutableProgram& program,const FunctionRecord& fu
     case Opcode::member_get:case Opcode::object_delete:case Opcode::block_address:case Opcode::drop:
         output();input();break;
     case Opcode::unary:output();input();operand=true;if(instruction.operand>1)bad("unknown unary operation");break;
-    case Opcode::binary:output();input();second();operand=true;if(instruction.operand>static_cast<std::uint32_t>(BinaryOperation::unsigned_shift_right))bad("unknown binary operation");break;
+    case Opcode::binary:output();input();second();operand=true;if(instruction.operand>static_cast<std::uint32_t>(BinaryOperation::shift_left_i32_unchecked))bad("unknown binary operation");break;
     case Opcode::convert:output();input();operand=true;if(instruction.operand!=INT_VALUE&&instruction.operand!=STRING_VALUE&&instruction.operand!=FLOAT_VALUE&&instruction.operand!=DOUBLE_VALUE&&instruction.operand!=ADDRESS_VALUE)bad("invalid conversion target");break;
     case Opcode::jump:case Opcode::branch_flow:case Opcode::branch_returned:destination();break;
     case Opcode::branch_false:input();destination();break;
@@ -296,7 +312,7 @@ void check_instruction(const ExecutableProgram& program,const FunctionRecord& fu
         output();input();const auto& registration=data();
         if(registration.target) {
             const auto& target=call_target(program,*registration.target);
-            if(target.kind!=TargetKind::script||target.return_type!=VOID_VALUE||target.param_types!=std::vector<int>{ADDRESS_VALUE}||target.hidden_count!=registration.contexts.size())bad("invalid object destructor signature");
+            if(target.kind!=TargetKind::script||target.entry_kind==2||target.return_type!=VOID_VALUE||target.param_types!=std::vector<int>{ADDRESS_VALUE}||target.hidden_count!=registration.contexts.size())bad("invalid object destructor signature");
         } else if(!registration.contexts.empty())bad("destructor contexts without destructor");break;
     }
     case Opcode::new_block:output();operand=true;if(!instruction.operand||instruction.operand>max_slots)bad("invalid block width");break;
@@ -317,6 +333,14 @@ void check_instruction(const ExecutableProgram& program,const FunctionRecord& fu
             const auto& target=call_target(program,method.target);
             if(target.kind!=TargetKind::script||target.entry_kind!=0||target.param_types.empty()||target.param_types[0]!=ADDRESS_VALUE||target.hidden_count!=method.contexts.size())bad("invalid virtual method target");
         }break;
+    }
+    case Opcode::guard_method: {
+        output();input();const auto& guard=data();
+        if(guard.immediate<0||static_cast<std::uint32_t>(guard.immediate)>=max_slots||!guard.target)bad("invalid method guard layout");
+        const auto& target=call_target(program,*guard.target);
+        if(target.kind!=TargetKind::script||target.entry_kind!=0||target.hidden_count||target.param_types.empty()||target.param_types[0]!=ADDRESS_VALUE)
+            bad("invalid method guard target");
+        break;
     }
     case Opcode::call_virtual: {
         output();const auto& call=data();
@@ -341,7 +365,7 @@ void verify_program(const ExecutableProgram& program) {
     std::set<int> public_ids;
     for(const auto& target:program.targets) {
         if(!public_ids.insert(target.function_id).second)bad("duplicate public function ID");
-        if(!type(target.return_type)||target.hidden_count>max_slots||target.param_types.size()>max_slots||target.entry_kind<0||target.entry_kind>1)bad("invalid call target signature");
+        if(!type(target.return_type)||target.hidden_count>max_slots||target.param_types.size()>max_slots||target.entry_kind<0||target.entry_kind>2)bad("invalid call target signature");
         for(auto parameter:target.param_types)if(!type(parameter,false))bad("invalid target parameter type");
         if(target.dynamic_signature&&target.kind==TargetKind::script)bad("dynamic signature on script target");
         if(target.kind==TargetKind::dynamic&&!target.dynamic_signature)bad("dynamic target requires dynamic signature");
@@ -356,7 +380,7 @@ void verify_program(const ExecutableProgram& program) {
     for(const auto& function:program.functions) {
         if(function.begin!=next||function.end<=function.begin||function.end>program.instructions.size())bad("function instruction ranges do not partition program");
         next=function.end;
-        if(!type(function.return_type)||function.entry_kind<0||function.entry_kind>1||function.param_types.size()>max_slots||function.local_count>max_slots-function.param_types.size()||function.hidden_count>max_slots||function.global_count>max_slots||function.global_offset>max_slots-function.global_count||function.bound_context_count>128||!function.node_count)bad("invalid function layout");
+        if(!type(function.return_type)||function.entry_kind<0||function.entry_kind>2||function.param_types.size()>max_slots||function.local_count>max_slots-function.param_types.size()||function.hidden_count>max_slots||function.global_count>max_slots||function.global_offset>max_slots-function.global_count||function.bound_context_count>128||!function.node_count)bad("invalid function layout");
         for(auto parameter:function.param_types)if(!type(parameter,false))bad("invalid function parameter type");
         if(function.lifecycle) {
             if((function.function_id!=0&&function.function_id!=1)||function.return_type!=VOID_VALUE||!function.param_types.empty()||function.hidden_count)bad("invalid lifecycle signature");
@@ -399,7 +423,7 @@ const char* opcode_name(Opcode opcode) noexcept {
         "call","set_return","function_end","cleanup_enter","cleanup_leave","cleanup_end",
         "member_get","object_address","object_register","object_delete","new_block","block_address","move_out","drop",
         "bind_context","context_abi","context_default","return_typed","check_type",
-        "buffer_new","buffer_operation","value_compare","check_object","check_method_receiver","set_methods","call_virtual"
+        "buffer_new","buffer_operation","value_compare","check_object","check_method_receiver","set_methods","call_virtual","guard_method"
     };
     static_assert(std::size(names)==static_cast<std::size_t>(Opcode::count));
     const auto index=static_cast<std::size_t>(opcode);return index<std::size(names)?names[index]:"unknown";

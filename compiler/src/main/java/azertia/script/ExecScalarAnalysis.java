@@ -81,7 +81,7 @@ final class ExecScalarAnalysis {
                 calls(child.value(),result);
     }
     static boolean eligible(AcsObject function, Set<Integer> safe) {
-        if (function.getAsInt("hidden-count") != 0 || function.getAsInt("entry-kind") != 0) return false;
+        if (function.getAsInt("hidden-count") != 0 || function.getAsInt("entry-kind") == 1) return false;
         // Bound the product of CFG states and local facts, not just tree size.
         if ((long)function.getAsInt("param-count") + function.getAsInt("local-count") > 256) return false;
         if (!scalar(function.getAsInt("return-type")) && function.getAsInt("return-type") != VOID_VALUE) return false;
@@ -99,7 +99,11 @@ final class ExecScalarAnalysis {
             if (!safe.contains(number(value, "id"))) return false;
             var call = (AcsObject)value;
             if (call.mmp.containsKey("contexts") && !call.getAsAcsArray("contexts").acsa.isEmpty()) return false;
-        } else if (!(op >= ADD && op <= NEGATE || op >= BIT_AND && op <= SELECT)) return false;
+        } else if (op == SEQUENCE) {
+            for(var item:((AcsObject)value).getAsAcsArray("statements").acsa)if(!statement(item,safe))return false;
+            return expression(field(value,"value"),safe);
+        } else if (!(op >= ADD && op <= NEGATE || op >= BIT_AND && op <= SELECT
+                || op >= ADD_I32_UNCHECKED && op <= SHIFT_LEFT_I32_UNCHECKED)) return false;
         if (op == CONVERT && !scalar(number(value, "type"))) return false;
         for (var child : ExecShape.children(value))
             if (!expression(child.value(), safe)) return false;
@@ -282,6 +286,7 @@ final class ExecScalarAnalysis {
         if (source instanceof AcsBooleanElement b) return new Value(BOOLEAN_VALUE, b.on ? 1 : 0, b.on ? 1 : 0, true);
         int op = opcode(source);
         if (op == VARIABLE) return facts.getOrDefault(number(source, "v"), UNKNOWN);
+        if (op == SEQUENCE) return UNKNOWN;
         if (op == CALL) return new Value(returns.getOrDefault(number(source, "id"), -1),
                 full(returns.getOrDefault(number(source, "id"), -1)).low,
                 full(returns.getOrDefault(number(source, "id"), -1)).high, false);
@@ -336,9 +341,9 @@ final class ExecScalarAnalysis {
             }
         }
         return switch (op) {
-            case ADD -> checked(a.low+b.low, a.high+b.high, total);
-            case SUBTRACT -> checked(a.low-b.high, a.high-b.low, total);
-            case MULTIPLY -> {
+            case ADD, ADD_I32_UNCHECKED -> checked(a.low+b.low, a.high+b.high, total);
+            case SUBTRACT, SUBTRACT_I32_UNCHECKED -> checked(a.low-b.high, a.high-b.low, total);
+            case MULTIPLY, MULTIPLY_I32_UNCHECKED -> {
                 long[] products = {a.low*b.low, a.low*b.high, a.high*b.low, a.high*b.high};
                 yield checked(Arrays.stream(products).min().orElseThrow(), Arrays.stream(products).max().orElseThrow(), total);
             }
@@ -346,6 +351,12 @@ final class ExecScalarAnalysis {
                     ? integer(0, b.low >= 0 ? b.high : a.high, total)
                     : integer(Integer.MIN_VALUE,Integer.MAX_VALUE,total);
             case BIT_OR, BIT_XOR -> integer(Integer.MIN_VALUE, Integer.MAX_VALUE, total);
+            case SHIFT_LEFT_I32_UNCHECKED -> {
+                if(b.low<0||b.high>31)yield integer(Integer.MIN_VALUE,Integer.MAX_VALUE,false);
+                long small=1L<<(int)b.low,large=1L<<(int)b.high;
+                long[] products={a.low*small,a.low*large,a.high*small,a.high*large};
+                yield checked(Arrays.stream(products).min().orElseThrow(),Arrays.stream(products).max().orElseThrow(),total);
+            }
             case SHIFT_LEFT, SHIFT_RIGHT, SHIFT_UNSIGNED -> integer(Integer.MIN_VALUE,Integer.MAX_VALUE,
                     total && b.low >= 0 && b.high <= 31);
             case DIVIDE, MODULO -> integer(Integer.MIN_VALUE,Integer.MAX_VALUE,

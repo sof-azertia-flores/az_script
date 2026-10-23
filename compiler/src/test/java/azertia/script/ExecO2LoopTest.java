@@ -35,7 +35,7 @@ class ExecO2LoopTest {
     }
     @Test void cheapArithmeticDoesNotStackAnotherTemporaryOnO1LoopMotion() throws Exception {
         String source="int f(int n){int s=0;int i=0;while(i<10){s+=((n&7)+1)*3;i+=1;}return s;}";
-        var passes=EnumSet.allOf(Compiler.OptimizationPass.class);
+        var passes=EnumSet.copyOf(Compiler.optimizationPasses(Compiler.Optimization.ADVANCED));
         passes.remove(RANGE_LOOP_MOTION);
         var before=function(source,passes);
         passes.add(RANGE_LOOP_MOTION);

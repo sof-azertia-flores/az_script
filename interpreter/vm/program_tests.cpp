@@ -106,8 +106,12 @@ void all_wire_operations() {
     auto check=node(51,{pointer()});auto context=std::make_shared<exec::context>();context->abi=ADDRESS_VALUE;context->kind=2;
     check->contexts.push_back(context);check->slot_types={INT_VALUE,ANY_VALUE};samples.push_back(check);
     auto methods=node(52,{pointer()});methods->methods.push_back({0x0fff0020,{}});samples.push_back(methods);
+    samples.push_back(node(54,{node(5,{integer()}),integer()}));
+    for(int opcode=55;opcode<=58;++opcode)samples.push_back(node(opcode,{integer(),integer()}));
+    auto increment=node(59,{slot()});increment->immediate=1;samples.push_back(increment);
+    auto guard=node(60,{pointer()});guard->function_id=0x0fff0020;samples.push_back(guard);
     auto virtual_call=node(53,{pointer()});virtual_call->return_type=VOID_VALUE;samples.push_back(virtual_call);
-    expect(samples.size()==54,"sample for every wire opcode");
+    expect(samples.size()==61,"sample for every wire opcode");
     auto root=node(1);for(const auto& sample:samples)root->children.push_back(sample);
     auto method=source_function(node(7),0x0fff0020);method.hidden_count=0;method.param_types={ADDRESS_VALUE};
     SourceProgram source;source.functions={source_function(root),method};
@@ -171,7 +175,7 @@ void constant_fidelity_and_rejections() {
     corrupt=program;corrupt.instructions[0].result=0;rejects([&]{verify_program(corrupt);},"unused instruction operand");
     corrupt=program;corrupt.instructions[find(corrupt,Opcode::constant)].result=corrupt.functions[0].register_count;rejects([&]{verify_program(corrupt);},"register index");
     corrupt=program;corrupt.functions[0].global_offset=1048576;rejects([&]{verify_program(corrupt);},"function layout");
-    rejects([&]{lower(node(54));},"unsupported wire opcode");
+    rejects([&]{lower(node(61));},"unsupported wire opcode");
     auto extra=integer();extra->contexts.push_back(scalar_context());
     rejects([&]{lower(extra);},"unexpected metadata");
     auto cycle=node(1);cycle->children.push_back(cycle);

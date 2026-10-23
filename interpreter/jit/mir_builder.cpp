@@ -1,4 +1,5 @@
 #include "mir.h"
+#include "operations.h"
 #include "shadow.h"
 #include <map>
 #include <stdexcept>
@@ -190,6 +191,12 @@ class Builder {
         }
         case Opcode::unary:case Opcode::binary:case Opcode::convert: {
             if(!writable(instruction.result))return step(pc);
+            const bool unchecked=instruction.opcode==Opcode::binary&&
+                unchecked_i32(static_cast<BinaryOperation>(instruction.operand));
+            // Untyped or hand-authored input still reports the ordinary VM
+            // type error; only proven integer operands reach the no-exit op.
+            if(unchecked&&(read_tags(frame,instruction.left)!=tag_bit(INT_VALUE)||
+                           read_tags(frame,instruction.right)!=tag_bit(INT_VALUE)))return step(pc);
             TagSet result;
             if(instruction.opcode==Opcode::binary)result=binary_result(static_cast<BinaryOperation>(instruction.operand),
                 read_tags(frame,instruction.left),read_tags(frame,instruction.right));
@@ -199,7 +206,9 @@ class Builder {
             const auto left=source(pc,instruction.left,T1);
             if(left==none)return step(pc);
             auto compute=op(instruction.opcode==Opcode::binary?Code::binary:instruction.opcode==Opcode::unary?Code::unary:Code::convert,pc);
-            compute.a=T0;compute.b=left;compute.exit=site(pc,ExitKind::redo);compute.tags=result;
+            compute.a=T0;compute.b=left;compute.tags=result;
+            if(unchecked)compute.code=Code::binary_i32;
+            else compute.exit=site(pc,ExitKind::redo);
             if(instruction.opcode==Opcode::binary) {
                 const auto right=source(pc,instruction.right,T2);
                 if(right==none)return step(pc);
@@ -317,14 +326,18 @@ public:
                 if(out.fill_registers[reg]&&frame.registers[reg].kind==Kind::value&&analysis.live[index][reg])
                     tags[reg]=frame.registers[reg].tags;
             for(std::uint32_t local=0;local<L;++local)
-                if(out.fill_locals[local]&&frame.locals[local].bound())tags[R+local]=frame.locals[local].tags;
+                if(out.fill_locals[local]&&frame.locals[local].bound()&&analysis.live_locals[index][local])
+                    tags[R+local]=frame.locals[local].tags;
             out.resume_tags[index]=std::move(tags);
         }
         for(const auto& exit:out.exits) {
-            std::vector<std::uint32_t> live;
+            std::vector<std::uint32_t> live,locals;
             for(std::uint32_t reg=0;reg<R;++reg)
                 if(out.fill_registers[reg]&&analysis.live[at(exit.pc)][reg])live.push_back(reg);
-            out.exit_registers.push_back(std::move(live));
+            for(std::uint32_t local=0;local<L;++local)
+                if(out.fill_locals[local]&&state(exit.pc).locals[local].bound()&&analysis.live_locals[at(exit.pc)][local])
+                    locals.push_back(local);
+            out.exit_registers.push_back(std::move(live));out.exit_locals.push_back(std::move(locals));
         }
         verify(out);
         return std::move(out);
@@ -356,7 +369,7 @@ std::string dump(const Function& function) {
     static constexpr const char* names[]{"steps","tick","set","copy","forget","read_reference","write_reference","truth",
         "branch_false","jump","branch_flags","set_flags","loop_next","binary","unary","convert","reference_local",
         "reference_global","copy_reference","drop_reference","declare","flush_local","enter_scope","leave_scope",
-        "check_undeclared","set_result","exit"};
+        "check_undeclared","set_result","binary_i32","exit"};
     std::string text="function "+std::to_string(function.function)+": "+std::to_string(function.registers)+" registers, "+
         std::to_string(function.locals)+" locals\n";
     const auto operand=[](std::uint32_t value){return value==none?std::string("-"):std::to_string(value);};

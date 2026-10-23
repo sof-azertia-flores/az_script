@@ -116,7 +116,7 @@ def main():
             client = compile_case(name + '-client', client_source)
             artifacts = [library, client]
             expected_functions = sum(len(item[1]['f']) for item in artifacts)
-            expected_public = sum(function['id'] not in (0, 1)
+            expected_public = sum(function['id'] not in (0, 1) and function.get('entry-kind', 0) != 2
                                   for item in artifacts for function in item[1]['f'])
             previous = None
             for order, ordered in (('client-first', [client, library]), ('library-first', [library, client])):

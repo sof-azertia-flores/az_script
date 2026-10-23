@@ -263,6 +263,27 @@ public:
         default:break;
         }
     }
+    // Locals whose cells an instruction reads through its operand registers.
+    void local_reads(const vm::Instruction& instruction,const FrameState& state,std::vector<bool>& live) const {
+        const auto through=[&](vm::Register reg) {
+            if(reg==no_index)return;
+            const auto& source=state.registers[reg];
+            if(source.kind==Kind::local)live[source.index]=true;
+            else if(source.kind==Kind::unknown||source.kind==Kind::orphan)live.assign(live.size(),true);
+        };
+        switch(instruction.opcode) {
+        case Opcode::declare_slot:through(instruction.left);break;
+        case Opcode::store:through(instruction.right);break;
+        case Opcode::snapshot:case Opcode::materialize:case Opcode::truth:case Opcode::unary:
+        case Opcode::convert:case Opcode::branch_false:case Opcode::set_return:
+            through(instruction.left);break;
+        case Opcode::binary:through(instruction.left);through(instruction.right);break;
+        case Opcode::call:
+            for(const auto argument:function.operations[instruction.operand].arguments)through(argument);
+            break;
+        default:break;
+        }
+    }
     static vm::Register written(const vm::Instruction& instruction) {
         switch(instruction.opcode) {
         case Opcode::constant:case Opcode::load_slot:case Opcode::store:case Opcode::snapshot:case Opcode::materialize:
@@ -298,6 +319,19 @@ public:
                 if(const auto reg=written(instruction);reg!=no_index)live[reg]=false;
                 reads(instruction,result.states[at(pc)],live);
                 if(live!=result.live[at(pc)]){result.live[at(pc)]=std::move(live);changed=true;}
+            }
+        }
+        result.live_locals.assign(size,std::vector<bool>(layout.locals,false));
+        for(bool changed=true;changed;) {
+            changed=false;
+            for(auto pc=function.end;pc-->function.begin;) {
+                if(!result.reached[at(pc)])continue;
+                auto live=result.live_locals[at(pc)];
+                for(const auto successor:successors(pc))
+                    if(successor<function.end&&result.reached[at(successor)])
+                        for(std::size_t i=0;i<live.size();++i)live[i]=live[i]||result.live_locals[at(successor)][i];
+                local_reads(program.instructions[pc],result.states[at(pc)],live);
+                if(live!=result.live_locals[at(pc)]){result.live_locals[at(pc)]=std::move(live);changed=true;}
             }
         }
     }

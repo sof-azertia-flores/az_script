@@ -24,7 +24,9 @@ OP_NAMES = {3: 'v', 4: 'vd', 5: 'vs', 6: 'm', 7: 'r', 8: 'ro', 9: 'oa',
             32: 'new_block', 33: 'block_address', 34: 'mv', 35: 'drop',
             36: 'context_abi', 37: 'context_default', 38: 'return_typed', 39: 'check_type',
             40: 'buffer_new', 41: 'buffer_op', 42: 'value_compare',
-            43: 'bit_and', 44: 'bit_or', 45: 'bit_xor', 46: 'shl', 47: 'shr', 48: 'ushr', 49: 'convert', 50: 'select', 51: 'check_object', 52: 'set_methods', 53: 'call_virtual'}
+            43: 'bit_and', 44: 'bit_or', 45: 'bit_xor', 46: 'shl', 47: 'shr', 48: 'ushr', 49: 'convert', 50: 'select', 51: 'check_object', 52: 'set_methods', 53: 'call_virtual',
+            54: 'seq', 55: 'add_i32_unchecked', 56: 'minus_i32_unchecked', 57: 'multiply_i32_unchecked',
+            58: 'shl_i32_unchecked', 59: 'increment_i32_unchecked', 60: 'guard_method'}
 EXEC_VERSION = 10
 
 
@@ -167,10 +169,14 @@ def returning(value=None):
     return expression(7, b'\0') if value is None else expression(7, b'\1', value)
 
 
-def debug_record(name, file=0, line=0, column=0, locations=()):
+def debug_record(name, file=0, line=0, column=0, locations=(), inlined=None):
     """[name, file, line, column, flat (node, file, line, column) int stack]."""
-    return stack(name.encode('utf-8') if isinstance(name, str) else name, integer(file), integer(line), integer(column),
-                 stack(*(integer(part) for quad in locations for part in quad)))
+    fields = [name.encode('utf-8') if isinstance(name, str) else name, integer(file), integer(line), integer(column),
+              stack(*(integer(part) for location in locations for part in location))]
+    if inlined is not None:
+        fields.append(stack(*(stack(entry['name'].encode('utf-8'), integer(entry['file']), integer(entry['line']),
+                                    integer(entry['column']), integer(entry['call-site'])) for entry in inlined)))
+    return stack(*fields)
 
 
 def function(body, ident=MAIN, return_type=0, params=(), locals_count=0, hidden_count=0, entry_kind=0, debug=None):
@@ -232,7 +238,7 @@ def encode_compact_expression(value):
             fields.append(child('val'))
     elif opcode == 5:
         fields = [integer(value['v']), child('val')]
-    elif opcode == 6 or 12 <= opcode <= 24 or 43 <= opcode <= 48:
+    elif opcode == 6 or 12 <= opcode <= 24 or 43 <= opcode <= 48 or 55 <= opcode <= 58:
         fields = [child('v1'), child('v2')]
     elif opcode == 7:
         fields = [bytes(['r' in value])] + ([child('r')] if 'r' in value else [])
@@ -280,6 +286,12 @@ def encode_compact_expression(value):
         fields = [child('v'), stack(*entries)]
     elif opcode == 53:
         fields = [integer(value['slot']), integer(value['type']), stack(*(encode_compact_expression(arg) for arg in value['param']))]
+    elif opcode == 54:
+        fields = [stack(*(encode_compact_expression(item) for item in value['statements'])), child('value')]
+    elif opcode == 59:
+        fields = [child('target'), integer(value['delta']), bytes([value['prefix']])]
+    elif opcode == 60:
+        fields = [child('receiver'), integer(value['slot']), integer(value['function'])]
     else:
         assert opcode in (29, 30)
         fields = []
@@ -321,7 +333,8 @@ def encode_compact_module(program):
         debug = entry.get('debug')
         if debug is not None:
             debug = debug_record(debug['name'], debug['file'], debug['line'], debug['column'],
-                                 [tuple(int(part) for part in item.split(':')) for item in debug['locations']])
+                                 [tuple(int(part) for part in item.split(':')) for item in debug['locations']],
+                                 debug.get('inlined'))
         functions.append(function(encode_compact_expression(body), entry['id'], entry['return-type'], params,
                                   entry.get('local-count', len(local_names)),
                                   entry.get('hidden-count', 0), entry.get('entry-kind', 0), debug))
@@ -421,7 +434,7 @@ class WireReader:
         elif opcode == 5:
             assert len(fields) == 2
             result.update(v=int_value(fields[0]), val=self.expression(fields[1]))
-        elif opcode == 6 or 12 <= opcode <= 24 or 43 <= opcode <= 48:
+        elif opcode == 6 or 12 <= opcode <= 24 or 43 <= opcode <= 48 or 55 <= opcode <= 58:
             assert len(fields) == 2
             result.update(v1=self.expression(fields[0]), v2=self.expression(fields[1]))
         elif opcode == 7:
@@ -512,6 +525,16 @@ class WireReader:
             slot, kind = int_value(fields[0]), int_value(fields[1])
             assert slot >= 0 and 0 <= kind <= 8
             result.update(slot=slot, type=kind, param=[self.expression(arg) for arg in frames(fields[2])])
+        elif opcode == 54:
+            assert len(fields) == 2
+            result.update(statements=[self.expression(item) for item in frames(fields[0])], value=self.expression(fields[1]))
+        elif opcode == 59:
+            assert len(fields) == 3
+            result.update(target=self.expression(fields[0]), delta=int_value(fields[1]), prefix=bool_value(fields[2]))
+        elif opcode == 60:
+            assert len(fields) == 3
+            result.update(receiver=self.expression(fields[0]), slot=int_value(fields[1]), function=int_value(fields[2]))
+            assert result['slot'] >= 0
         else:
             assert opcode in (29, 30) and not fields
         return result
@@ -525,19 +548,41 @@ class WireReader:
 
     def debug(self, payload, files):
         fields = frames(payload)
-        assert len(fields) == 5
+        assert len(fields) in (5, 6)
         name = self.debug_text(fields[0])
         file, line, column = (int_value(field) for field in fields[1:4])
         assert 0 <= file < len(files) and line >= 0 and column >= 0 and (line == 0) == (column == 0)
         values = [int_value(item) for item in frames(fields[4])]
-        assert len(values) % 4 == 0
+        width = 5 if len(fields) == 6 else 4
+        assert len(values) % width == 0
         locations = []
-        for i in range(0, len(values), 4):
+        for i in range(0, len(values), width):
             node, at_file, at_line, at_column = values[i:i + 4]
             assert (not locations or node > int(locations[-1].split(':')[0])) and 0 <= node < len(self.nodes)
             assert 0 <= at_file < len(files) and at_line >= 1 and at_column >= 1
-            locations.append(f'{node}:{at_file}:{at_line}:{at_column}')
-        return {'name': name, 'file': file, 'line': line, 'column': column, 'locations': locations}
+            locations.append(':'.join(str(value) for value in values[i:i + width]))
+        result = {'name': name, 'file': file, 'line': line, 'column': column, 'locations': locations}
+        if width == 5:
+            inlined = []
+            for record in frames(fields[5]):
+                entry = frames(record)
+                assert len(entry) == 5
+                source_file, source_line, source_column, call_site = map(int_value, entry[1:])
+                assert 0 <= source_file < len(files) and source_line >= 0 and source_column >= 0
+                assert (source_line == 0) == (source_column == 0)
+                assert 0 <= call_site < len(locations)
+                inlined.append({'name': self.debug_text(entry[0]), 'file': source_file, 'line': source_line,
+                                'column': source_column, 'call-site': call_site})
+            indices = values[4::5]
+            assert all(0 <= index <= len(inlined) for index in indices)
+            for index in range(1, len(inlined) + 1):
+                seen = set()
+                while index:
+                    assert index not in seen, 'cyclic inline chain'
+                    seen.add(index)
+                    index = indices[inlined[index - 1]['call-site']]
+            result['inlined'] = inlined
+        return result
 
     def read(self, data):
         file_fields = frames(data)
@@ -915,9 +960,9 @@ def main():
             parsed = WireReader().read(payload)
             assert encode_compact_module(parsed) == payload, ('select independent roundtrip', name)
             execute_wire('independent-select-' + name, fields, expected=expected)
-        depth_call = expression(2, integer(0x0abd0001), stack(), stack())
-        same_scope = expression(19, expression(50, constant(True), depth_call, depth_call), depth_call)
-        execute_wire('independent-select-current-scope', module([function(returning(same_scope), return_type=4)]), expected='true\n')
+        # 0x0abd0001 belonged to the removed getDepth; a call to it never links.
+        retired_call = expression(2, integer(0x0abd0001), stack(), stack())
+        execute_wire('retired-depth-builtin', module([function(returning(retired_call))]), invalid=True, error='0x0abd0001')
         for index, condition in enumerate([0, 1, Scalar(DOUBLE, struct.pack('<d', 1.0)), 'yes', Address(1), b'\xff']):
             body = returning(expression(50, constant(condition), constant(2), constant(3)))
             execute_wire('select-condition-' + str(index), module([function(body)]), invalid=True,
@@ -1033,7 +1078,7 @@ def main():
             execute_wire('virtual-' + label, module([function(body, return_type=5, locals_count=1), method]), invalid=True)
         for label, target, captured in [
                 ('missing-target', method_id + 1, []),
-                ('native-target', 0x0abd0001, []),
+                ('native-target', 0x0abd0000, []),
                 ('hidden-mismatch', method_id, [{'abi': 0, 'kind': 0}])]:
             body = block(allocation, bind_manual, set_methods(pointer, [(target, captured)]))
             execute_wire('virtual-binding-' + label, module([function(body, return_type=5, locals_count=1), method]), invalid=True)
@@ -1126,7 +1171,7 @@ def main():
                 ('debug-file-width', b'\0', None),
                 ('debug-without-files', b'', good_debug),
                 ('debug-record-short', files, stack(b'main', integer(0), integer(1), integer(5))),
-                ('debug-record-long', files, stack(b'main', integer(0), integer(1), integer(5), b'', b'')),
+                ('debug-record-long', files, stack(b'main', integer(0), integer(1), integer(5), b'', b'', b'')),
                 ('debug-quads-partial', files, stack(b'main', integer(0), integer(1), integer(5), stack(integer(1), integer(0), integer(1)))),
                 ('debug-node-count', files, debug_record('main', 0, 1, 5, [(3, 0, 1, 1)])),
                 ('debug-node-decreasing', files, debug_record('main', 0, 1, 5, [(2, 0, 1, 1), (1, 0, 1, 1)])),

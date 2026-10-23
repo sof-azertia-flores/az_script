@@ -13,8 +13,12 @@ difference fails. JNI invocations are not dual-run: the JVM loads one engine.
 With --jit MODE[,MODE...] each invocation also runs on the VM once per mode
 with AZSCRIPT_JIT=MODE; each such run must be byte-identical to the plain VM
 run, refusals included, since the JIT tier is part of the VM engine.
+
+Suites are independent; --jobs runs that many at once and the report lists
+them in suite order.
 """
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 import json
 import os
 from pathlib import Path
@@ -87,11 +91,14 @@ def main():
     parser.add_argument('--only', help='comma-separated suite names (refusal counts are checked for these only)')
     parser.add_argument('--suggest', type=Path, help='write observed refusals as registry entries for review')
     parser.add_argument('--jit', help='also run each invocation on the VM with AZSCRIPT_JIT set to each of these comma-separated modes')
+    parser.add_argument('--jobs', type=int, default=1, help='suites run concurrently (each invocation already runs its engines concurrently)')
     args = parser.parse_args()
     modes = args.jit.split(',') if args.jit else []
     native = args.native.resolve()
     if not 0 < args.runner_timeout < float('inf'):
         parser.error('--runner-timeout must be finite and positive')
+    if args.jobs < 1:
+        parser.error('--jobs must be at least 1')
     work = args.work.resolve()
     work.mkdir(parents=True, exist_ok=False)
     interpreter = work / 'interpreter'
@@ -131,7 +138,7 @@ def main():
     for key in ('JAVA_TOOL_OPTIONS', 'JDK_JAVA_OPTIONS', '_JAVA_OPTIONS', 'AZSCRIPT_EXPERIMENTAL_VM_BACKEND', 'AZSCRIPT_JIT'):
         env.pop(key, None)
     report = {'native': str(native), 'runner_timeout': args.runner_timeout, 'suites': {}, 'failures': []}
-    for name in selected:
+    def align(name):
         suite_records = work / 'records' / name
         suite_records.mkdir(parents=True)
         command = [sys.executable, ROOT / f'tests/{name}.py', '--classpath', args.classpath, *arguments[name]]
@@ -169,12 +176,17 @@ def main():
         for message in sorted(set(refused) | set(listed)):
             if refused.get(message, 0) != listed.get(message, 0):
                 problems.append(f'refusal count for {message!r}: observed {refused.get(message, 0)}, listed {listed.get(message, 0)}')
-        report['suites'][name] = {'exit': result.returncode, 'invocations': len(invocations),
-                                  'identical': len(invocations) - len(mismatched) - sum(refused.values()),
-                                  'refusals': refused, 'mismatches': mismatched, 'problems': problems}
-        report['failures'] += [f'{name}: {problem}' for problem in problems]
-        print(f'{name}: exit={result.returncode} invocations={len(invocations)} '
-              f'refused={sum(refused.values())} mismatched={len(mismatched)}', flush=True)
+        return {'exit': result.returncode, 'invocations': len(invocations),
+                'identical': len(invocations) - len(mismatched) - sum(refused.values()),
+                'refusals': refused, 'mismatches': mismatched, 'problems': problems}
+
+    with ThreadPoolExecutor(max_workers=args.jobs) as pool:
+        results = list(pool.map(align, selected))
+    for name, suite in zip(selected, results):
+        report['suites'][name] = suite
+        report['failures'] += [f'{name}: {problem}' for problem in suite['problems']]
+        print(f'{name}: exit={suite["exit"]} invocations={suite["invocations"]} '
+              f'refused={sum(suite["refusals"].values())} mismatched={len(suite["mismatches"])}', flush=True)
     (work / 'report.json').write_text(json.dumps(report, indent=2) + '\n', encoding='utf-8')
     if args.suggest:
         suggestion = [{'suite': suite, 'message': message, 'count': count, 'removed_by': 'TODO'}

@@ -96,10 +96,5 @@ ScopeId transfer_parent(ScopeId scope) noexcept {
     if(find(record->caller))return record->caller;
     return find(record->parent)?record->parent:ScopeId{};
 }
-int depth(ScopeId scope) noexcept {
-    int result=0;
-    for(auto id=scope;const auto* record=find(id);id=record->parent)++result;
-    return result;
-}
 }
 }

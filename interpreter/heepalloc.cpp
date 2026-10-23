@@ -85,7 +85,7 @@ void validate_object(const object_record& record) {
     }
     auto it=script->functions.find(*record.destructor_id);
     auto destructor=it==script->functions.end()?nullptr:std::dynamic_pointer_cast<ofunction>(it->second);
-    if(!destructor||destructor->rett!=VOID_VALUE||destructor->param_count!=1||
+    if(!destructor||destructor->entry_kind==2||destructor->rett!=VOID_VALUE||destructor->param_count!=1||
        destructor->param_types!=std::vector<int>{ADDRESS_VALUE}||
        static_cast<std::size_t>(destructor->hidden_count)!=record.destructor_contexts.size())
         throw std::invalid_argument("Object destructor must be a script function void(address)");
@@ -308,6 +308,12 @@ std::shared_ptr<const method_table> methods_at(address pointer,const std::shared
     }
     if(!methods||methods->empty())throw std::runtime_error("Object has no virtual method table");
     return methods;
+}
+bool guard_method(address pointer,std::size_t slot,int function_id,const std::shared_ptr<script>& script) noexcept {
+    try {
+        const auto methods=methods_at(pointer,script);
+        return slot<methods->size()&&(*methods)[slot].function_id==function_id&&(*methods)[slot].contexts.empty();
+    } catch(...) {return false;}
 }
 std::size_t method_table_count() {
     std::lock_guard<std::recursive_mutex> lock(runtime_mutex());return method_tables.size();

@@ -53,7 +53,7 @@ R03 基础设施实测：两个分别编译的适配器都链接原始 Release �
 
 ## Wire 指令清单
 
-下表登记所有 v10 opcode；编号与 `ExecOpcodes.java` 对齐。R03 的实际静态出现情况以报告为准。完整合法/非法记录已有 `tests/compact_exec_end_to_end.py` 独立 wire 语料；语义侧引用各专项回归，后续 R07–R16 不能将“可解码”当作“已由新 VM 执行”。
+下表登记全部 opcode，包括 `exec_v11_main` 开发扩展 54–60；开发期根格式版本仍为 10，编号与 `ExecOpcodes.java` 对齐。R03 的实际静态出现情况以报告为准。完整合法/非法记录已有 `tests/compact_exec_end_to_end.py` 独立 wire 语料；语义侧引用各专项回归，后续 R07–R16 不能将“可解码”当作“已由新 VM 执行”。
 
 | 编号 | 指令 | 语义回归归属 |
 | --- | --- | --- |
@@ -111,6 +111,13 @@ R03 基础设施实测：两个分别编译的适配器都链接原始 Release �
 | 51 | check_object | language ops/generics |
 | 52 | set_methods | 差分 source-virtual；virtual methods |
 | 53 | call_virtual | 差分 source-virtual；virtual methods |
+| 54 | seq | exec-v11 原始 wire 预算扫描；O3 嵌套/惰性/循环条件，原位依序赋值与求值，不创建作用域 |
+| 55 | add_i32_unchecked | exec-v11 原始 wire/JIT；int32 类型检查、uint32 位模式回绕及 O3 区间证明 |
+| 56 | minus_i32_unchecked | exec-v11 原始 wire/JIT；int32 类型检查、uint32 位模式回绕及 O3 区间证明 |
+| 57 | multiply_i32_unchecked | exec-v11 原始 wire/JIT；int32 类型检查、uint32 位模式回绕及 O3 区间证明 |
+| 58 | shl_i32_unchecked | exec-v11 原始 wire/JIT；移位数低五位、类型错误，O3 另证源码移位数与结果范围 |
+| 59 | increment_i32_unchecked | exec-v11 原始 wire；前缀/后缀、引用目标、类型错误与回绕，源码暂不直接发射 |
+| 60 | guard_method | exec-v11 原始 wire；方法绑定/上下文/过期及外国接收者、重定位，表达式错误仍传播 |
 
 ## 内建函数清单
 
@@ -119,7 +126,7 @@ R03 基础设施实测：两个分别编译的适配器都链接原始 Release �
 | ID | 名称 | 验收归属 |
 | --- | --- | --- |
 | 0x0abd0000 | print | stdout 字节；end-to-end |
-| 0x0abd0001 | getDepth | loops/numeric slots；逻辑作用域 |
+| 0x0abd0001 | getDepth（exec v11 删除，ID 永久保留） | loops/numeric slots；逻辑作用域 |
 | 0x0abd0002 | mem_free | address；first-fit/owner |
 | 0x0abd0003 | alloc | address；容量/first-fit |
 | 0x0abd0004 | make_free | address；自动所有权移除 |

@@ -19,7 +19,7 @@ class NativeCode {
     void* code_=nullptr;
     azjit_entry entry_=nullptr;
     std::vector<azjit_op> ops_;
-    std::vector<std::uint32_t> resume_ops_,resume_ids_;
+    std::vector<std::uint32_t> resume_ops_,resume_ids_,exit_slot_begin_,exit_slots_;
     std::vector<std::uint16_t> resume_tags_;
 public:
     NativeCode(const azjit_backend& backend,const Function& function);

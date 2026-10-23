@@ -84,8 +84,15 @@ def check_destination(raw, force):
 def copy_assets(package):
     (package / 'docs').mkdir()
     (package / 'docs/compiler-optimization').mkdir()
-    for name in ('O2.md', 'O2-validation.json', 'O2-performance.json', 'JIT-93b5dd0-validation.md'):
+    for name in ('O2.md', 'O3.md', 'O2-validation.json', 'O2-performance.json',
+                 'O3-validation.json', 'O3-performance.json', 'JIT-93b5dd0-validation.md'):
         shutil.copy2(ROOT / 'docs/compiler-optimization' / name, package / 'docs/compiler-optimization' / name)
+    # Development roadmaps describe the source checkout and are not shipped in
+    # the SDK. Keep their labels as prose instead of exporting broken links.
+    def source_roadmaps(content):
+        return re.sub(r'\[([^\]]+)\]\((?:\.\./)?exec-v11-roadmap/[^)]+\)', r'\1', content)
+    o3 = package / 'docs/compiler-optimization/O3.md'
+    o3.write_text(source_roadmaps(o3.read_text(encoding='utf-8')), encoding='utf-8')
     for name in ('USAGE.md', 'QUICKSTART.md', 'USAGE.en.md', 'QUICKSTART.en.md'):
         shutil.copy2(TEMPLATES / name, package / 'docs' / name)
     for name in ('EXEC_FORMAT.md', 'HINT_LINKING.md', 'EXTERN_LIBRARY.md', 'RUNTIME_ABI.md',
@@ -93,7 +100,7 @@ def copy_assets(package):
         destination = package / 'docs' / name
         shutil.copy2(ROOT / 'docs' / name, destination)
         content = destination.read_text(encoding='utf-8')
-        destination.write_text(content.replace('](../compiler/examples/', '](../examples/'), encoding='utf-8')
+        destination.write_text(source_roadmaps(content).replace('](../compiler/examples/', '](../examples/'), encoding='utf-8')
     for name in ('compile.sh', 'compile.cmd', 'run.sh', 'run.cmd',
                  'compile_extern_lib.sh', 'compile_extern_lib.cmd',
                  'sign_extern_lib.sh', 'sign_extern_lib.cmd'):
@@ -119,6 +126,7 @@ def copy_assets(package):
     language = language.replace('](stdlib/', '](../stdlib/').replace('](examples/', '](../examples/')
     language = language.replace('](../docs/EXEC_FORMAT.md)', '](EXEC_FORMAT.md)').replace('](../docs/HINT_LINKING.md)', '](HINT_LINKING.md)').replace('](../docs/EXTERN_LIBRARY.md)', '](EXTERN_LIBRARY.md)')
     language = language.replace('](../docs/compiler-optimization/O2.md)', '](compiler-optimization/O2.md)')
+    language = language.replace('](../docs/compiler-optimization/O3.md)', '](compiler-optimization/O3.md)')
     (package / 'docs/LANGUAGE.md').write_text(language, encoding='utf-8')
     language = (ROOT / 'compiler/LANGUAGE.en.md').read_text(encoding='utf-8')
     start = language.index('From the repository root')
@@ -133,6 +141,7 @@ def copy_assets(package):
     for name in ('EXEC_FORMAT.en.md', 'HINT_LINKING.en.md', 'EXTERN_LIBRARY.en.md'):
         language = language.replace(f'](../docs/{name})', f']({name})')
     language = language.replace('](../docs/compiler-optimization/O2.md)', '](compiler-optimization/O2.md)')
+    language = language.replace('](../docs/compiler-optimization/O3.md)', '](compiler-optimization/O3.md)')
     (package / 'docs/LANGUAGE.en.md').write_text(language, encoding='utf-8')
     shutil.copytree(TEMPLATES / 'licenses', package / 'licenses')
     shutil.copy2(TEMPLATES / 'THIRD_PARTY.md', package / 'THIRD_PARTY.md')

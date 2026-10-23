@@ -24,8 +24,8 @@ struct Activation {
 // False (nothing changed) when memory disagrees, e.g. a host gave a register
 // a value without a shadow: the VM then continues.
 bool fill(const Function& function,vm::ProgramCounter pc,const FrameAccess& frame,Activation& activation,Counters& counters);
-// Write the exit's live register shadows and every present local shadow,
-// the flags, the step count, the static depths and the pc back into VM memory.
+// Write the exit's live register and local shadows (those present), the
+// flags, the step count, the static depths and the pc back into VM memory.
 void write_back(const Function& function,std::uint32_t site,FrameAccess& frame,const Activation& activation) noexcept;
 
 struct Outcome {

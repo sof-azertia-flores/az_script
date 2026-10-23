@@ -30,6 +30,11 @@ V set_methods_expression::execute(E env) {
     if(context_free)cached=std::move(methods);
     return nil();
 }
+V guard_method_expression::execute(E env) {
+    tick(env);auto value=run(receiver,env);
+    return std::make_shared<variable>(value->type_tag()==ADDRESS_VALUE&&
+        heap::guard_method(value->get<address>(),static_cast<std::size_t>(slot),function_id,owner(env)));
+}
 V call_virtual_expression::execute(E env) {
     tick(env);std::vector<V> args;args.reserve(arguments.size());
     for(const auto& argument:arguments)args.push_back(blocks::materialize(run(argument,env),env));
@@ -50,7 +55,7 @@ V functionInvocationExpression::execute(E env) {
     tick(env);std::vector<V> args;
     // Snapshot each argument before evaluating the next one (left-to-right).
     for(auto& p:params) args.push_back(blocks::materialize(run(p,env),env));
-    auto result=invoke_bound_function(owner(env),function_id,env,std::move(args),bind_contexts(contexts,env));
+    auto result=invoke_target(owner(env),env,std::move(args),bind_contexts(contexts,env));
     if(!result) throw std::runtime_error("Host function returned a null pointer");
     blocks::adopt_result(result,env);
     return result;

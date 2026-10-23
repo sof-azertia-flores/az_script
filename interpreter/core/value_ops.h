@@ -10,7 +10,8 @@ enum class UnaryOperation : std::uint32_t { logical_not, negate };
 enum class BinaryOperation : std::uint32_t {
     add, subtract, multiply, divide, remainder, greater, less, equal,
     not_equal, greater_equal, less_equal, bit_and, bit_or, bit_xor,
-    shift_left, shift_right, unsigned_shift_right
+    shift_left, shift_right, unsigned_shift_right,
+    add_i32_unchecked, subtract_i32_unchecked, multiply_i32_unchecked, shift_left_i32_unchecked
 };
 }
 // The runtime's one implementation of value arithmetic, comparison,

@@ -81,7 +81,7 @@ class ExecO2OptimizerTest {
         assertEquals(0,count(skipped,WHILE));
     }
     @Test void observersAndObjectRegionsAreNotRewritten() throws Exception {
-        for(String source:List.of("int run(){int a=1;int b=1;return getDepth();}",
+        for(String source:List.of("extern int host():0x12340001;int run(){int a=1;int b=1;return host();}",
                 "class A{int x;~A(){print(x);}}int run(){A a;int n=1;return n+2;}",
                 "<T> T identity(T x){return x;}int main(){buffer<int> b;b.push(identity<int>(7));return b.get(0);}")) {
             var before=compile(source,Set.of()).toValue().toAbdFormat();

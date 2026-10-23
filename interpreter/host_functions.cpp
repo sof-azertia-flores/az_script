@@ -54,7 +54,11 @@ public:
 }
 std::shared_ptr<function> script::getFunction(int id) {
     std::lock_guard<std::recursive_mutex> lock(runtime_mutex());require_execution();
-    if(auto found=functions.find(id);found!=functions.end())return found->second;
+    if(auto found=functions.find(id);found!=functions.end()) {
+        auto fn=std::dynamic_pointer_cast<ofunction>(found->second);
+        if(fn&&fn->entry_kind==2)throw std::runtime_error("Unknown function id: "+function_id_text(id)+" (private function)");
+        return found->second;
+    }
     const int ns=namespace_of(id);
     if(ns!=0x0abd&&script_namespaces.contains(ns))
         throw std::runtime_error("Unknown function id: "+function_id_text(id)+" (script namespace)");
@@ -68,7 +72,9 @@ std::shared_ptr<function> script::getFunction(int id) {
 bool script::hasFunction(int id) {
     std::lock_guard<std::recursive_mutex> lock(runtime_mutex());
     if(closed)return false;
-    if(functions.contains(id))return true;
+    if(auto found=functions.find(id);found!=functions.end()) {
+        auto fn=std::dynamic_pointer_cast<ofunction>(found->second);return !fn||fn->entry_kind!=2;
+    }
     const int ns=namespace_of(id);
     return (ns==0x0abd||!script_namespaces.contains(ns))&&isInternelFunction(id);
 }

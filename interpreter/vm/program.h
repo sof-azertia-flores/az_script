@@ -31,7 +31,7 @@ enum class Opcode : std::uint16_t {
     new_block, block_address, move_out, drop,
     bind_context, context_abi, context_default, return_typed, check_type,
     buffer_new, buffer_operation, value_compare, check_object,
-    check_method_receiver, set_methods, call_virtual,
+    check_method_receiver, set_methods, call_virtual, guard_method,
     count
 };
 enum class BudgetKind : std::uint32_t { expression, loop_iteration, method_entry };

@@ -1093,6 +1093,7 @@ void virtual_tests() {
     invoke_bound_function(program,1012,env,{at(live)},{string_type});
     check(integer(program->invoke(1020,{at(live)}))==STRING_VALUE,"method tables retain bound hidden contexts after their installing call ends");
     const auto first_bound_table=heap::methods_at(live,program);
+    check(!heap::guard_method(live,0,first_bound_table->at(0).function_id,program),"method guard rejects nonempty bound contexts");
     invoke_bound_function(program,1012,env,{at(live)},{double_type});
     check(integer(program->invoke(1020,{at(live)}))==DOUBLE_VALUE&&first_bound_table->at(0).contexts[0]->abi==STRING_VALUE,
           "reference contexts are rebound instead of cached or mutated across calls");
@@ -1103,6 +1104,7 @@ void virtual_tests() {
     auto foreign=load_raw(rmodule({rfn(1030,VOID_VALUE,rblock({})),rfn(1000,INT_VALUE,rreturn(rc(n(0))),0,{ADDRESS_VALUE})}));
     rejects_message([&]{heap::set_methods(live,base,foreign);},"Object belongs to another script","a foreign script cannot change heap methods");
     rejects_message([&]{heap::methods_at(live,foreign);},"Object belongs to another script","a foreign script cannot dispatch heap methods");
+    check(!heap::guard_method(live,0,1000,foreign),"method guard rejects a foreign receiver without throwing");
     rejects_message([&]{heap::methods_at(blocks::address_of(literal),foreign);},"Object belongs to another script","a foreign script cannot dispatch literal methods");
     foreign->destroy();
     const auto raw_pointer=heap::alloc(1);
@@ -1110,6 +1112,7 @@ void virtual_tests() {
     rejects_message([&]{heap::methods_at(address{live.value+1},program);},"Virtual call requires a live object start","heap interiors cannot dispatch");
     auto expired=blocks::address_of(blocks::create(1,program));
     rejects_message([&]{heap::methods_at(expired,program);},"Virtual call requires a live object start","expired literal virtual receivers reject");
+    check(!heap::guard_method(expired,0,1000,program),"method guard rejects expired literal receivers without throwing");
     for(auto malformed:std::vector<method_table>{{{99999,{}}},{{1016,{}}},{{1017,{}}},{{1004,{}}},{{1000,{string_type}}}}) {
         bool caught=false;try {validate_method_table(malformed,program);}catch(const std::invalid_argument& error) {
             caught=true;check(typeid(error)==typeid(std::invalid_argument),"snapshot method validation preserves invalid_argument mapping");
@@ -2488,11 +2491,15 @@ int main(){try{
         rejects([&]{insert_raw(linked,alpha,false);},"duplicate hint mount rejected");
         check(linked->setup&&linked->module_manifest().size()==2,"failed mounting preserves previous setup and module list");
         rejects([&]{linked->namespace_for_hint("alpha");},"hint names are case sensitive");
-        auto cached_host=linked->getFunction(0x0abd0001);
+        rejects_containing([&]{linked->getFunction(0x0abd0001);},"Unknown function id: 0x0abd0001",
+            "the removed getDepth id resolves to no builtin");
+        check(!linked->hasFunction(0x0abd0001)&&linked->hasFunction(0x0abd0002),"only the retired builtin slot is empty");
+        auto cached_host=linked->getFunction(0x0abd000b);
         linked->baseEnv->getVariable(-1)->setValue(100);linked->baseEnv->getVariable(-2)->setValue(70);
         insert_raw(linked,rhint("Beta",{rfn(2,STRING_VALUE,rreturn(rc(s("beta"))))}),false);
         rejects([&]{entry->invoke(linked->baseEnv);},"insert invalidates cached script execution gate");
-        rejects([&]{cached_host->invoke(linked->baseEnv);},"insert invalidates cached host execution gate");
+        rejects_containing([&]{cached_host->invoke(linked->baseEnv,{std::make_shared<variable>(std::string("x"))});},
+            "call flush before execution","insert invalidates cached host execution gate");
         insert_raw(linked,rhint("Gamma",{rfn(2,INT_VALUE,rreturn(rcall(alias)))},0,
             raw({assume("Alpha",0x1234)}),raw({rsignature(alias,INT_VALUE)})),false);
         insert_raw(linked,rhint("Delta",{rfn(2,STRING_VALUE,rreturn(rcall(alias)))},0,

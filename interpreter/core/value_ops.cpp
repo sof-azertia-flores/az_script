@@ -99,6 +99,23 @@ const char* operation_name(BinaryOperation operation) {
 Value binary(BinaryOperation operation,const Value& a,const Value& b) {
     if(operation>=BinaryOperation::bit_and&&operation<=BinaryOperation::unsigned_shift_right)
         return bitwise(43+static_cast<int>(operation)-static_cast<int>(BinaryOperation::bit_and),a,b);
+    if(operation>=BinaryOperation::add_i32_unchecked&&operation<=BinaryOperation::shift_left_i32_unchecked) {
+        if(operation==BinaryOperation::shift_left_i32_unchecked) {
+            if(a.type_tag()!=INT_VALUE||b.type_tag()!=INT_VALUE)
+                throw std::runtime_error(std::string("shl operands must be int, got ")+type_name(a.type_tag())+" and "+type_name(b.type_tag()));
+            return Value(std::bit_cast<int>(static_cast<std::uint32_t>(a.get<int>())<<(static_cast<std::uint32_t>(b.get<int>())&31u)));
+        }
+        const auto checked=static_cast<BinaryOperation>(static_cast<unsigned>(operation)-static_cast<unsigned>(BinaryOperation::add_i32_unchecked));
+        const std::string name=operation_name(checked);
+        if(a.type_tag()!=INT_VALUE||b.type_tag()!=INT_VALUE) {
+            if(a.type_tag()==OBJECT_VALUE||b.type_tag()==OBJECT_VALUE)throw std::runtime_error("Unsupported object value operands for "+name);
+            if(a.type_tag()==ADDRESS_VALUE||b.type_tag()==ADDRESS_VALUE)throw std::runtime_error("Unsupported address operands for "+name);
+            throw std::runtime_error("Unsupported operands for "+name);
+        }
+        const auto x=static_cast<std::uint32_t>(a.get<int>()),y=static_cast<std::uint32_t>(b.get<int>());
+        const std::uint32_t result=checked==BinaryOperation::add?x+y:checked==BinaryOperation::subtract?x-y:x*y;
+        return Value(std::bit_cast<int>(result));
+    }
     const std::string_view op=operation_name(operation);
     if(a.type_tag()==OBJECT_VALUE||b.type_tag()==OBJECT_VALUE)throw std::runtime_error("Unsupported object value operands for "+std::string(op));
     if(op=="add"&&(a.type_tag()==STRING_VALUE||b.type_tag()==STRING_VALUE))

@@ -23,7 +23,7 @@ final class ExecLoopMotion {
             calls|=node.ownEffects().contains(ExecIr.Effect.CALL);
             cleans|=node.ownEffects().contains(ExecIr.Effect.CLEANUP);
             Escape own=switch(node.opcode()) {
-                case NEW_BLOCK,BUFFER_NEW,OBJECT_BIND -> Escape.LOCAL_IDENTITY;
+                case NEW_BLOCK,BUFFER_NEW,OBJECT_BIND,OBJECT_ADDRESS,BLOCK_ADDRESS -> Escape.LOCAL_IDENTITY;
                 case RETURN_OBJECT,RETURN_TYPED,MOVE_OUT -> Escape.ESCAPES;
                 case CALL,CALL_VIRTUAL,BUFFER_OP,MOVE,SET_METHODS,CHECK_TYPE,CHECK_OBJECT -> Escape.UNKNOWN;
                 default -> Escape.NONE;

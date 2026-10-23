@@ -74,7 +74,7 @@ plan resolve(const input& source) {
             if(target!=source.functions.end()) {
                 if(auto defining=function_modules.find(id);defining!=function_modules.end()&&defining->second!=index)dependencies.insert(defining->second);
                 const auto& fn=target->second;
-                if(!fn||fn->return_type!=signature.return_type||fn->param_types!=signature.param_types||
+                if(!fn||fn->entry_kind==2||fn->return_type!=signature.return_type||fn->param_types!=signature.param_types||
                    fn->hidden_count!=signature.hidden_count||fn->entry_kind!=signature.entry_kind)
                     throw std::runtime_error("External signature does not match script function: "+function_id_text(id));
             } else if(mapping.contains(namespace_of(original_id))||source.script_namespaces.contains(namespace_of(id))||namespace_of(id)==0x0fff)
@@ -87,6 +87,11 @@ plan resolve(const input& source) {
         for(const auto& reference:module.references) {
             const int id=resolve_id(reference.function_id);
             const auto kind=reference.kind;
+            if(auto target=found_function(id);target!=source.functions.end()&&target->second&&target->second->entry_kind==2) {
+                const auto defining=function_modules.find(id);
+                if(kind!=exec::reference_kind::call||defining==function_modules.end()||defining->second!=index)
+                    throw std::runtime_error("Private function requires a direct call from its own module: "+function_id_text(id));
+            }
             if(auto defining=function_modules.find(id);defining!=function_modules.end()&&defining->second!=index)dependencies.insert(defining->second);
             if(mapping.contains(namespace_of(reference.function_id))||kind!=exec::reference_kind::call) {
                 auto target=found_function(id);
@@ -96,7 +101,7 @@ plan resolve(const input& source) {
                     throw std::runtime_error("Object destructor must be a script function void(address)");
                 if(kind==exec::reference_kind::placement&&(!fn||fn->return_type!=VOID_VALUE||fn->param_types!=std::vector<int>{ADDRESS_VALUE}||fn->entry_kind!=1))
                     throw std::runtime_error("Generic placement initializer must be an internal script function void(address)");
-                if(kind==exec::reference_kind::method&&(!fn||fn->entry_kind!=0||fn->param_types.empty()||fn->param_types.front()!=ADDRESS_VALUE))
+                if((kind==exec::reference_kind::method||kind==exec::reference_kind::guard_method)&&(!fn||fn->entry_kind!=0||fn->param_types.empty()||fn->param_types.front()!=ADDRESS_VALUE))
                     throw std::runtime_error("Virtual method entry must be an ordinary script function with an address receiver");
                 if(kind==exec::reference_kind::factory&&(!fn||fn->return_type!=OBJECT_VALUE||!fn->param_types.empty()))
                     throw std::runtime_error("Generic default factory must be a script function object()");

@@ -41,7 +41,7 @@ void write_back(const Function& function,std::uint32_t site,FrameAccess& frame,c
     const auto& exit=function.exits[site];
     for(const auto reg:function.exit_registers[site])
         if(activation.slots[reg].tag!=absent)frame.set_register_shadow(reg,activation.slots[reg]);
-    for(std::uint32_t local=0;local<function.locals;++local)
+    for(const auto local:function.exit_locals[site])
         if(const auto& shadow=activation.slots[function.registers+local];shadow.tag!=absent)
             frame.set_local_shadow(local,shadow);
     frame.set_flags(activation.flags);frame.set_steps(activation.steps);
@@ -98,6 +98,8 @@ Outcome interpret(const Function& function,vm::ProgramCounter pc,FrameAccess& fr
             if(!result)return leave(op.exit);
             V[op.a]=*result;break;
         }
+        case Code::binary_i32:
+            V[op.a]=binary_i32_unchecked(static_cast<BinaryOperation>(op.tag),V[op.b],V[op.c]);break;
         case Code::unary: {
             const auto result=unary(static_cast<UnaryOperation>(op.tag),V[op.b]);
             if(!result)return leave(op.exit);

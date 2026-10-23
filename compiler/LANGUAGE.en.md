@@ -6,15 +6,17 @@ The compiler was rewritten around the original code-tree format. Source passes t
 
 ## Compilation and embedding
 
-`compile` and `compile-json` accept `-O0` (default), `-O1` and `-O2`; the last option wins. After semantic validation, O1 applies integer/boolean constant folding, conservative scalar propagation, non-trapping scalar leaf inlining, inline specialization of fixed scalar generic contexts, and total loop-invariant expression hoisting. Overflow, division by zero and invalid shifts remain runtime errors. Floating-point, string and observable object lifetime operations are not algebraically eliminated. The readable AST is unchanged; use identical optimization options when recompiling it to obtain identical ABD bytes. Debug numbering follows optimization.
+`compile` and `compile-json` accept `-O0` (default), `-O1`, `-O2` and the development `-O3` level; the last option wins. After semantic validation, O1 applies integer/boolean constant folding, conservative scalar propagation, non-trapping scalar leaf inlining, inline specialization of fixed scalar generic contexts, and total loop-invariant expression hoisting. Overflow, division by zero and invalid shifts remain runtime errors. Floating-point, string and observable object lifetime operations are not algebraically eliminated. The readable AST is unchanged; use identical optimization options when recompiling it to obtain identical ABD bytes. Debug numbering follows optimization.
 
 `--no-fold`, `--no-propagation`, `--no-inline` and `--no-loop-motion` independently disable those passes. Propagation and inlining may still evaluate the constants they expose. Java callers can select `Compiler.Optimization.STANDARD`, or pass an exact `Set<Compiler.OptimizationPass>` to `Compiler.compile(ast, diagnostics, debugInfo, passes)`. `CONSTANTS` enables only folding; existing overloads retain O0.
 
 O2 (`Compiler.Optimization.ADVANCED` in Java) adds scalar analysis across branches and loop backedges, common expression reuse, unreachable branch and dead scalar write elimination, bounded straight-line scalar function inlining, and loop motion justified by integer ranges. Inlined arguments are evaluated once in their original order; potentially failing operations keep their source locations. `--no-cfg-opt`, `--no-cse` and `--no-dce` disable control-flow pruning, common expression reuse and dead code elimination. Existing propagation, inline and loop-motion switches also control their O2 stages.
 
-O2 preserves results, types, effects, object lifetimes, ordinary error categories and failing source locations. Cross-level comparisons allow shorter error stacks and different resource-exhaustion positions; `getDepth()` behavior remains unchanged. Unknown calls, reflection, cleanup and functions beyond analysis limits are treated conservatively. O2 still emits exec v10 and does not select VM/JIT or change JIT thresholds. Same-artifact backend equivalence is unchanged. See the [O2 boundaries and limits](../docs/compiler-optimization/O2.md).
+O2 preserves results, types, effects, object lifetimes, ordinary error categories and failing source locations. Cross-level comparisons allow shorter error stacks and different resource-exhaustion positions. Unknown calls, reflection, cleanup and functions beyond analysis limits are treated conservatively. O2 still emits exec v10 and does not select VM/JIT or change JIT thresholds. Same-artifact backend equivalence is unchanged. See the [O2 boundaries and limits](../docs/compiler-optimization/O2.md).
 
-Optimization reduces executed expressions and budget consumption. `max_steps` prevents runaway execution; optimization levels need not exhaust it at the same source position. Both engines retain the same work-unit charges for a given artifact. In scalar regions without calls, cleanup or control transfers, the VM can validate at most 64 steps together while still charging each executed tick; insufficient budget takes the per-tick path. The default `max_call_depth=0` disables the logical call-depth cap; positive values explicitly enable it. Native-stack and workspace limits remain active. O1 can remove physical calls, so optional depth caps and resource-exhaustion positions are outside O0/O1 equivalence; `getDepth()` and ordinary error traces remain protected.
+O3 (`Compiler.Optimization.AGGRESSIVE` in Java) belongs to the exec v11 development roadmap and uses extensions including `seq`, private functions and unchecked integer operations. Its version field remains 10 during development; new constructs require this branch's runtime. The switches `--no-sequence-inline`, `--no-slot-compaction`, `--no-specialization`, `--no-context-specialization`, `--no-scalar-replacement`, `--no-field-cache`, `--no-devirtualization` and `--no-unchecked-arithmetic` independently control these stages; `--no-inline` also disables sequence inlining. Unchecked arithmetic is emitted only after proving that the source operation cannot overflow and that shift counts are valid, preserving source error rules. See the [implemented O3 scope and limits](../docs/compiler-optimization/O3.md) and [o3-regressions.azs](examples/o3-regressions.azs).
+
+Optimization reduces executed expressions and budget consumption. `max_steps` prevents runaway execution; optimization levels need not exhaust it at the same source position. Both engines retain the same work-unit charges for a given artifact. In scalar regions without calls, cleanup or control transfers, the VM can validate at most 64 steps together while still charging each executed tick; insufficient budget takes the per-tick path. The default `max_call_depth=0` disables the logical call-depth cap; positive values explicitly enable it. Native-stack and workspace limits remain active. O1 can remove physical calls, so optional depth caps and resource-exhaustion positions are outside O0/O1 equivalence; ordinary error traces remain protected.
 
 From the repository root, use the unified build entry point:
 
@@ -97,12 +99,11 @@ Non-hint programs retain `__script_onload = 0`, `main = 0x0fff0000`, and `__scri
 
 `#namespace_hint NAME` declares an independent library. Ordinary library functions, including main, use placeholder 0000; 0/1 are reserved for lifecycle and automatic numbering starts at 2. `#assume_hint NAME abcd` supplies a call namespace relocated by flush. A compilation unit including active includes may have at most one namespace or namespace_hint directive. See [multi-file libraries and hint linking](../docs/HINT_LINKING.en.md).
 
-Twenty built-ins require no declaration:
+Nineteen built-ins require no declaration:
 
 | Name | Signature | ID |
 | --- | --- | --- |
 | `print` | `void(any)` | `0x0abd0000` |
-| `getDepth` | `int()` | `0x0abd0001` |
 | `mem_free` | `boolean(address)` | `0x0abd0002` |
 | `alloc` | `address(int)` | `0x0abd0003` |
 | `make_free` | `void(address)` | `0x0abd0004` |
@@ -122,7 +123,7 @@ Twenty built-ins require no declaration:
 | `str_starts_with` | `boolean(string, string)` | `0x0abd0012` |
 | `str_ends_with` | `boolean(string, string)` | `0x0abd0013` |
 
-These names and `0xabd` IDs are reserved and cannot be script or extern declarations. Built-ins do not appear in AST abstract or extern-signatures.
+These names and `0xabd` IDs are reserved and cannot be script or extern declarations. Built-ins do not appear in AST abstract or extern-signatures. `0x0abd0001` belonged to the removed `getDepth`; it stays reserved and is never reassigned, so calling or declaring it is an error, while the name `getDepth` is no longer reserved. Runtime scope structure is not observable: scopes show only through object lifetimes (destruction order and ownership transfer).
 
 `load_extern_library("xxx")` resolves the platform's xxx.dylib/.dll/.so and adjacent xxx.signature. After verification it calls the exported `azscript_load_extern`. Libraries use C++ host `registerExecutor`; scripts still carry compile-time extern signatures. This neither loads a hint module nor calls flush. See [external libraries](../docs/EXTERN_LIBRARY.en.md) for search rules, keys, and implementation.
 
@@ -577,8 +578,6 @@ For raw-memory or typed-member assignment, an RHS that needs splitting must be f
 A cut inside a lazy operand (the right side of `&&`/`||`, either `?:` arm, or a functional-if arm) or a while condition cannot be moved before its enclosing statement. If such a cut is needed, the compiler reports the source position and asks for a local variable. The diagnostic starts `Expression nesting exceeds the ABD limit of 128 levels`, followed by `; store this operand in a local variable first` or `; store this condition in a local variable first`. For a lazy arm, put the calculation inside the selected branch; for a while condition, compute it inside the loop before an explicit break check so it is reevaluated each iteration. Deep postfix/member/call chains and genuinely nested syntax still consume depth; automatic splitting is not an unlimited nesting guarantee.
 
 Generic and pointer type expressions retain a separate 64-level limit. Parser recursion and JSON containers have a 320-level guard; compilation has a 640-level expression-recursion guard. Cyclic ASTs are rejected. Errors remain located and do not prevent later compilations in the same process. The Java `Compiler.compileExpression` API also validates the tree and encoded depth. It can lower a statement array, but a standalone expression needing sibling statements reports `Expression requires statement-level spilling; store this operand in a local variable first`; place such work in a statement array or function.
-
-`getDepth()` reports implementation-defined runtime scope depth, not source brace nesting; compiler-generated scopes may affect it.
 
 ### Long operator chains
 

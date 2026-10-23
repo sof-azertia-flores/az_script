@@ -204,3 +204,19 @@ sanitizer（`--sanitize`，不构建 JIT 模块）：完整运行在合并头 `8
 - `python3 tools/export_distribution.py build/dist-jit --offline --jit` 与不加 `--jit` 的导出均通过搬迁后的完整发行包检查。前者含 `lib/libazscript-jit.so`（64 MB，静态链接 LLVM），`manifest.json` 的 `jit` 为 `{"module": "lib/libazscript-jit.so", "llvmVersion": "18.1.8"}`，检查项为 “run wrapper --jit runs hot functions natively”；后者不含模块，`jit` 为 `null`，`--jit` 以 VM 完成、`--jit=require` 失败。
 - 用导出的 Release 运行器执行 2,000 万次迭代的标量循环：`--vm` 34.8 s，`--jit` 2.1 s（含编译），结果相同；无模块的包 `--jit` 31.7 s。
 - `tests/test_export_distribution.py` 23 项通过（新增 `jit` 清单字段检查）。
+
+## exec v11：活跃 slot 与无检查整数运算（2026-10-22，未提交）
+
+V2 将模块 ABI 升为 2，增加每个退出点的 slot 集合，删除公共返回块对全部 slot 的写回。局部活跃性处理复制引用、重新声明后的 orphan 引用和未知引用；后两者保守保留全部局部。恢复块只装入活跃且可能绑定的局部，退出块也排除肯定未绑定的局部，保持 absent 初始化和 maybe-declared 标签的原有语义。
+
+V9 新增无失败退出的 `binary_i32` MIR，消费 `add_i32_unchecked`、`minus_i32_unchecked`、`multiply_i32_unchecked`、`shl_i32_unchecked`。只在分析证明两个输入标签都是 int 时使用；否则在 VM 单步处理，保留类型错误。LLVM 与可移植后端均采用确定的 int32 回绕及左移计数低 5 位语义。`seq`、私有函数对 JIT 透明，方法守卫仍属于未支持的对象操作。
+
+编译耗时在 macOS arm64、LLVM 18.1.8、Release 运行库与模块上测量。基线目录 `build/v2-bench-base` 保留 V2 之前的代码生成与测量钩子，候选为 `build/v2-release`，编译器使用冻结的 `build/v11/baseline-java`。`tools/bench_jit_compile.py` 对 chain/statements/locals/loop 的 32、64、128、256、512 规模分别运行 eager+llvm 和 stress+llvm，解除准入上限，逐次核对 VM 输出；超时为 8 秒。报告为 `build/v11/jit-compile-base.json` 与 `jit-compile-v2.json`，各 40 组，超时行明确保留，不按成功样本计入。
+
+链式表达式 64 项的 eager 编译从 1.067 秒降至 0.049 秒，stress 从 3.510 秒降至 0.121 秒；候选链式 512 项（3,073 个 MIR 操作、869 个恢复单元）为 0.800 秒，直线语句 256 项（3,620 操作、2,871 恢复单元）为 0.359 秒。操作数上限据此由 2,048 提高到 4,096。
+
+进一步在相同候选代码上强制 O1 与 O2：locals 24/32/48/64/80 各重复两次，另测三个形状的 64/256 规模，报告为 `jit-compile-locals-o1.json`、`jit-compile-locals-o2.json` 与 `jit-compile-shapes-o1.json`、`jit-compile-shapes-o2.json`。1,051 操作的 loop64 eager 为 O1 0.089 秒、O2 0.094 秒；3,739 操作的 loop256 eager 为 0.377/0.424 秒，因此保留 1,024 操作的 O2/O1 分界。O1 没有解决很多活跃局部的瓶颈：48 locals/680 操作/5,202 恢复单元为 O1 0.907–0.951 秒、O2 1.016–1.032 秒，64 locals/8,978 恢复单元在两种流水线均超过 3 秒。恢复单元上限保留 8,192，不能把本阶段描述成所有形状均近似线性或保证一秒内完成，也没有提高恢复单元上限的证据。
+
+本阶段新增 orphan 引用跨重新声明、只复制引用不读值、死局部不装入/写回、无检查 MIR 不带退出和错误类型回退的回归，操作对照网格扩展至四种无检查运算。Release 定向 `ctest -R 'jit-|vm-call'` 四项通过，日志 `build/v11/v2-v9-tests.log`。既有树参考的 scalar/calls 两组共 38 案例、每模式 1,146 个独立进程，在七种 JIT 模式下全部重放通过（共 8,022 个进程，零标签越界），日志 `build/v11/v2-v9-replays.log`。完整对象/所有权重放、后端对齐、O3 重新测量与最终普通/sanitizer 验证由 exec v11 总任务统一记录；此处不沿用先前旧模块的通过结论。本机没有 valgrind，callgrind 门槛尚未执行。
+
+最终 V3/V9 wire 回归 `exec-v11-tests` 的 1,315 项检查在七种 JIT 模式下均通过，含无检查回绕、负数/32/63 左移、错误类型、seq、私有调用、方法守卫与 trace 预算扫描；eager+llvm 实际编译 817 个函数并进入 1,131 次，stress+llvm 进入 18,585 次，均零标签越界。日志 `build/v11/v9-wire-final-jit.log`。

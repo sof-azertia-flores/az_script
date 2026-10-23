@@ -280,10 +280,6 @@ def main():
                 trace=0;print(false?arm(4):arm(5));print(trace);
                 print(true?7:1/0);print(false?1/0:9);
             }''', '2\n12\n5\n5\n7\n9\n')
-        execute('select-current-scope', '''void main(){
-            int depth=getDepth();print((true?getDepth():getDepth())==depth);
-            {int nested=getDepth();print((false?getDepth():getDepth())==nested);}
-        }''', 'true\ntrue\n')
         promoted, _ = execute('select-numeric-promotion', '''void main(){
             float f=true?16777217:1.25f;double d=true?7:2.5;double e=true?1.25f:2.5;
             print(f==16777216.0f);print(d==7.0);print(e==1.25);
@@ -665,7 +661,6 @@ public class ConversionHost {
                 int lazy(boolean flag):0053{return flag?7:1/0;}
                 int dynamicCondition():0054{def(flag,1);return flag?2:3;}
                 int promotedOperand(boolean flag):0055{def(value,flag?1:2.5f);return value&1;}
-                int currentScope():0056{int depth=getDepth();return true?getDepth()-depth:1000;}
             ''')
             selection_java = work / 'SelectionHost.java'
             selection_java.write_text(r'''import azertia.AbdInvoker;
@@ -693,7 +688,6 @@ public class SelectionHost {
    reject(0x54,"Condition must be boolean, got int");
    reject(0x55,"bit_and operands must be int, got float and int",true);
    reject(0x55,"bit_and operands must be int, got float and int",false);
-   expect(0x56,Integer.valueOf(0));
   }finally{AbdInvoker.close();}
  }
 }

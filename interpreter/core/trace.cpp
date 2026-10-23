@@ -173,15 +173,22 @@ bool trace::current_is_published() noexcept {
 }
 void trace::note_script_frame(int function_id,const function_debug* debug,std::uint32_t location) noexcept {
     try {
-        trace_frame result;result.function_id=function_id;
-        if(debug) {
-            result.name=debug->name;
-            const auto position=location&&location<=debug->locations.size()?debug->locations[location-1]:debug->header;
-            if(position.line&&position.column&&debug->files&&position.file<debug->files->size()) {
-                result.file=(*debug->files)[position.file];result.line=position.line;result.column=position.column;
+        auto position=debug?(location&&location<=debug->locations.size()?debug->locations[location-1]:debug->header):source_position{};
+        const auto frame=[&](const std::string& name,const source_position& at) {
+            trace_frame result;result.function_id=function_id;result.name=name;
+            if(debug&&at.line&&at.column&&debug->files&&at.file<debug->files->size()) {
+                result.file=(*debug->files)[at.file];result.line=at.line;result.column=at.column;
             }
+            note_frame(std::move(result));
+        };
+        std::size_t remaining=debug?debug->inlined.size():0;
+        while(debug&&position.inline_index&&position.inline_index<=debug->inlined.size()&&remaining--) {
+            const auto& item=debug->inlined[position.inline_index-1];
+            frame(item.name,position);
+            if(item.call_site>=debug->locations.size())break;
+            position=debug->locations[item.call_site];
         }
-        note_frame(std::move(result));
+        frame(debug?debug->name:std::string{},position);
     } catch(...) {if(auto state=trace_storage())++state->active.omitted_frames;}
 }
 }

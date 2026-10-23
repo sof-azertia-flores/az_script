@@ -96,6 +96,20 @@ public:
             }
             result=std::move(node);break;
         }
+        case 54: {
+            auto node=std::make_shared<sequence_expression>();node->children=expressions(source);result=std::move(node);break;
+        }
+        case 55:case 56:case 57:case 58:case 59: {
+            auto node=std::make_shared<unchecked_expression>();node->opcode=opcode;node->left=child(0);
+            if(opcode==59){node->delta=source.immediate;node->prefix=source.prefix;}else node->right=child(1);
+            result=std::move(node);break;
+        }
+        case 60: {
+            auto node=std::make_shared<guard_method_expression>();node->receiver=child(0);node->slot=source.immediate;
+            node->function_id=source.function_id;
+            references.push_back({node->function_id,&node->function_id,false,0,false,false,false,true});
+            result=std::move(node);break;
+        }
         case 53:result=std::make_shared<call_virtual_expression>(source.immediate,source.return_type,expressions(source));break;
         case 51: {
             auto value=child(0);auto spec=context(*source.contexts[0]);

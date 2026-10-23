@@ -19,14 +19,6 @@ public:
         std::cout<<value_to_string(args[0])<<'\n';return std::make_shared<variable>(nullptr);
     }
 };
-class depth_function final:public function {
-public:
-    int return_type()override{return INT_VALUE;}
-    std::shared_ptr<variable> invoke(std::shared_ptr<environment> env,std::vector<std::shared_ptr<variable>> args)override {
-        if(!args.empty())throw std::invalid_argument("getDepth takes no arguments");
-        return std::make_shared<variable>(env?ownership::depth(env->ownership_id()):0);
-    }
-};
 class load_extern_library_function final:public function {
 public:
     int return_type()override{return VOID_VALUE;}
@@ -138,7 +130,7 @@ std::map<int,std::shared_ptr<executor>>& registry(){static std::map<int,std::sha
 std::uint64_t& generation(){static std::uint64_t value=0;return value;}
 std::shared_ptr<function> builtin(int id) {
     static const std::vector<std::shared_ptr<function>> functions{
-        std::make_shared<print_function>(),std::make_shared<depth_function>(),std::make_shared<f_free>(),
+        std::make_shared<print_function>(),nullptr,std::make_shared<f_free>(),
         std::make_shared<f_heepalloc>(),std::make_shared<f_make_free>(),std::make_shared<f_send_up>(),std::make_shared<f_get>(),
         std::make_shared<load_extern_library_function>(),std::make_shared<reflect_invoke_function>(),
         std::make_shared<hint_query_function>(false),std::make_shared<hint_query_function>(true),
@@ -147,6 +139,7 @@ std::shared_ptr<function> builtin(int id) {
         std::make_shared<string_function>(0x11),std::make_shared<string_function>(0x12),std::make_shared<string_function>(0x13),
         std::make_shared<f_object_alloc>()};
     // The table is indexed by ids::builtin order; both engines classify by those ids.
+    // The retired getDepth id keeps its empty entry and is never resolved.
     if(functions.size()!=static_cast<std::size_t>(ids::builtin_count))throw std::logic_error("Builtin table does not match the builtin ids");
     int i=ids::local_of(id);
     return i<static_cast<int>(functions.size())?functions[i]:nullptr;

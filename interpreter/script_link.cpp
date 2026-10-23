@@ -88,8 +88,8 @@ void script::flush() {
         for(std::size_t i=0;i<modules.size();++i) {
             for(const auto& [original,function]:modules[i]->definitions) {
                 (void)original;
-                const auto found=compiled.public_functions.find(function->function_id);
-                if(found==compiled.public_functions.end())throw std::logic_error("VM public function binding is unavailable");
+                const auto found=compiled.functions.find(function->function_id);
+                if(found==compiled.functions.end())throw std::logic_error("VM public function binding is unavailable");
                 bind(function,found->second,false);
             }
             bind(modules[i]->onload,compiled.modules[i].onload,true);

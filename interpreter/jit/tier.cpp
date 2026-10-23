@@ -1,5 +1,7 @@
 #include "tier.h"
 #include "../vm/frames.h"
+#include <charconv>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <stdexcept>
@@ -7,20 +9,39 @@
 namespace azertian::jit {
 namespace {
 constexpr std::size_t operation_limit=std::size_t{1}<<22;
-// LLVM's compile time grows faster than linearly with a function's
-// operations (about 1.6 s for 3,000 MIR operations, 46 s for 12,000 at O2)
-// and with its resume entries, each of which loads every slot (1.4 s for
-// 7,600 resume points times slots, 16.5 s for 43,000, as stress makes every
-// pc of a 100-term expression a resume point).
-constexpr std::size_t native_operation_limit=2048,native_resume_limit=8192;
+// Release measurements with live exit stores allow larger straight-line
+// bodies (3,620 MIR operations in 0.4 s; a 3,073-op expression in 0.8 s).
+// Many live locals still make LLVM compilation superlinear: 48 locals and
+// 5,202 resume cells take about 1 s, 64 locals/8,978 cells over 3 s. Keep
+// the old resume cap; neither cap is a wall-clock deadline. See the V2
+// measurements in docs/jit-roadmap/STATUS.md before raising them again.
+constexpr std::size_t native_operation_limit=4096,native_resume_limit=8192;
 }
-bool fits_native(const Function& code) noexcept {
+NativeLimits native_limits() {
+    NativeLimits limits{native_operation_limit,native_resume_limit};
+    const char* text=std::getenv("AZSCRIPT_JIT_NATIVE_LIMITS");
+    if(!text||!*text)return limits;
+    const std::string_view value(text);
+    const auto comma=value.find(',');
+    const auto number=[&](std::string_view digits,std::size_t& out) {
+        const auto [end,error]=std::from_chars(digits.data(),digits.data()+digits.size(),out);
+        if(digits.empty()||error!=std::errc{}||end!=digits.data()+digits.size())
+            throw std::invalid_argument("Invalid AZSCRIPT_JIT_NATIVE_LIMITS: "+std::string(value));
+    };
+    if(comma==std::string_view::npos)throw std::invalid_argument("Invalid AZSCRIPT_JIT_NATIVE_LIMITS: "+std::string(value));
+    number(value.substr(0,comma),limits.operations);number(value.substr(comma+1),limits.resume_cells);
+    return limits;
+}
+std::size_t resume_cells(const Function& code) noexcept {
     std::size_t resumes=0;
     for(const auto op:code.resume)resumes+=op!=none;
-    return code.ops.size()<=native_operation_limit&&resumes*code.slots()<=native_resume_limit;
+    return resumes*code.slots();
+}
+bool fits_native(const Function& code,const NativeLimits& limits) noexcept {
+    return code.ops.size()<=limits.operations&&resume_cells(code)<=limits.resume_cells;
 }
 Tier::Tier(const vm::ExecutableProgram& program,const Config& config)
-    :program_(program),config_(config),random_(config.seed) {
+    :program_(program),config_(config),random_(config.seed),limits_(native_limits()) {
     if(config.backend==Backend::llvm&&config.mode!=Mode::off&&config.mode!=Mode::probe) {
         std::string error;
         native_=native_backend(error);
@@ -55,12 +76,15 @@ Tier::~Tier() {
     }
     if(FILE* file=std::fopen(path,"a")) {
         std::fprintf(file,"{\"functions\":%zu,\"compiled\":%zu,\"ineligible\":%zu,\"entries\":%llu,\"rejects\":%llu,"
-            "\"steps\":%llu,\"redos\":%llu,\"yields\":%llu,\"operations\":%llu,\"violations\":%llu,\"refusals\":{",
+            "\"steps\":%llu,\"redos\":%llu,\"yields\":%llu,\"operations\":%llu,\"violations\":%llu,"
+            "\"compile_ns\":%llu,\"compile_max_ns\":%llu,\"compile_max_operations\":%llu,\"compile_max_resume_cells\":%llu,\"refusals\":{",
             functions_.size(),ready,ineligible,
             static_cast<unsigned long long>(counters_.entries),static_cast<unsigned long long>(counters_.rejects),
             static_cast<unsigned long long>(counters_.steps),static_cast<unsigned long long>(counters_.redos),
             static_cast<unsigned long long>(counters_.yields),static_cast<unsigned long long>(counters_.operations),
-            static_cast<unsigned long long>(counters_.violations));
+            static_cast<unsigned long long>(counters_.violations),static_cast<unsigned long long>(compile_ns_),
+            static_cast<unsigned long long>(compile_max_ns_),static_cast<unsigned long long>(compile_max_operations_),
+            static_cast<unsigned long long>(compile_max_resume_cells_));
         bool first=true;
         for(const auto& [reason,count]:refusals_) {
             std::string text;
@@ -101,14 +125,22 @@ Tier::Compiled& Tier::compiled(std::uint32_t function) {
             compiled_operations_+=entry.code.ops.size();
             if(const char* path=std::getenv("AZSCRIPT_JIT_DUMP");path&&*path)
                 if(FILE* file=std::fopen(path,"a")){const auto text=dump(entry.code);std::fputs(text.c_str(),file);std::fclose(file);}
-            if(native_&&!fits_native(entry.code)) {
+            if(native_&&!fits_native(entry.code,limits_)) {
                 ++refusals_["too large for native code"];
                 entry.state=Compiled::State::ineligible;entry_bounds_[function]=program_.functions[function].end;
                 compiled_operations_-=entry.code.ops.size();
                 return entry;
             }
             if(native_) {
+                const auto start=std::chrono::steady_clock::now();
                 entry.native=std::make_unique<NativeCode>(*native_,entry.code);
+                const auto elapsed=static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::steady_clock::now()-start).count());
+                compile_ns_+=elapsed;
+                if(elapsed>compile_max_ns_) {
+                    compile_max_ns_=elapsed;compile_max_operations_=entry.code.ops.size();
+                    compile_max_resume_cells_=resume_cells(entry.code);
+                }
                 if(!entry.native->compiled())throw std::runtime_error("native code: "+entry.native->error);
             }
             const auto size=entry.analysis.end-entry.analysis.begin;

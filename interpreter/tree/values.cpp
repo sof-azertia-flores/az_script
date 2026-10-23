@@ -28,6 +28,23 @@ V bitwise(int opcode,const V& left,const V& right) {
     return wrap(value_ops::binary(static_cast<BinaryOperation>(operation),value_of(left),value_of(right)));
 }
 }
+V sequence_expression::execute(E env) {
+    tick(env);
+    for(std::size_t i=0;i+1<children.size();++i)run(children[i],env);
+    return run(children.back(),env);
+}
+V unchecked_expression::execute(E env) {
+    tick(env);
+    auto target=run(left,env);const auto original=value_of(target);
+    if(opcode==59) {
+        auto updated=wrap(value_ops::binary(BinaryOperation::add_i32_unchecked,original,Value(delta)));
+        blocks::store(target,updated,env);
+        return prefix?updated:wrap(original);
+    }
+    auto other=run(right,env);
+    const auto operation=static_cast<BinaryOperation>(static_cast<int>(BinaryOperation::add_i32_unchecked)+opcode-55);
+    return wrap(value_ops::binary(operation,original,value_of(other)));
+}
 V select_expression::execute(E env) {
     tick(env);bool selected;
     {

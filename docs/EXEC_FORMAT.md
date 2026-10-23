@@ -2,6 +2,8 @@
 
 中文 | [English](EXEC_FORMAT.en.md)
 
+本页同时记录 `exec_v11_main` 的开发扩展。根记录的 `exec_version` 暂时仍为 10，旧 opcode、旧函数记录及不带内联表的调试记录保持原布局；O0/O1/O2 不发射下述 54–60 或私有入口。使用这些新构造的 O3 产物需要本开发分支的运行库，不能交给 main 的 v10 运行库；正式发布再统一升为 11。路线图见 [exec v11 设计](exec-v11-roadmap/DESIGN.md)。
+
 这是执行文件的布局版本，独立于源码 `metadata.version`。可读 AST 保留源码名称，exec JSON 是检查视图；下述固定结构在 ABD 中使用裸 stack，不保存字段名或逐字段类型标签。整数使用 int32、小端四字节；address 使用独立 uint64、小端八字节，空地址为 0；函数 ID 按完整 uint32 位模式解释，布尔为一字节 0/1，字符串为 UTF-8。每个字段仍是标准 ABD frame：int32 非负长度加原始 payload。
 
 文件本身是一个 ABD frame，其 payload 为固定顺序的根 stack：
@@ -84,6 +86,13 @@ stack 的成员数量由其 frame 边界确定；固定记录必须恰好包含�
 | 51 | check_object | `value:E, context:Context, slot_types:Stack<int>` |
 | 52 | set_methods | `address:E, entries:Stack<[function_id:int, contexts:Stack<Context>]>` |
 | 53 | call_virtual | `slot:int, return_type:int, args:Es` |
+| 54 | seq | `statements:Es, value:E` |
+| 55 | add_i32_unchecked | `left:E, right:E` |
+| 56 | minus_i32_unchecked | `left:E, right:E` |
+| 57 | multiply_i32_unchecked | `left:E, right:E` |
+| 58 | shl_i32_unchecked | `left:E, right:E` |
+| 59 | increment_i32_unchecked | `target:E, delta:int, prefix:bool` |
+| 60 | guard_method | `receiver:E, slot:int, function_id:int` |
 
 `if`/`wi`/`select` 的条件，以及 `and`/`or`/`not` 中实际求值的每个操作数，必须为 BOOLEAN_VALUE（4）。数值零/非零与 void 不再表示真假；类型错误时抛出 `Condition must be boolean, got <type>`。`and`/`or` 仍从左到右短路，被跳过的右操作数在运行时不求值也不检查。源码编译还会拒绝静态已知的非布尔操作数，包括降级后的 `for` 条件。
 
@@ -116,7 +125,7 @@ stack 的成员数量由其 frame 边界确定；固定记录必须恰好包含�
 
 ## 泛型操作上下文（opcode 36–39）
 
-`hidden_count` 是函数接收的操作上下文数量，独立于显式参数和变量槽。`entry_kind` 为 0 表示普通入口，1 表示编译器内部入口。检查视图 JSON 使用 `hidden-count`、`entry-kind`，解码时即使为零也会输出。生命周期钩子的隐藏上下文数量必须为零。公开 C++/JNI 调用不提供隐藏上下文，宿主须调用包裹泛型实现的普通非泛型函数；反射也仅接受隐藏上下文为零的普通入口。泛型 extern 须链接到脚本实现，不能由原生或 Java 回调实现。
+`hidden_count` 是函数接收的操作上下文数量，独立于显式参数和变量槽。`entry_kind` 为 0 表示普通入口，1 表示编译器内部对象入口，开发扩展 2 表示编译器私有入口（见下文）；外部 Signature 仍只允许 0/1。检查视图 JSON 使用 `hidden-count`、`entry-kind`，解码时即使为零也会输出。生命周期钩子的隐藏上下文数量必须为零。公开 C++/JNI 调用不提供隐藏上下文，宿主须调用包裹泛型实现的普通非泛型函数；反射也仅接受隐藏上下文为零的普通入口。泛型 extern 须链接到脚本实现，不能由原生或 Java 回调实现。
 
 上下文只描述 ABI 操作，不包含类名、类布局、约束或原生指针。每个上下文使用裸 stack：
 
@@ -193,6 +202,22 @@ buffer 元素上下文按 ABI、类别、宽度及递归嵌套的元素上下文
 
 Flush 按定义模块的 assume 表重定位方法函数 ID 及其上下文中递归出现的函数引用；方法槽号不是可重定位函数 ID。每项必须指向首参数为 address 的普通脚本函数，且隐藏数量与上下文数一致；原生/Java 回调不能作为表项。这些检查不证明名义类身份，也不证明独立编译的头文件槽顺序一致。新增指令不改变 exec v10 版本、根或函数记录。
 
+## O3 开发扩展（opcode 54–60）
+
+`seq` 的记录严格为 `[54, statements:Es, value:E]`，检查 JSON 使用 `statements` 与 `value`。它计一次普通表达式预算，依次执行 statements 后求值并返回 value；所有子表达式共享当前作用域和语句临时值边界，不额外建立块或清理边界。每个 statement 只能是向非负局部槽写入的 `vs`，目标为非负变量槽的 `m`，或直接 `call`。局部必须已在外层声明，未声明的写入仍由运行时拒绝。整个序列（包括最终 value）不能嵌套 block、vd、r、ro、return_typed、if、wi、brk、cont 或 cleanup。编译器还必须证明不在序列中创建拥有对象的临时值。预先提升的参数快照和局部声明允许 seq 在循环条件、惰性分支和嵌套操作数中按原位置执行；一般控制流内联尚不能用这个受限记录表达。
+
+55–58 的记录为 `[opcode, left:E, right:E]`，检查 JSON 用 `v1`、`v2`。两侧从左到右各求值一次，左值在右侧执行前保存为快照；两者都必须是 int，类型错误仍抛出异常，不接受数值扩宽或字符串连接。add/minus/multiply 用 uint32 运算后按二进制补码解释为 int32，不抛出溢出错误。`shl_i32_unchecked` 使用计数的低五位（包括负数和 32 以上的手写输入），再按 uint32 左移并回绕；普通 opcode 46 的 0…31 检查保持不变。编译器只有证明原运算不溢出且移位量处于 0…31 时才能发射无检查版本；掩码和回绕定义使手写产物或错误证明在各后端有一致行为，不改变源码语言的检查规则。
+
+59 的记录为 `[59, target:E, delta:int, prefix:bool]`，检查 JSON 使用 `target`、`delta`、`prefix`。目标规则与普通 `m` 相同，且只求值一次；读取目标的 int 值，加任意 int32 delta 并回绕后写回。prefix=true 返回更新值，false 返回原值快照。delta 是记录字段而非表达式，不增加子节点预算；目标类型不为 int 时在写入前报错。源码自增目前也可降为 55/56 与普通赋值，不要求使用 59。
+
+`guard_method` 的记录为 `[60, receiver:E, slot:int, function_id:int]`，检查 JSON 使用 `receiver`、`slot`、`function`。slot 为 0…1048575 的方法槽号；function_id 是完整 32 位函数 ID，链接时按方法引用重定位，必须指向首参数为 address、无隐藏上下文的普通脚本函数。接收者求值一次；它是本脚本的有效对象起点、对应槽绑定该函数且绑定上下文为空时返回 true，否则返回 false。错误标签、null、过期/外部脚本对象、缺少表、槽越界和不同上下文均不会在守卫查询中抛错；接收者表达式自身的错误和预算耗尽正常传播。此构造不调用方法、不修改对象；VM 将它归入对象帧，JIT 暂不处理对象帧。编译器用 select 保留失败分支的原 call_virtual，因此不能省去原虚调用的错误检查。
+
+## 编译器私有入口（entry_kind=2）
+
+私有克隆使用与普通函数相同的 Function 记录和模块 namespace；编译器从低 16 位的 `0xffff` 向下选择未占用编号。它只允许定义模块中的直接 CALL，不能经宿主 getFunction/hasFunction/invoke、公开 invoke_bound（包括缓存的函数句柄）、反射、其他模块的直接调用、任何 extern（包括定义模块自身）、虚方法表、析构或泛型上下文工厂找到。生命周期钩子 0/1 不允许入口种类 2。`flush()` 在发布任何重定位和已链接状态前验证这些限制，重复函数 ID 仍拒绝；hint 重定位后仍按定义模块判断可见性。
+
+VM 的完整内部定义索引包含私有函数，公共函数索引排除它们。入口种类 2 自身不使函数或其调用者成为对象帧；实际对象操作、对象签名和隐藏上下文仍遵守原分类。JNI 快照版本保持 10，模块身份仍逐字节校验；已有对象记录不能把私有函数绑定为析构、方法或上下文工厂，C++ 堆恢复和字面量析构登记同样拒绝这些绑定。私有函数调试名称沿用被专用化的原函数。
+
 ## JNI 快照 v10 方法记录
 
 每个堆对象及字面量/视图记录必须有 `methods:[{"id":functionId,"contexts":[context,...]}]`，上下文使用既有序列化 context map。`[]` 表示无方法表，buffer 记录必须为空；类元素视图可带绑定。已绑定上下文保存为数据，不保存原生指针或已退出调用帧引用。
@@ -239,16 +264,18 @@ Flush 按定义模块的 assume 表重定位方法函数 ID 及其上下文中�
 
 读取器只接受此 v10 裸 stack 格式，通过首个 frame 的 magic 和紧随其后的版本识别。包括 v9、v8 在内的旧执行版本、旧 Map 执行文件和未知版本直接拒绝，错误信息给出期望版本，已有源码或可读 AST 必须重新编译。原有 64 MiB 文件上限、128 层 ABD 嵌套限制、变量槽和调用预算继续适用；紧凑格式不得绕过嵌套检查。JNI 快照版本独立于 exec 版本，为 10；JNI 仅接受 v10 快照，拒绝模块不是 exec v10 的快照；地址标量、堆分配起点、对象登记和自动清理顺序均保留完整 uint64 值；长度、数量和函数 ID 仍用既有整数表示。快照把堆和全局中的字面量对象保存为 `{object, has destructor, [destructor], destructor contexts, methods, slots}` 映射，恢复时分配新 id 并改写指向已保存对象的地址；指向未保存对象的地址保持原值，其 id 被永久停用。脚本字节作为不透明数据保存及校验，不再读取旧快照。
 
-物理容器深度从根 stack 的第 1 层开始计算，函数列表第 2 层、函数记录第 3 层、函数体第 4 层。嵌套表达式各加一层，块内语句列表、调用实参列表以及常量的单元素数组各另加一层。扩展元数据从第 2 层开始计算内部 Map/Array 嵌套。调试文件名位于第 3 层，函数调试记录位于第 4 层，其字段位于第 5 层，位置整数位于第 6 层。裸 stack 不会绕过 128 层上限。
+物理容器深度从根 stack 的第 1 层开始计算，函数列表第 2 层、函数记录第 3 层、函数体第 4 层。嵌套表达式各加一层，块内语句列表、调用实参列表以及常量的单元素数组各另加一层。扩展元数据从第 2 层开始计算内部 Map/Array 嵌套。调试文件名位于第 3 层，函数调试记录位于第 4 层，其字段位于第 5 层，位置整数位于第 6 层；可选内联列表位于第 5 层，每条内联记录第 6 层，其字段第 7 层。裸 stack 不会绕过 128 层上限。
 
 编译器按每种 opcode 及上下文角色的实际物理结构计量深度，包括方法条目 stack 和其中的上下文列表；未知 opcode 不能通过计量。安全时，语句级拆分在上下文归一化和调试编号之前生成普通声明、赋值、读取及 drop，并为生成记录保留切分点的源码位置。内部序列标记 `-1` 从不写入执行文件，读取器只接受已登记的执行 opcode。拆分不能绕过 128 层上限、展平递归上下文数据，或把惰性操作数/while 条件移出其执行位置。影响所有权的捕获会被拒绝，不改变复制或临时值生命周期。跨已知标量脚本调用保留拥有值时，须传递证明作用域影响安全；未知/虚/反射调用及未证明安全的 any 或拥有型操作，不能仅因结果 ABI 为标量而通过。IF 条件捕获在进入分支前检查并释放，select/布尔表达式保留通常的临时值生命周期。需要切分的内存赋值 RHS 必须为纯计算；调用或修改会触发带位置的 RHS 局部变量提示。纯 RHS 拆分预先验证已捕获目标，并保留解码器识别的带类型 `mem_get(oa(base, offset))` 结构及原偏移。这些是保守的编译限制，不改变运行时存储行为、wire 字段、opcode 或版本。
 
 ## 调试记录（`-g`）
 
-调试信息可选，默认不生成。`compile -g`、`compile-json -g`（Java API 为 `Compiler.compile(tree, true)`）填写 `debug_files`，并为每个函数生成一条调试记录；不加 `-g` 时 `debug_files` 为空，所有 `has_debug` 为 false。调试记录不具有执行语义：执行、链接、重定位、预算和反射均不使用它，`flush()` 不改写任何调试字段，同一函数在有无 `-g` 时的指令完全相同。解释器校验这些记录并随函数保存。
+调试信息可选，默认不生成。`compile -g`、`compile-json -g`（Java API 为 `Compiler.compile(tree, true)`）填写 `debug_files`，并为每个函数生成一条调试记录；不加 `-g` 时 `debug_files` 为空，所有 `has_debug` 为 false。调试记录不具有执行语义：执行、链接、重定位、预算和反射均不使用它，`flush()` 不改写任何调试字段，同一优化档位的执行指令在有无 `-g` 时完全相同，`-g` 只决定是否保存调试记录。解释器校验这些记录并随函数保存。
 
 ```text
-FunctionDebug = [ name:string, file:int, line:int, column:int, locations:Stack<int> ]
+FunctionDebug = [ name:string, file:int, line:int, column:int,
+                  locations:Stack<int>, [inlined:Stack<InlineDebug>] ]
+InlineDebug   = [ name:string, file:int, line:int, column:int, call_site:int ]
 ```
 
 - `debug_files` 按顺序保存可读 AST `sources` 表中互不相同的名称，即诊断中显示的文件标签：相对所属 include 根目录、以 `/` 分隔的路径，主文件为不含目录的文件名，源码字符串为 `<source>`。各项非空且互不相同，最多 1,048,576 项。
@@ -256,11 +283,17 @@ FunctionDebug = [ name:string, file:int, line:int, column:int, locations:Stack<i
 - `file`、`line`、`column` 指向函数声明，编译器生成的类函数指向类声明。`file` 是 `debug_files` 的下标；line 与 column 同为 0（未知）或同为正数。
 - `locations` 是由 `(node, file, line, column)` 四元组平铺而成的 int stack。node 按线路字段顺序对 `body` 中的表达式 stack 做先序编号：函数体为 0 号，每个常量、块、调用和 opcode 表达式进入时取下一个编号；上下文及其他字段不编号。node 严格递增且小于函数体的节点数，`file` 是 `debug_files` 的下标，line 与 column 从 1 开始（column 与编译诊断一致，按 UTF-16 码元计数）。没有条目的节点使用最近的有位置祖先节点的位置。编译器在运算符、调用和语句的源码记号处记录位置，不记录常量和变量读取，并省略与最近有位置祖先位置相同的节点。
 
-读取器拒绝以下情况：名称或文件为空、不是合法 UTF-8，或包含 C0、DEL、C1 控制字符、U+2028/U+2029 或双向格式字符（U+061C、U+200E、U+200F、U+202A–U+202E、U+2066–U+2069）；文件重复；`has_debug` 为 true 却没有恰好一条记录；记录字段数不为五；locations 不是完整的四元组；node 未递增或超出函数体；文件下标超出 `debug_files`；位置的行或列小于 1；声明位置的行、列只有一个为 0。编译器把显示名中的此类字符替换为 U+FFFD，因此源码名称不会生成无效记录。
+读取器拒绝以下情况：名称或文件为空、不是合法 UTF-8，或包含 C0、DEL、C1 控制字符、U+2028/U+2029 或双向格式字符（U+061C、U+200E、U+200F、U+202A–U+202E、U+2066–U+2069）；文件重复；`has_debug` 为 true 却没有恰好一条记录；记录字段数不是五或六；无内联表时 locations 不是完整四元组、有内联表时不是完整五元组；node 未递增或超出函数体；文件下标超出 `debug_files`；位置的行或列小于 1；声明位置的行、列只有一个为 0。编译器把显示名中的此类字符替换为 U+FFFD，因此源码名称不会生成无效记录。
 
-检查视图的根总是包含 `debug-files`（字符串数组，无 `-g` 时为空）。有调试记录的函数另含 `debug`：`{"name":…, "file":…, "line":…, "column":…, "locations":["node:file:line:column", …]}`，每个位置使用规范十进制。
+开发扩展可在记录末尾追加第六字段 `inlined`。该字段存在时（即使为空），每个位置改为 `(node, file, line, column, inline_index)` 五元组；不存在时保持原四元组，不能混用。inline_index 为 0 表示外层函数，正数为 inlined 的一基下标。每个 InlineDebug 保存被内联函数的显示名和声明位置（允许 0:0 未知），call_site 为 locations 表的零基条目下标，不是表达式 node。调用点条目本身的 inline_index 连接到外层内联记录，所有下标必须有效且链不能成环；两张表各最多 1,048,576 项。新表不保存可执行函数引用，不参与重定位。
 
-调试记录会把函数名、类名和文件名写入执行文件，且每个位置占 32 字节；不希望发行包携带这些信息时不要使用 `-g`。JNI 快照逐字节比较模块，因此 `-g` 构建保存的快照不能恢复到不加 `-g` 编译的同一程序中，反之亦然。
+报告错误时先用失败位置和其 inline_index 输出最内层被内联帧，再沿 call_site 链逐层输出，最后以最外调用点输出承载函数。所有帧共享原来的 64 帧上限。合成帧的 `error_trace.frames[].function_id` 沿用承载函数的数值 ID；记录没有原被调者 ID，不能据此反查原函数。跨优化档位比较有名称脚本帧的名称、文件、行列和顺序；同一产物的后端比较仍包含数值 ID。O3 内联在有无 `-g` 时采用相同的 seq 指令变换；优化期间保留原函数位置及内联链，不带 `-g` 时在最终输出中剥离调试记录。
+
+内联记录只在承载函数报告错误时重建显示帧，不创建真实调用的错误栈发布边界。真实调用失败时会在调用者清理前发布错误栈，成功时会清除已发布错误栈；seq 不执行这些调用边界动作。编译器必须证明消除该边界不可观察，目前只在封闭的纯标量调用者中内联，避免宿主回调或对象清理观察到不同的错误栈状态。
+
+检查视图的根总是包含 `debug-files`（字符串数组，无 `-g` 时为空）。有调试记录的函数另含 `debug`：`{"name":…, "file":…, "line":…, "column":…, "locations":["node:file:line:column", …]}`，每个位置使用规范十进制。存在内联表时位置字符串增加 `:inline_index`，debug 增加 `inlined:[{"name":…, "file":…, "line":…, "column":…, "call-site":…}, …]`。
+
+调试记录会把函数名、类名和文件名写入执行文件，且四元组每个位置占 32 字节、五元组占 40 字节，另加内联记录；不希望发行包携带这些信息时不要使用 `-g`。JNI 快照逐字节比较模块，因此 `-g` 构建保存的快照不能恢复到不加 `-g` 编译的同一程序中，反之亦然。
 
 
 ## 模块链接
@@ -269,6 +302,6 @@ FunctionDebug = [ name:string, file:int, line:int, column:int, locations:Stack<i
 
 hint 模块只定义占位 namespace 0000 下的函数，0/1 为模块初始化/销毁钩子，其余普通函数在装载时迁移。固定 namespace 模块的普通函数不得占用自身 assume 的 namespace。类名及布局不进入指令，签名保持擦除后的基础类型。使用 `-g` 时调试记录携带显示名（可能含类名），但执行和链接都不读取它。
 
-`flush()` 按所属模块的 assume 表重定位 CALL 的函数 ID、ob 的析构 ID 及上下文中的默认工厂和原地构造 ID（含元素上下文），并校验所有 hint 导入对应的函数及签名。普通整数、堆地址和变量槽不重定位。消除 assumption 只发生在完整链接验证成功之后。has_destructor=false 时没有析构 ID 字段；true 时保留完整32位位模式，包括 `0xffffffff`，不再使用 -1 哨兵。析构仍须指向合法的 `void(address)` 脚本函数，生命周期、main 和内置保留 ID 规则继续生效。
+`flush()` 按所属模块的 assume 表重定位 CALL 与 guard_method 的函数 ID、set_methods 的方法 ID、ob 的析构 ID 及上下文中的默认工厂和原地构造 ID（含元素上下文），并校验所有 hint 导入对应的函数及签名。普通整数、堆地址和变量槽不重定位。消除 assumption 只发生在完整链接验证成功之后。has_destructor=false 时没有析构 ID 字段；true 时保留完整32位位模式，包括 `0xffffffff`，不再使用 -1 哨兵。析构仍须指向合法的 `void(address)` 脚本函数，生命周期、main 和内置保留 ID 规则继续生效。
 
 旧 exec v9 及更早版本、旧 Map 执行文件和旧 JNI 快照不再读取。所有库和宿主应配套更新。

@@ -6,15 +6,17 @@
 
 ## 编译与嵌入
 
-`compile` 和 `compile-json` 支持 `-O0`（默认）、`-O1` 和 `-O2`，最后一个选项生效。O1 在语义检查后进行整数/布尔常量折叠、保守的标量传播、无错小函数内联、固定标量上下文的泛型内联专用化，以及不会引入提前报错的循环不变量外提。溢出、除零及非法移位仍在运行时报告；浮点、字符串和可观察的对象生命周期不做代数消除。可读 AST 不变；AST 再编译要指定相同优化选项才能得到相同 ABD。debug 编号在优化后生成。
+`compile` 和 `compile-json` 支持 `-O0`（默认）、`-O1`、`-O2` 和开发中的 `-O3`，最后一个选项生效。O1 在语义检查后进行整数/布尔常量折叠、保守的标量传播、无错小函数内联、固定标量上下文的泛型内联专用化，以及不会引入提前报错的循环不变量外提。溢出、除零及非法移位仍在运行时报告；浮点、字符串和可观察的对象生命周期不做代数消除。可读 AST 不变；AST 再编译要指定相同优化选项才能得到相同 ABD。debug 编号在优化后生成。
 
 `--no-fold`、`--no-propagation`、`--no-inline`、`--no-loop-motion` 分别关闭对应阶段；传播和内联阶段仍可计算其新产生的常量结果。Java 可使用 `Compiler.Optimization.STANDARD`，或向 `Compiler.compile(ast, diagnostics, debugInfo, Set<Compiler.OptimizationPass>)` 传入精确阶段集合；`CONSTANTS` 仅开启常量折叠，已有重载保持 O0。
 
 O2（Java `Compiler.Optimization.ADVANCED`）在 O1 之后增加跨分支/回边的标量分析、公共表达式复用、不可达分支与死标量写入消除、有界直线标量函数内联，以及整数范围证明驱动的循环外提。内联实参按原顺序求值一次；可能报错的运算保留原源码位置。`--no-cfg-opt`、`--no-cse`、`--no-dce` 分别关闭控制流裁剪、公共表达式复用、死代码消除；原有 `--no-propagation`、`--no-inline`、`--no-loop-motion` 同时控制 O2 对应阶段。
 
-O2 保留结果、类型、副作用、对象生命周期、普通错误类别和出错源码位置，允许跨档位的错误调用栈缩短及资源耗尽位置变化，`getDepth()` 行为保持。未知调用、反射、对象清理及不满足分析上限的函数保守处理。O2 继续生成 exec v10，不选择 VM/JIT 或更改 JIT 阈值；同一产物的后端等价契约不变。具体边界与上限见 [O2 说明](../docs/compiler-optimization/O2.md)。
+O2 保留结果、类型、副作用、对象生命周期、普通错误类别和出错源码位置，允许跨档位的错误调用栈缩短及资源耗尽位置变化。未知调用、反射、对象清理及不满足分析上限的函数保守处理。O2 继续生成 exec v10，不选择 VM/JIT 或更改 JIT 阈值；同一产物的后端等价契约不变。具体边界与上限见 [O2 说明](../docs/compiler-optimization/O2.md)。
 
-优化会减少表达式与预算消耗。`max_steps` 用于阻止失控执行，不保证不同优化级别在同一源码位置耗尽；树与 VM 对同一产物仍按相同工作单位计费。VM 可在无调用、清理和控制转移的标量片段中一次验证最多 64 步的余额，逐步扣费；不足时回到逐点检查。默认 `max_call_depth=0` 关闭逻辑调用层数上限，正数可显式启用；原生栈与 workspace 限制仍生效。O1 可能消除实际调用，因此可选深度上限与资源耗尽位置不构成 O0/O1 等价保证；`getDepth()` 和正常错误的调用栈仍受保护。
+O3（Java `Compiler.Optimization.AGGRESSIVE`）是 exec v11 开发路线的优化档位，使用 `seq`、私有函数和整数无检查运算等扩展；版本字段在开发期仍为 10，新增产物需使用本分支运行库。`--no-sequence-inline`、`--no-slot-compaction`、`--no-specialization`、`--no-context-specialization`、`--no-scalar-replacement`、`--no-field-cache`、`--no-devirtualization`、`--no-unchecked-arithmetic` 分别控制扩展阶段，`--no-inline` 同时关闭序列内联。无检查运算仅在证明源码运算不会溢出、移位数量有效时生成，源码错误规则不变。具体已实现形态、代价限制与阶段进度见 [O3 说明](../docs/compiler-optimization/O3.md)，示例见 [o3-regressions.azs](examples/o3-regressions.azs)。
+
+优化会减少表达式与预算消耗。`max_steps` 用于阻止失控执行，不保证不同优化级别在同一源码位置耗尽；树与 VM 对同一产物仍按相同工作单位计费。VM 可在无调用、清理和控制转移的标量片段中一次验证最多 64 步的余额，逐步扣费；不足时回到逐点检查。默认 `max_call_depth=0` 关闭逻辑调用层数上限，正数可显式启用；原生栈与 workspace 限制仍生效。O1 可能消除实际调用，因此可选深度上限与资源耗尽位置不构成 O0/O1 等价保证；正常错误的调用栈仍受保护。
 
 在仓库根目录使用统一构建入口：
 
@@ -97,12 +99,11 @@ float narrow(double value) { return float(value); }
 
 `#namespace_hint NAME` 声明独立库；库内普通函数（包括 `main`）以0000占位，0/1保留给生命周期，自动编号从2开始。`#assume_hint NAME abcd` 为调用声明假定 namespace，运行时在 `flush()` 中重定位。一个编译单元及其有效 include 最多包含一个 namespace 或 namespace_hint 指令。完整规则及可运行类库示例见 [多文件库与 hint 链接](../docs/HINT_LINKING.md)。
 
-二十个内置函数无需声明即可直接调用：
+十九个内置函数无需声明即可直接调用：
 
 | 名称 | 签名 | ID |
 | --- | --- | --- |
 | `print` | `void(any)` | `0x0abd0000` |
-| `getDepth` | `int()` | `0x0abd0001` |
 | `mem_free` | `boolean(address)` | `0x0abd0002` |
 | `alloc` | `address(int)` | `0x0abd0003` |
 | `make_free` | `void(address)` | `0x0abd0004` |
@@ -122,7 +123,7 @@ float narrow(double value) { return float(value); }
 | `str_starts_with` | `boolean(string, string)` | `0x0abd0012` |
 | `str_ends_with` | `boolean(string, string)` | `0x0abd0013` |
 
-这些名称和 `0xabd` ID 是保留的，不能声明为脚本函数或外部函数；内置函数不会写入 AST 的 `abstract` 或 `extern-signatures`。
+这些名称和 `0xabd` ID 是保留的，不能声明为脚本函数或外部函数；内置函数不会写入 AST 的 `abstract` 或 `extern-signatures`。`0x0abd0001` 原属已删除的 `getDepth`，永久保留且不再分配，调用或声明该 ID 均报错；`getDepth` 名称不再保留。运行时作用域结构不可观察，作用域只通过对象生命周期（析构次序、所有权转移）体现。
 
 `load_extern_library("xxx")` 按当前系统把 `xxx` 解析成 `xxx.dylib`、`xxx.dll` 或 `xxx.so`，并读取同目录的 `xxx.signature`。签名通过后，运行时调用动态库导出的 `azscript_load_extern`。库内使用与 C++ 宿主相同的 `registerExecutor` 注册外部函数；脚本仍用编译期 `extern` 声明携带签名。它不装载 hint 模块，也不调用 `flush`。查找规则、公钥和插件写法见 [外部动态库](../docs/EXTERN_LIBRARY.md)。
 
@@ -579,8 +580,6 @@ extern int host_add(int, int):0xccf0001;
 惰性操作数（`&&`/`||` 右侧、任一 `?:` 分支或函数式 if 分支）内部及 while 条件内部的切分不能移到外围语句之前。需要这种切分时，编译器在源码位置报告原因，并提示先存入局部变量。诊断以 `Expression nesting exceeds the ABD limit of 128 levels` 开头，并附加 `; store this operand in a local variable first` 或 `; store this condition in a local variable first`。惰性分支的计算应放在实际选中的分支内；while 条件可在循环体内计算，再显式检查并 break，确保每轮重新计算。较深的后缀/成员/调用链及真正嵌套的语法仍消耗深度，自动拆分不保证无限嵌套。
 
 泛型及指针类型表达式仍有独立的 64 层上限。语法递归和 JSON 容器有 320 层防护，编译表达式递归有 640 层防护；循环 AST 会被拒绝。错误仍有位置，同一进程之后可以继续编译。Java `Compiler.compileExpression` API 同样校验代码树和编码深度，可以降级语句数组；独立表达式若需要兄弟语句，则报告 `Expression requires statement-level spilling; store this operand in a local variable first`，应把相关计算放进语句数组或函数。
-
-`getDepth()` 返回实现定义的运行时作用域深度，不等同于源码花括号层数，编译器生成的作用域也可能影响它。
 
 ### 长运算符链
 

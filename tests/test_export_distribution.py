@@ -61,6 +61,11 @@ class DistributionOutputTests(unittest.TestCase):
                             'entries': [{'id': 0x12340002, 'contexts': [{'ref': 0}]}]},
                            {'t': 0, 'c': 53, 'slot': 0, 'type': 0, 'param': [{'address': '0'}]}])
 
+    def test_development_v11_controls_keep_the_current_version_field(self):
+        for opcode in range(54, 61):
+            with self.subTest(opcode=opcode):
+                self.check_output([{'t': 0, 'c': opcode}])
+
     def test_invalid_controls_report_the_actual_value_and_location(self):
         # The first opcode past the registry is unknown.
         for opcode in (None, True, 'return_typed', 38.0, -1, 0, 2, max(verifier.CONTROL_OPCODES) + 1):

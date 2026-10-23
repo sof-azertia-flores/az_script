@@ -7,8 +7,14 @@ run; each observation reports the engine the runtime actually used, and a run
 reporting another engine fails. Saved ABD bytes, commands, binary hashes and
 complete observations are retained so later stages replay the same inputs
 without rebuilding the reference or changing semantic comparisons.
+
+Cases are independent: --jobs runs that many at once. A new collection keeps
+each case's budget sweep sequential (the reference decides where it ends); a
+replay runs every saved budget on its own. The manifest and report list cases
+in fixture order whatever order they finish in.
 """
 import argparse
+from concurrent.futures import FIRST_EXCEPTION, ThreadPoolExecutor, wait
 import copy
 import json
 import os
@@ -16,6 +22,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 
 import compact_exec_end_to_end as wire
@@ -103,14 +110,15 @@ def main():
     parser.add_argument('--work', type=Path, help='new directory, retained on success and failure')
     parser.add_argument('--budget-max', type=int, default=1024, help='positive sweep cap; incomplete sweeps fail')
     parser.add_argument('--timeout', type=float, default=20)
+    parser.add_argument('--jobs', type=int, default=os.cpu_count() or 1, help='cases run concurrently')
     args = parser.parse_args()
     if args.reference_work:
         if not args.candidate_host or args.reference_host or args.classpath or args.only:
             parser.error('--reference-work requires --candidate-host and excludes new reference compilation options')
     elif not args.reference_host or not args.classpath:
         parser.error('new reference collection requires --reference-host and --classpath')
-    if args.budget_max < 2 or args.timeout <= 0:
-        parser.error('budget-max must be at least 2 and timeout must be positive')
+    if args.budget_max < 2 or args.timeout <= 0 or args.jobs < 1:
+        parser.error('budget-max must be at least 2, timeout positive and jobs at least 1')
     for host in (args.reference_host, args.candidate_host):
         if host and not host.is_file():
             parser.error(f'host does not exist: {host}')
@@ -139,7 +147,8 @@ def main():
         candidate = observed(args.candidate_host, args.candidate_engine, record['binary']['path'],
                              [item['path'] for item in record['inserted']], record['options'], args.candidate_arg,
                              budget, folder / f'{budget}.candidate.json', args.timeout)
-        report['independent_candidate_processes'] += 1
+        with lock:
+            report['independent_candidate_processes'] += 1
         mismatch = compare_engines(reference, candidate, reference_engine, args.candidate_engine)
         entry = registry.lookup(record['name'], args.candidate_engine)
         if entry is None:
@@ -154,11 +163,46 @@ def main():
             return observed(host, engine, record['binary']['path'], [item['path'] for item in record['inserted']],
                             record['options'], [*more, *extra], budget, folder / f'{budget}.{side}.validator.json',
                             args.timeout)
-        if registry.validate(entry, record['name'], reference, candidate, mismatch, rerun,
-                             lambda left, right: compare_engines(left, right, reference_engine, args.candidate_engine)):
-            counts = report['registered_differences']
-            counts[entry['id']] = counts.get(entry['id'], 0) + 1
+        # The registry records which entries were used; registered
+        # differences are rare, so their validation runs one at a time.
+        with lock:
+            if registry.validate(entry, record['name'], reference, candidate, mismatch, rerun,
+                                 lambda left, right: compare_engines(left, right, reference_engine, args.candidate_engine)):
+                counts = report['registered_differences']
+                counts[entry['id']] = counts.get(entry['id'], 0) + 1
 
+    def run_cases(work_items, task):
+        # Results come back in work order. The first failure stops cases that
+        # have not started, makes running ones stop at their next budget, and
+        # is the one reported.
+        if args.jobs == 1:
+            return [task(item) for item in work_items]
+        first = []
+
+        def guarded(item):
+            try:
+                return task(item)
+            except BaseException as error:
+                with lock:
+                    if not stop.is_set():
+                        first.append(error); stop.set()
+                raise
+        with ThreadPoolExecutor(max_workers=args.jobs) as pool:
+            futures = [pool.submit(guarded, item) for item in work_items]
+            wait(futures, return_when=FIRST_EXCEPTION)
+            if stop.is_set():
+                for future in futures:
+                    future.cancel()
+        if first:
+            raise first[0]
+        return [future.result() for future in futures]
+
+    def check_stop():
+        if stop.is_set():
+            raise AssertionError('stopped after another case failed')
+
+    lock = threading.Lock()
+    stop = threading.Event()
     try:
         if args.reference_work:
             reference_root = args.reference_work.resolve()
@@ -173,23 +217,28 @@ def main():
             reference_host = Path(original['reference']['path'])
             if str(args.candidate_host) == original['reference']['path'] and reference_engine == args.candidate_engine:
                 raise AssertionError('candidate must be a distinct executable or engine')
-            for record in original['cases']:
-                if args.stage != 'all' and record['stage'] != args.stage:
-                    continue
+            selected = [record for record in original['cases'] if args.stage == 'all' or record['stage'] == args.stage]
+            for record in selected:
                 for artifact in [record['binary'], *record['inserted']]:
                     if digest(artifact['path']) != artifact['sha256']:
                         raise AssertionError('saved module changed: ' + artifact['path'])
-                manifest['cases'].append(record)
-                write_json(work / 'manifest.json', manifest)
-                for budget in record['budgets']:
-                    saved = reference_root / record['name'] / f'{budget}.reference.json'
-                    if digest(saved) != record['reference_observation_sha256'][str(budget)]:
-                        raise AssertionError('saved reference observation changed: ' + str(saved))
-                    reference = json.loads(saved.read_text(encoding='utf-8'))['observation']
-                    compare(record, budget, reference)
-                report['cases'].append({'name': record['name'], 'stage': record['stage'],
-                                        'budgets': record['budgets'], 'status': 'passed'})
-                write_json(work / 'report.json', report)
+            manifest['cases'] = selected
+            write_json(work / 'manifest.json', manifest)
+
+            # Every saved observation replays on its own, so a long sweep
+            # spreads over all jobs.
+            def replay(task):
+                record, budget = task
+                check_stop()
+                saved = reference_root / record['name'] / f'{budget}.reference.json'
+                if digest(saved) != record['reference_observation_sha256'][str(budget)]:
+                    raise AssertionError('saved reference observation changed: ' + str(saved))
+                reference = json.loads(saved.read_text(encoding='utf-8'))['observation']
+                compare(record, budget, reference)
+            run_cases([(record, budget) for record in selected for budget in record['budgets']], replay)
+            report['cases'] = [{'name': record['name'], 'stage': record['stage'], 'budgets': record['budgets'],
+                                'status': 'passed'} for record in selected]
+            write_json(work / 'report.json', report)
         else:
             args.reference_host = args.reference_host.resolve()
             manifest['reference'] = identity(args.reference_host, args.reference_revision, args.reference_library)
@@ -204,21 +253,22 @@ def main():
             selected = [item for item in cases(args.stage) if args.only is None or args.only in item.name]
             if not selected:
                 raise AssertionError('no fixtures selected')
-            for item in selected:
+            def collect_case(item):
+                check_stop()
                 folder = work / item.name; folder.mkdir()
                 record = {'name': item.name, 'stage': item.stage, 'options': item.options, 'budgets': [],
                           'reference_observation_sha256': {}, 'inserted': []}
                 record['binary'] = compile_source(compiler, item.source, item.name, folder, env)
                 for index, module in enumerate(item.modules):
                     record['inserted'].append(compile_source(compiler, module, f'{item.name}-module-{index}', folder, env))
-                manifest['cases'].append(record); write_json(work / 'manifest.json', manifest)
 
                 def collect(budget):
                     destination = folder / f'{budget}.reference.json'
                     value = observed(args.reference_host, args.reference_engine, record['binary']['path'],
                                      [entry['path'] for entry in record['inserted']], item.options, [],
                                      budget, destination, args.timeout)
-                    report['independent_reference_processes'] += 1
+                    with lock:
+                        report['independent_reference_processes'] += 1
                     if value['engine'] not in (args.reference_engine, 'unloaded'):
                         raise AssertionError(f'{item.name}: reference ran on {value["engine"]!r}, expected {args.reference_engine!r}')
                     record['budgets'].append(budget)
@@ -240,6 +290,7 @@ def main():
                 matched = 0
                 if item.sweep:
                     for budget in range(1, args.budget_max + 1):
+                        check_stop()
                         value = collect(budget)
                         matched = matched + 1 if terminal_shape(value) == terminal_shape(full) else 0
                         # Includes every stopping point plus an extra successful
@@ -250,10 +301,12 @@ def main():
                         raise AssertionError(f'{item.name}: incomplete budget sweep (cap {args.budget_max})')
                 record['expected'] = {'return': item.expected_return, 'error': item.expected_error,
                                       'globals': item.expected_globals, 'trace_names': item.trace_names}
-                write_json(work / 'manifest.json', manifest)
-                report['cases'].append({'name': item.name, 'stage': item.stage, 'budgets': record['budgets'],
-                                        'status': 'passed' if args.candidate_host else 'reference-collected'})
-                write_json(work / 'report.json', report)
+                return record, {'name': item.name, 'stage': item.stage, 'budgets': record['budgets'],
+                                'status': 'passed' if args.candidate_host else 'reference-collected'}
+            results = run_cases(selected, collect_case)
+            manifest['cases'] = [record for record, _ in results]
+            report['cases'] = [entry for _, entry in results]
+            write_json(work / 'manifest.json', manifest); write_json(work / 'report.json', report)
         if not manifest['cases']:
             raise AssertionError('no fixtures selected from reference collection')
         if args.candidate_host:

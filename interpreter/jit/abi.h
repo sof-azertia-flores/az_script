@@ -12,7 +12,7 @@
 extern "C" {
 #endif
 
-#define AZJIT_ABI_VERSION 1u
+#define AZJIT_ABI_VERSION 2u
 #define AZJIT_ABSENT 0xffu
 /* Public value tags (INT_VALUE...) a shadow can carry. */
 #define AZJIT_TAG_INT 0u
@@ -34,7 +34,7 @@ enum {
     AZJIT_TRUTH,AZJIT_BRANCH_FALSE,AZJIT_JUMP,AZJIT_BRANCH_FLAGS,AZJIT_SET_FLAGS,AZJIT_LOOP_NEXT,
     AZJIT_BINARY,AZJIT_UNARY,AZJIT_CONVERT,AZJIT_REFERENCE_LOCAL,AZJIT_REFERENCE_GLOBAL,AZJIT_COPY_REFERENCE,
     AZJIT_DROP_REFERENCE,AZJIT_DECLARE,AZJIT_FLUSH_LOCAL,AZJIT_ENTER_SCOPE,AZJIT_LEAVE_SCOPE,
-    AZJIT_CHECK_UNDECLARED,AZJIT_SET_RESULT,AZJIT_EXIT
+    AZJIT_CHECK_UNDECLARED,AZJIT_SET_RESULT,AZJIT_BINARY_I32,AZJIT_EXIT
 };
 #define AZJIT_NONE 0xffffffffu
 
@@ -77,6 +77,11 @@ typedef struct azjit_function {
     const uint32_t* resume_ops;
     const uint16_t* resume_tags;
     uint32_t exit_count;
+    /* Per exit, the slots the runtime reads back: exit_slots[exit_slot_begin[e]
+     * .. exit_slot_begin[e+1]) (exit_count+1 offsets). Native code need not
+     * write any other slot's shadow. */
+    const uint32_t* exit_slot_begin;
+    const uint32_t* exit_slots;
     const azjit_helpers* helpers;
     const char* name;
 } azjit_function;

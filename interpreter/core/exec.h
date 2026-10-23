@@ -45,6 +45,8 @@ struct expression {
     // slot, function ID, member offset, block size, buffer operation, virtual
     // slot or conversion target. return_type is used by call_virtual.
     int immediate=0,return_type=VOID_VALUE;
+    int function_id=0; // guard_method target; independent of its method slot
+    bool prefix=false; // increment result selects the updated or original value
     std::optional<int> destructor_id;
     bool manual=false,on_error=false;
     std::vector<std::shared_ptr<const context>> contexts;
@@ -72,7 +74,7 @@ struct module {
 // module's globals start in the script; messages are the runtime's load errors.
 module read_module(const unsigned char* bytes,std::size_t length,std::size_t global_offset);
 
-enum class reference_kind { call,destructor,factory,placement,method };
+enum class reference_kind { call,destructor,factory,placement,method,guard_method };
 struct reference {
     int function_id=0;
     reference_kind kind=reference_kind::call;

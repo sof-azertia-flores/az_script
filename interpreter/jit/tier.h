@@ -11,9 +11,19 @@
 #include <vector>
 
 namespace azertian::jit {
-// Whether the LLVM backend compiles the function in bounded time; larger
-// functions stay with the VM, recorded as "too large for native code".
-bool fits_native(const Function& code) noexcept;
+// The native size caps: MIR operations, and the dense resume table's cells
+// (resume points times slots). Larger functions stay with the VM, recorded as "too large for
+// native code".
+struct NativeLimits {
+    std::size_t operations,resume_cells;
+};
+// The caps, or for compile-time measurements AZSCRIPT_JIT_NATIVE_LIMITS
+// ("<operations>,<resume cells>"); read when a tier is created.
+NativeLimits native_limits();
+// Resume points times slots, including shadows initialized absent.
+std::size_t resume_cells(const Function& code) noexcept;
+// Whether the LLVM backend compiles the function in bounded time.
+bool fits_native(const Function& code,const NativeLimits& limits=native_limits()) noexcept;
 // The dispatch loop's view of the JIT tier. Each frame keeps a bound
 // (FrameRecord::end) that the loop already checks before every instruction;
 // the tier lowers it to the next point where it may take over and is
@@ -39,6 +49,9 @@ class Tier {
     std::vector<std::uint64_t> heat_;  // events per untried function under the policy
     std::string unavailable_;          // why on runs without the tier
     std::size_t compiled_operations_=0;
+    NativeLimits limits_;
+    // Native compilation time, for the statistics side channel.
+    std::uint64_t compile_ns_=0,compile_max_ns_=0,compile_max_operations_=0,compile_max_resume_cells_=0;
     Activation scratch_;              // shared: native runs never nest
     std::map<std::string,std::uint64_t> refusals_;
     vm::ProgramCounter random_bound(vm::ProgramCounter low,vm::ProgramCounter end) noexcept;

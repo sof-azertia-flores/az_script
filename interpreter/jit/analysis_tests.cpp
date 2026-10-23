@@ -1,4 +1,5 @@
 #include "jit/analysis.h"
+#include "jit/mir.h"
 #include "vm/lowering.h"
 #include <iostream>
 #include <stdexcept>
@@ -94,6 +95,79 @@ void loops() {
     for(std::size_t i=0;i<analysis.live.size();++i)
         if(analysis.reached[i])for(const bool value:analysis.live[i])live+=value;
     check(live>0,"binary operands are live between their snapshot and use");
+    // The counter is read until the return; the body's local never is.
+    bool counter_read=false,body_local_read=false;
+    for(std::size_t i=0;i<analysis.live_locals.size();++i) {
+        if(!analysis.reached[i])continue;
+        body_local_read|=analysis.live_locals[i][1];
+        if(lowered.program.instructions[analysis.begin+i].opcode==Opcode::set_return)counter_read=analysis.live_locals[i][0];
+    }
+    check(counter_read,"a local read by the return is live before it");
+    check(!body_local_read,"a local that is never read is never live");
+    check(!analysis.live_locals.back()[0],"nothing is live at the function end");
+}
+// Nothing ends a local's liveness (an orphaned reference may still read a
+// replaced cell), so a local read later is live even before its declaration.
+void locals_without_kills() {
+    auto body=block({define(0,literal(Value(1))),define(1,literal(Value(2))),
+        returned(op(12,{slot(0),slot(1)}))});
+    const auto lowered=lower(body,INT_VALUE,2);
+    check(lowered.analysis.eligible,"two locals are eligible: "+lowered.analysis.reason);
+    const auto& analysis=lowered.analysis;
+    check(analysis.live_locals[0][0]&&analysis.live_locals[0][1],"both locals are live at entry: the return reads them");
+}
+void reference_liveness() {
+    // A reference survives replacement of its local's cell. Reading it must
+    // keep the old cell current across any native exit before replacement.
+    vm::ExecutableProgram program;
+    program.constants={Value(1),Value(2)};
+    const auto unused=vm::no_index;
+    program.instructions={
+        {Opcode::constant,0,unused,unused,0},
+        {Opcode::declare_slot,unused,0,unused,0},
+        {Opcode::load_slot,1,unused,unused,0},
+        {Opcode::copy_reference,2,1},
+        {Opcode::constant,0,unused,unused,1},
+        {Opcode::store,0,1,0},
+        {Opcode::declare_slot,unused,0,unused,0},
+        {Opcode::set_return,unused,2,unused,0},
+        {Opcode::function_end}};
+    program.sources.resize(program.instructions.size());
+    vm::FunctionRecord record;record.begin=0;record.end=program.instructions.size();
+    record.register_count=3;record.local_count=2;program.functions={record};
+    auto analysis=analyze(program,0,vm::frame_layout(program,0),false);
+    check(analysis.eligible,"a surviving local reference is eligible");
+    check(analysis.states[7].registers[2].kind==RegisterState::Kind::orphan,"a copied reference survives redeclaration");
+    check(analysis.live_locals[5][0]&&analysis.live_locals[7][0],"an orphan read preserves local liveness before replacement");
+    check(analysis.live_locals[7][1],"an orphan read conservatively keeps every local live");
+    // With no eventual read, copying a reference alone does not read its
+    // cell: neither resume loads nor exit stores should include the local.
+    program.instructions[7]={Opcode::set_return,unused,0,unused,0};
+    analysis=analyze(program,0,vm::frame_layout(program,0),false);
+    check(!analysis.live_locals[3][0],"copying a reference does not read the local value");
+    const auto code=build(program,analysis,true);
+    check(code.resume_tags[3][code.registers]==0,"dead locals start absent at a native resume point");
+    for(std::size_t exit=0;exit<code.exits.size();++exit)
+        check(code.exit_locals[exit].empty(),"dead locals are omitted from native exits");
+}
+void unchecked_arithmetic() {
+    for(int opcode=55;opcode<=58;++opcode) {
+        const auto lowered=lower(block({returned(op(opcode,{literal(Value(INT32_MAX)),literal(Value(2))}))}));
+        check(lowered.analysis.eligible,"unchecked integer arithmetic is eligible");
+        const auto code=build(lowered.program,lowered.analysis,false);
+        bool found=false;
+        for(const auto& operation:code.ops)if(operation.code==Code::binary_i32) {
+            found=true;
+            check(operation.exit==none,"unchecked arithmetic has no failure exit");
+            check(operation.tags==tag_bit(INT_VALUE),"unchecked arithmetic produces int32");
+        }
+        check(found,"proven integer operands lower to the unchecked MIR operation");
+        const auto invalid=lower(block({returned(op(opcode,{literal(Value(1.0)),literal(Value(2))}))}));
+        check(invalid.analysis.eligible,"a type error remains an eligible failing instruction");
+        const auto checked=build(invalid.program,invalid.analysis,false);
+        for(const auto& operation:checked.ops)
+            check(operation.code!=Code::binary_i32,"unproven operand tags do not enter unchecked native arithmetic");
+    }
 }
 void strings() {
     const auto lowered=lower(block({define(0,op(12,{literal(Value(std::string("n="))),literal(Value(1))})),returned(slot(0))}),STRING_VALUE,1);
@@ -130,6 +204,6 @@ void refusals() {
 }
 }
 int main() {
-    try{tags();loops();strings();parameters_and_globals();refusals();std::cout<<"JIT analysis checks passed: "<<checks<<'\n';}
+    try{tags();loops();locals_without_kills();reference_liveness();unchecked_arithmetic();strings();parameters_and_globals();refusals();std::cout<<"JIT analysis checks passed: "<<checks<<'\n';}
     catch(const std::exception& error){std::cerr<<error.what()<<'\n';return 1;}
 }

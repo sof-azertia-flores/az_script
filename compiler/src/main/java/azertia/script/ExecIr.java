@@ -68,13 +68,17 @@ final class ExecIr {
             case MOVE -> EnumSet.of(Effect.WRITE_SLOT, Effect.WRITE_HEAP, Effect.CLEANUP, Effect.CALL, Effect.THROW);
             case NEW_BLOCK -> EnumSet.of(Effect.ALLOCATE, Effect.WRITE_HEAP, Effect.THROW);
             case OBJECT_ADDRESS, BLOCK_ADDRESS, CHECK_OBJECT -> EnumSet.of(Effect.READ_HEAP, Effect.THROW);
+            case GUARD_METHOD -> EnumSet.of(Effect.READ_HEAP);
+            case INCREMENT_I32_UNCHECKED -> EnumSet.of(Effect.READ_SLOT, Effect.WRITE_SLOT, Effect.WRITE_HEAP, Effect.THROW);
+            case SEQUENCE -> EnumSet.noneOf(Effect.class);
             case SET_METHODS -> EnumSet.of(Effect.WRITE_HEAP, Effect.THROW);
             case BLOCK, CLEANUP -> EnumSet.of(Effect.CONTROL, Effect.CLEANUP, Effect.CALL, Effect.THROW);
             case RETURN_OBJECT -> EnumSet.of(Effect.CONTROL, Effect.CLEANUP, Effect.WRITE_HEAP, Effect.THROW);
             case RETURN, IF, WHILE, BREAK, CONTINUE, SELECT, AND, OR -> EnumSet.of(Effect.CONTROL, Effect.THROW);
             case ADD, SUBTRACT, MULTIPLY, DIVIDE, MODULO, GREATER, LESS, EQUAL, NOT_EQUAL,
                  GREATER_EQUAL, LESS_EQUAL, NOT, NEGATE, CONTEXT_ABI, BIT_AND, BIT_OR, BIT_XOR,
-                 SHIFT_LEFT, SHIFT_RIGHT, SHIFT_UNSIGNED, CONVERT -> EnumSet.of(Effect.THROW);
+                 SHIFT_LEFT, SHIFT_RIGHT, SHIFT_UNSIGNED, CONVERT, ADD_I32_UNCHECKED, SUBTRACT_I32_UNCHECKED,
+                 MULTIPLY_I32_UNCHECKED, SHIFT_LEFT_I32_UNCHECKED -> EnumSet.of(Effect.THROW);
             default -> throw new IllegalArgumentException("Unclassified exec opcode " + opcode);
         };
     }
@@ -88,8 +92,10 @@ final class ExecIr {
         if (source instanceof AcsAddress) return ADDRESS_VALUE;
         if (source instanceof AcsByteArray) return VOID_VALUE;
         return switch (opcode) {
-            case GREATER, LESS, EQUAL, NOT_EQUAL, GREATER_EQUAL, LESS_EQUAL, NOT, AND, OR -> BOOLEAN_VALUE;
+            case GREATER, LESS, EQUAL, NOT_EQUAL, GREATER_EQUAL, LESS_EQUAL, NOT, AND, OR, GUARD_METHOD -> BOOLEAN_VALUE;
             case CONTEXT_ABI, VALUE_COMPARE, BIT_AND, BIT_OR, BIT_XOR, SHIFT_LEFT, SHIFT_RIGHT, SHIFT_UNSIGNED -> INT_VALUE;
+            case ADD_I32_UNCHECKED, SUBTRACT_I32_UNCHECKED, MULTIPLY_I32_UNCHECKED, SHIFT_LEFT_I32_UNCHECKED, INCREMENT_I32_UNCHECKED -> INT_VALUE;
+            case SEQUENCE -> children.get(children.size()-1).value.type;
             case OBJECT_ADDRESS, BLOCK_ADDRESS -> ADDRESS_VALUE;
             case NEW_BLOCK, BUFFER_NEW -> OBJECT_VALUE;
             case CONVERT -> ((AcsObject) source).getAsInt("type");

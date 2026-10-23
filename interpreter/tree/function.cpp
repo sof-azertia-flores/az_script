@@ -5,6 +5,16 @@
 namespace azertian {
 using namespace tree;
 using trace::entry_scope;
+V functionInvocationExpression::invoke_target(const std::shared_ptr<script>& script,const E& env,std::vector<V> args,type_contexts contexts) {
+    entry_scope entry;return entry.run([&]() -> V {
+    std::lock_guard<std::recursive_mutex> lock(runtime_mutex());
+    const auto found=script->functions.find(function_id);
+    auto target=found==script->functions.end()?script->getFunction(function_id):found->second;
+    if(auto fn=std::dynamic_pointer_cast<ofunction>(target))return fn->invoke_bound_internal(site_of(env),std::move(args),std::move(contexts),true);
+    if(!contexts.empty())throw std::runtime_error("Generic contexts require a script function implementation");
+    return target->invoke(env,std::move(args));
+    });
+}
 V invoke_bound_function(const std::shared_ptr<script>& script,int id,const E& env,std::vector<V> args,type_contexts contexts) {
     entry_scope entry;return entry.run([&]() -> V {
     auto target=script->getFunction(id);
@@ -24,6 +34,7 @@ V invoke_bound_function(const std::shared_ptr<script>& script,int id,ownership::
 int ofunction::return_type(){return rett;}
 V ofunction::invoke(E ev,std::vector<V> args) {
     entry_scope entry;return entry.run([&]() -> V {
+    if(entry_kind==2)throw std::runtime_error("Private function cannot be invoked by the host");
     if(hidden_count)throw std::runtime_error("Generic function requires a non-generic wrapper for public invocation");
     return invoke_bound(std::move(ev),std::move(args),{});
     });
@@ -32,7 +43,11 @@ V ofunction::invoke_bound(E ev,std::vector<V> args,type_contexts contexts) {
     return invoke_bound(site_of(ev),std::move(args),std::move(contexts));
 }
 V ofunction::invoke_bound(ownership::Site caller,std::vector<V> args,type_contexts contexts) {
+    return invoke_bound_internal(caller,std::move(args),std::move(contexts),false);
+}
+V ofunction::invoke_bound_internal(ownership::Site caller,std::vector<V> args,type_contexts contexts,bool private_call) {
     entry_scope entry;return entry.run([&]() -> V {
+    if(entry_kind==2&&!private_call)throw std::runtime_error("Private function cannot be invoked by the host");
     std::shared_ptr<function_frame> frame;
     bool vm_trace=false;
     try {

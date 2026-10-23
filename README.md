@@ -25,6 +25,8 @@ python3 tools/build_and_test.py
 
 编译默认使用 `-O0`；可显式选择保守优化 `-O1` 或增强标量优化 `-O2`。优化档位与执行后端独立，仍输出 exec v10。用法、关闭选项与语义边界见 [编译与嵌入](compiler/LANGUAGE.md#编译与嵌入)。
 
+`exec_v11_main` 开发分支另提供 `-O3`（Java `Compiler.Optimization.AGGRESSIVE`），继续实施表达式内联、私有专用化、对象优化与范围证明运算。开发期间格式版本字段仍为 10，但使用新增构造的 O3 产物需要本分支运行库；O0/O1/O2 保持原格式。当前支持范围和未完成的验收见 [O3 说明](docs/compiler-optimization/O3.md)及 [exec v11 进度](docs/exec-v11-roadmap/STATUS.md)。
+
 构建会复用现有 Gradle/Maven 缓存，缺少依赖时从 Maven Central 下载并校验固定 SHA-256。所有构建产物、下载和临时测试文件都放在本目录的 `build/` 内。已有缓存时可完全离线构建：
 
 ```sh
@@ -32,7 +34,7 @@ python3 tools/build_and_test.py --offline
 python3 tools/build_and_test.py --offline --sanitize
 ```
 
-`--sanitize` 对原生数据层、解释器和编译执行链启用 AddressSanitizer/UndefinedBehaviorSanitizer；JNI 使用普通构建配合 JVM 的 `-Xcheck:jni` 验证。只构建可使用 `--skip-tests`；不需要 JNI 可使用 `--skip-jni`。`--jit` 先构建固定版本的 LLVM（`tools/build_llvm.py`，缺少缓存时去掉 `--offline` 下载），从而构建并测试 JIT 模块。
+`--sanitize` 对原生数据层、解释器和编译执行链启用 AddressSanitizer/UndefinedBehaviorSanitizer；JNI 使用普通构建配合 JVM 的 `-Xcheck:jni` 验证。只构建可使用 `--skip-tests`；不需要 JNI 可使用 `--skip-jni`。`--jit` 先构建固定版本的 LLVM（`tools/build_llvm.py`，缺少缓存时去掉 `--offline` 下载），从而构建并测试 JIT 模块。`--quick` 用于开发阶段之间：所有套件照常运行，但 JIT 重放、O2/O3 与后端对齐只用 stress 模式，不能代替交付前的完整验证。独立进程差分按 CPU 数并行（`tests/vm_execution_end_to_end.py --jobs`），后端对齐同时运行多个套件（`tools/backend_alignment.py --jobs`）；比较内容与串行运行相同。
 
 `CompilerScalingTest` 检查编译工作量随程序规模线性增长：它比较生成程序与其八倍规模版本的确定性操作计数，覆盖大量局部变量、语句、函数、全局变量、类、字段、extern 或参数。构建后可运行 `python3 tools/bench_compiler.py`，在这类程序上测量编译耗时，最大到单个作用域 32,000 个局部变量或 20,000 个函数；它是可选基准，不属于验证流程。
 
@@ -82,7 +84,7 @@ int main() {
 }
 ```
 
-内置函数 `print`、`getDepth`、`mem_free`、`alloc`、`make_free`、`mem_send_up`、`mem_get` 和 `load_extern_library` 由编译器直接提供，不需要 include 或声明。`str_*` [字符串函数](compiler/LANGUAGE.md#字符串函数) 同样无需声明，并提供按码点计算的方法和下标访问。`load_extern_library("xxx")` 按当前系统加载已签名的 `xxx.so` / `xxx.dylib` / `xxx.dll`，库内用现有的 C++ 宿主注册接口挂上外部函数。独立运行时从 `AZSCRIPT_TRUSTED_KEY` 或 `trusted_key.pem` 读取公钥；嵌入式宿主通过 C++ / Java API 提供公钥。完整约定见 [外部动态库](docs/EXTERN_LIBRARY.md)。include 先按所在源文件的目录解析，再依次查找各 `-I` 目录和包装脚本的标准库目录；绝对路径和离开这些根目录的路径需要 `--unrestricted-includes`（见[预处理](compiler/LANGUAGE.md#字符串注释与预处理)）。
+内置函数 `print`、`mem_free`、`alloc`、`make_free`、`mem_send_up`、`mem_get` 和 `load_extern_library` 由编译器直接提供，不需要 include 或声明。`str_*` [字符串函数](compiler/LANGUAGE.md#字符串函数) 同样无需声明，并提供按码点计算的方法和下标访问。`load_extern_library("xxx")` 按当前系统加载已签名的 `xxx.so` / `xxx.dylib` / `xxx.dll`，库内用现有的 C++ 宿主注册接口挂上外部函数。独立运行时从 `AZSCRIPT_TRUSTED_KEY` 或 `trusted_key.pem` 读取公钥；嵌入式宿主通过 C++ / Java API 提供公钥。完整约定见 [外部动态库](docs/EXTERN_LIBRARY.md)。include 先按所在源文件的目录解析，再依次查找各 `-I` 目录和包装脚本的标准库目录；绝对路径和离开这些根目录的路径需要 `--unrestricted-includes`（见[预处理](compiler/LANGUAGE.md#字符串注释与预处理)）。
 
 `address` 是独立的无符号 64 位地址类型，表示 slot 位置，空地址写作 `null`。例如 `address p = alloc(2); mem_get(p + 1) = 42; mem_free(p);`。地址支持与 int32 偏移加减并检查越界；对象引用也使用该运行时类型，类成员的静态类型检查和继承规则保持不变。地址值、变量槽编号、分配数量和函数 ID 是不同概念，后面三者仍使用既有 32 位表示。
 
@@ -223,7 +225,7 @@ try {
 - `extern int host_add(int, int):0xccf0001;` 以完整签名绑定宿主函数；类型必填，旧 `#extern` 指令已删除。参数和回调返回值按实际类型精确匹配，`int`、`float`、`double` 之间不隐式转换。`#namespace 1234` 支持1～4位，拒绝保留的 `0000` 和 `0abd`；独立库用 `#namespace_hint` 声明，`#assume_hint` 绑定调用。
 - 函数按值传参，参数从左到右求值；函数只能访问自己的局部变量和全局变量。块有独立作用域，循环每次创建新的块作用域。`for` 初始化变量的作用域包含整个循环，循环结束后不可见。
 - `return` 穿透当前函数内的循环和条件块；`break` 退出最内层循环/switch，`continue` 结束最近循环的本轮执行，均执行必要的块清理。数值返回必须精确匹配，或从 int 扩宽到 float/double、从 float 扩宽到 double；int 转 float 可能舍入。收窄须显式使用受检查的 `int(x)` 或 `float(x)` 转换，动态返回类型在运行时检查。
-- ABD 仍限制为 128 层物理容器；编译器精确计量记录和上下文列表，把符合条件的立即求值语句表达式拆成隐藏局部变量。惰性操作数/while 条件内部切分、影响所有权的捕获及有副作用的内存赋值 RHS 拆分若会改变求值、复制或生命周期，则被拒绝，需显式调整源码。被保留的拥有值之后若有调用，须传递证明作用域安全，不能只看标量返回类型。较深的后缀及真正嵌套表达式仍受限制：语法/JSON 防护为 320 层，编译表达式递归为 640 层，类型表达式为 64 层；循环代码树会被拒绝。`getDepth()` 是实现定义的作用域深度。默认每次顶层脚本调用最多 1,000,000 步；逻辑调用深度上限默认关闭（`max_call_depth=0`，正数可显式启用），脚本文件最多 64 MiB，堆最多 1,048,576 槽（含保留槽 0）；宿主回调本身的耗时不受指令预算控制。 长二元运算链和语句 else-if 链超过 128 个操作数/条件时使用扁平 AST；剩余深度不足且作用域检查通过时，较短的 else-if 链也可扁平降级；移动的条件/正文若无法证明生命周期安全，会收到带位置的局部变量提示。求值顺序、短路、源码跳转目标和清理规则保持不变；产生值的函数式 if 保留表达式语义，仍可能报告嵌套超限。
+- ABD 仍限制为 128 层物理容器；编译器精确计量记录和上下文列表，把符合条件的立即求值语句表达式拆成隐藏局部变量。惰性操作数/while 条件内部切分、影响所有权的捕获及有副作用的内存赋值 RHS 拆分若会改变求值、复制或生命周期，则被拒绝，需显式调整源码。被保留的拥有值之后若有调用，须传递证明作用域安全，不能只看标量返回类型。较深的后缀及真正嵌套表达式仍受限制：语法/JSON 防护为 320 层，编译表达式递归为 640 层，类型表达式为 64 层；循环代码树会被拒绝。默认每次顶层脚本调用最多 1,000,000 步；逻辑调用深度上限默认关闭（`max_call_depth=0`，正数可显式启用），脚本文件最多 64 MiB，堆最多 1,048,576 槽（含保留槽 0）；宿主回调本身的耗时不受指令预算控制。 长二元运算链和语句 else-if 链超过 128 个操作数/条件时使用扁平 AST；剩余深度不足且作用域检查通过时，较短的 else-if 链也可扁平降级；移动的条件/正文若无法证明生命周期安全，会收到带位置的局部变量提示。求值顺序、短路、源码跳转目标和清理规则保持不变；产生值的函数式 if 保留表达式语义，仍可能报告嵌套超限。
 - 解释器在原生栈上递归执行调用、代码块和表达式，因此原生栈另有限制。每个线程记录最外层脚本调用开始的位置；执行接近线程实际栈底，或用量超过 `script->max_stack_bytes` 时，抛出 `std::runtime_error("Script native stack limit exceeded")`，已进入的调用正常展开并完成清理。Linux、macOS 和 Windows 8+ 自动检测线程栈范围，栈底前保留栈大小的四分之一（至少 64 KiB、至多 1 MiB）供异常展开、清理、宿主调用和 JVM 等宿主的保护页使用；无法检测时使用 256 KiB 预算。`max_stack_bytes` 默认为 `0`，只按检测结果限制；设为正数可进一步收紧，但不能越过检测到的栈底。栈较小的线程能执行的递归较浅。Java 宿主使用 `AbdInvoker.setMaxSteps`、`setMaxCallDepth` 和 `setMaxStackBytes`。
 - `return`、`if`、`else`、`while`、`for`、`switch`、`case`、`default`、`break`、`continue`、`def`、`var`、`class`、`new`、`this`、`null`、`delete`、`extern`、`public/private/protected/virtual`、`override`、`final`、`any`、类型名和 `true/false` 是保留字，不能作为类、字段、方法、函数、参数、变量、全局变量或宏的名字；标识符不能含控制字符或格式字符（如 U+200B、U+202E）。源码与 `compile-json` 共用这些命名规则。非 void 函数的正常退出路径都必须 `return`；条件恒真的 while/for 且体内没有属于它的 `break` 时，视为不会正常结束。
 - 数值转字符串（`print` 和 `+` 拼接）使用最短可往返表示：`0.1+0.2` 得到 `0.30000000000000004`，`123456789.0` 得到 `123456789`，`1e20` 得到 `1e+20`，负零保留为 `-0`。

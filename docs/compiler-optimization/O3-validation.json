@@ -1,0 +1,2169 @@
+{
+  "correctness_status": "passed",
+  "platform": "macOS-26.6.2-arm64-arm-64bit-Mach-O",
+  "cpu": "Apple M2 Pro",
+  "base_revision": "fad8abdf182c6629ac26ee02350fccbb8feeeb93",
+  "uncommitted": true,
+  "exec_version": 10,
+  "full_driver_compiler_class_identity": [
+    {
+      "module": "compiler",
+      "normal_jar_sha256": "bd8ea2086d2df5c0b3a186b6215deed376b499db90f27378da3660814a93eb0b",
+      "current_jar_sha256": "3bed1b79648b629e268cf50f3ca0481a115b9a8f96aacdd0590cbd8216667008",
+      "class_count": 126,
+      "class_payload_sha256": "04f16af8789111c4eba2d50cf299b0c4a1e48b3010b050676b2017a1d9252e90",
+      "equal": true
+    },
+    {
+      "module": "abdJava",
+      "normal_jar_sha256": "e23e1afcfc8e008575743647435ffba8666efe894f4085ef15759a91125fa93b",
+      "current_jar_sha256": "e8ca550e7a3188cde911e09d76e54fe69f1373a30a4a75fe59286921a402853e",
+      "class_count": 28,
+      "class_payload_sha256": "a51f37e5e5969cefe753c14180fd69ed9407d835f9ef01f727a9197130d4b684",
+      "equal": true
+    },
+    {
+      "module": "abdJavaInvoker",
+      "normal_jar_sha256": "afb063c564137eb26f9f132df0065b893b14badc8b78ac5d18c304336330c1a7",
+      "current_jar_sha256": "5a7cce11812a5866ab4968837c47c7865fe622ee7094cafe0750e0873d3be184",
+      "class_count": 9,
+      "class_payload_sha256": "cd766ff6bc3fdcb5db6bed20d3913eb5ff78e319934607c98f661e13a8f2ce09",
+      "equal": true
+    }
+  ],
+  "validation_repairs": [
+    {
+      "issue": "Missing development opcodes in the semantic inventory",
+      "opcodes": [
+        54,
+        55,
+        56,
+        57,
+        58,
+        59,
+        60
+      ],
+      "self_checks": 24,
+      "inventoried": 61
+    },
+    {
+      "issue": "JIT-dependent small-stack diagnostic test",
+      "change": "Fresh -Xint -Xss256k JVM",
+      "diagnostic_tests_per_repeat": 35,
+      "repeats": 3,
+      "initial_failure": "build/v11/o3-resumed-sanitize-first.log"
+    }
+  ],
+  "normal": {
+    "status": "passed",
+    "log": "build/v11/o3-resumed-normal.log",
+    "log_sha256": "40080ba477d357810bec05d3376d9395f8e86157a37aa818ab52b87431071756",
+    "junit_tests": 415,
+    "ctest_suites": 20,
+    "compiler_corpus": {
+      "path": "build/compiler-optimization-corpus/report.json",
+      "sha256": "c77a4f9c3ebb5ca671e19603f2e33a88715eabbe2e159923bce2c1d869aace35",
+      "cases": 460,
+      "observations": 10120,
+      "jit_modes": [
+        "probe:7",
+        "eager",
+        "stress",
+        "on:2+interp",
+        "eager+llvm",
+        "stress+llvm",
+        "on:3+llvm"
+      ]
+    },
+    "directed": {
+      "path": "build/compiler-o2.json",
+      "sha256": "249f7ef4ea933942db371759d7d36eadfee716757c45bc53fe8fd3c43e33e40e",
+      "cases": 79,
+      "observations": 2238,
+      "budget_checks": 4230,
+      "case_levels": {
+        "loop": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "inline-order": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "inline-error-frame": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "loop-motion": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "zero-loop-trap": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "loop-alias-call": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "virtual-dispatch": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "propagation": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "loop-variant": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "branch-join": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "parameter-copy": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "invariant-local": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "copy-snapshot": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "global-call": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "loop-condition": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "bits": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "short-circuit": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "effects": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "objects": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "generic-buffer": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "reflection": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "overflow": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "divide-overflow": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "negate-overflow": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "divide-zero": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "shift-range": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "error-cleanup": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "o2-cse": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "o2-cse-scope": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "o2-cse-overwrite": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "o2-cse-input": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "o2-cse-error": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "o2-dead-trap": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "o2-negative-bits": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "o2-loop-join": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "o2-contradiction": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "o2-snapshot": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "o2-inline-repeat": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "o2-inline-order": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "o2-inline-arg-trap": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "o2-inline-origin": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "o2-inline-overflow": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "o2-inline-loop": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "o2-range-loop": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "o2-range-guard": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "o2-range-division": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "o2-range-reset": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "o2-range-guard-division": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "o2-zero-trip-overflow": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "o2-conditional-trap": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "o2-cse-dominator": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "o2-unused-storage": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "o2-cse-backedge": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "o2-cse-loop-storage": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "o2-cse-loop-stable": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "o2-generated-flow": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "o3-nested-call": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "o3-lazy-call": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "o3-loop-condition": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "o3-call-argument-order": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "o3-nested-origin": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "o3-recursion": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "o3-specialize-constant": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "o3-specialize-boolean": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "o3-range-boundary": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "o3-range-overflow": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "o3-field-cache": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "o3-field-cache-call": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "o3-field-cache-alias": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "o3-virtual-guard": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "o3-virtual-override": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "o3-sixteen-arguments": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "o3-scalar-pointer-loop": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "o3-scalar-pointer-error": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "o3-literal-copy-storage": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "o3-inline-argument-trace": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "o3-generic-scalar-context": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "o3-inline-published-trace-clear": [
+          "O0",
+          "O3"
+        ],
+        "o3-inline-closed-published": [
+          "O0",
+          "O3"
+        ]
+      }
+    },
+    "heap": {
+      "path": "build/compiler-o3-heap/report.json",
+      "sha256": "46c90bf7a7141661d7b2428dc09bbc85c93ac84fddbd4325a379df3beffe3926",
+      "cases": 8,
+      "checks": 576
+    },
+    "tree_vm": {
+      "path": "build/runtime-perf/vm-execution/report.json",
+      "sha256": "73ed1328218775c2a29760fd7f4c9ddb59cd5b2db710d656025b1b3b673a2f46",
+      "status": "passed",
+      "optimization": "O0",
+      "cases": 460,
+      "reference_processes": 55451,
+      "candidate_processes": 55451,
+      "registered_differences": {}
+    },
+    "jit_replays": {
+      "probe:7": {
+        "path": "build/runtime-perf/vm-execution-jit-probe7/report.json",
+        "sha256": "4bbf8f0ddadbf31b1c730d08c2955092856682e11dd3545ce056fc68270450ed",
+        "status": "passed",
+        "optimization": "O0",
+        "cases": 460,
+        "reference_processes": 0,
+        "candidate_processes": 55451,
+        "registered_differences": {}
+      },
+      "eager": {
+        "path": "build/runtime-perf/vm-execution-jit-eager/report.json",
+        "sha256": "4bbf8f0ddadbf31b1c730d08c2955092856682e11dd3545ce056fc68270450ed",
+        "status": "passed",
+        "optimization": "O0",
+        "cases": 460,
+        "reference_processes": 0,
+        "candidate_processes": 55451,
+        "registered_differences": {}
+      },
+      "stress": {
+        "path": "build/runtime-perf/vm-execution-jit-stress/report.json",
+        "sha256": "4bbf8f0ddadbf31b1c730d08c2955092856682e11dd3545ce056fc68270450ed",
+        "status": "passed",
+        "optimization": "O0",
+        "cases": 460,
+        "reference_processes": 0,
+        "candidate_processes": 55451,
+        "registered_differences": {}
+      },
+      "on:2+interp": {
+        "path": "build/runtime-perf/vm-execution-jit-on2-interp/report.json",
+        "sha256": "4bbf8f0ddadbf31b1c730d08c2955092856682e11dd3545ce056fc68270450ed",
+        "status": "passed",
+        "optimization": "O0",
+        "cases": 460,
+        "reference_processes": 0,
+        "candidate_processes": 55451,
+        "registered_differences": {}
+      },
+      "eager+llvm": {
+        "path": "build/runtime-perf/vm-execution-jit-eager-llvm/report.json",
+        "sha256": "4bbf8f0ddadbf31b1c730d08c2955092856682e11dd3545ce056fc68270450ed",
+        "status": "passed",
+        "optimization": "O0",
+        "cases": 460,
+        "reference_processes": 0,
+        "candidate_processes": 55451,
+        "registered_differences": {}
+      },
+      "stress+llvm": {
+        "path": "build/runtime-perf/vm-execution-jit-stress-llvm/report.json",
+        "sha256": "4bbf8f0ddadbf31b1c730d08c2955092856682e11dd3545ce056fc68270450ed",
+        "status": "passed",
+        "optimization": "O0",
+        "cases": 460,
+        "reference_processes": 0,
+        "candidate_processes": 55451,
+        "registered_differences": {}
+      },
+      "on:3+llvm": {
+        "path": "build/runtime-perf/vm-execution-jit-on3-llvm/report.json",
+        "sha256": "4bbf8f0ddadbf31b1c730d08c2955092856682e11dd3545ce056fc68270450ed",
+        "status": "passed",
+        "optimization": "O0",
+        "cases": 460,
+        "reference_processes": 0,
+        "candidate_processes": 55451,
+        "registered_differences": {}
+      }
+    },
+    "alignment": {
+      "probe:11": {
+        "path": "build/runtime-perf/alignment-probe11/report.json",
+        "sha256": "973829ceef974ab59b45f360d62bb31ba9917c2af426074c6d2e275b13bd27bb",
+        "suites": 19,
+        "invocations": 1379,
+        "identical": 1379,
+        "refusals": 0
+      },
+      "eager": {
+        "path": "build/runtime-perf/alignment-eager/report.json",
+        "sha256": "973829ceef974ab59b45f360d62bb31ba9917c2af426074c6d2e275b13bd27bb",
+        "suites": 19,
+        "invocations": 1379,
+        "identical": 1379,
+        "refusals": 0
+      },
+      "stress": {
+        "path": "build/runtime-perf/alignment-stress/report.json",
+        "sha256": "973829ceef974ab59b45f360d62bb31ba9917c2af426074c6d2e275b13bd27bb",
+        "suites": 19,
+        "invocations": 1379,
+        "identical": 1379,
+        "refusals": 0
+      },
+      "on:2+interp": {
+        "path": "build/runtime-perf/alignment-on2-interp/report.json",
+        "sha256": "973829ceef974ab59b45f360d62bb31ba9917c2af426074c6d2e275b13bd27bb",
+        "suites": 19,
+        "invocations": 1379,
+        "identical": 1379,
+        "refusals": 0
+      },
+      "eager+llvm": {
+        "path": "build/runtime-perf/alignment-eager-llvm/report.json",
+        "sha256": "973829ceef974ab59b45f360d62bb31ba9917c2af426074c6d2e275b13bd27bb",
+        "suites": 19,
+        "invocations": 1379,
+        "identical": 1379,
+        "refusals": 0
+      },
+      "stress+llvm": {
+        "path": "build/runtime-perf/alignment-stress-llvm/report.json",
+        "sha256": "973829ceef974ab59b45f360d62bb31ba9917c2af426074c6d2e275b13bd27bb",
+        "suites": 19,
+        "invocations": 1379,
+        "identical": 1379,
+        "refusals": 0
+      },
+      "on:3+llvm": {
+        "path": "build/runtime-perf/alignment-on3-llvm/report.json",
+        "sha256": "973829ceef974ab59b45f360d62bb31ba9917c2af426074c6d2e275b13bd27bb",
+        "suites": 19,
+        "invocations": 1379,
+        "identical": 1379,
+        "refusals": 0
+      }
+    }
+  },
+  "sanitizer": {
+    "status": "passed",
+    "log": "build/v11/o3-resumed-sanitize.log",
+    "log_sha256": "554fc0aa62fd538c1e5ca625790be46ea7b3a3d77d30f4017ee106abe42ab50a",
+    "junit_tests": 415,
+    "ctest_suites": 19,
+    "compiler_corpus": {
+      "path": "build/compiler-optimization-corpus-sanitize/report.json",
+      "sha256": "e2cddef95dee9ae5a4188aeb92e1bebf9afcdb163c8918499d7322b1245e950e",
+      "cases": 460,
+      "observations": 7360,
+      "jit_modes": [
+        "probe:7",
+        "eager",
+        "stress",
+        "on:2+interp"
+      ]
+    },
+    "directed": {
+      "path": "build/compiler-o2-sanitize.json",
+      "sha256": "0acf0bee0767d639ad1389ef3293cc9d72ceb01e3f0d2a8ed897381ea930853a",
+      "cases": 79,
+      "observations": 1596,
+      "budget_checks": 2820,
+      "case_levels": {
+        "loop": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "inline-order": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "inline-error-frame": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "loop-motion": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "zero-loop-trap": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "loop-alias-call": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "virtual-dispatch": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "propagation": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "loop-variant": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "branch-join": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "parameter-copy": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "invariant-local": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "copy-snapshot": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "global-call": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "loop-condition": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "bits": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "short-circuit": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "effects": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "objects": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "generic-buffer": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "reflection": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "overflow": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "divide-overflow": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "negate-overflow": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "divide-zero": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "shift-range": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "error-cleanup": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "o2-cse": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "o2-cse-scope": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "o2-cse-overwrite": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "o2-cse-input": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "o2-cse-error": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "o2-dead-trap": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "o2-negative-bits": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "o2-loop-join": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "o2-contradiction": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "o2-snapshot": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "o2-inline-repeat": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "o2-inline-order": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "o2-inline-arg-trap": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "o2-inline-origin": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "o2-inline-overflow": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "o2-inline-loop": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "o2-range-loop": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "o2-range-guard": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "o2-range-division": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "o2-range-reset": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "o2-range-guard-division": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "o2-zero-trip-overflow": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "o2-conditional-trap": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "o2-cse-dominator": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "o2-unused-storage": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "o2-cse-backedge": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "o2-cse-loop-storage": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "o2-cse-loop-stable": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "o2-generated-flow": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "o3-nested-call": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "o3-lazy-call": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "o3-loop-condition": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "o3-call-argument-order": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "o3-nested-origin": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "o3-recursion": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "o3-specialize-constant": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "o3-specialize-boolean": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "o3-range-boundary": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "o3-range-overflow": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "o3-field-cache": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "o3-field-cache-call": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "o3-field-cache-alias": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "o3-virtual-guard": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "o3-virtual-override": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "o3-sixteen-arguments": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "o3-scalar-pointer-loop": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "o3-scalar-pointer-error": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "o3-literal-copy-storage": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "o3-inline-argument-trace": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "o3-generic-scalar-context": [
+          "O0",
+          "O1",
+          "O2",
+          "O3"
+        ],
+        "o3-inline-published-trace-clear": [
+          "O0",
+          "O3"
+        ],
+        "o3-inline-closed-published": [
+          "O0",
+          "O3"
+        ]
+      }
+    },
+    "heap": {
+      "path": "build/compiler-o3-heap-sanitize/report.json",
+      "sha256": "48f7f9fc2bccd2f54311892029f868578383064dfcdcf2be81ead20b5c1a0734",
+      "cases": 8,
+      "checks": 384
+    },
+    "tree_vm": {
+      "path": "build/runtime-perf/vm-execution-sanitize/report.json",
+      "sha256": "73ed1328218775c2a29760fd7f4c9ddb59cd5b2db710d656025b1b3b673a2f46",
+      "status": "passed",
+      "optimization": "O0",
+      "cases": 460,
+      "reference_processes": 55451,
+      "candidate_processes": 55451,
+      "registered_differences": {}
+    },
+    "jit_replays": {
+      "probe:7": {
+        "path": "build/runtime-perf/vm-execution-jit-probe7-sanitize/report.json",
+        "sha256": "4bbf8f0ddadbf31b1c730d08c2955092856682e11dd3545ce056fc68270450ed",
+        "status": "passed",
+        "optimization": "O0",
+        "cases": 460,
+        "reference_processes": 0,
+        "candidate_processes": 55451,
+        "registered_differences": {}
+      },
+      "eager": {
+        "path": "build/runtime-perf/vm-execution-jit-eager-sanitize/report.json",
+        "sha256": "4bbf8f0ddadbf31b1c730d08c2955092856682e11dd3545ce056fc68270450ed",
+        "status": "passed",
+        "optimization": "O0",
+        "cases": 460,
+        "reference_processes": 0,
+        "candidate_processes": 55451,
+        "registered_differences": {}
+      },
+      "stress": {
+        "path": "build/runtime-perf/vm-execution-jit-stress-sanitize/report.json",
+        "sha256": "4bbf8f0ddadbf31b1c730d08c2955092856682e11dd3545ce056fc68270450ed",
+        "status": "passed",
+        "optimization": "O0",
+        "cases": 460,
+        "reference_processes": 0,
+        "candidate_processes": 55451,
+        "registered_differences": {}
+      },
+      "on:2+interp": {
+        "path": "build/runtime-perf/vm-execution-jit-on2-interp-sanitize/report.json",
+        "sha256": "4bbf8f0ddadbf31b1c730d08c2955092856682e11dd3545ce056fc68270450ed",
+        "status": "passed",
+        "optimization": "O0",
+        "cases": 460,
+        "reference_processes": 0,
+        "candidate_processes": 55451,
+        "registered_differences": {}
+      }
+    },
+    "alignment": {
+      "stress": {
+        "path": "build/runtime-perf/alignment-stress-sanitize/report.json",
+        "sha256": "c3135e8d9e6ff8ad3e472857c6d00c4e94eda9512c0eed2dd7c62aa44c3210a7",
+        "suites": 19,
+        "invocations": 1379,
+        "identical": 1379,
+        "refusals": 0
+      },
+      "on:2+interp": {
+        "path": "build/runtime-perf/alignment-on2-interp-sanitize/report.json",
+        "sha256": "c3135e8d9e6ff8ad3e472857c6d00c4e94eda9512c0eed2dd7c62aa44c3210a7",
+        "suites": 19,
+        "invocations": 1379,
+        "identical": 1379,
+        "refusals": 0
+      }
+    }
+  },
+  "lifecycle_fuzz": {
+    "path": "build/v11/o3-resumed-fuzz-200/report.json",
+    "sha256": "d8e85b4894b9a2991871771fc326dd824d36dd5379371a4b82bb48a2da1abf2b",
+    "programs": 200,
+    "passed": 200,
+    "budget_points_compared": 18111,
+    "independent_reference_processes": 19071,
+    "independent_candidate_processes": 18111,
+    "optimization_comparisons": {
+      "passed": 185,
+      "resource-limited": 15
+    },
+    "mismatches": [],
+    "refused": {},
+    "host_failures": [],
+    "generator_failures": []
+  },
+  "installed_consumers": {
+    "path": "build/v11/installed-consumer-final/report.json",
+    "sha256": "82a7845a2d57fdd839d0792f6d77ec26b37f146a94c9db806f9f341e169e2feb",
+    "observations": 6
+  },
+  "negative_controls": {
+    "source": "workspace",
+    "controls": 2,
+    "caught": 16,
+    "checks": {
+      "control": {
+        "expectations": "missed"
+      },
+      "control-vm": {
+        "tree_vs_vm": "missed"
+      },
+      "destructor-after-fields": {
+        "expectations": "caught"
+      },
+      "temporaries-first-in-first-out": {
+        "expectations": "caught"
+      },
+      "owned-first-in-first-out": {
+        "expectations": "caught"
+      },
+      "destructor-caller-always-synthesized": {
+        "expectations": "caught"
+      },
+      "step-reset-per-destructor": {
+        "expectations": "caught"
+      },
+      "last-error-wins": {
+        "expectations": "caught"
+      },
+      "copy-not-charged": {
+        "expectations": "caught"
+      },
+      "heap-members-before-destructor": {
+        "expectations": "caught"
+      },
+      "return-copies-locals": {
+        "expectations": "caught"
+      },
+      "teardown-without-guard": {
+        "expectations": "caught"
+      },
+      "continuation-without-admission": {
+        "tree_vs_vm": "caught"
+      },
+      "continuation-entries-succeed-on-failure": {
+        "tree_vs_vm": "caught"
+      },
+      "continuation-failure-reaches-caller": {
+        "tree_vs_vm": "caught"
+      },
+      "continuation-calls-from-current-scope": {
+        "tree_vs_vm": "caught"
+      },
+      "unwinding-levels-not-republished": {
+        "tree_vs_vm": "caught"
+      },
+      "unwinding-region-ends-root": {
+        "tree_vs_vm": "caught"
+      }
+    },
+    "report": "build/v11/o3-resumed-mutants/report.json"
+  },
+  "not_completed": [
+    "General control-flow inlining and destructor expansion",
+    "Allocation elimination and complete generic specialization",
+    "Callgrind (unavailable on this macOS arm64 host)",
+    "V10 distribution/version release",
+    "Remaining O3 object/virtual acceleration targets and V2 worst-case compilation bound"
+  ],
+  "compiler_fix_after_full_drivers": {
+    "issue": "Removing redundant generic checks lost the call location and prevented sequence inlining",
+    "implementation": "ExecSpecializer.uncheckedValue keeps the child's location or transfers the removed check's location",
+    "regression_red_log": "build/v11/generic-fix-regression-first.log",
+    "junit_log": "build/v11/generic-fix-java.log",
+    "junit_tests": 416,
+    "production_runtime_changed": false,
+    "full_drivers_repeated": false,
+    "scope": "Full drivers above use the pre-fix compiler; all compiler corpus/directed suites were rerun below. Full O0 budget replays remain applicable by byte identity.",
+    "source_delta": {
+      "path": "build/v11/generic-fix-source-delta.json",
+      "sha256": "5066ceb3e4bf76da8a0d77f0254e614f85c6cfb6d0b41e4afa26efe20d1a1e4b",
+      "production_changes": [
+        "compiler/src/main/java/azertia/script/ExecSpecializer.java"
+      ]
+    }
+  },
+  "postfix": {
+    "normal": {
+      "corpus": {
+        "path": "build/v11/generic-fixed-corpus/report.json",
+        "sha256": "c77a4f9c3ebb5ca671e19603f2e33a88715eabbe2e159923bce2c1d869aace35",
+        "cases": 460,
+        "observations": 10120,
+        "jit": {
+          "probe:7": {
+            "entries": 0,
+            "compiled": 0,
+            "sessions": 0
+          },
+          "eager": {
+            "entries": 1247,
+            "compiled": 348,
+            "sessions": 920
+          },
+          "stress": {
+            "entries": 55670,
+            "compiled": 348,
+            "sessions": 920
+          },
+          "on:2+interp": {
+            "entries": 644,
+            "compiled": 192,
+            "sessions": 920
+          },
+          "eager+llvm": {
+            "entries": 1247,
+            "compiled": 348,
+            "sessions": 920
+          },
+          "stress+llvm": {
+            "entries": 55358,
+            "compiled": 347,
+            "sessions": 920
+          },
+          "on:3+llvm": {
+            "entries": 496,
+            "compiled": 122,
+            "sessions": 920
+          }
+        }
+      },
+      "directed": {
+        "path": "build/v11/generic-fixed-directed.json",
+        "sha256": "92815da71782e31d6e4c9f6124c977ceb9cc24bdf18651edb521c76993020353",
+        "cases": 79,
+        "observations": 2238,
+        "budget_checks": 4230
+      },
+      "new_generic_regressions": {
+        "path": "build/v11/generic-location-directed.json",
+        "sha256": "83ca7b859642bfab9ceee2d088b5662daf44271301cc564f7b3d7db40146b08f",
+        "cases": 3,
+        "observations": 33,
+        "budget_checks": 234
+      }
+    },
+    "sanitizer": {
+      "corpus": {
+        "path": "build/v11/generic-fixed-corpus-sanitize/report.json",
+        "sha256": "e2cddef95dee9ae5a4188aeb92e1bebf9afcdb163c8918499d7322b1245e950e",
+        "cases": 460,
+        "observations": 7360,
+        "jit": {
+          "probe:7": {
+            "entries": 0,
+            "compiled": 0,
+            "sessions": 0
+          },
+          "eager": {
+            "entries": 1247,
+            "compiled": 348,
+            "sessions": 920
+          },
+          "stress": {
+            "entries": 55670,
+            "compiled": 348,
+            "sessions": 920
+          },
+          "on:2+interp": {
+            "entries": 644,
+            "compiled": 192,
+            "sessions": 920
+          }
+        }
+      },
+      "directed": {
+        "path": "build/v11/generic-fixed-directed-sanitize.json",
+        "sha256": "aab1a14a72cd0b2ca5e51aeaf1ffb3d6824e9fb26d27249bba4b70e1c2617b87",
+        "cases": 79,
+        "observations": 1596,
+        "budget_checks": 2820
+      },
+      "new_generic_regressions": {
+        "path": "build/v11/generic-location-directed-sanitize.json",
+        "sha256": "1a3562418d87dc3d0422d2449e8638e17f97031afbb8a2020a947e48e3e8adfa",
+        "cases": 3,
+        "observations": 24,
+        "budget_checks": 156
+      }
+    },
+    "lifecycle_artifact_identity": {
+      "path": "build/v11/generic-fixed-fuzz-identity/report.json",
+      "sha256": "c24323e6cdda6495faf700e4e8ddb0eb7d44a306367c5ecc98a014307903df77",
+      "identical": 200,
+      "scope": "200 O3 debug artifacts, recompiled from the same readable AST; original full budget observations retained"
+    },
+    "installed_consumers": {
+      "path": "build/v11/generic-fixed-installed/report.json",
+      "sha256": "c33f5ef78012280c3e640ad9a643c46b4631436d3a22558ed4c73142bb36e573",
+      "observations": 6
+    },
+    "corpus_artifact_identity": {
+      "path": "build/v11/generic-fixed-corpus-identity.json",
+      "sha256": "f93db0f0d7237ab5aa497c19dbf2b312824a23c1089f427d2bfe041d674a2728",
+      "levels": {
+        "O0": {
+          "inputs": 470,
+          "identical": 470,
+          "identical_to_full_sanitizer": 470
+        },
+        "O1": {
+          "inputs": 470,
+          "identical": 470,
+          "identical_to_full_sanitizer": 470
+        },
+        "O2": {
+          "inputs": 470,
+          "identical": 470,
+          "identical_to_full_sanitizer": 470
+        },
+        "O3": {
+          "inputs": 470,
+          "identical": 470,
+          "identical_to_full_sanitizer": 470
+        }
+      },
+      "changes": [],
+      "full_budget_inputs": {
+        "normal": {
+          "cases": 460,
+          "inputs": 470,
+          "identical": 470
+        },
+        "sanitizer": {
+          "cases": 460,
+          "inputs": 470,
+          "identical": 470
+        }
+      }
+    }
+  },
+  "performance": {
+    "path": "docs/compiler-optimization/O3-performance.json",
+    "sha256": "c3338e0ff9919b0f91280d7182e667961ffb927d9f4995581d9fc2090b792811",
+    "status": "targets-unmet",
+    "gate_status": "passed"
+  },
+  "resumed_phase_compiler_sha256": "415d11cb47cb3b0e8ababd6916e9f7b458e1f74c11b52f232f89f8c6d44c1d19",
+  "resumed_phase_source_manifest": {
+    "files": 395,
+    "sha256": "8b3596592bb73a827e41bdec285535f32cd7d25df898ae6b397176d3663ec439"
+  },
+  "final_compiler_sha256": "73703ae19d33819b1257771c8f53f02b0de3435e8b9460485dfd44e8f0c0049c",
+  "latest_phase": "local-sequence-cleanup-and-closed-field-cache",
+  "source_manifest": {
+    "files": 396,
+    "sha256": "6fdb317f923861e8fb3fabac328503e5afd6a5785677c931c0f4b4c995935c97"
+  },
+  "snapshot_followup": {
+    "status": "passed",
+    "scope": "Compiler-only snapshot optimization. The existing unified main ran --offline --jit --quick with isolated output paths and the existing native build cache; the prior full normal/sanitizer drivers were not repeated.",
+    "junit_tests": 420,
+    "ctest_suites": 20,
+    "log": "build/v11/o3-followup/integration.log",
+    "log_sha256": "0472c9bef752a263c24823aa793a9f65ed1421ab4517e5717d8c8c7297962d6e",
+    "corpus": {
+      "path": "build/v11/o3-followup/integration/compiler-optimization-corpus/report.json",
+      "sha256": "630a8beb8a275dc10be092037f6488e7a7f9a4e119766f310daaf1aa6f55de70",
+      "cases": 460,
+      "observations": 5520,
+      "jit": {
+        "stress": {
+          "entries": 55346,
+          "compiled": 348,
+          "sessions": 920
+        },
+        "stress+llvm": {
+          "entries": 55346,
+          "compiled": 348,
+          "sessions": 920
+        }
+      }
+    },
+    "directed": {
+      "path": "build/v11/o3-followup/integration/compiler-o2.json",
+      "sha256": "2e4b428990f152ff038d23fbc020a7f73d72206dfab1af531d4ed88f5b7927ca",
+      "cases": 92,
+      "observations": 1324,
+      "budget_checks": 2712
+    },
+    "heap": {
+      "path": "build/v11/o3-followup/integration/compiler-o3-heap/report.json",
+      "sha256": "dcd80d3c15e2ffaa02a4f6cc8fc601d1f60bc63cced585147ac6cbd7ca15fe3e",
+      "cases": 8,
+      "checks": 256
+    },
+    "default_O0_budget_scan": {
+      "path": "build/v11/o3-followup/integration/runtime-perf/vm-execution/report.json",
+      "sha256": "73ed1328218775c2a29760fd7f4c9ddb59cd5b2db710d656025b1b3b673a2f46",
+      "cases": 460,
+      "reference_processes": 55451,
+      "candidate_processes": 55451
+    },
+    "alignment": {
+      "path": "build/v11/o3-followup/integration/runtime-perf/alignment-stress-llvm/report.json",
+      "sha256": "973829ceef974ab59b45f360d62bb31ba9917c2af426074c6d2e275b13bd27bb",
+      "invocations": 1379,
+      "identical": 1379
+    },
+    "default_O0_replays": {
+      "stress": {
+        "path": "build/v11/o3-followup/integration/runtime-perf/vm-execution-jit-stress/report.json",
+        "sha256": "4bbf8f0ddadbf31b1c730d08c2955092856682e11dd3545ce056fc68270450ed",
+        "cases": 460,
+        "comparisons": 55451
+      },
+      "stress-llvm": {
+        "path": "build/v11/o3-followup/integration/runtime-perf/vm-execution-jit-stress-llvm/report.json",
+        "sha256": "4bbf8f0ddadbf31b1c730d08c2955092856682e11dd3545ce056fc68270450ed",
+        "cases": 460,
+        "comparisons": 55451
+      }
+    },
+    "sanitizer_corpus": {
+      "path": "build/v11/o3-followup/corpus-sanitize/report.json",
+      "sha256": "0944d470de692b9674397dc04ae65d9655a771df3b0576022c91473ca334a398",
+      "cases": 460,
+      "observations": 7360,
+      "jit": {
+        "probe:7": {
+          "entries": 0,
+          "compiled": 0,
+          "sessions": 0
+        },
+        "eager": {
+          "entries": 1236,
+          "compiled": 348,
+          "sessions": 920
+        },
+        "stress": {
+          "entries": 55346,
+          "compiled": 348,
+          "sessions": 920
+        },
+        "on:2+interp": {
+          "entries": 644,
+          "compiled": 192,
+          "sessions": 920
+        }
+      },
+      "scope": "Existing fully validated ASan/UBSan runtime; final frozen compiler. No sanitizer rebuild or full sanitizer driver was repeated."
+    },
+    "new_cases": {
+      "normal": {
+        "path": "build/v11/o3-followup/snapshot-cases.json",
+        "sha256": "158bd92fab1aef58aca9312ed377dd82cc575ee04c5ea117c42eb355f472af89",
+        "cases": 10,
+        "observations": 110,
+        "budget_checks": 738,
+        "jit": {
+          "probe:7": {
+            "entries": 0,
+            "compiled": 0,
+            "sessions": 0
+          },
+          "eager": {
+            "entries": 59,
+            "compiled": 17,
+            "sessions": 10
+          },
+          "stress": {
+            "entries": 3581,
+            "compiled": 17,
+            "sessions": 10
+          },
+          "on:2+interp": {
+            "entries": 1,
+            "compiled": 1,
+            "sessions": 10
+          },
+          "eager+llvm": {
+            "entries": 59,
+            "compiled": 17,
+            "sessions": 10
+          },
+          "stress+llvm": {
+            "entries": 3581,
+            "compiled": 17,
+            "sessions": 10
+          },
+          "on:3+llvm": {
+            "entries": 1,
+            "compiled": 1,
+            "sessions": 10
+          }
+        },
+        "hot_loop_native_entries": {
+          "eager": 5,
+          "stress": 3200,
+          "on:2+interp": 1,
+          "eager+llvm": 5,
+          "stress+llvm": 3200,
+          "on:3+llvm": 1
+        }
+      },
+      "sanitizer": {
+        "path": "build/v11/o3-followup/snapshot-cases-sanitize.json",
+        "sha256": "babaf3af4c27bd641ac7b62b69a338b08057f710dc7c055625214044fc50c188",
+        "cases": 10,
+        "observations": 80,
+        "budget_checks": 492,
+        "jit": {
+          "probe:7": {
+            "entries": 0,
+            "compiled": 0,
+            "sessions": 0
+          },
+          "eager": {
+            "entries": 59,
+            "compiled": 17,
+            "sessions": 10
+          },
+          "stress": {
+            "entries": 3581,
+            "compiled": 17,
+            "sessions": 10
+          },
+          "on:2+interp": {
+            "entries": 1,
+            "compiled": 1,
+            "sessions": 10
+          }
+        },
+        "hot_loop_native_entries": {
+          "eager": 5,
+          "stress": 3200,
+          "on:2+interp": 1
+        }
+      }
+    },
+    "artifact_identity": {
+      "path": "build/v11/o3-followup/corpus-identity.json",
+      "sha256": "3dc73996892bc7899a8451b494ff876d3b7067b03683ae85756736233ea63eca",
+      "levels": {
+        "O0": {
+          "inputs": 470,
+          "identical": 470
+        },
+        "O1": {
+          "inputs": 470,
+          "identical": 470
+        },
+        "O2": {
+          "inputs": 470,
+          "identical": 470
+        },
+        "O3": {
+          "inputs": 470,
+          "identical": 465
+        }
+      },
+      "changed_O3_cases": [
+        "arity-1",
+        "arity-16",
+        "arity-4",
+        "nested-error-trace",
+        "parameter-copy"
+      ]
+    },
+    "changed_O3_budget_scan": {
+      "path": "build/v11/o3-followup/changed-o3-budgets/report.json",
+      "sha256": "4c2e8fc91c9944c0ab77250a42d30e699a4b5f2af31ac5d0ad5c234f52180491",
+      "optimization": "O3",
+      "cases": 5,
+      "reference_processes": 77,
+      "candidate_processes": 77
+    },
+    "changed_O3_replays": {
+      "path": "build/v11/o3-followup/changed-replays.json",
+      "sha256": "1f5a7f7ddb405ec31b426b124e4ec26c667de5fefe63fbb7b4791e3bd81b098a",
+      "modes": {
+        "probe:7": {
+          "path": "build/v11/o3-followup/changed-o3-jit-probe7/report.json",
+          "sha256": "da27273925bd4042e2ce8d6eab913c11e002088446209283aa6c27fb8276920b",
+          "cases": 5,
+          "comparisons": 77,
+          "compiled": 0,
+          "entries": 0
+        },
+        "eager": {
+          "path": "build/v11/o3-followup/changed-o3-jit-eager/report.json",
+          "sha256": "da27273925bd4042e2ce8d6eab913c11e002088446209283aa6c27fb8276920b",
+          "cases": 5,
+          "comparisons": 77,
+          "compiled": 77,
+          "entries": 91
+        },
+        "stress": {
+          "path": "build/v11/o3-followup/changed-o3-jit-stress/report.json",
+          "sha256": "da27273925bd4042e2ce8d6eab913c11e002088446209283aa6c27fb8276920b",
+          "cases": 5,
+          "comparisons": 77,
+          "compiled": 77,
+          "entries": 1901
+        },
+        "on:2+interp": {
+          "path": "build/v11/o3-followup/changed-o3-jit-on2-interp/report.json",
+          "sha256": "da27273925bd4042e2ce8d6eab913c11e002088446209283aa6c27fb8276920b",
+          "cases": 5,
+          "comparisons": 77,
+          "compiled": 0,
+          "entries": 0
+        },
+        "eager+llvm": {
+          "path": "build/v11/o3-followup/changed-o3-jit-eager-llvm/report.json",
+          "sha256": "da27273925bd4042e2ce8d6eab913c11e002088446209283aa6c27fb8276920b",
+          "cases": 5,
+          "comparisons": 77,
+          "compiled": 77,
+          "entries": 91
+        },
+        "stress+llvm": {
+          "path": "build/v11/o3-followup/changed-o3-jit-stress-llvm/report.json",
+          "sha256": "da27273925bd4042e2ce8d6eab913c11e002088446209283aa6c27fb8276920b",
+          "cases": 5,
+          "comparisons": 77,
+          "compiled": 77,
+          "entries": 1901
+        },
+        "on:3+llvm": {
+          "path": "build/v11/o3-followup/changed-o3-jit-on3-llvm/report.json",
+          "sha256": "da27273925bd4042e2ce8d6eab913c11e002088446209283aa6c27fb8276920b",
+          "cases": 5,
+          "comparisons": 77,
+          "compiled": 0,
+          "entries": 0
+        }
+      }
+    },
+    "changed_O3_replay_scope": "Strict same-artifact budget replay in seven modes. Cold policy modes do not compile these five low-entry cases; the separate new loop cases establish hot native execution in every applicable mode.",
+    "lifecycle_identity": {
+      "path": "build/v11/o3-followup/fuzz-identity/report.json",
+      "sha256": "04e9814e12011638a897f190e335527e3c2ddaaebc7dfd3296fbaf965ed08014",
+      "identical": 200,
+      "budget_points_retained": 18111
+    },
+    "installed_consumers": {
+      "path": "build/v11/o3-followup/installed-consumers/report.json",
+      "sha256": "6e26fe9c9d8ea54f0813c57bee8d0753c64c2e2716fd99bd6035684a75c44abf",
+      "observations": 6
+    },
+    "compiler_class_identity": {
+      "path": "build/v11/o3-followup/compiler-class-identity.json",
+      "sha256": "01c8fa0024a6f14b5314f67679787d8658b021b0514655f5f6258dcb3aa5120e",
+      "status": "passed",
+      "class_count": 126,
+      "frozen_compiler": "build/v11/o3-followup/compiler-final.jar",
+      "integration_compiler": "build/v11/o3-followup/integration/java/compiler.jar",
+      "identical": true,
+      "class_payload_sha256": "89facb1b12dbd7e399b52df39ca593de0c13f175debe0d8d03e53358991c5e07"
+    },
+    "production_changes": [
+      "compiler/src/main/java/azertia/script/ExecSequenceInliner.java"
+    ],
+    "wrappers": [
+      {
+        "path": "build/v11/o3-followup/run_integration.py",
+        "sha256": "1644af866601f1d6eb78df3153beb187f4c626580ff1e774462f2696570fbab8"
+      },
+      {
+        "path": "build/v11/o3-followup/check_changed_corpus.py",
+        "sha256": "72489f52829409010a3e1aad5de234cb17c18e90c164ea7327a7a631f3e8588d"
+      },
+      {
+        "path": "build/v11/o3-followup/run_final_performance.py",
+        "sha256": "c48362e0df2ef1cfdd7b8254f5f090feeeba2cb41e1832de1b104a52deee8c02"
+      }
+    ]
+  },
+  "local_cleanup_followup": {
+    "compiler_snapshot": {
+      "path": "build/v11/o3-local/compiler-final.jar",
+      "sha256": "73703ae19d33819b1257771c8f53f02b0de3435e8b9460485dfd44e8f0c0049c"
+    },
+    "previous_compiler_snapshot": {
+      "path": "build/v11/o3-local/compiler-before.jar",
+      "sha256": "16e0c876166ac9fc3b9c180363544c36e645abb1ef666f998dcf3c17b4dcd816"
+    },
+    "status": "passed",
+    "scope": "Compiler-only followup. The unified main ran --offline --jit --quick with isolated output paths and the existing native cache. Existing ASan/UBSan runtime additionally ran the full corpus, directed cases and heap observations; full normal/sanitizer drivers were not repeated.",
+    "junit_tests": 424,
+    "ctest_suites": 20,
+    "integration_log": {
+      "path": "build/v11/o3-local/integration.log",
+      "sha256": "ff1160621f2b3d8a42b6b27f650b5246e6742ca75618fee56e1d933de445f2ad"
+    },
+    "compiler_class_identity": {
+      "status": "passed",
+      "classes": 127,
+      "jar_sha256": "73703ae19d33819b1257771c8f53f02b0de3435e8b9460485dfd44e8f0c0049c",
+      "class_payload_sha256": "51f49707f8725b0b75f1985bea59c218c8967b21194496940670dbf9e56350b8"
+    },
+    "directed": {
+      "path": "build/v11/o3-local/integration/compiler-o2.json",
+      "sha256": "ea78929ee14b4472b5bbd0aded32dbe9d6de011aa1b27f15365013974d59371c",
+      "cases": 101,
+      "observations": 1432,
+      "budget_checks": 3288
+    },
+    "corpus": {
+      "path": "build/v11/o3-local/integration/compiler-optimization-corpus/report.json",
+      "sha256": "49235729bbe97a9c53c29bf736d3c25c55c063d9c3b38048d9124cf03c50651a",
+      "cases": 460,
+      "observations": 5520
+    },
+    "optimized_O0_O1_LLVM_corpus": {
+      "path": "build/v11/o3-local/integration/compiler-optimization-corpus-jit-stress-llvm/report.json",
+      "sha256": "c3c79fd40058521ac7afa6553dfc48605dec8c3f7ca7decd3938ba921fec724b",
+      "cases": 460,
+      "observations": 1840
+    },
+    "sanitizer_corpus": {
+      "path": "build/v11/o3-local/corpus-sanitize/report.json",
+      "sha256": "f79f40985a4711c0dc712f2cde9297439ba67d0165c2728f117b002ea6916b6d",
+      "cases": 460,
+      "observations": 7360
+    },
+    "new_cases": {
+      "path": "build/v11/o3-local/directed-final.json",
+      "sha256": "0abcee90919061fcb54e96271cc55e776387e9b377e10c64f8b9d1de785ed3d8",
+      "cases": 9,
+      "observations": 198,
+      "budget_checks": 1350,
+      "hot_loop_native_entries": {
+        "eager": 70,
+        "stress": 4577,
+        "on:2+interp": 63,
+        "eager+llvm": 70,
+        "stress+llvm": 4577,
+        "on:3+llvm": 61
+      }
+    },
+    "new_cases_sanitizer": {
+      "path": "build/v11/o3-local/directed-sanitize.json",
+      "sha256": "b7659b1e77fb0804e4b02c9c3e56f823fc0302c4f1982beb325697bdff85fd02",
+      "cases": 9,
+      "observations": 144,
+      "budget_checks": 900,
+      "hot_loop_native_entries": {
+        "eager": 70,
+        "stress": 4577,
+        "on:2+interp": 63
+      }
+    },
+    "heap": {
+      "path": "build/v11/o3-local/integration/compiler-o3-heap/report.json",
+      "sha256": "dcd80d3c15e2ffaa02a4f6cc8fc601d1f60bc63cced585147ac6cbd7ca15fe3e",
+      "cases": 8,
+      "checks": 256,
+      "heap_lengths": [
+        1,
+        100
+      ],
+      "debug": [
+        false,
+        true
+      ],
+      "variants": [
+        [
+          "tree",
+          "off"
+        ],
+        [
+          "vm",
+          "off"
+        ],
+        [
+          "vm",
+          "stress"
+        ],
+        [
+          "vm",
+          "stress+llvm"
+        ]
+      ],
+      "status": "passed"
+    },
+    "sanitizer_heap": {
+      "path": "build/v11/o3-local/heap-sanitize/report.json",
+      "sha256": "48f7f9fc2bccd2f54311892029f868578383064dfcdcf2be81ead20b5c1a0734",
+      "cases": 8,
+      "checks": 384,
+      "heap_lengths": [
+        1,
+        100
+      ],
+      "debug": [
+        false,
+        true
+      ],
+      "variants": [
+        [
+          "tree",
+          "off"
+        ],
+        [
+          "vm",
+          "off"
+        ],
+        [
+          "vm",
+          "probe:7"
+        ],
+        [
+          "vm",
+          "eager"
+        ],
+        [
+          "vm",
+          "stress"
+        ],
+        [
+          "vm",
+          "on:2+interp"
+        ]
+      ],
+      "status": "passed"
+    },
+    "artifact_identity": {
+      "path": "build/v11/o3-local/corpus-identity.json",
+      "sha256": "7cfe308a822ff21386b31d267cbc95030b91b6e3249445bfc6d6dc6bfc844e79",
+      "levels": {
+        "O0": {
+          "inputs": 470,
+          "identical": 470
+        },
+        "O1": {
+          "inputs": 470,
+          "identical": 470
+        },
+        "O2": {
+          "inputs": 470,
+          "identical": 470
+        },
+        "O3": {
+          "inputs": 470,
+          "identical": 467
+        }
+      },
+      "changed_O3_cases": [
+        "arity-16",
+        "arity-4",
+        "nested-error-trace"
+      ]
+    },
+    "normal_sanitizer_artifact_identity": {
+      "inputs": 1880,
+      "identical": 1880
+    },
+    "lifecycle_identity": {
+      "path": "build/v11/o3-local/fuzz-identity/report.json",
+      "sha256": "5920a376b1cf21eeaa63fe6303b75e844db3e38f465a7d2bdf2cb2f6a42edc84",
+      "identical": 200,
+      "budget_points_retained": 18111
+    },
+    "changed_O3_budget_scan": {
+      "path": "build/v11/o3-local/changed-o3-budgets/report.json",
+      "sha256": "edfb4932c58b0bc875a7dc63181d5e78d05726f029496bce8ec3d12c3e5d3dfe",
+      "cases": 3,
+      "reference_processes": 22,
+      "candidate_processes": 22
+    },
+    "changed_O3_replays": {
+      "path": "build/v11/o3-local/changed-replays.json",
+      "sha256": "8dc3260d6bceab5e76f93a810b6469e4f15e482ed23246ec4924e5788a7b1fdd",
+      "status": "passed",
+      "modes": {
+        "probe:7": {
+          "report": "build/v11/o3-local/changed-o3-jit-probe7/report.json",
+          "compiled": 0,
+          "entries": 0
+        },
+        "eager": {
+          "report": "build/v11/o3-local/changed-o3-jit-eager/report.json",
+          "compiled": 22,
+          "entries": 22
+        },
+        "stress": {
+          "report": "build/v11/o3-local/changed-o3-jit-stress/report.json",
+          "compiled": 22,
+          "entries": 201
+        },
+        "on:2+interp": {
+          "report": "build/v11/o3-local/changed-o3-jit-on2-interp/report.json",
+          "compiled": 0,
+          "entries": 0
+        },
+        "eager+llvm": {
+          "report": "build/v11/o3-local/changed-o3-jit-eager-llvm/report.json",
+          "compiled": 22,
+          "entries": 22
+        },
+        "stress+llvm": {
+          "report": "build/v11/o3-local/changed-o3-jit-stress-llvm/report.json",
+          "compiled": 22,
+          "entries": 201
+        },
+        "on:3+llvm": {
+          "report": "build/v11/o3-local/changed-o3-jit-on3-llvm/report.json",
+          "compiled": 0,
+          "entries": 0
+        }
+      },
+      "scope": "Cold policy modes have zero native entries for these three low-entry cases. The separate directed mixed loop confirms native execution in every applicable policy mode."
+    },
+    "default_O0_budget_scan": {
+      "tree_VM": {
+        "path": "build/v11/o3-local/integration/runtime-perf/vm-execution/report.json",
+        "sha256": "73ed1328218775c2a29760fd7f4c9ddb59cd5b2db710d656025b1b3b673a2f46",
+        "cases": 460,
+        "candidate_processes": 55451
+      },
+      "stress": {
+        "path": "build/v11/o3-local/integration/runtime-perf/vm-execution-jit-stress/report.json",
+        "sha256": "4bbf8f0ddadbf31b1c730d08c2955092856682e11dd3545ce056fc68270450ed",
+        "cases": 460,
+        "candidate_processes": 55451
+      },
+      "stress-llvm": {
+        "path": "build/v11/o3-local/integration/runtime-perf/vm-execution-jit-stress-llvm/report.json",
+        "sha256": "4bbf8f0ddadbf31b1c730d08c2955092856682e11dd3545ce056fc68270450ed",
+        "cases": 460,
+        "candidate_processes": 55451
+      }
+    },
+    "alignment": {
+      "path": "build/v11/o3-local/integration/runtime-perf/alignment-stress-llvm/report.json",
+      "sha256": "973829ceef974ab59b45f360d62bb31ba9917c2af426074c6d2e275b13bd27bb",
+      "invocations": 1379,
+      "identical": 1379
+    },
+    "production_changes": [
+      "compiler/src/main/java/azertia/script/ExecObjectOptimizer.java",
+      "compiler/src/main/java/azertia/script/ExecSequenceCleanup.java",
+      "compiler/src/main/java/azertia/script/ExecSequenceInliner.java"
+    ],
+    "wrappers": [
+      {
+        "path": "build/v11/o3-local/run_integration.py",
+        "sha256": "c0d0ac666f91bd1f3fc7146076a6b619e0660c59a934e6ab0bba4d7113f1b422"
+      },
+      {
+        "path": "build/v11/o3-local/check_changed_corpus.py",
+        "sha256": "b20108f21ba7bde866888cdcb9f89cb42bf28113fa2174ea1293339ab559f0b0"
+      },
+      {
+        "path": "build/v11/o3-local/run_performance_when_ready.py",
+        "sha256": "edc43656b4dc86b4f889e2b51cdee0834cc9b15ab7954f3905f1a39b1df60f72"
+      },
+      {
+        "path": "build/v11/o3-local/paired_performance.py",
+        "sha256": "65d3e61bf9e34a84e8009c205055ecc4fb57cd433ab30054d6687d78251d06e0"
+      },
+      {
+        "path": "build/v11/o3-local/gather_results.py",
+        "sha256": "c19cb784cbb9de1623f00261f8c580de3837b3ad067abec2d11825c4f625471d"
+      }
+    ]
+  }
+}

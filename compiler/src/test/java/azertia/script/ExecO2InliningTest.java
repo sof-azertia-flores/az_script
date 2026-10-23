@@ -36,7 +36,7 @@ class ExecO2InliningTest {
     }
     @Test void observersRecursionAndUnknownArgumentsKeepCalls() throws Exception {
         for(String source:List.of(
-                "int f(int x){return getDepth();}int main(){return f(3);}",
+                "extern int host():0x12340001;int f(int x){return host();}int main(){return f(3);}",
                 "int f(int x){return f(x);}int main(){return f(3);}",
                 "extern int host():0x12340001;int f(int x){return x*x;}int main(){return f(host());}")) {
             var program=compile(source);

@@ -109,6 +109,8 @@ def main():
     parser.add_argument('--skip-tests',action='store_true')
     parser.add_argument('--sanitize',action='store_true',help='Address/UB sanitizers on native tests (builds without JNI)')
     parser.add_argument('--jit',action='store_true',help='build the pinned LLVM first (tools/build_llvm.py), so the JIT module is built and tested')
+    parser.add_argument('--quick',action='store_true',help='between development stages: every suite, but the JIT replays, O2/O3 runs and alignment use '
+                        'only the stress modes; not a substitute for the full validation before delivery')
     args=parser.parse_args()
     check_error_storage()
     BUILD.mkdir(exist_ok=True)
@@ -238,16 +240,20 @@ def main():
     o2_replay=[]
     if (ROOT/'interpreter/jit').is_dir():
         module=native/'interpreter'/('libazscript-jit.dylib' if sys.platform=='darwin' else 'libazscript-jit.so')
-        modes=['probe:7','eager','stress','on:2+interp']
-        if module.exists():modes+=['eager+llvm','stress+llvm','on:3+llvm']
+        modes=['stress'] if args.quick else ['probe:7','eager','stress','on:2+interp']
+        if module.exists():modes+=['stress+llvm'] if args.quick else ['eager+llvm','stress+llvm','on:3+llvm']
         o2_replay=['--jit-modes',','.join(modes)]
     run([sys.executable, ROOT/'tests/compiler_o2_end_to_end.py', '--classpath', classpath,
-         '--host', native/'interpreter/observation-host', *o2_replay,
+         '--host', native/'interpreter/observation-host', '--levels', 'O0,O1,O2,O3', *o2_replay,
          '--report', BUILD/('compiler-o2-sanitize.json' if args.sanitize else 'compiler-o2.json')])
+    heap_work=BUILD/('compiler-o3-heap-sanitize' if args.sanitize else 'compiler-o3-heap')
+    if heap_work.exists():shutil.rmtree(heap_work)
+    run([sys.executable, ROOT/'tests/compiler_o3_heap.py', '--classpath', classpath,
+         '--host', native/'interpreter/o3-heap-observation-host', '--work', heap_work, *o2_replay])
     compiler_corpus=BUILD/('compiler-optimization-corpus-sanitize' if args.sanitize else 'compiler-optimization-corpus')
     if compiler_corpus.exists():shutil.rmtree(compiler_corpus)
     run([sys.executable, ROOT/'tests/compiler_optimization_corpus.py', '--classpath', classpath,
-         '--host', native/'interpreter/observation-host', '--work', compiler_corpus, '--o2', *o2_replay])
+         '--host', native/'interpreter/observation-host', '--work', compiler_corpus, '--o2', '--o3', *o2_replay])
     run([sys.executable, ROOT/'tests/vm_program_end_to_end.py', '--classpath', classpath,
          '--host', native/'interpreter/vm-loader-host'])
     vm_work=BUILD/'runtime-perf'/('vm-execution-sanitize' if args.sanitize else 'vm-execution')
@@ -271,6 +277,7 @@ def main():
     # on:N compiles after N entries or back-edges, so replays cross tier-up
     # and on-stack replacement at loop heads.
     jit_modes=('probe:7', 'eager', 'stress', 'on:2+interp')+(('eager+llvm', 'stress+llvm', 'on:3+llvm') if jit_module.exists() else ())
+    if args.quick:jit_modes=('stress',)+(('stress+llvm',) if jit_module.exists() else ())
     print(f'JIT module: {jit_module if jit_module.exists() else "not built"}', flush=True)
     for mode in jit_modes:
         jit_work=BUILD/'runtime-perf'/(f'vm-execution-jit-{mode.replace(":","").replace("+","-")}'+('-sanitize' if args.sanitize else ''))
@@ -300,11 +307,15 @@ def main():
     # entry and exit point) and the policy; the replays above cover the rest.
     align_modes=('stress', 'on:2+interp') if args.sanitize else \
         ('probe:11', 'eager', 'stress', 'on:2+interp')+(('eager+llvm', 'stress+llvm', 'on:3+llvm') if jit_module.exists() else ())
+    if args.quick:align_modes=('stress+llvm',) if jit_module.exists() and not args.sanitize else ('stress',)
+    # Suites run concurrently; each invocation already runs tree, VM and JIT
+    # at once, so a few suites keep every one within the suites' timeouts.
+    align_jobs=max(1,(os.cpu_count() or 1)//(6 if args.sanitize else 3))
     for mode in align_modes:
         align_work=BUILD/'runtime-perf'/(f'alignment-{mode.replace(":","").replace("+","-")}'+('-sanitize' if args.sanitize else ''))
         if align_work.exists():shutil.rmtree(align_work)
         run([sys.executable, ROOT/'tools/backend_alignment.py', '--native', native, '--classpath', classpath, '--work', align_work,
-             '--jit', mode])
+             '--jit', mode, '--jobs', align_jobs])
     print('Build and all selected tests passed. Use ./azscript --help.')
 
 if __name__=='__main__':

@@ -18,6 +18,7 @@ final class FunctionTables {
     final Set<AcsElement> stagedCaptures=Collections.newSetFromMap(new IdentityHashMap<>());
     final Set<AcsElement> atomic=Collections.newSetFromMap(new IdentityHashMap<>());
     final Map<Integer,Integer> slots = new HashMap<>();
+    final Map<Integer,Integer> genericSlots = new HashMap<>();
     final IdentityHashMap<AcsElement,JsonElement> origins = new IdentityHashMap<>();
     final IdentityHashMap<AcsElement,Boolean> results = new IdentityHashMap<>();
     final IdentityHashMap<AcsElement,int[]> positions;

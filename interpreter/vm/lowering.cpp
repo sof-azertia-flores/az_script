@@ -68,6 +68,13 @@ class Lowerer {
             !(node.children[0]->opcode==2&&node.children[0]->immediate==ids::id(ids::builtin::mem_get))))
             bad("assignment target must be a variable or mem_get(pointer)");
     }
+    void sequence_expression(const std::shared_ptr<const exec::expression>& source,std::size_t depth) const {
+        if(!source||depth>=128)bad("null, cyclic or excessively nested sequence expression");
+        const auto opcode=source->opcode;
+        if(opcode==1||opcode==4||opcode==7||opcode==8||(opcode>=27&&opcode<=31)||opcode==38)
+            bad("sequence cannot contain declarations or control flow");
+        for(const auto& nested:source->children)sequence_expression(nested,depth+1);
+    }
     std::uint32_t context(const std::shared_ptr<const exec::context>& source,std::size_t depth=0) {
         if(!source||depth>=128)bad("null, cyclic or excessively nested context");
         Context result;result.reference=source->reference;result.abi=source->abi;
@@ -126,13 +133,14 @@ class Lowerer {
     Register expression(const std::shared_ptr<const exec::expression>& source,std::size_t depth,bool root=false) {
         if(!source||depth>=128)bad("null, cyclic or excessively nested expression");
         const auto& node=*source;
-        if(node.opcode<0||node.opcode>53)bad("unsupported wire opcode "+std::to_string(node.opcode));
+        if(node.opcode<0||node.opcode>60)bad("unsupported wire opcode "+std::to_string(node.opcode));
         if(next_node==no_index||node.node!=next_node++)bad("expression nodes are not in wire preorder");
         const bool has_contexts=node.opcode==2||node.opcode==10||(node.opcode>=36&&node.opcode<=40)||node.opcode==42||node.opcode==51;
         if((!has_contexts&&!node.contexts.empty())||(node.opcode!=52&&!node.methods.empty())||
            (node.opcode!=51&&!node.slot_types.empty())||(node.opcode!=10&&(node.destructor_id||node.manual))||
            (node.opcode!=31&&node.on_error)||(node.opcode!=53&&node.return_type!=VOID_VALUE)||
-           (node.opcode!=0&&node.constant.type_tag()!=VOID_VALUE))bad("unexpected metadata for wire opcode "+std::to_string(node.opcode));
+           (node.opcode!=0&&node.constant.type_tag()!=VOID_VALUE)||(node.opcode!=59&&node.prefix)||
+           (node.opcode!=60&&node.function_id))bad("unexpected metadata for wire opcode "+std::to_string(node.opcode));
         site={node.node,node.location?node.location:site.location};
         const auto parent=site;
         const auto result=allocate();
@@ -302,6 +310,38 @@ class Lowerer {
                 data.methods.push_back({target(method.function_id),context_list(method.contexts)});
             }
             emit(Opcode::set_methods,result,value,no_index,operation(std::move(data)));break;
+        }
+        case 54: {
+            children(node,1,max_slots);
+            for(std::size_t i=0;i<node.children.size();++i) {
+                sequence_expression(node.children[i],depth+1);
+                if(i+1==node.children.size())break;
+                const auto& statement=*node.children[i];
+                if(statement.opcode==5) {if(statement.immediate<0)bad("sequence assignment requires a local slot");}
+                else if(statement.opcode==6) {
+                    children(statement,2,2);
+                    if(statement.children[0]->opcode!=3||statement.children[0]->immediate<0)bad("sequence assignment requires a local slot");
+                } else if(statement.opcode!=2)bad("sequence statements must be local assignments or calls");
+            }
+            for(std::size_t i=0;i+1<node.children.size();++i) {child(node,i,depth);next_register=result+1;}
+            copy(result,child(node,node.children.size()-1,depth));break;
+        }
+        case 55:case 56:case 57:case 58: {
+            children(node,2,2);const auto left=child(node,0,depth);emit(Opcode::snapshot,left,left);
+            const auto right=child(node,1,depth);
+            emit(Opcode::binary,result,left,right,static_cast<std::uint32_t>(BinaryOperation::add_i32_unchecked)+node.opcode-55);break;
+        }
+        case 59: {
+            children(node,1,1);assignment_target(node);
+            const auto target=child(node,0,depth),original=allocate(),delta=allocate(),updated=allocate();
+            emit(Opcode::snapshot,original,target);constant(delta,Value(node.immediate));
+            emit(Opcode::binary,updated,original,delta,static_cast<std::uint32_t>(BinaryOperation::add_i32_unchecked));
+            emit(Opcode::store,result,target,updated);if(!node.prefix)copy(result,original);break;
+        }
+        case 60: {
+            children(node,1,1);const auto receiver=child(node,0,depth);
+            OperationData data;data.immediate=node.immediate;data.target=target(node.function_id);
+            emit(Opcode::guard_method,result,receiver,no_index,operation(std::move(data)));break;
         }
         case 53: {
             children(node,1,max_slots);OperationData data;data.immediate=node.immediate;data.return_type=node.return_type;

@@ -26,7 +26,7 @@ namespace azertian {
 inline constexpr std::size_t MAX_VARIABLE_SLOTS=limits::max_slots;
 // The only exec format the loader reads; ExecCodec.VERSION in the compiler matches it.
 inline constexpr int EXEC_FORMAT_VERSION=exec::format_version;
-class expression; class function; class environment; class variable; class script; struct loaded_module;
+class expression; class function; class environment; class variable; class script; class functionInvocationExpression; struct loaded_module;
 namespace link { struct plan; }
 namespace vm {
 class Session;
@@ -152,6 +152,9 @@ public:
     std::shared_ptr<expression> code;
 private:
     friend class script;
+    friend class functionInvocationExpression;
+    std::shared_ptr<variable> invoke_bound_internal(ownership::Site caller,
+        std::vector<std::shared_ptr<variable>> arguments,type_contexts contexts,bool private_call);
     std::uint32_t vm_function_index_=UINT32_MAX;
 };
 // Engine-side access to a variable's payload; not part of the host API.

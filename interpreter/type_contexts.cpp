@@ -17,7 +17,7 @@ void validate_type_contexts(const type_contexts& contexts,const std::shared_ptr<
             if(!script||script->closed)throw std::invalid_argument("Generic context script is unavailable");
             auto found=script->functions.find(*context->factory_id);
             auto fn=found==script->functions.end()?nullptr:std::dynamic_pointer_cast<ofunction>(found->second);
-            if(!fn||fn->rett!=OBJECT_VALUE||!fn->param_types.empty()||fn->hidden_count<0||static_cast<std::size_t>(fn->hidden_count)!=context->contexts.size())
+            if(!fn||fn->entry_kind==2||fn->rett!=OBJECT_VALUE||!fn->param_types.empty()||fn->hidden_count<0||static_cast<std::size_t>(fn->hidden_count)!=context->contexts.size())
                 throw std::invalid_argument("Invalid generic default factory signature");
         }
         if((context->placement_id||!context->placement_contexts.empty())&&context->kind!=3)

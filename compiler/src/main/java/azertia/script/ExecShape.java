@@ -176,7 +176,7 @@ final class ExecShape {
                 direct(children, node, "v", Role.EAGER_VALUE); optionalContexts(children, node, "contexts"); floor = 1;
             }
             case 11, 25, 26, 33 -> { schema(node, "t c v", ""); direct(children, node, "v", Role.EAGER_VALUE); }
-            case 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 43, 44, 45, 46, 47, 48 -> {
+            case 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 43, 44, 45, 46, 47, 48, 55, 56, 57, 58 -> {
                 schema(node, "t c v1 v2", "");
                 direct(children, node, "v1", Role.EAGER_VALUE); direct(children, node, "v2", Role.EAGER_VALUE);
             }
@@ -237,6 +237,20 @@ final class ExecShape {
             case 53 -> {
                 schema(node, "t c slot type param", ""); integer(node, "slot"); integer(node, "type");
                 list(children, node.mmp.get("param"), "param", 2, Role.EAGER_VALUE); floor = 1;
+            }
+            case 54 -> {
+                schema(node, "t c statements value", "");
+                list(children, node.mmp.get("statements"), "statements", 2, Role.EAGER_VALUE);
+                direct(children, node, "value", Role.EAGER_VALUE); floor = 1;
+            }
+            case 59 -> {
+                schema(node, "t c target delta prefix", ""); storage(node.mmp.get("target")); integer(node, "delta");
+                if (!(node.mmp.get("prefix") instanceof AcsBooleanElement)) throw invalid("prefix must be boolean");
+                direct(children, node, "target", Role.STORAGE_TARGET);
+            }
+            case 60 -> {
+                schema(node, "t c receiver slot function", ""); integer(node, "slot"); integer(node, "function");
+                direct(children, node, "receiver", Role.EAGER_VALUE);
             }
             default -> throw invalid("unknown control opcode " + opcode);
         }

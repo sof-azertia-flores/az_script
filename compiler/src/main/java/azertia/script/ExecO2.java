@@ -105,7 +105,8 @@ final class ExecO2 {
     private void removeUnusedDefinitions(AcsElement value, Set<Integer> needed) {
         if (opcode(value) == BLOCK) {
             ((AcsArray)value).acsa.removeIf(item -> {
-                if (opcode(item) != DEFINE || needed.contains(written(item))) return false;
+                if (opcode(item) != DEFINE || needed.contains(written(item))
+                        || !((AcsObject)item).mmp.containsKey("declared-type")) return false;
                 Block site = analysis.sites.get(item);
                 if (site == null || site.in == null) return false;
                 Value rhs = analysis.evaluate(field(item,"val"),site.in);

@@ -13,7 +13,10 @@ namespace azertian::jit {
 static_assert(sizeof(Shadow)==sizeof(azjit_shadow)&&offsetof(Shadow,bits)==offsetof(azjit_shadow,bits)&&
               offsetof(Shadow,tag)==offsetof(azjit_shadow,tag),"shadows are passed to native code as they are");
 static_assert(static_cast<int>(Code::exit)==AZJIT_EXIT&&static_cast<int>(Code::binary)==AZJIT_BINARY&&
-              static_cast<int>(Code::set_result)==AZJIT_SET_RESULT,"MIR codes are the module's");
+              static_cast<int>(Code::set_result)==AZJIT_SET_RESULT&&static_cast<int>(Code::binary_i32)==AZJIT_BINARY_I32,
+              "MIR codes are the module's");
+static_assert(static_cast<int>(BinaryOperation::add_i32_unchecked)==17&&
+              static_cast<int>(BinaryOperation::shift_left_i32_unchecked)==20,"LLVM integer operation numbers agree");
 static_assert(none==AZJIT_NONE&&absent==AZJIT_ABSENT);
 static_assert(INT_VALUE==AZJIT_TAG_INT&&FLOAT_VALUE==AZJIT_TAG_FLOAT&&DOUBLE_VALUE==AZJIT_TAG_DOUBLE&&
               BOOLEAN_VALUE==AZJIT_TAG_BOOLEAN&&VOID_VALUE==AZJIT_TAG_VOID&&ADDRESS_VALUE==AZJIT_TAG_ADDRESS);
@@ -105,10 +108,17 @@ NativeCode::NativeCode(const azjit_backend& backend,const Function& function):ba
         const auto& tags=function.resume_tags[index];
         resume_tags_.insert(resume_tags_.end(),tags.begin(),tags.end());
     }
+    exit_slot_begin_.reserve(function.exits.size()+1);
+    for(std::size_t site=0;site<function.exits.size();++site) {
+        exit_slot_begin_.push_back(static_cast<std::uint32_t>(exit_slots_.size()));
+        exit_slots_.insert(exit_slots_.end(),function.exit_registers[site].begin(),function.exit_registers[site].end());
+        for(const auto local:function.exit_locals[site])exit_slots_.push_back(function.registers+local);
+    }
+    exit_slot_begin_.push_back(static_cast<std::uint32_t>(exit_slots_.size()));
     const std::string name="azscript_function_"+std::to_string(function.function);
     const azjit_function data{AZJIT_ABI_VERSION,function.slots(),function.registers,static_cast<std::uint32_t>(ops_.size()),ops_.data(),
         static_cast<std::uint32_t>(resume_ops_.size()),resume_ops_.data(),resume_tags_.data(),
-        static_cast<std::uint32_t>(function.exits.size()),&helpers,name.c_str()};
+        static_cast<std::uint32_t>(function.exits.size()),exit_slot_begin_.data(),exit_slots_.data(),&helpers,name.c_str()};
     char message[512]{};
     code_=backend.compile(&data,message,sizeof message);
     if(!code_){error=message[0]?message:"the JIT module refused the function";return;}

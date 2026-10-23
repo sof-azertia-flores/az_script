@@ -1,0 +1,31 @@
+// Compile with -O3 on exec_v11_main. Successful execution returns 0.
+int squared(int value) {
+    int bounded = value & 31;
+    return bounded * bounded;
+}
+
+int choose(int value, boolean square) {
+    if (square) { return value * value; }
+    return value + 1;
+}
+
+class Cell {
+    double value = 7.0;
+    virtual int read() { return int(value); }
+}
+
+int main() {
+    int sum = 0;
+    for (int i = 0; i < 8; i++) { sum += squared(i); }
+    if (sum != 140) { return 1; }
+    if ((false ? squared(31) : 2 + squared(3)) != 11) { return 2; }
+    if (choose(7, true) + choose(4, false) != 54) { return 3; }
+    Cell cell;
+    int first = int(cell.value);
+    int second = int(cell.value);
+    if (first + second != 14) { return 4; }
+    Cell * pointer = new Cell();
+    int read = pointer.read();
+    delete pointer;
+    return read - 7;
+}

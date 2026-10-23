@@ -31,6 +31,8 @@ public final class ExecCodec {
         final Map<AcsElement,int[]> positions;
         final AcsArray located=new AcsArray();
         int[] inherited;
+        boolean inline;
+        final Map<Integer,Integer> callSites=new HashMap<>();
         Numbering(Map<AcsElement,int[]> positions) {this.positions=positions;}
     }
     private static void depth(int depth) {
@@ -57,7 +59,7 @@ public final class ExecCodec {
     }
     private static int entryKind(AcsObject value) {
         int kind=optionalInteger(value,"entry-kind",0);
-        if(kind!=0&&kind!=1)throw invalid("entry-kind must be ordinary (0) or internal (1)");
+        if(kind<0||kind>2)throw invalid("entry-kind must be ordinary (0), internal (1), or private (2)");
         return kind;
     }
     private static String string(AcsElement value,String label) {
@@ -82,7 +84,8 @@ public final class ExecCodec {
             PROGRAM=KeySpec.of("author version exec-version gvs ext extern-signatures f namespace-hint assume-hints debug-files",""),
             SIGNATURE=KeySpec.of("id return-type param-types","hidden-count entry-kind"),
             FUNCTION=KeySpec.of("id return-type param-count local-count param-types script","hidden-count entry-kind debug"),
-            DEBUG=KeySpec.of("name file line column locations",""),
+            DEBUG=KeySpec.of("name file line column locations","inlined"),
+            INLINE_DEBUG=KeySpec.of("name file line column call-site",""),
             ASSUMPTION=KeySpec.of("hint namespace",""),
             CALL=KeySpec.of("t id param","contexts"),
             OPERAND=KeySpec.of("t c v",""),
@@ -106,7 +109,10 @@ public final class ExecCodec {
             SET_METHODS=KeySpec.of("t c v entries",""),
             METHOD_ENTRY=KeySpec.of("id contexts",""),
             VIRTUAL_CALL=KeySpec.of("t c slot type param",""),
-            BINARY=KeySpec.of("t c v1 v2","");
+            BINARY=KeySpec.of("t c v1 v2",""),
+            SEQUENCE=KeySpec.of("t c statements value",""),
+            INCREMENT=KeySpec.of("t c target delta prefix",""),
+            METHOD_GUARD=KeySpec.of("t c receiver slot function","");
     private static void keys(AcsObject object,KeySpec keys) {
         for(String name:keys.required())if(!object.mmp.containsKey(name)||object.mmp.get(name)==null)throw invalid("missing field "+name);
         for(String name:object.mmp.keySet())if(!keys.allowed().contains(name))throw invalid("unexpected field "+name);
@@ -319,22 +325,47 @@ public final class ExecCodec {
         int file=debugFile(integer(debug,"file"),files),line=integer(debug,"line"),column=integer(debug,"column");
         if(line<0||column<0||(line==0)!=(column==0))throw invalid("debug header position must be both zero or both positive");
         AcsArray locations=array(debug.mmp.get("locations"),"debug locations");count(locations.acsa.size(),"debug location count");
-        List<AbdValue> quads=new ArrayList<>();int previous=-1;
+        boolean hasInline=debug.mmp.containsKey("inlined");
+        AcsArray inlined=hasInline?array(debug.mmp.get("inlined"),"inlined"):new AcsArray();
+        count(inlined.acsa.size(),"inlined count");
+        List<AbdValue> coordinates=new ArrayList<>();List<int[]> decoded=new ArrayList<>();int previous=-1;
         for(AcsElement item:locations.acsa) {
-            int[] location=location(string(item,"debug location"));
+            int[] location=location(string(item,"debug location"),hasInline?5:4);
             if(location[0]<=previous||location[0]>=nodes)throw invalid("debug location nodes must increase and refer to body nodes");
             debugFile(location[1],files);
             if(location[2]<1||location[3]<1)throw invalid("debug location line and column must be positive");
-            previous=location[0];for(int part:location)quads.add(n(part));
+            if(hasInline&&location[4]>inlined.acsa.size())throw invalid("debug inline index outside inlined table");
+            previous=location[0];for(int part:location)coordinates.add(n(part));decoded.add(location);
         }
-        return stack(s(name),n(file),n(line),n(column),stack(quads));
+        List<AbdValue> records=new ArrayList<>();int[] parents=new int[inlined.acsa.size()+1];
+        for(int index=0;index<inlined.acsa.size();index++) {
+            AcsObject entry=object(inlined.acsa.get(index),"inlined entry");keys(entry,INLINE_DEBUG);
+            String callee=debugText(entry.mmp.get("name"),"inlined name");
+            int calleeFile=debugFile(integer(entry,"file"),files),calleeLine=integer(entry,"line"),calleeColumn=integer(entry,"column");
+            if(calleeLine<0||calleeColumn<0||(calleeLine==0)!=(calleeColumn==0))throw invalid("invalid inlined header position");
+            int callSite=integer(entry,"call-site");
+            if(callSite<0||callSite>=decoded.size())throw invalid("inlined call-site outside locations");
+            parents[index+1]=decoded.get(callSite)[4];
+            records.add(stack(s(callee),n(calleeFile),n(calleeLine),n(calleeColumn),n(callSite)));
+        }
+        byte[] colors=new byte[parents.length];
+        for(int index=1;index<parents.length;index++) {
+            int next=index;
+            while(next!=0&&colors[next]==0) {colors[next]=1;next=parents[next];}
+            if(next!=0&&colors[next]==1)throw invalid("cyclic inline debug chain");
+            next=index;
+            while(next!=0&&colors[next]==1) {colors[next]=2;next=parents[next];}
+        }
+        List<AbdValue> result=new ArrayList<>(List.of(s(name),n(file),n(line),n(column),stack(coordinates)));
+        if(hasInline)result.add(stack(records));return stack(result);
     }
     /** Parses "node:file:line:column" in canonical decimal. */
-    private static int[] location(String text) {
+    private static int[] location(String text) {return location(text,4);}
+    private static int[] location(String text,int width) {
         String[] parts=text.split(":",-1);
-        if(parts.length!=4)throw invalid("debug location must be node:file:line:column");
-        int[] result=new int[4];
-        for(int i=0;i<4;i++) {
+        if(parts.length!=width)throw invalid("debug location must be node:file:line:column");
+        int[] result=new int[width];
+        for(int i=0;i<width;i++) {
             String part=parts[i];
             boolean canonical=!part.isEmpty()&&part.length()<=10&&(part.equals("0")||part.charAt(0)!='0');
             for(int j=0;canonical&&j<part.length();j++)canonical=part.charAt(j)>='0'&&part.charAt(j)<='9';
@@ -351,8 +382,18 @@ public final class ExecCodec {
      */
     static AcsArray locations(AcsObject function,int globals,Map<AcsElement,int[]> positions) {
         Numbering numbering=new Numbering(positions);
+        AcsObject debug=function.mmp.get("debug") instanceof AcsObject value?value:null;
+        numbering.inline=debug!=null&&debug.mmp.containsKey("inlined");
         expression(function.mmp.get("script"),new Layout(globals,integer(function,"param-count"),integer(function,"local-count"),
                 optionalInteger(function,"hidden-count",0),numbering),4);
+        if(numbering.inline) {
+            AcsArray inlined=debug.getAsAcsArray("inlined");
+            for(int i=0;i<inlined.acsa.size();i++) {
+                Integer callSite=numbering.callSites.get(i+1);
+                if(callSite==null)throw new IllegalStateException("Missing inlined call-site location");
+                ((AcsObject)inlined.acsa.get(i)).put("call-site",callSite.intValue());
+            }
+        }
         return numbering.located;
     }
     private static void hint(String name) {
@@ -372,14 +413,20 @@ public final class ExecCodec {
     }
     private static boolean binaryOpcode(int op) {
         return op==ExecOpcodes.MOVE||op>=ExecOpcodes.ADD&&op<=ExecOpcodes.OR
-                ||op>=ExecOpcodes.BIT_AND&&op<=ExecOpcodes.SHIFT_UNSIGNED;
+                ||op>=ExecOpcodes.BIT_AND&&op<=ExecOpcodes.SHIFT_UNSIGNED
+                ||op>=ExecOpcodes.ADD_I32_UNCHECKED&&op<=ExecOpcodes.SHIFT_LEFT_I32_UNCHECKED;
     }
     private static AbdValue expression(AcsElement value,Layout layout,int level) {
         Numbering numbering=layout.numbering();int node=numbering.next++;
         if(numbering.positions==null)return expressionBody(value,layout,level);
         int[] outer=numbering.inherited,at=numbering.positions.get(value);
         if(at!=null) {
-            if(!Arrays.equals(at,outer))numbering.located.acsa.add(new AcsStringElement(location(node,at[0],at[1],at[2])));
+            if(!Arrays.equals(at,outer)) {
+                String valueLocation=location(node,at[0],at[1],at[2]);
+                if(numbering.inline)valueLocation+=":"+(at.length>3?at[3]:0);
+                if(at.length>4&&at[4]>0)numbering.callSites.put(at[4],numbering.located.acsa.size());
+                numbering.located.acsa.add(new AcsStringElement(valueLocation));
+            }
             numbering.inherited=at;
         }
         try {return expressionBody(value,layout,level);}
@@ -511,6 +558,23 @@ public final class ExecCodec {
                 virtualSlot(slot);type(type,false,false);AcsArray arguments=array(object.mmp.get("param"),"param");virtualArguments(arguments);
                 fields.add(n(slot));fields.add(n(type));fields.add(expressions(arguments,layout,level+1));
             }
+            case ExecOpcodes.SEQUENCE -> {
+                keys(object,SEQUENCE);AcsArray statements=array(object.mmp.get("statements"),"statements");
+                for(AcsElement statement:statements.acsa)sequenceStatement(statement);
+                sequenceValue(object.mmp.get("value"));
+                fields.add(expressions(statements,layout,level+1));
+                fields.add(expression(object.mmp.get("value"),layout,level+1));
+            }
+            case ExecOpcodes.INCREMENT_I32_UNCHECKED -> {
+                keys(object,INCREMENT);storageTarget(object(object.mmp.get("target"),"increment target"),"increment target");
+                fields.add(expression(object.mmp.get("target"),layout,level+1));
+                fields.add(n(integer(object,"delta")));fields.add(b(bool(object.mmp.get("prefix"),"prefix")));
+            }
+            case ExecOpcodes.GUARD_METHOD -> {
+                keys(object,METHOD_GUARD);int slot=integer(object,"slot"),function=integer(object,"function");
+                virtualSlot(slot);methodId(function);
+                fields.add(expression(object.mmp.get("receiver"),layout,level+1));fields.add(n(slot));fields.add(n(function));
+            }
             default -> {
                 if(!binaryOpcode(op))throw invalid("invalid control opcode "+op);
                 keys(object,BINARY);
@@ -519,6 +583,28 @@ public final class ExecCodec {
             }
         }
         return stack(fields);
+    }
+    private static void sequenceStatement(AcsElement value) {
+        int op=ExecScalarAnalysis.opcode(value);
+        if(op!=ExecOpcodes.SET&&op!=ExecOpcodes.MOVE&&op!=ExecOpcodes.CALL)
+            throw invalid("sequence statements must be local assignments or calls");
+        if(op==ExecOpcodes.SET&&integer((AcsObject)value,"v")<0)
+            throw invalid("sequence assignment requires a local slot");
+        if(op==ExecOpcodes.MOVE) {
+            AcsElement target=((AcsObject)value).mmp.get("v1");
+            if(ExecScalarAnalysis.opcode(target)!=ExecOpcodes.VARIABLE||integer((AcsObject)target,"v")<0)
+                throw invalid("sequence assignment requires a local slot");
+        }
+        sequenceValue(value);
+    }
+    private static void sequenceValue(AcsElement value) {
+        int op=ExecScalarAnalysis.opcode(value);
+        if(op==ExecOpcodes.BLOCK||op==ExecOpcodes.DEFINE||op==ExecOpcodes.RETURN||op==ExecOpcodes.RETURN_OBJECT
+                ||op==ExecOpcodes.RETURN_TYPED||op==ExecOpcodes.BREAK||op==ExecOpcodes.CONTINUE
+                ||op==ExecOpcodes.IF||op==ExecOpcodes.WHILE||op==ExecOpcodes.CLEANUP)
+            throw invalid("sequence cannot contain declarations or control flow");
+        for(var child:ExecShape.children(value))if(child.role()!=ExecShape.Role.CONTEXT&&child.role()!=ExecShape.Role.METHOD_ENTRY)
+            sequenceValue(child.value());
     }
     /** Assignment and drop targets name a variable slot or the built-in mem_get. */
     private static void storageTarget(AcsObject target,String label) {
@@ -643,12 +729,25 @@ public final class ExecCodec {
     private static AcsObject decodeDebug(AbdValue value,int level) {
         Record record=new Record(value,level);AcsObject view=new AcsObject();
         view.put("name",record.string());view.put("file",record.integer());view.put("line",record.integer());view.put("column",record.integer());
-        Record quads=new Record(record.next(),level+1);record.end();
-        if(quads.fields.size()%4!=0)throw invalid("debug locations must be node:file:line:column quads");
+        Record coordinates=new Record(record.next(),level+1);
+        boolean hasInline=record.position<record.fields.size();int width=hasInline?5:4;
+        if(coordinates.fields.size()%width!=0)throw invalid("invalid debug locations width");
         AcsArray locations=new AcsArray();
-        while(quads.position<quads.fields.size())
-            locations.acsa.add(new AcsStringElement(location(quads.integer(),quads.integer(),quads.integer(),quads.integer())));
-        view.put("locations",locations);return view;
+        while(coordinates.position<coordinates.fields.size()) {
+            String location=location(coordinates.integer(),coordinates.integer(),coordinates.integer(),coordinates.integer());
+            if(hasInline)location+=":"+coordinates.integer();locations.acsa.add(new AcsStringElement(location));
+        }
+        view.put("locations",locations);
+        if(hasInline) {
+            AcsArray entries=new AcsArray();
+            for(AbdValue item:new Record(record.next(),level+1).fields) {
+                Record entry=new Record(item,level+2);AcsObject result=new AcsObject();
+                result.put("name",entry.string());result.put("file",entry.integer());result.put("line",entry.integer());
+                result.put("column",entry.integer());result.put("call-site",entry.integer());entry.end();entries.acsa.add(result);
+            }
+            view.put("inlined",entries);
+        }
+        record.end();return view;
     }
     public static AcsObject decode(byte[] frame) {
         if(frame.length>MAX_BYTES)throw invalid("executable exceeds 64 MiB");return decode(AbdValue.fromAbd(frame));
@@ -739,6 +838,15 @@ public final class ExecCodec {
                 int slot=record.integer(),type=record.integer();virtualSlot(slot);type(type,false,false);
                 view.put("slot",slot);view.put("type",type);AcsArray arguments=decodeExpressions(record.next(),level+1);virtualArguments(arguments);
                 view.put("param",arguments);
+            }
+            case ExecOpcodes.SEQUENCE -> {
+                view.put("statements",decodeExpressions(record.next(),level+1));view.put("value",decodeExpression(record.next(),level+1));
+            }
+            case ExecOpcodes.INCREMENT_I32_UNCHECKED -> {
+                view.put("target",decodeExpression(record.next(),level+1));view.put("delta",record.integer());view.put("prefix",record.bool());
+            }
+            case ExecOpcodes.GUARD_METHOD -> {
+                view.put("receiver",decodeExpression(record.next(),level+1));view.put("slot",record.integer());view.put("function",record.integer());
             }
             default -> {
                 if(!binaryOpcode(op))throw invalid("invalid control opcode "+op);

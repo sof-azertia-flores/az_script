@@ -18,7 +18,7 @@ EXECUTABLE_SUFFIX = ".exe" if WINDOWS else ""
 EXEC_VERSION = 10
 # Constants, blocks and calls use other JSON representations (wire opcodes 0–2).
 # The unit suite checks this set against the compiler's opcode registry.
-CONTROL_OPCODES = frozenset(range(3, 54))
+CONTROL_OPCODES = frozenset(range(3, 61))
 
 
 def _require(condition: bool, message: str) -> None:

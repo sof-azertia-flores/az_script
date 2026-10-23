@@ -10,8 +10,21 @@ template<class Operation> std::optional<Shadow> general(Operation operation) noe
 Shadow integer(std::int32_t value) noexcept{return {std::bit_cast<std::uint32_t>(value),INT_VALUE};}
 Shadow boolean(bool value) noexcept{return {value?1u:0u,BOOLEAN_VALUE};}
 }
+Shadow binary_i32_unchecked(BinaryOperation operation,const Shadow& left,const Shadow& right) noexcept {
+    const auto a=static_cast<std::uint32_t>(left.bits),b=static_cast<std::uint32_t>(right.bits);
+    std::uint32_t result=0;
+    switch(operation) {
+    case BinaryOperation::add_i32_unchecked:result=a+b;break;
+    case BinaryOperation::subtract_i32_unchecked:result=a-b;break;
+    case BinaryOperation::multiply_i32_unchecked:result=a*b;break;
+    case BinaryOperation::shift_left_i32_unchecked:result=a<<(b&31u);break;
+    default:std::terminate();
+    }
+    return {result,INT_VALUE};
+}
 std::optional<Shadow> binary(BinaryOperation operation,const Shadow& left,const Shadow& right) noexcept {
     if(left.tag==INT_VALUE&&right.tag==INT_VALUE) {
+        if(unchecked_i32(operation))return binary_i32_unchecked(operation,left,right);
         const auto a=std::bit_cast<std::int32_t>(static_cast<std::uint32_t>(left.bits));
         const auto b=std::bit_cast<std::int32_t>(static_cast<std::uint32_t>(right.bits));
         std::int32_t result;

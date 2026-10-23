@@ -70,6 +70,12 @@ struct FunctionAnalysis {
     std::vector<FrameState> states;
     // Register values each instruction may read later (live before it).
     std::vector<std::vector<bool>> live;
+    // Locals whose current value an instruction or a later one may read
+    // through a reference (live before it). A read through an unknown or
+    // orphaned reference counts as reading every local, and nothing ends a
+    // local's liveness: an orphan may still read the cell of a binding that
+    // a declaration or scope exit replaced.
+    std::vector<std::vector<bool>> live_locals;
     // Per function, whether a register's or local's value stays out of
     // strings everywhere, so its value can live in a shadow word.
     std::vector<bool> shadow_registers,shadow_locals;

@@ -12,7 +12,7 @@ struct ModuleEntrypoints {
 };
 struct CompiledScript {
     ExecutableProgram program;
-    std::map<int,std::uint32_t> public_functions;
+    std::map<int,std::uint32_t> public_functions,functions;
     // Same order as script::module_manifest(). Lifecycle IDs are local to a
     // module, so they cannot be indexed by the public function-ID map.
     std::vector<ModuleEntrypoints> modules;

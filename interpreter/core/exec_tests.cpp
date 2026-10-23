@@ -108,7 +108,7 @@ void built_by_tree(const B& body) {
 void all_opcodes() {
     const auto one=constant(1),two=constant(2),pointer=address_constant(1);
     const auto var=expression(3,{integer(0)}),empty=expression(1,{B{}}),context=fixed();
-    std::vector<B> inputs(54);
+    std::vector<B> inputs(61);
     inputs[0]=one;inputs[1]=expression(1,{stack({one,two})});inputs[2]=call(0x12340001,stack({one}));
     inputs[3]=var;inputs[4]=expression(4,{integer(0),integer(INT_VALUE),B{1},one});
     inputs[5]=expression(5,{integer(-1),one});inputs[6]=expression(6,{var,one});
@@ -130,9 +130,13 @@ void all_opcodes() {
     inputs[51]=expression(51,{pointer,fixed(ADDRESS_VALUE,2),stack({integer(INT_VALUE)})});
     inputs[52]=expression(52,{pointer,stack({stack({integer(0x12340003),stack({context})})})});
     inputs[53]=expression(53,{integer(2),integer(ADDRESS_VALUE),stack({pointer,one})});
-    for(int opcode=0;opcode<54;++opcode) {
+    inputs[54]=expression(54,{stack({expression(5,{integer(0),one})}),two});
+    for(int opcode=55;opcode<=58;++opcode)inputs[opcode]=expression(opcode,{one,two});
+    inputs[59]=expression(59,{var,integer(1),B{1}});
+    inputs[60]=expression(60,{pointer,integer(0),integer(0x12340002)});
+    for(int opcode=0;opcode<61;++opcode) {
         built_by_tree(inputs[opcode]);
-        auto parsed=read_body(inputs[opcode]);check(parsed->opcode==opcode,"every v10 opcode decodes");
+        auto parsed=read_body(inputs[opcode]);check(parsed->opcode==opcode,"every supported wire opcode decodes");
         check(parsed->node==0&&parsed->location==0,"root node numbering starts at zero");
         // Traversal and relocation must work for every record, including ones
         // containing only contexts and no ordinary expression operands.
@@ -182,7 +186,7 @@ void constants_and_locations() {
     rejects([&]{read_body(constant(1),std::vector<std::uint32_t>{0,0});},"duplicate debug index rejected",
         "Exec debug location nodes must strictly increase");
     rejects([&]{read_body(B{1,2,3});},"truncated buffer rejected without reading past it","Missing or truncated exec field");
-    rejects([&]{read_body(expression(54));},"unknown opcode rejected","Unknown exec opcode: 54");
+    rejects([&]{read_body(expression(61));},"unknown opcode rejected","Unknown exec opcode: 61");
     rejects([&]{read_body(expression(3,{integer(0),integer(0)}));},"extra fields rejected","Unexpected extra exec fields");
 }
 

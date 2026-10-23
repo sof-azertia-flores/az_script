@@ -13,7 +13,9 @@ import java.io.PrintStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.TimeUnit;
 import static org.junit.jupiter.api.Assertions.*;
 
 /** Diagnostics name the original file, line and column through includes and macros. */
@@ -397,14 +399,25 @@ class DiagnosticsTest {
             namespace.getAsJsonObject().entrySet().removeIf(entry -> entry.getValue().getAsJsonObject()
                     .getAsJsonObject("metadata").get("name").getAsString().equals(name));
     }
-    /** Runs the CLI on a thread with a small stack, so deep but valid nesting overflows it. */
-    private static int runOnSmallStack(StringBuilder output, String... args) throws InterruptedException {
-        var bytes = new ByteArrayOutputStream(); var stream = new PrintStream(bytes, true, StandardCharsets.UTF_8);
-        int[] status = {-1};
-        Thread thread = new Thread(null, () -> status[0] = Main.run(args, stream, stream), "small-stack", 16 << 10);
-        thread.start(); thread.join();
-        output.append(bytes.toString(StandardCharsets.UTF_8).replace("\r\n", "\n"));
-        return status[0];
+    /** Uses a fresh interpreter-only JVM so JIT warmup cannot shrink the parser's stack frames. */
+    private int runOnSmallStack(StringBuilder output, String... args) throws Exception {
+        var classpath = new ArrayList<String>();
+        for (Class<?> type : List.of(Main.class, AcsObject.class, Gson.class))
+            classpath.add(Path.of(type.getProtectionDomain().getCodeSource().getLocation().toURI()).toString());
+        var command = new ArrayList<>(List.of(Path.of(System.getProperty("java.home"), "bin", "java").toString(),
+                "-Xint", "-Xss256k", "-cp", String.join(java.io.File.pathSeparator, classpath), "azertia.Main"));
+        command.addAll(List.of(args));
+        Path log = Files.createTempFile(temporary, "small-stack-", ".log");
+        var builder = new ProcessBuilder(command).redirectErrorStream(true).redirectOutput(log.toFile());
+        for (String option : List.of("JAVA_TOOL_OPTIONS", "JDK_JAVA_OPTIONS", "_JAVA_OPTIONS"))
+            builder.environment().remove(option);
+        Process process = builder.start();
+        if (!process.waitFor(30, TimeUnit.SECONDS)) {
+            process.destroyForcibly().waitFor();
+            fail("Small-stack compiler subprocess timed out");
+        }
+        output.append(Files.readString(log, StandardCharsets.UTF_8).replace("\r\n", "\n"));
+        return process.exitValue();
     }
 
     @Test void independentErrorsInSeveralFunctionsAreReportedTogether() throws Exception {
@@ -730,7 +743,7 @@ class DiagnosticsTest {
         assertEquals("tree.json: error: in function main: Malformed script JSON near inc/lib.azs:3:10", malformed.getMessage());
         assertTrue(malformed.fatal() && !malformed.internal());
         // A stack overflow while compiling a parsed program is an internal compiler error with exit status 2.
-        Path deep = write("deep.azs", "int main(){\n  return " + "(".repeat(150) + "1" + ")".repeat(150) + ";\n}\n");
+        Path deep = write("deep.azs", "int main(){\n  return " + "(".repeat(300) + "1" + ")".repeat(300) + ";\n}\n");
         StringBuilder output = new StringBuilder();
         int status = runOnSmallStack(output, "compile", deep.toString(), "-o", temporary.resolve("deep.abd").toString());
         assertEquals(2, status, output::toString);

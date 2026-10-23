@@ -15,8 +15,9 @@ constexpr int relocate(int id,int name_space) noexcept {
 }
 // Builtins, in the order of the runtime's builtin table. The compiler emits
 // object_alloc only from class factories; its source table stops at str_ends_with.
+// 0x0abd0001 (the removed getDepth) stays reserved so no id is renumbered.
 enum class builtin : int {
-    print=0x0abd0000,get_depth,mem_free,alloc,make_free,mem_send_up,mem_get,load_extern_library,
+    print=0x0abd0000,retired_get_depth,mem_free,alloc,make_free,mem_send_up,mem_get,load_extern_library,
     reflect_invoke_function,reflect_get_hint_namespace,reflect_hint_loaded,str_length,str_byte_length,
     str_substring,str_char_at,str_code_at,str_from_code,str_index_of,str_starts_with,str_ends_with,object_alloc,
 };

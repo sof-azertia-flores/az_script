@@ -308,6 +308,36 @@ Expression read_expression(raw_view view,const function_layout& layout,std::size
             throw std::invalid_argument("Object-check class slot count must match context width");
         break;
     }
+    case 54: {
+        children(logical_depth+1);
+        for(const auto& statement:node->children) {
+            if(statement->opcode==5) {
+                if(statement->immediate<0)throw std::invalid_argument("Sequence assignment requires a local slot");
+            } else if(statement->opcode==6) {
+                if(statement->children[0]->opcode!=3||statement->children[0]->immediate<0)
+                    throw std::invalid_argument("Sequence assignment requires a local slot");
+            } else if(statement->opcode!=2)
+                throw std::invalid_argument("Sequence statements must be local assignments or calls");
+        }
+        child();
+        const auto check=[&](auto&& self,const expression& expression)->void {
+            if(expression.opcode==1||expression.opcode==4||expression.opcode==7||expression.opcode==8||
+               (expression.opcode>=27&&expression.opcode<=31)||expression.opcode==38)
+                throw std::invalid_argument("Sequence cannot contain declarations or control flow");
+            for(const auto& nested:expression.children)self(self,*nested);
+        };
+        for(const auto& expression:node->children)check(check,*expression);
+        break;
+    }
+    case 55:case 56:case 57:case 58:child();child();break;
+    case 59:
+        child();node->immediate=fields.integer();node->prefix=fields.boolean();
+        if(!storage_target(*node->children[0]))throw std::invalid_argument("Increment target must be a variable or mem_get(pointer)");
+        break;
+    case 60:
+        child();node->immediate=fields.integer();node->function_id=fields.integer();
+        if(node->immediate<0||static_cast<std::size_t>(node->immediate)>=max_slots)throw std::invalid_argument("Invalid virtual method slot");
+        break;
     case 50:child();child();child();break;
     case 7:case 8:if(opcode==8||fields.boolean())child();break;
     case 9: {
@@ -384,7 +414,20 @@ std::shared_ptr<function_debug> read_function_debug(raw_view view,const std::sha
     const int line=fields.integer(),column=fields.integer();
     if(line<0||column<0||(line==0)!=(column==0))throw std::invalid_argument("Exec debug header position must be both zero or both positive");
     debug->header.line=static_cast<std::uint32_t>(line);debug->header.column=static_cast<std::uint32_t>(column);
-    raw_cursor quads(fields.take());fields.finish();
+    raw_cursor quads(fields.take());
+    const bool has_inlined=!fields.empty();
+    if(has_inlined) {
+        raw_cursor entries(fields.take());
+        while(!entries.empty()) {
+            if(debug->inlined.size()>=max_slots)throw std::invalid_argument("Too many exec inline records");
+            raw_cursor entry(entries.take());inline_debug item;item.name=debug_text(entry,"inline name");
+            item.header.file=file(entry.integer());const int line=entry.integer(),column=entry.integer(),call_site=entry.integer();
+            if(line<0||column<0||(line==0)!=(column==0)||call_site<0)throw std::invalid_argument("Invalid exec inline position");
+            item.header.line=static_cast<std::uint32_t>(line);item.header.column=static_cast<std::uint32_t>(column);
+            item.call_site=static_cast<std::uint32_t>(call_site);entry.finish();debug->inlined.push_back(std::move(item));
+        }
+    }
+    fields.finish();
     while(!quads.empty()) {
         if(debug->locations.size()>=max_slots)throw std::invalid_argument("Too many exec debug locations");
         const int node=quads.integer();
@@ -395,7 +438,24 @@ std::shared_ptr<function_debug> read_function_debug(raw_view view,const std::sha
             throw std::invalid_argument("Exec debug location nodes must strictly increase");
         if(at_line<1||at_column<1)throw std::invalid_argument("Exec debug location line and column must be positive");
         position.line=static_cast<std::uint32_t>(at_line);position.column=static_cast<std::uint32_t>(at_column);
+        if(has_inlined) {
+            const int index=quads.integer();
+            if(index<0||static_cast<std::size_t>(index)>debug->inlined.size())throw std::invalid_argument("Exec inline index outside inline records");
+            position.inline_index=static_cast<std::uint32_t>(index);
+        }
         nodes.push_back(static_cast<std::uint32_t>(node));debug->locations.push_back(position);
+    }
+    for(const auto& item:debug->inlined)
+        if(item.call_site>=debug->locations.size())throw std::invalid_argument("Exec inline call site outside locations");
+    std::vector<unsigned char> colors(debug->inlined.size());
+    for(std::uint32_t first=0;first<debug->inlined.size();++first) {
+        std::vector<std::uint32_t> path;auto current=first+1;
+        while(current&&colors[current-1]==0) {
+            colors[current-1]=1;path.push_back(current-1);
+            current=debug->locations[debug->inlined[current-1].call_site].inline_index;
+        }
+        if(current&&colors[current-1]==1)throw std::invalid_argument("Cyclic exec inline records");
+        for(auto index:path)colors[index]=2;
     }
     return debug;
 }
@@ -466,11 +526,11 @@ module read_fields(raw_view root,std::size_t offset) {
         std::vector<std::uint32_t> located;
         if(entry.boolean())fn.debug=read_function_debug(entry.take(),debug_files,located);
         entry.finish();
-        if(hidden<0||static_cast<std::size_t>(hidden)>max_slots||fn.entry_kind<0||fn.entry_kind>1)
+        if(hidden<0||static_cast<std::size_t>(hidden)>max_slots||fn.entry_kind<0||fn.entry_kind>2)
             throw std::invalid_argument("Invalid function generic ABI");
         if(fn.return_type==ANY_VALUE&&!hidden)throw std::invalid_argument("Any return requires generic contexts");
         if(fn.param_types.size()!=static_cast<std::size_t>(param_count))throw std::invalid_argument("param-count and param-types disagree");
-        if((fn.function_id==0||fn.function_id==1)&&(fn.return_type!=VOID_VALUE||param_count!=0||hidden!=0))
+        if((fn.function_id==0||fn.function_id==1)&&(fn.return_type!=VOID_VALUE||param_count!=0||hidden!=0||fn.entry_kind==2))
             throw std::invalid_argument("Lifecycle function must return void and take no parameters");
         fn.local_count=static_cast<std::uint32_t>(local_count);fn.hidden_count=static_cast<std::uint32_t>(hidden);
         node_numbering numbering;numbering.nodes=&located;
@@ -533,6 +593,10 @@ public:
         if(source->opcode==2&&!member_access(*source)) {
             const auto id=visit(source->immediate,reference_kind::call,source->contexts.size(),*source);
             if(result)result->immediate=id;
+        }
+        if(source->opcode==60) {
+            const auto id=visit(source->function_id,reference_kind::guard_method,0,*source);
+            if(result)result->function_id=id;
         }
         if(source->destructor_id) {
             const auto id=visit(*source->destructor_id,reference_kind::destructor,source->contexts.size(),*source);

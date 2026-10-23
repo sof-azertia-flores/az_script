@@ -8,16 +8,27 @@ import java.util.*;
 /** Resolves symbols and lowers the readable JSON AST to numeric-slot ABD instructions. */
 public class Compiler {
     /** NONE preserves lowering; STANDARD and ADVANCED select the O1 and O2 pipelines. */
-    public enum Optimization { NONE, CONSTANTS, STANDARD, ADVANCED }
+    public enum Optimization { NONE, CONSTANTS, STANDARD, ADVANCED, AGGRESSIVE }
     public enum OptimizationPass { CONSTANTS, PROPAGATION, INLINING, LOOP_MOTION,
-        CONTROL_FLOW, COMMON_SUBEXPRESSIONS, DEAD_CODE, SCALAR_INLINING, RANGE_LOOP_MOTION, FLOW_PROPAGATION }
+        CONTROL_FLOW, COMMON_SUBEXPRESSIONS, DEAD_CODE, SCALAR_INLINING, RANGE_LOOP_MOTION, FLOW_PROPAGATION, SEQUENCE_INLINING, SLOT_COMPACTION,
+        CONSTANT_SPECIALIZATION, CONTEXT_SPECIALIZATION, SCALAR_REPLACEMENT, FIELD_CACHING,
+        DEVIRTUALIZATION, UNCHECKED_ARITHMETIC }
     public static Set<OptimizationPass> optimizationPasses(Optimization optimization) {
         return switch (Objects.requireNonNull(optimization)) {
             case NONE -> Set.of();
             case CONSTANTS -> Set.of(OptimizationPass.CONSTANTS);
             case STANDARD -> Set.of(OptimizationPass.CONSTANTS, OptimizationPass.PROPAGATION,
                     OptimizationPass.INLINING, OptimizationPass.LOOP_MOTION);
-            case ADVANCED -> Set.of(OptimizationPass.values());
+            case ADVANCED -> Set.of(OptimizationPass.CONSTANTS, OptimizationPass.PROPAGATION,
+                    OptimizationPass.INLINING, OptimizationPass.LOOP_MOTION, OptimizationPass.CONTROL_FLOW,
+                    OptimizationPass.COMMON_SUBEXPRESSIONS, OptimizationPass.DEAD_CODE, OptimizationPass.SCALAR_INLINING,
+                    OptimizationPass.RANGE_LOOP_MOTION, OptimizationPass.FLOW_PROPAGATION);
+            case AGGRESSIVE -> {
+                var passes = EnumSet.allOf(OptimizationPass.class);
+                passes.remove(OptimizationPass.INLINING);
+                passes.remove(OptimizationPass.SCALAR_INLINING);
+                yield Set.copyOf(passes);
+            }
         };
     }
     // Mutable holders: the depth changes at every node, and updating a holder avoids a ThreadLocal.set each time.
@@ -40,9 +51,9 @@ public class Compiler {
                 DOUBLE_VALUE = 3, BOOLEAN_VALUE = 4, VOID_VALUE = 5, ANY_VALUE = 6, ADDRESS_VALUE = 7, OBJECT_VALUE = 8;
     }
     private record BuiltinSpec(String name, int id, int returnType, List<Integer> paramTypes) {}
+    // 0x0abd0001 belonged to the removed getDepth and is never assigned again.
     private static final List<BuiltinSpec> BUILTINS = List.of(
             new BuiltinSpec("print", 0x0abd0000, AsTypes.VOID_VALUE, List.of(AsTypes.ANY_VALUE)),
-            new BuiltinSpec("getDepth", 0x0abd0001, AsTypes.INT_VALUE, List.of()),
             new BuiltinSpec("mem_free", 0x0abd0002, AsTypes.BOOLEAN_VALUE, List.of(AsTypes.ADDRESS_VALUE)),
             new BuiltinSpec("alloc", 0x0abd0003, AsTypes.ADDRESS_VALUE, List.of(AsTypes.INT_VALUE)),
             new BuiltinSpec("make_free", 0x0abd0004, AsTypes.VOID_VALUE, List.of(AsTypes.ADDRESS_VALUE)),
@@ -139,6 +150,7 @@ public class Compiler {
     static final class CompilationState {
         Set<OptimizationPass> optimizationPasses = Set.of();
         final Map<Integer,Set<Integer>> optimizerTemps = new HashMap<>();
+        final Map<Integer,ExecSpecializer.GenericSignature> genericSignatures = new HashMap<>();
         final Diagnostics diagnostics;
         final SourceMap sources;
         final CompilerMetrics metrics;
@@ -162,6 +174,7 @@ public class Compiler {
          * object or block, the first (innermost) one recorded winning; null without debug info.
          */
         IdentityHashMap<AcsElement,int[]> positions;
+        boolean emitDebug;
         /** With debug info: the exec debug file table, and the index of each source unit's name in it. */
         List<String> debugFiles = List.of();
         int[] unitFiles;
@@ -345,6 +358,8 @@ public class Compiler {
             LogicVariable variable = new LogicVariable(); variable.name = alias; variable.slot = slot; variable.type = type;
             variable.alias.add(alias);
             tables.slots.put(slot,abiType(type));
+            int generic=typeParameters.indexOf(type);
+            if(generic>=0)tables.genericSlots.put(slot,generic);
             index.put(alias, vars.size()); vars.add(variable); indexed++; return variable;
         }
     }
@@ -3039,7 +3054,8 @@ public class Compiler {
         diagnostics.sources(sources);
         CompilationState state = new CompilationState(diagnostics, sources, parsed, limit);
         state.optimizationPasses = passes;
-        if (debugInfo) state.enableDebugInfo();
+        state.emitDebug = debugInfo;
+        if (debugInfo || ExecO3.enabled(passes)) state.enableDebugInfo();
         try {
             // Bound nesting and reject cycles first: the shape check walks the whole tree.
             try { TreeLimits.validate(source); }
@@ -3299,6 +3315,13 @@ public class Compiler {
         diagnostics.checkpoint();
         result.put("f",output);normalizeContexts(result);
         Set<OptimizationPass> passes = state.optimizationPasses;
+        // O3 routes every inline expansion through seq and its source-frame records.
+        if (ExecO3.enabled(passes)) {
+            var debugPasses = EnumSet.copyOf(passes);
+            debugPasses.remove(OptimizationPass.INLINING);
+            debugPasses.remove(OptimizationPass.SCALAR_INLINING);
+            passes = Set.copyOf(debugPasses);
+        }
         for (AcsElement item : output.acsa) {
             AcsObject compiled = (AcsObject)item; AcsElement optimized = compiled.mmp.get("script");
             if (passes.contains(OptimizationPass.CONSTANTS)) optimized = ExecOptimizer.constants(optimized, state.positions);
@@ -3317,14 +3340,21 @@ public class Compiler {
             if (!passes.isEmpty()) ExecShape.requireFits(compiled.mmp.get("script"), 4, state.abdLimit);
         }
         ExecO2.optimize(output, passes, state.positions, state.abdLimit);
-        AcsArray debugFiles = new AcsArray();
-        for (String file : state.debugFiles) debugFiles.acsa.add(new AcsStringElement(file));
-        result.put("debug-files", debugFiles);
-        // Every function compiled, so the outputs are in function order.
-        if (state.positions != null) for (int i = 0; i < functions.size(); i++) {
+        if (state.positions != null && ExecO3.enabled(passes)) for (int i = 0; i < functions.size(); i++) {
             AcsObject compiled = (AcsObject) output.acsa.get(i);
             compiled.put("debug", debugRecord(functions.get(i), compiled, globals, global));
         }
+        ExecO3.optimize(result, passes, state.positions, state.genericSignatures, state.abdLimit);
+        AcsArray debugFiles = new AcsArray();
+        if (state.emitDebug) for (String file : state.debugFiles) debugFiles.acsa.add(new AcsStringElement(file));
+        result.put("debug-files", debugFiles);
+        // Every function compiled, so the outputs are in function order.
+        if (state.emitDebug) for (int i = 0; i < output.acsa.size(); i++) {
+            AcsObject compiled = (AcsObject) output.acsa.get(i);
+            if (ExecO3.enabled(passes)) compiled.getAsAcsObject("debug").put("locations",ExecCodec.locations(compiled,globals,state.positions));
+            else compiled.put("debug", debugRecord(functions.get(i), compiled, globals, global));
+        }
+        if (!state.emitDebug) for (AcsElement item : output.acsa) ((AcsObject)item).mmp.remove("debug");
         return result;
     }
     /**
@@ -3455,6 +3485,9 @@ public class Compiler {
         }
         scope.counter.next=scope.tables.nextSlot;compiled.put("script",body);
         global.state().optimizerTemps.put(function.id(), Set.copyOf(scope.tables.temporarySlots));
-        compiled.put("local-count",scope.counter.next-parameter);return compiled;
+        compiled.put("local-count",scope.counter.next-parameter);
+        if(!scope.typeParameters.isEmpty())global.state().genericSignatures.put(function.id(),
+                new ExecSpecializer.GenericSignature(scope.typeParameters.indexOf(function.returnType()),Map.copyOf(scope.tables.genericSlots)));
+        return compiled;
     }
 }

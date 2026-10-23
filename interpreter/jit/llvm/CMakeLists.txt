@@ -12,6 +12,9 @@ set_target_properties(azscript-jit PROPERTIES OUTPUT_NAME azscript-jit
     LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/../.."
     CXX_VISIBILITY_PRESET hidden VISIBILITY_INLINES_HIDDEN ON)
 if(APPLE)
+    # CMake names modules .so on macOS too; the loader, build_and_test and
+    # the distribution look for the platform's .dylib.
+    set_target_properties(azscript-jit PROPERTIES SUFFIX ".dylib")
     target_link_options(azscript-jit PRIVATE "LINKER:-exported_symbol,_azscript_jit_backend_v1")
 else()
     target_link_options(azscript-jit PRIVATE "LINKER:--exclude-libs,ALL"
