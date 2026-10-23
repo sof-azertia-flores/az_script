@@ -1,6 +1,6 @@
 # exec v11 开发交接
 
-更新：2026-10-23。本轮局部清理与字段缓存优化已完成，用户已授权将本轮 exec v11 工作提交并推送到 `v11_main`（从 `exec_v11_main` 开发点建立）；具体提交和远端状态以 Git 为准。用户 decompiler 修改独立保留。生产改动仅 `ExecSequenceInliner.java`、新增 `ExecSequenceCleanup.java` 和 `ExecObjectOptimizer.java`，实现实参后缀写入分析、seq 内常量与复制传播/无用临时槽删除、封闭标量调用的字段缓存保留。空 seq 保留作为内联调用点锚点。
+更新：2026-10-23。本轮局部清理与字段缓存优化已完成，当前为 `exec_v11_main` 未提交、未暂存工作区；用户 decompiler 修改保留。生产改动仅 `ExecSequenceInliner.java`、新增 `ExecSequenceCleanup.java` 和 `ExecObjectOptimizer.java`，实现实参后缀写入分析、seq 内常量与复制传播/无用临时槽删除、封闭标量调用的字段缓存保留。空 seq 保留作为内联调用点锚点。
 
 424 Java、20 CTest、统一 quick、ASan/UBSan 全语料及变化产物七模式预算补验通过。原有 19 负载的 38 份字节码和 Release 运行库完全不变，保留原 O3/O2 均值 0.874 / 0.530；四个新增定向负载另比较本轮与上轮 O3，详见 O3 文档与性能索引。
 
